@@ -514,3 +514,132 @@ async def test_retry_allows_when_source_node_id_is_none_but_reservation_on_diffe
             provider_environ={},
         )
         assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_persist_reservation_when_source_has_none(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying a legacy source with no ResourceReservation but a known
+    target_node_id (from settings.worker_node_id) must still persist a
+    reservation for the retried workspace so that subsequent
+    find_host_port_conflicts can see the retried workspace's node
+    placement.  Without this, a later create/retry on the same node
+    misses the retried workspace's host port claims."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        worker_node_id="node-1",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        for res in await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        ):
+            await session.delete(res)
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="legacy no-reservation test",
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(retry.new_workspace.id)
+        assert len(retried_reservations) == 1
+        assert retried_reservations[0].node_id == "node-1"
+
+
+@pytest.mark.unit
+async def test_retry_no_reservation_when_target_node_unknown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When the source has no reservation and no worker_node_id is configured,
+    target_node_id is None and no reservation should be created for the
+    retried workspace.  Without any node placement signal the conflict
+    checker cannot meaningfully scope port checks."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(source.id)
+        assert ws is not None
+        ws.node_id = None
+        for res in await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        ):
+            await session.delete(res)
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="no node test",
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(retry.new_workspace.id)
+        assert len(retried_reservations) == 0

@@ -386,6 +386,21 @@ async def retry_workspace_row(
             dind_mode="dind" if source_reservation.dind_slots else "none",
             phase=source_reservation.phase,
         )
+    elif target_node_id is not None:
+        retry_reservation = workspaces.ResourceReservationPlan(
+            node_id=target_node_id,
+            steady_cpu=resolved_settings.workspace_steady_cpu,
+            steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
+            peak_cpu=resolved_settings.workspace_peak_cpu,
+            peak_memory_gb=resolved_settings.workspace_peak_memory_gb,
+            disk_mb=None,
+            dind_slots=0,
+            dind_mode="none",
+            phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
+        )
+    else:
+        retry_reservation = None
+    if retry_reservation is not None:
         await ResourceReservationRepository(session).create(
             workspace_id=retried.id,
             attempt_id=attempt.id,
