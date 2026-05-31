@@ -183,6 +183,11 @@ async def _run_fix_cycle(
                     stderr=str(exc),
                     reason_code=exc.reason_code,
                 )
+            # The same thread can be re-addressed in a later settle pass after
+            # new reviewer feedback changes its verdict. Remove stale
+            # publish/resolve queues before recording the latest outcome so
+            # workflow-scope push rollback follows the newest verdict only.
+            _drop_pending_publish_state(t.thread_id)
             _mark_review_thread_addressed(state, t, verdict)
             if verdict == "defer":
                 # Follow-up defer (#305): durably capture the deferred work
@@ -280,6 +285,10 @@ async def _run_fix_cycle(
                     reason_code=exc.reason_code,
                 )
             verdict = verdict_result.verdict
+            # Review-level comments can also be re-addressed across settle
+            # passes. Drop stale publish dependencies before storing the latest
+            # verdict so a prior fix_committed pass cannot override it.
+            _drop_pending_publish_state(c.comment_id)
             _sync_needs_human_reason(state, c.comment_id, verdict_result)
             _mark_review_comment_addressed(state, c, verdict)
             if verdict in {"false_positive", "defer"}:

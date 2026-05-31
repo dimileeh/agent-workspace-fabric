@@ -44,6 +44,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
+    thread_node,
 )
 from tests.unit.runtime.test_pr_monitor import _status
 
@@ -735,6 +736,89 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
 
     assert isinstance(action, AddressComments)
     assert action.threads == (false_positive_thread,)
+    assert action.review_comments == ()
+
+
+@pytest.mark.unit
+async def test_workflow_scope_push_failure_honors_latest_false_positive_thread_verdict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify stale fix_committed workflow bookkeeping does not override re-triage."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: reviewer follow-up is already handled")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(
+            threads=[
+                thread_node(
+                    tid="T_multi",
+                    author="cursor[bot]",
+                    path=".github/workflows/publish.yml",
+                    line=12,
+                    body="reviewer follow-up is already handled",
+                )
+            ]
+        ),
+    )
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    initial_thread = ReviewThread(
+        thread_id="T_multi",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow still needs the reviewed fix",
+        author="cursor[bot]",
+    )
+    latest_thread = ReviewThread(
+        thread_id="T_multi",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="reviewer follow-up is already handled",
+        author="cursor[bot]",
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(initial_thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert len(adapter.calls) == 2
+    assert "T_multi" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_multi" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_multi" not in state.threads_addressed_ids
+
+    action = decide(_status(inline=(latest_thread,)), state, MonitorConfig())
+
+    assert isinstance(action, AddressComments)
+    assert action.threads == (latest_thread,)
     assert action.review_comments == ()
 
 
