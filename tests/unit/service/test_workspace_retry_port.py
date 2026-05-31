@@ -588,8 +588,8 @@ async def test_retry_no_reservation_when_target_node_unknown(
 ) -> None:
     """When the source has no reservation and no worker_node_id is configured,
     target_node_id is None and no reservation should be created for the
-    retried workspace.  Without any node placement signal the conflict
-    checker cannot meaningfully scope port checks."""
+    retried workspace.  The conflict checker scans all nodes so a port held
+    by an active workspace on any node is still detected."""
     settings = Settings(
         _env_file=None,
         host_home=str(tmp_path / "home"),
@@ -643,3 +643,94 @@ async def test_retry_no_reservation_when_target_node_unknown(
             session,
         ).list_for_workspace(retry.new_workspace.id)
         assert len(retried_reservations) == 0
+
+
+@pytest.mark.unit
+async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When target_node_id is None the conflict scan must still run against
+    all nodes so that a retry cannot silently admit a workspace whose host
+    port collides with an active workspace on any node."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(source.id)
+        assert ws is not None
+        ws.node_id = None
+        for res in await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        ):
+            await session.delete(res)
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        blocker = await repo.create(
+            repo_url="git@github.com:example/blocker.git",
+            branch_base="main",
+            task_title="Block port",
+            task_prompt="noop",
+            task_external_id=None,
+            task_class="test_task",
+            owned_paths=[],
+            task_policy={
+                "companions": [
+                    {"name": "blocker-svc", "ports": [[5432, 5434]]},
+                ],
+            },
+            auto_merge=False,
+            initial_review_grace_period_seconds=0,
+            agent="codex",
+            env_profile=None,
+            profile_ref=None,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=[],
+            requires_database=False,
+            idempotency_key=None,
+            task_kind="feature_branch_pr",
+            remote_push_branch=None,
+        )
+        blocker.node_id = "node-1"
+        await repo.transition(blocker, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.ready, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.running, reason_code="TEST")
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="no-node conflict scan test",
+                provider_environ={},
+            )
