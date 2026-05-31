@@ -1001,6 +1001,64 @@ class TestCursorAdapter:
         _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
+    async def test_lower_effort_without_model_override_omits_thinking_model(self) -> None:
+        """Lower Cursor effort does not inherit the thinking model default."""
+        runner = FakeCommandRunner()
+        adapter = CursorAdapter(
+            runner=runner,
+            default_model="sonnet-4-thinking",
+            default_effort="medium",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        cursor_start = args.index("cursor-agent")
+        assert args[cursor_start:] == [
+            "cursor-agent",
+            "-p",
+            "--force",
+            "--output-format",
+            "text",
+        ]
+        assert "-m" not in args[cursor_start:]
+
+    @pytest.mark.unit
+    async def test_explicit_thinking_model_override_is_preserved_for_lower_effort(self) -> None:
+        """Explicit Cursor model overrides win even when effort is lower."""
+        runner = FakeCommandRunner()
+        adapter = CursorAdapter(
+            runner=runner,
+            default_model="sonnet-4-thinking",
+            default_effort="medium",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            model="sonnet-4-thinking",
+        )
+
+        args = runner.calls[0].args
+        cursor_start = args.index("cursor-agent")
+        assert args[cursor_start:] == [
+            "cursor-agent",
+            "-p",
+            "--force",
+            "-m",
+            "sonnet-4-thinking",
+            "--output-format",
+            "text",
+        ]
+        _assert_prompt_not_in_argv(args)
+        _assert_prompt_sent_on_stdin(runner)
+
+    @pytest.mark.unit
     async def test_model_override_is_passed_without_prompt_argv(self) -> None:
         """Explicit models are passed while prompts remain stdin-only."""
         runner = FakeCommandRunner()

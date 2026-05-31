@@ -38,12 +38,38 @@ class CursorAdapter(AgentAdapter):
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         """Build the cursor-agent print-mode command arguments."""
-        selected_model = _cursor_model_for_effort(model=model, effort=self._default_effort)
+        selected_model = _cursor_selected_model(
+            model=model,
+            default_model=self._default_model,
+            effort=self._default_effort,
+        )
         args = ["cursor-agent", "-p", "--force"]
         if selected_model:
             args.extend(["-m", selected_model])
         args.extend(["--output-format", "text"])
         return args
+
+
+def _cursor_selected_model(
+    *,
+    model: str | None,
+    default_model: str | None,
+    effort: str | None,
+) -> str | None:
+    """Return the Cursor model for one run.
+
+    ``model`` is an explicit per-run override. The bound Cursor thinking model
+    default is effort-derived, so lower efforts without an override should not
+    inherit it and accidentally force thinking mode.
+    """
+
+    if model:
+        return model
+    if default_model and default_model != CURSOR_DEFAULT_THINKING_MODEL:
+        return default_model
+    if effort is None:
+        return default_model
+    return _cursor_model_for_effort(model=None, effort=effort)
 
 
 def _cursor_model_for_effort(*, model: str | None, effort: str | None) -> str | None:
@@ -59,6 +85,6 @@ def _cursor_model_for_effort(*, model: str | None, effort: str | None) -> str | 
         return model
     if effort is None:
         return None
-    if effort.lower() in {"high", "xhigh", "max"}:
+    if effort.strip().lower() in {"high", "xhigh", "max"}:
         return CURSOR_DEFAULT_THINKING_MODEL
     return None

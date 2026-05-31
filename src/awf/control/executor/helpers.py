@@ -518,6 +518,12 @@ def _agent_model_for_workspace(
     return workspace_defaults.model if workspace_defaults is not None else None
 
 
+def _agent_run_model_for_workspace(ws: Workspace) -> str | None:
+    """Return only the workspace's explicit model override for adapter.run()."""
+    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    return _nonblank_policy_string(policy, "agent_model")
+
+
 def _agent_defaults_for_workspace(
     ws: Workspace,
     defaults: AgentDefaults | None,

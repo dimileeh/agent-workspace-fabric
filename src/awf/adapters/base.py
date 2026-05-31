@@ -179,6 +179,11 @@ class AgentAdapter(ABC):
         must not place it in argv: review comments can exceed Linux's per-arg
         length limit, and argv prompt transport leaks large prompts into process
         listings.
+
+        ``model`` is the explicit per-run override. Implementations that should
+        use a configured default model must apply ``self._default_model``
+        themselves so they can still distinguish explicit overrides from
+        effort-derived defaults.
         """
 
     async def run(
@@ -207,7 +212,7 @@ class AgentAdapter(ABC):
         """
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
-        cli_args = self._cli_args(model=model or self._default_model)
+        cli_args = self._cli_args(model=model)
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
             compose_file=compose_file,
