@@ -60,7 +60,8 @@ __all__ = [
 _DX_FIRST_PATH_HELP = """
 For first-time users: the current runnable first path is
 `awf service bootstrap`, then `awf init <path>` to prepare your project
-repository. `awf setup` and `awf start` are reserved future command surfaces.
+repository. Run `awf setup --dry-run` first for a read-only host readiness
+check. `awf start` is a reserved future command surface.
 """
 
 _MUTATES_GLOBAL_HELP = """
