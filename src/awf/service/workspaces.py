@@ -310,6 +310,28 @@ class WorkspaceCreateHostPortConflictError(Exception):
         super().__init__(self.message)
 
 
+class WorkspaceRetrySourceRuntimeNotReleasedError(Exception):
+    """Raised when a retry is attempted but the source workspace's compose
+    runtime has not been released yet, meaning its host ports are still
+    claimed and a new workspace would collide at Docker Compose time."""
+
+    error_code = "SOURCE_RUNTIME_NOT_RELEASED"
+
+    def __init__(
+        self,
+        source_workspace_id: str,
+    ) -> None:
+        self.source_workspace_id = source_workspace_id
+        self.message = (
+            f"Source workspace {source_workspace_id} runtime has not been "
+            f"released yet; host ports may still be in use"
+        )
+        self.detail: dict[str, Any] | None = {
+            "source_workspace_id": source_workspace_id,
+        }
+        super().__init__(self.message)
+
+
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 
 
@@ -1214,6 +1236,7 @@ __all__ = [
     "WorkspaceCreateIdempotencyConflictError",
     "HostPortConflict",
     "WorkspaceCreateHostPortConflictError",
+    "WorkspaceRetrySourceRuntimeNotReleasedError",
     "host_ports_from_task_policy_companions",
     "host_ports_from_resolved_profile",
     "check_host_port_conflicts",

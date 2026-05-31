@@ -98,6 +98,7 @@ from awf.service.workspaces import (
     WorkspaceCreateInsufficientDiskError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
+    WorkspaceRetrySourceRuntimeNotReleasedError,
     WorkspaceService,
 )
 
@@ -445,6 +446,8 @@ def register_workspace_tools(
             return _workspace_error_result(exc)
         except WorkspaceCreateHostPortConflictError as exc:
             return _workspace_error_result(exc)
+        except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
+            return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(
                 error_code="INVALID_PROFILE",
@@ -483,6 +486,8 @@ def register_workspace_tools(
         except WorkspaceRetryError as exc:
             return _workspace_retry_error_result(exc)
         except WorkspaceCreateHostPortConflictError as exc:
+            return _workspace_error_result(exc)
+        except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
             return _workspace_error_result(exc)
         return _tool_result(response.model_dump(mode="json"))
 

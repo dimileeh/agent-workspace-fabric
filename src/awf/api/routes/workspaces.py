@@ -97,6 +97,7 @@ from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
+    WorkspaceRetrySourceRuntimeNotReleasedError,
     _egress_audit_response,
     check_host_port_conflicts,
     create_workspace_row,
@@ -696,6 +697,16 @@ async def retry_workspace(
             provider_readiness_override_reason=provider_readiness_override_reason,
         )
     except WorkspaceCreateHostPortConflictError as exc:
+        await session.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorResponse(
+                error_code=exc.error_code,
+                message=exc.message,
+                detail=exc.detail,
+            ).model_dump(),
+        )
+    except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
         await session.rollback()
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,

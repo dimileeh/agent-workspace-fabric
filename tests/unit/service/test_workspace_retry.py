@@ -36,6 +36,7 @@ from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryNotFoundError,
     WorkspaceRetrySalvageUnavailableError,
+    WorkspaceRetrySourceRuntimeNotReleasedError,
     WorkspaceService,
     create_workspace_row,
     retry_workspace_row,
@@ -1626,9 +1627,9 @@ async def test_retry_rejects_host_port_conflict_with_source(
 ) -> None:
     """Retrying a failed workspace that still holds its companion host port
     (no terminal_runtime_released event) must raise
-    WorkspaceCreateHostPortConflictError.  The source's compose stack may
-    still be running, so excluding it from port-conflict detection hides
-    the resource most likely to collide at compose-up."""
+    WorkspaceRetrySourceRuntimeNotReleasedError.  The source's compose stack
+    may still be running, so a separate fast-fail check detects this before
+    the generic conflict query, yielding a clearer error message."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
     companion_req = {
@@ -1653,7 +1654,7 @@ async def test_retry_rejects_host_port_conflict_with_source(
     await _mark_failed(factory, source.id)
 
     async with factory() as session:
-        with pytest.raises(WorkspaceCreateHostPortConflictError):
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
             await retry_workspace_row(
                 session,
                 source.id,

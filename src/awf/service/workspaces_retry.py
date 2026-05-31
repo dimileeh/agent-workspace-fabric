@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
@@ -16,6 +17,7 @@ from awf.db.models import (
     Task,
     TaskAttempt,
     Workspace,
+    WorkspaceEvent,
 )
 from awf.db.repositories import (
     OperationRepository,
@@ -24,6 +26,10 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceRepository,
+)
+from awf.db.repositories.base import (
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
 )
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -79,6 +85,31 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     from awf.service.workspaces_response import workspace_failure_details_payload as _payload
 
     return _payload(workspace)
+
+
+async def _source_runtime_not_yet_released(
+    repo: WorkspaceRepository,
+    source: Workspace,
+) -> bool:
+    """Return True if the source workspace is in a terminal status but its
+    compose runtime has not been released yet (no ``terminal_runtime_released``
+    event).  In that state the source's host ports are still claimed and a
+    retry would collide at Docker Compose time."""
+    if WorkspaceStatus(source.status) not in (
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+    ):
+        return False
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == source.id,
+            WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        .limit(1)
+    )
+    return (await repo._session.execute(stmt)).scalar_one_or_none() is None
 
 
 async def retry_workspace_row(
@@ -255,11 +286,16 @@ async def retry_workspace_row(
         await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
+            excluding_workspace_id=source.id,
         )
         if conflicts:
             raise workspaces.WorkspaceCreateHostPortConflictError(
                 host_port=conflicts[0].host_port,
                 conflicting_workspace_id=conflicts[0].workspace_id,
+            )
+        if await _source_runtime_not_yet_released(repo, source):
+            raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
+                source_workspace_id=source.id,
             )
 
     retried = await repo.create(
