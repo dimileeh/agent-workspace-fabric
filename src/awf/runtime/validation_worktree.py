@@ -334,7 +334,7 @@ async def cleanup_validation_worktree_side_effects(
                     "AWF validation changed HEAD during execution. "
                     f"Expected {restore_ref_sha[:8]}, found {current_head_sha[:8]}."
                 ),
-                cleanup_command="git rev-parse",
+                cleanup_command=None,
             )
 
         return None

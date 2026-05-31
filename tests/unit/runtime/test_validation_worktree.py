@@ -238,7 +238,7 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
     )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
-    assert cleanup.cleanup_command == "git rev-parse"
+    assert cleanup.cleanup_command is None
     assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
 
 
@@ -299,7 +299,7 @@ async def test_cleanup_validation_worktree_detects_head_change_after_dirty_clean
     )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
-    assert cleanup.cleanup_command == "git rev-parse"
+    assert cleanup.cleanup_command is None
     assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
 
 
