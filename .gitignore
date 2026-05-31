@@ -90,3 +90,4 @@ query.json
 .claude/projects/
 .claude/todos/
 .claude/hooks/*.local.*
+.gstack/
