@@ -124,7 +124,6 @@ def test_workspace_create_builds_full_v1_payload(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.unit
-@pytest.mark.unit
 def test_workspace_create_builds_minimal_development_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,7 +206,6 @@ def test_workspace_create_builds_minimal_development_payload(
 
 
 @pytest.mark.unit
-@pytest.mark.unit
 def test_workspace_create_merges_env_from_into_companion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -279,7 +277,6 @@ def test_workspace_create_merges_env_from_into_companion(
 
 
 @pytest.mark.unit
-@pytest.mark.unit
 def test_workspace_create_env_exclude_drops_keys(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -346,7 +343,6 @@ def test_workspace_create_env_exclude_drops_keys(
 
 
 @pytest.mark.unit
-@pytest.mark.unit
 def test_workspace_create_env_from_missing_companion_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -401,7 +397,6 @@ def test_workspace_create_env_from_missing_companion_raises(
     assert raised.value.exit_code == 2
 
 
-@pytest.mark.unit
 @pytest.mark.unit
 def test_workspace_create_rejects_non_object_companion_json(
     monkeypatch: pytest.MonkeyPatch,

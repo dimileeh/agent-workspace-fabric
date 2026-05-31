@@ -211,7 +211,7 @@ def _warn(message: str) -> None:
 
 
 def _shallow_copy_companion(companion: dict[str, object]) -> dict[str, object]:
-    """Shallow-copy a companion dict, deep-copying the environment."""
+    """Shallow-copy a companion dict, isolating the environment mapping."""
     result = dict(companion)
     env = companion.get("environment")
     if env is not None and not isinstance(env, dict):
