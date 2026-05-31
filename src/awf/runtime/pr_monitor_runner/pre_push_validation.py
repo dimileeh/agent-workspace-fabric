@@ -36,6 +36,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.validation import profile_phase_command_plan
@@ -68,6 +69,7 @@ _log = get_logger(__name__)
 PRE_PUSH_VALIDATION_FAILED_REASON = _PRE_PUSH_VALIDATION_FAILED_REASON
 PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
 PRE_PUSH_VALIDATION_FIX_FAILED_REASON = _PRE_PUSH_VALIDATION_FIX_FAILED_REASON
+PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
 
 
 @dataclass(frozen=True)
@@ -199,7 +201,7 @@ async def _run_pre_push_validation_with_fix_passes(
             return validation_result
         if pass_index >= max_fix_passes:
             break
-        committed = await _run_pre_push_validation_fix_pass(
+        committed, rollback_failed_reason = await _run_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -213,6 +215,16 @@ async def _run_pre_push_validation_with_fix_passes(
             validation_commands=validation_commands,
         )
         if not committed:
+            if rollback_failed_reason is not None:
+                return replace(
+                    validation_result,
+                    reason_code=rollback_failed_reason,
+                    message=(
+                        "PR monitor pre-push validation fix pass rollback failed "
+                        f"after {pass_index + 1}/{max_fix_passes} attempts: "
+                        f"{validation_result.message}"
+                    ),
+                )
             return replace(
                 validation_result,
                 reason_code=PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
@@ -332,11 +344,11 @@ async def _run_pre_push_validation_fix_pass(
     pass_number: int,
     total_passes: int,
     validation_commands: tuple[str, ...],
-) -> bool:
+) -> tuple[bool, str | None]:
     """Attempt a validation fix pass using the failure context and evidence."""
     first_fail = validation_result.first_failure
     if first_fail is None:
-        return False
+        return False, None
     worktree_path = self._worktrees_root / workspace_id
     fix_start_head = await self._rev_parse_head(worktree_path)
     if fix_start_head is None:
@@ -345,7 +357,7 @@ async def _run_pre_push_validation_fix_pass(
             workspace_id=workspace_id,
             pass_number=pass_number,
         )
-        return False
+        return False, None
     context = ValidationFixContext(
         failed_command=first_fail.command,
         returncode=first_fail.returncode,
@@ -411,7 +423,7 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason_code=exc.reason_code,
         )
-        await _rollback_failed_pre_push_validation_fix_pass(
+        rollback_ok = await _rollback_failed_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
@@ -419,7 +431,9 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason="compose_cleanup_failed",
         )
-        return False
+        if not rollback_ok:
+            return False, PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+        return False, None
     except Exception as exc:
         _log.warning(
             "monitor.pre_push_validation_fix_failed",
@@ -427,7 +441,7 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             error=repr(exc),
         )
-        await _rollback_failed_pre_push_validation_fix_pass(
+        rollback_ok = await _rollback_failed_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
@@ -435,7 +449,9 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason="agent_exception",
         )
-        return False
+        if not rollback_ok:
+            return False, PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+        return False, None
 
     try:
         committed = bool(
@@ -457,7 +473,7 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             error=repr(exc),
         )
-        await _rollback_failed_pre_push_validation_fix_pass(
+        rollback_ok = await _rollback_failed_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
@@ -465,9 +481,11 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason="commit_exception",
         )
-        return False
+        if not rollback_ok:
+            return False, PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+        return False, None
     if not committed:
-        await _rollback_failed_pre_push_validation_fix_pass(
+        rollback_ok = await _rollback_failed_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
@@ -475,7 +493,9 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason="commit_failed",
         )
-    return committed
+        if not rollback_ok:
+            return False, PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+    return committed, None
 
 
 async def _rollback_failed_pre_push_validation_fix_pass(

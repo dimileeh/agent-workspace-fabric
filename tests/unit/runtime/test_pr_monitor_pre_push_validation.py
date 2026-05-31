@@ -896,7 +896,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
         result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
     )
 
-    committed = await pre_push_validation._run_pre_push_validation_fix_pass(
+    committed, rollback_failed = await pre_push_validation._run_pre_push_validation_fix_pass(
         runner,
         workspace_id=workspace_id,
         compose_project="proj",
@@ -911,6 +911,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     )
 
     assert committed is False
+    assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
     assert any("clean -fd" in call for call in joined_calls)
@@ -957,7 +958,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
         result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
     )
 
-    committed = await pre_push_validation._run_pre_push_validation_fix_pass(
+    committed, rollback_failed = await pre_push_validation._run_pre_push_validation_fix_pass(
         runner,
         workspace_id=workspace_id,
         compose_project="proj",
@@ -972,9 +973,67 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     )
 
     assert committed is False
+    assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
     assert any("clean -fd" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_rollback_failure_is_bubbled_as_pre_push_validation_rollback_failed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed rollback after a fix pass should surface a distinct rollback failure code."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {'f' * 8}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(  # type: ignore[assignment]
+        _validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+    )
+
+    async def _rollback_failed(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _commit_failed(**_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_failed,
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_failed)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_ROLLBACK_FAILED"
 
 
 @pytest.mark.unit
