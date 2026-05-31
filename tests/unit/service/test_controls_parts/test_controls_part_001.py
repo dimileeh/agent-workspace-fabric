@@ -1674,12 +1674,12 @@ async def test_cancel_workspace_without_stop_stack_skips_terminal_runtime_releas
 
 
 @pytest.mark.unit
-async def test_cancel_workspace_skips_terminal_runtime_released_when_launching(
+async def test_cancel_workspace_records_terminal_runtime_released_when_launching(
     engine: AsyncEngine,
 ) -> None:
-    """When a provisioning_launching guard event exists, cancel should not
-    record terminal_runtime_released because the provisioner may still be
-    starting containers for this workspace."""
+    """When a provisioning_launching guard event exists and stop_stack=True
+    successfully stops the stack, cancel must record terminal_runtime_released
+    because the containers are gone and the ports should be released for reuse."""
     from awf.db.repositories.base import (
         PROVISIONING_LAUNCHING_EVENT_TYPE,
         PROVISIONING_LAUNCHING_REASON_CODE,
@@ -1718,7 +1718,7 @@ async def test_cancel_workspace_skips_terminal_runtime_released_when_launching(
         release_events = [
             e for e in events if e.event_type == "workspace.terminal_runtime_released"
         ]
-        assert len(release_events) == 0, (
-            "terminal_runtime_released must not be recorded when "
-            "provisioning_launching guard exists"
+        assert len(release_events) == 1, (
+            "terminal_runtime_released must be recorded after stop_stack=True "
+            "even when provisioning_launching guard exists"
         )
