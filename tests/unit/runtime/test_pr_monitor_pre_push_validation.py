@@ -977,7 +977,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert any("clean -fd" in call for call in joined_calls)
+    assert any("clean -fdx" in call for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -1040,7 +1040,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert any("clean -fd" in call for call in joined_calls)
+    assert any("clean -fdx" in call for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -1133,7 +1133,7 @@ async def test_pre_push_validation_fix_pass_rollback_does_not_clean_when_reset_f
     assert rolled_back is False
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert f"reset --hard {restore_ref}" in joined_calls
-    assert not any("clean -fd" in call for call in joined_calls)
+    assert not any("clean -fdx" in call for call in joined_calls)
 
 
 @pytest.mark.unit

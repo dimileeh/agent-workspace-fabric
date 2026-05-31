@@ -532,7 +532,7 @@ async def _rollback_failed_pre_push_validation_fix_pass(
         )
         return False
 
-    clean = await self._deps.runner.run(_git_worktree_command(worktree_path, "clean", "-fd"))
+    clean = await self._deps.runner.run(_git_worktree_command(worktree_path, "clean", "-fdx"))
     ok = bool(clean.ok)
     log = _log.info if ok else _log.warning
     log(
