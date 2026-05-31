@@ -145,7 +145,21 @@ def _run_setup(
         # issues the operator must fix first behind a misleading input-required
         # exit, so only demand interactive provider input when the host is
         # otherwise ready to proceed.
-        if selected_providers and payload.status not in ("blocked", "failed"):
+        provider_needs_input = bool(selected_providers) and payload.status not in (
+            "blocked",
+            "failed",
+        )
+        # ``--allow-plain-secrets`` and the ``--source-checkout`` selection are
+        # explicit, non-secret CLI flags -- not interactive prompts -- so
+        # persisting them never needs input and must survive the provider
+        # interactive guard. Otherwise a ready-host
+        # ``--provider X --non-interactive --allow-plain-secrets`` run aborts
+        # with INTERACTIVE_INPUT_REQUIRED before the safe write, silently
+        # discarding consent the operator passed explicitly. When no such
+        # explicit consent was given there is nothing to record ahead of the
+        # guard, so its original no-write early abort is preserved.
+        explicit_consent = allow_plain_secrets or explicit_source is not None
+        if provider_needs_input and not explicit_consent:
             # Configuring a selected provider needs interactive credential entry,
             # which T04 forwards to provider setup (T07). Under --non-interactive
             # there is no way to collect it, so surface the machine-readable signal.
@@ -162,6 +176,11 @@ def _run_setup(
             # warnings the operator ran setup to see, rather than dropping them in
             # favour of a config-write-only diagnostic.
             return _readiness_with_config_write_failure(payload, error)
+        if provider_needs_input and explicit_consent:
+            # Explicit non-secret consent is now persisted; still surface the
+            # interactive-input signal for the provider credential step (T07)
+            # that cannot run under --non-interactive.
+            require_interactive(non_interactive, "configure the selected provider(s)")
 
     return payload
 

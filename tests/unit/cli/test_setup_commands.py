@@ -560,6 +560,68 @@ def test_setup_non_interactive_provider_requires_input(harness: _Harness) -> Non
 
 
 @pytest.mark.unit
+def test_setup_non_interactive_provider_persists_plain_secret_consent(harness: _Harness) -> None:
+    """Verify explicit --allow-plain-secrets survives the provider input guard.
+
+    Regression for review comment issue:4585200251: a ready-host
+    ``--provider X --non-interactive --allow-plain-secrets`` run still aborts
+    with INTERACTIVE_INPUT_REQUIRED (provider credentials cannot be collected),
+    but the explicitly-passed, non-secret plain-file consent must be persisted
+    rather than silently dropped before the guard fires.
+    """
+    result = _runner.invoke(
+        app,
+        [
+            "setup",
+            "--provider",
+            "github",
+            "--non-interactive",
+            "--allow-plain-secrets",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "INTERACTIVE_INPUT_REQUIRED"
+    assert harness.writes[-1].consent.plain_file_secrets is True
+
+
+@pytest.mark.unit
+def test_setup_non_interactive_provider_persists_source_checkout(
+    harness: _Harness, tmp_path: Path
+) -> None:
+    """Verify an explicit --source-checkout survives the provider input guard.
+
+    Companion to the plain-secret regression: the ``--source-checkout`` selection
+    is an explicit CLI flag, not interactive input, so its verified metadata and
+    consent must be recorded even when the non-interactive provider guard aborts.
+    """
+    root = _make_source_checkout(tmp_path / "awf")
+    result = _runner.invoke(
+        app,
+        [
+            "setup",
+            "--provider",
+            "github",
+            "--non-interactive",
+            "--source-checkout",
+            str(root),
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "INTERACTIVE_INPUT_REQUIRED"
+    written = harness.writes[-1]
+    assert written.source_checkout is not None
+    assert written.consent.source_checkout_assets is True
+
+
+@pytest.mark.unit
 def test_setup_non_interactive_provider_surfaces_readiness_blockers(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
