@@ -194,6 +194,7 @@ class InstallerHarness:
         wheel_url: str | None = None,
         wheel_name: str | None = None,
         tag: str | None = None,
+        package: str | None = "agent-workspace-fabric",
     ) -> Path:
         """Write a T11-shaped manifest pointing at the fixture wheel.
 
@@ -202,7 +203,10 @@ class InstallerHarness:
         a malformed/compromised manifest; it defaults to the wheel's basename.
         ``tag`` overrides the ``source.tag`` field (defaults to ``v{version}``)
         so tests can model a manifest whose declared release tag disagrees with
-        its version or with the requested ``--version`` pin.
+        its version or with the requested ``--version`` pin. ``package`` overrides
+        the top-level ``package`` field (defaults to ``agent-workspace-fabric``);
+        pass a different name to model a manifest misattached to another package,
+        or ``None`` to omit the field entirely (a legacy/hand-authored manifest).
         """
         artifacts = [
             {
@@ -226,11 +230,10 @@ class InstallerHarness:
                     "url": f"file://{wheel.parent / sdist_name}",
                 }
             )
-        manifest = {
+        manifest: dict[str, object] = {
             "artifacts": artifacts,
             "channel": channel,
             "generated_at": "2026-05-29T00:00:00Z",
-            "package": "agent-workspace-fabric",
             "schema_version": 1,
             "source": {
                 "commit": None,
@@ -239,6 +242,8 @@ class InstallerHarness:
             },
             "version": version,
         }
+        if package is not None:
+            manifest["package"] = package
         path = self.root / "awf-install-manifest.json"
         path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path

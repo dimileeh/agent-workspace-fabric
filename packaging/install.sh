@@ -13,7 +13,7 @@
 # stderr (it does not depend on the Python first-run error catalog):
 #
 #   UNSUPPORTED_PLATFORM MISSING_DEPENDENCY MANIFEST_UNAVAILABLE MANIFEST_INVALID
-#   CHANNEL_MISMATCH VERSION_MISMATCH DOWNLOAD_FAILED CHECKSUM_MISMATCH
+#   CHANNEL_MISMATCH VERSION_MISMATCH PACKAGE_MISMATCH DOWNLOAD_FAILED CHECKSUM_MISMATCH
 #   INSTALL_METHOD_FAILED AWF_NOT_REACHABLE UNINSTALL_REFUSED_UNMANAGED BAD_USAGE
 #
 # Testability seams (keep fixture tests hermetic, no real release/network):
@@ -415,6 +415,17 @@ extract_manifest_tag() {
         | head -n 1
 }
 
+# Extract the manifest's top-level "package" string (jq-free). Like the other
+# extract_manifest_* helpers, this relies on the T11 manifest's stable
+# pretty-printed, sorted-key shape: "package" appears once at the top level and on
+# no artifact object (the leading-quote anchor never matches a longer key that
+# merely ends in "package"), so the first match is the package the manifest
+# attributes itself to.
+extract_manifest_package() {
+    sed -n 's/.*"package"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST_FILE" \
+        | head -n 1
+}
+
 # When no explicit --version pins the release, the resolved manifest's channel
 # must match the requested --channel. Version/tag pinning is the trust boundary
 # (RELEASING.md), so a pinned --version selects the manifest directly and the
@@ -462,6 +473,32 @@ verify_version() {
     fi
     if [ -n "$manifest_tag" ] && [ "$manifest_tag" != "v${VERSION}" ]; then
         fail VERSION_MISMATCH "requested version ${VERSION} but the resolved manifest is tagged ${manifest_tag} (${MANIFEST_SOURCE}); the pinned release asset or mirror is serving a manifest for a different release"
+    fi
+}
+
+# The resolved manifest must describe the package this installer installs. Unlike
+# the version/channel checks this is enforced for every install (pinned or not):
+# a release asset or mirror (AWF_INSTALL_BASE_URL) that serves a manifest for a
+# *different* package which happens to share this version/tag would otherwise be
+# installed silently, because that manifest's wheel name/url/sha256 are internally
+# consistent — the checksum gate only proves the wheel matches the manifest, not
+# that the manifest is for ${PACKAGE}. Such a misattached manifest would mutate
+# the user's environment with the wrong tool via uv/pipx. The checked-in generator
+# emits a top-level "package" field (scripts/generate_install_manifest.py), so
+# cross-check it against PACKAGE before downloading and refuse a mismatch. A
+# manifest that omits the field (legacy/hand-authored) is not enforced here,
+# mirroring how verify_channel/verify_version tolerate a missing field.
+verify_package() {
+    # extract_manifest_package pipes sed into `head -n 1`; as in verify_channel,
+    # head can close the pipe before sed finishes and leave sed taking SIGPIPE, so
+    # under pipefail the pipeline may exit non-zero. `|| true` degrades that to an
+    # empty value, which the guard below treats as "field absent" rather than
+    # letting set -e abort the install with no reason token.
+    local manifest_package
+    manifest_package="$(extract_manifest_package || true)"
+    [ -n "$manifest_package" ] || return 0
+    if [ "$manifest_package" != "$PACKAGE" ]; then
+        fail PACKAGE_MISMATCH "resolved manifest is for package ${manifest_package} but this installer installs ${PACKAGE} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest for a different package"
     fi
 }
 
@@ -832,6 +869,7 @@ run_install() {
     parse_manifest
     verify_channel
     verify_version
+    verify_package
     say "Resolved manifest: ${MANIFEST_SOURCE}"
 
     plan "download artifact: ${ARTIFACT_URL}"
