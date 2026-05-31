@@ -1086,7 +1086,12 @@ def _check_cursor(
             ],
             credential_scope="static_env_token",
             isolation="service_env",
-            warnings=[],
+            warnings=[
+                _security_warning(
+                    "STATIC_TOKEN_FALLBACK",
+                    f"Cursor auth is supplied by static service environment variable {signal}.",
+                )
+            ],
         )
 
     return _provider_result(

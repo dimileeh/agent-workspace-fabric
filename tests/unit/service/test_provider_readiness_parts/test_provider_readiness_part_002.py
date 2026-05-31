@@ -293,7 +293,15 @@ def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
     assert cursor["signals"] == ["CURSOR_API_KEY"]
     assert cursor["credential_scope"] == "static_env_token"
     assert cursor["isolation"] == "service_env"
-    assert cursor["warnings"] == []
+    assert cursor["warnings"] == [
+        {
+            "reason": "STATIC_TOKEN_FALLBACK",
+            "message": (
+                "Cursor auth is supplied by static service environment variable CURSOR_API_KEY."
+            ),
+            "severity": "warning",
+        }
+    ]
     assert "cursor_env_secret" not in json.dumps(payload, sort_keys=True)
 
 
