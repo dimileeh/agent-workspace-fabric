@@ -21,8 +21,17 @@ from awf.runtime.monitor_state_keys import (
 )
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
+    arm_operator_hint_freeze,
+    build_pending_operator_hint_payload,
+    mark_operator_hint_agent_failed,
+    mark_operator_hint_needs_human,
+    mark_operator_hint_processed,
+    operator_hint_from_threads,
     operator_hint_processed_key,
     persist_operator_hint,
+    remonitor_elapsed_settle_head_shas,
+    remonitor_has_elapsed_settle,
+    utcnow,
 )
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -96,6 +105,153 @@ def _ready_status(
         base_behind_count=0,
         merge_state_status=merge_state_status,
     )
+
+
+def test_operator_hint_from_threads_rejects_bad_payloads_and_defaults_status() -> None:
+    assert operator_hint_from_threads({OPERATOR_HINT_STATE_KEY: "{not-json"}) is None
+    assert operator_hint_from_threads({OPERATOR_HINT_STATE_KEY: "[]"}) is None
+    assert operator_hint_from_threads({OPERATOR_HINT_STATE_KEY: '{"reason":"   "}'}) is None
+
+    hint = operator_hint_from_threads(
+        {
+            OPERATOR_HINT_STATE_KEY: (
+                '{"operation_id":42,"reason":"retry the URL fix",'
+                '"reason_code":"","requested_at":"","status":"surprising"}'
+            )
+        }
+    )
+
+    assert hint is not None
+    assert hint.reason == "retry the URL fix"
+    assert hint.status == "pending"
+    assert hint.operation_id is None
+    assert hint.requested_at is None
+    assert hint.reason_code == "OPERATOR_REMONITOR"
+
+
+def test_operator_hint_markers_noop_without_pending_hint_or_operation_id() -> None:
+    state = MonitorState()
+
+    mark_operator_hint_needs_human(state, "protected file changed")
+    mark_operator_hint_agent_failed(state, "agent timed out")
+    assert state.pending_operator_hint is None
+
+    state.pending_operator_hint = _hint(operation_id=None)
+    mark_operator_hint_processed(state)
+
+    assert state.pending_operator_hint is None
+    assert state.threads_addressed_ids == {}
+
+    state.pending_operator_hint = _hint(operation_id="op_agent_failed")
+    mark_operator_hint_agent_failed(state, "provider unavailable")
+
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "agent_failed"
+    assert state.pending_operator_hint.status_reason == "provider unavailable"
+
+
+def test_remonitor_elapsed_settle_helpers_filter_current_head() -> None:
+    done_current = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha="current",
+    )
+    done_other = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha="other",
+    )
+    threads_addressed = {
+        done_current: "elapsed",
+        done_other: "elapsed",
+    }
+
+    assert not remonitor_has_elapsed_settle(
+        threads_addressed,
+        pr_number=None,
+        head_sha="current",
+    )
+    assert remonitor_elapsed_settle_head_shas(
+        threads_addressed,
+        pr_number=42,
+        preferred_head_sha="other",
+        current_head_sha="current",
+    ) == ("current",)
+    assert (
+        remonitor_elapsed_settle_head_shas(
+            threads_addressed,
+            pr_number=42,
+            preferred_head_sha="other",
+            current_head_sha="missing",
+        )
+        == ()
+    )
+
+
+def test_arm_operator_hint_freeze_replaces_stale_activity_settle_markers() -> None:
+    now = datetime(2026, 5, 31, 12, 30, tzinfo=UTC)
+    started_value = "1780230600.000000"
+    head_sha = "abc123"
+    done_key = _non_check_reviewer_settle_done_key(pr_number=42, head_sha=head_sha)
+    done_activity_key = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+        activity_signature="review-activity",
+    )
+    waiting_activity_key = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+        activity_signature="waiting-activity",
+    )
+    empty_activity_key = f"{done_key}:"
+    started_key = _non_check_reviewer_settle_started_key(pr_number=42, head_sha=head_sha)
+    stale_started_activity_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+        activity_signature="stale-activity",
+    )
+    refreshed_activity_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+        activity_signature="review-activity",
+    )
+    freeze_key = _non_check_reviewer_settle_freeze_key(pr_number=42, head_sha=head_sha)
+    threads_addressed = {
+        done_key: "elapsed",
+        done_activity_key: "elapsed",
+        waiting_activity_key: "waiting",
+        empty_activity_key: "elapsed",
+        started_key: "old",
+        stale_started_activity_key: "old",
+    }
+
+    arm_operator_hint_freeze(
+        threads_addressed,
+        pr_number=42,
+        head_sha=head_sha,
+        now=now,
+    )
+
+    assert threads_addressed[started_key] == started_value
+    assert threads_addressed[refreshed_activity_key] == started_value
+    assert threads_addressed[freeze_key] == "armed"
+    assert done_key not in threads_addressed
+    assert done_activity_key not in threads_addressed
+    assert waiting_activity_key not in threads_addressed
+    assert empty_activity_key not in threads_addressed
+    assert stale_started_activity_key not in threads_addressed
+
+
+def test_operator_hint_payload_and_clock_helpers() -> None:
+    hint = _hint(status="needs_human", status_reason="protected workflow edit")
+
+    assert build_pending_operator_hint_payload(hint) == {
+        "reason": "operator asked the monitor to revisit the PR",
+        "operation_id": "op_operator_hint_edge",
+        "requested_at": "2026-05-31T12:00:00+00:00",
+        "reason_code": "OPERATOR_REMONITOR",
+        "status": "needs_human",
+        "status_reason": "protected workflow edit",
+    }
+    assert utcnow().tzinfo is UTC
 
 
 def test_operator_hints_without_operation_id_match_by_value() -> None:
