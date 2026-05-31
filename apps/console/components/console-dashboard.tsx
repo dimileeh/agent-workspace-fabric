@@ -4,6 +4,7 @@ import { useSearchParams } from "next/navigation";
 import {
 useCallback,
 useEffect,
+useLayoutEffect,
 useMemo,
 useRef,
 useState,
@@ -97,29 +98,6 @@ export function ConsoleDashboard() {
   const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
 const searchParams = useSearchParams();
   const [selectedId, setSelectedIdState] = useState<string | null>(searchParams.get("workspaceId"));
-
-const setSelectedId = useCallback((action: React.SetStateAction<string | null>) => {
-    setSelectedIdState(action);
-  }, []);
-
-  useEffect(() => {
-    const urlWorkspaceId = searchParams.get("workspaceId");
-    setSelectedIdState((current) => (current !== urlWorkspaceId ? urlWorkspaceId : current));
-  }, [searchParams]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const currentParam = params.get("workspaceId");
-    if (selectedId !== currentParam) {
-      if (selectedId) {
-        params.set("workspaceId", selectedId);
-      } else {
-        params.delete("workspaceId");
-      }
-      const newQuery = params.toString();
-      window.history.replaceState(null, "", newQuery ? `?${newQuery}` : window.location.pathname);
-    }
-  }, [selectedId]);
   const [detail, setDetail] = useState<DetailState>(emptyDetail);
   const [selectedStreams, setSelectedStreams] = useState<string[]>([]);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -131,8 +109,6 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const [logTailSignal, setLogTailSignal] = useState(0);
   const [fullscreenTailSignal, setFullscreenTailSignal] = useState(0);
   const [logSortDirection, setLogSortDirection] = useState<SortDirection>("asc");
-  const logStreamActivityRef = useRef<LogStreamActivityMap>({});
-  const selectedStreamsRef = useRef<string[]>([]);
   const [statusFilters, setStatusFilters] = useState<string[]>([]);
   const [agentFilters, setAgentFilters] = useState<string[]>([]);
   const [modelFilters, setModelFilters] = useState<string[]>([]);
@@ -160,6 +136,35 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  const selectedIdRef = useRef<string | null>(selectedId);
+  const logStreamActivityRef = useRef<LogStreamActivityMap>({});
+  const selectedStreamsRef = useRef<string[]>([]);
+
+  const setSelectedId = useCallback((workspaceId: string | null) => {
+    selectedIdRef.current = workspaceId;
+    setSelectedIdState(workspaceId);
+  }, []);
+
+  useEffect(() => {
+    const urlWorkspaceId = searchParams.get("workspaceId");
+    if (selectedIdRef.current !== urlWorkspaceId) {
+      setSelectedId(urlWorkspaceId);
+    }
+  }, [searchParams, setSelectedId]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const currentParam = params.get("workspaceId");
+    if (selectedId !== currentParam) {
+      if (selectedId) {
+        params.set("workspaceId", selectedId);
+      } else {
+        params.delete("workspaceId");
+      }
+      const newQuery = params.toString();
+      window.history.replaceState(null, "", newQuery ? `?${newQuery}` : window.location.pathname);
+    }
+  }, [selectedId]);
 
   const availableModels = useMemo(() => {
     return Array.from(new Set(overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m)))).sort();
@@ -229,11 +234,10 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       })),
     );
     setLastRefresh(new Date());
-    setSelectedId((current) =>
-      current && result.data.items.some((item) => item.workspace_id === current)
-        ? current
-        : null,
-    );
+    const currentSelectedId = selectedIdRef.current;
+    if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
+      setSelectedId(null);
+    }
   }, [overviewPath, setSelectedId]);
 
   const loadResourceSaturation = useCallback(async () => {
@@ -294,6 +298,10 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       apiGet<ListEnvelope<WorkspaceLogStream>>(`/api/awf/workspaces/${workspaceId}/logs`),
     ]);
 
+    if (selectedIdRef.current !== workspaceId) {
+      return;
+    }
+
     const firstFailure = [workspace, runtime, events, operations, streams].find((item) => !item.ok);
     if (firstFailure && !firstFailure.ok) {
       setError(firstFailure.message);
@@ -329,15 +337,23 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   }, []);
 
   const retrySelectedWorkspace = useCallback(async () => {
-    if (!selectedId) {
+    const workspaceId = selectedId;
+    if (!workspaceId) {
       return;
     }
     setRetryState({ status: "submitting" });
     const result = await apiPost<WorkspaceRetryResponse>(
-      `/api/awf/workspaces/${encodeURIComponent(selectedId)}/retry`,
+      `/api/awf/workspaces/${encodeURIComponent(workspaceId)}/retry`,
     );
     if (!result.ok) {
+      if (selectedIdRef.current !== workspaceId) {
+        return;
+      }
       setRetryState({ status: "error", message: formatProviderReadinessRetryError(result) });
+      return;
+    }
+    if (selectedIdRef.current !== workspaceId) {
+      await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
       return;
     }
     setRetryState({
@@ -350,24 +366,28 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
 
   const runWorkspaceOperatorAction = useCallback(
     async (action: WorkspaceOperatorAction, requestedTier?: number) => {
-      if (!selectedId || operatorActionState.status === "submitting") {
+      const workspaceId = selectedId;
+      if (!workspaceId || operatorActionState.status === "submitting") {
         return;
       }
       setOperatorActionState({ status: "submitting", action });
       const payload: WorkspaceOperatorRequest = {
         reason: operatorActionReason(action),
         workspace_version: detail.workspace?.version,
-        idempotency_key: operatorIdempotencyKey(action, selectedId),
+        idempotency_key: operatorIdempotencyKey(action, workspaceId),
       };
       if (action === "revalidate") {
         payload.requested_tier = requestedTier === 1 || requestedTier === 2 || requestedTier === 3 ? requestedTier : 1;
       }
 
       const result = await apiPost<WorkspaceControlResponse | Operation>(
-        operatorActionPath(action, selectedId),
+        operatorActionPath(action, workspaceId),
         payload,
       );
       if (!result.ok) {
+        if (selectedIdRef.current !== workspaceId) {
+          return;
+        }
         const failure = summarizeWorkspaceOperatorFailure(result);
         setOperatorActionState({
           status: "error",
@@ -379,12 +399,17 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       }
 
       const success = summarizeWorkspaceOperatorSuccess(action, result.data);
+      if (selectedIdRef.current !== workspaceId) {
+        await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
+        return;
+      }
       setOperatorActionState({
         status: "success",
         action,
         operationId: success.operationId,
         operationStatus: success.status,
         message: success.message,
+        warnings: success.warnings,
       });
       await Promise.all([
         loadOverview(),
@@ -392,7 +417,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
         loadMergeQueue(),
         loadFailureSummary(),
         loadWorkspaceSummary(),
-        loadWorkspace(selectedId),
+        loadWorkspace(workspaceId),
       ]);
     },
     [
@@ -506,14 +531,15 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
     return () => window.clearInterval(interval);
   }, [loadFailureSummary]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    selectedIdRef.current = selectedId;
     setDetail(emptyDetail);
     setSelectedStreams([]);
     setLogEntries([]);
     setStreamOffsets({});
     setRetryState({ status: "idle" });
     setOperatorActionState({ status: "idle" });
-  }, [selectedId, setSelectedId]);
+  }, [selectedId]);
 
   useEffect(() => {
     if (!selectedId) {

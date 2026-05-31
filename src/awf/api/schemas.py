@@ -1459,12 +1459,18 @@ class WorkspaceOperationRequest(WorkspaceReasonRequest):
     requested_tier: Annotated[int | None, Field(default=None, ge=1, le=3)]
 
 
+class WorkspaceControlWarningResponse(BaseModel):
+    warning_code: str
+    message: str
+
+
 class WorkspaceControlResponse(BaseModel):
     workspace_id: str
     operation_id: str
     operation_status: OperationStatus
     status: WorkspaceStatus
     message: str
+    warnings: list[WorkspaceControlWarningResponse] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

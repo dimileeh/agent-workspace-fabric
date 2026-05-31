@@ -2,270 +2,50 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Any
 
 import pytest
-from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
-    MergeCandidateRepository,
     OperationRepository,
-    SecretLeaseIssue,
-    SecretLeaseRepository,
-    TaskAttemptRepository,
-    TaskRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
+from awf.runtime.operator_hints import (
+    OPERATOR_HINT_STATE_KEY,
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
+    _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_started_key,
+)
+from awf.service import controls as controls_module
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
-    WorkspaceControlService,
     WorkspaceNotFoundError,
-    WorkspaceRebaseStateError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
     WorkspaceStackStopError,
 )
 from tests.postgres import postgres_test_session
+from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
+    FailingStopper,
+    _events,
+    _operations,
+    _service,
+    _workspace,
+    _workspace_with_candidate,
+)
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
     async with postgres_test_session() as s:
         yield s
-
-
-@dataclass
-class RecordingStopper:
-    calls: list[str | None] = field(default_factory=list)
-
-    async def __call__(self, compose_project_name: str | None) -> None:
-        self.calls.append(compose_project_name)
-
-
-@dataclass
-class FailingStopper:
-    calls: list[str | None] = field(default_factory=list)
-
-    async def __call__(self, compose_project_name: str | None) -> None:
-        self.calls.append(compose_project_name)
-        raise WorkspaceStackStopError(
-            operation="stop",
-            returncode=17,
-            stdout="",
-            stderr="compose stop denied",
-        )
-
-
-@dataclass
-class CleanupCall:
-    workspace_id: str
-    repo_url: str
-    compose_project_name: str | None
-    compose_file_path: Path | None
-    worktree_host_path: Path | None
-    remove_volumes: bool
-    remove_worktree: bool
-
-
-@dataclass
-class RecordingCleaner:
-    failures: list[str] = field(default_factory=list)
-    calls: list[CleanupCall] = field(default_factory=list)
-
-    async def cleanup(
-        self,
-        *,
-        workspace_id: str,
-        repo_url: str,
-        companion_worktrees: tuple[tuple[str, str], ...] = (),
-        compose_project_name: str | None = None,
-        compose_file_path: Path | None = None,
-        worktree_host_path: Path | None = None,
-        remove_volumes: bool = True,
-        remove_worktree: bool = True,
-    ) -> list[str]:
-        _ = companion_worktrees
-        self.calls.append(
-            CleanupCall(
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                compose_project_name=compose_project_name,
-                compose_file_path=compose_file_path,
-                worktree_host_path=worktree_host_path,
-                remove_volumes=remove_volumes,
-                remove_worktree=remove_worktree,
-            )
-        )
-        return list(self.failures)
-
-
-@dataclass
-class StaleCallbackCleaner(RecordingCleaner):
-    session: AsyncSession | None = None
-    final_status: WorkspaceStatus = WorkspaceStatus.cancelled
-
-    async def cleanup(
-        self,
-        *,
-        workspace_id: str,
-        repo_url: str,
-        companion_worktrees: tuple[tuple[str, str], ...] = (),
-        compose_project_name: str | None = None,
-        compose_file_path: Path | None = None,
-        worktree_host_path: Path | None = None,
-        remove_volumes: bool = True,
-        remove_worktree: bool = True,
-    ) -> list[str]:
-        result = await super().cleanup(
-            workspace_id=workspace_id,
-            repo_url=repo_url,
-            companion_worktrees=companion_worktrees,
-            compose_project_name=compose_project_name,
-            compose_file_path=compose_file_path,
-            worktree_host_path=worktree_host_path,
-            remove_volumes=remove_volumes,
-            remove_worktree=remove_worktree,
-        )
-        assert self.session is not None
-        await self.session.execute(
-            sa_update(Workspace)
-            .where(Workspace.id == workspace_id)
-            .values(
-                status=self.final_status.value,
-                failure_reason=(
-                    "operator_failure" if self.final_status == WorkspaceStatus.failed else None
-                ),
-                failure_message=(
-                    "operator moved workspace"
-                    if self.final_status == WorkspaceStatus.failed
-                    else None
-                ),
-            )
-            .execution_options(synchronize_session=False)
-        )
-        await self.session.flush()
-        return result
-
-
-async def _workspace(
-    session: AsyncSession,
-    *,
-    status: WorkspaceStatus,
-    title: str = "control lifecycle",
-) -> Workspace:
-    workspace = await WorkspaceRepository(session).create(
-        repo_url="git@github.com:example/control-lifecycle.git",
-        branch_base="development",
-        task_title=title,
-        task_prompt="Exercise control lifecycle behavior.",
-        agent=AgentRuntime.codex.value,
-        test_commands=["pytest -q"],
-    )
-    workspace.status = status.value
-    workspace.compose_project_name = f"awf_{workspace.id}"
-    workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
-    await session.flush()
-    return workspace
-
-
-async def _workspace_with_candidate(
-    session: AsyncSession,
-    *,
-    status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
-    title: str = "rebase lifecycle",
-) -> tuple[Workspace, MergeCandidate]:
-    workspace = await _workspace(session, status=status, title=title)
-    workspace.branch_name = f"awf/{workspace.id}"
-    workspace.remote_push_branch = workspace.branch_name
-    workspace.base_commit = "a" * 40
-    workspace.monitor_last_commit_sha = "h" * 40
-    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/50"
-    workspace.pr_number = 50
-    task = await TaskRepository(session).create_or_get(
-        repo_url=workspace.repo_url,
-        base_branch=workspace.branch_base,
-        title=workspace.task_title,
-        prompt=workspace.task_prompt,
-        external_id=workspace.task_external_id,
-        idempotency_key=None,
-        task_class=workspace.task_class,
-        owned_paths=list(workspace.owned_paths),
-    )
-    attempt = await TaskAttemptRepository(session).create_for_workspace(
-        task=task,
-        workspace=workspace,
-    )
-    candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
-        task=task,
-        attempt=attempt,
-        workspace=workspace,
-        head_sha=workspace.monitor_last_commit_sha,
-        base_sha=workspace.base_commit,
-    )
-    await session.flush()
-    return workspace, candidate
-
-
-def _service(
-    session: AsyncSession,
-    *,
-    stopper: RecordingStopper | None = None,
-    cleaner: RecordingCleaner | None = None,
-) -> tuple[WorkspaceControlService, RecordingStopper, RecordingCleaner]:
-    stopper = stopper or RecordingStopper()
-    cleaner = cleaner or RecordingCleaner()
-    return (
-        WorkspaceControlService(
-            session,
-            project_stopper=stopper,
-            cleaner_factory=lambda: cleaner,
-        ),
-        stopper,
-        cleaner,
-    )
-
-
-async def _issue_control_secret_lease(
-    session: AsyncSession,
-    workspace: Workspace,
-    *,
-    now: datetime | None = None,
-) -> None:
-    issued_at = now or datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
-    await SecretLeaseRepository(session).issue_declared_leases(
-        workspace,
-        leases=[
-            SecretLeaseIssue(
-                secret_name="api-token",
-                kind="env",
-                target="API_TOKEN",
-                mode="ro",
-                required=True,
-                provider="env",
-                ref_digest="sha256:" + "d" * 64,
-                expires_at=issued_at + timedelta(hours=1),
-                issue_metadata={"profile": "control-lifecycle", "declaration_index": 0},
-            )
-        ],
-        now=issued_at,
-    )
-
-
-async def _operations(session: AsyncSession, workspace_id: str) -> list[Operation]:
-    return await OperationRepository(session).list_for_workspace(workspace_id, limit=20)
-
-
-async def _events(session: AsyncSession, workspace_id: str) -> list[WorkspaceEvent]:
-    return await WorkspaceEventRepository(session).list(workspace_id=workspace_id, limit=20)
 
 
 @pytest.mark.unit
@@ -786,6 +566,7 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
         "execution_claimed_by": "execution-worker",
         "execution_claim_expires_at": execution_expiry.isoformat(),
     }
+    pending_hint = events[0].payload["pending_operator_hint"]
 
     assert response.operation_id == replay.operation_id
     assert response.status == WorkspaceStatus.monitoring_pr
@@ -805,12 +586,396 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
         "source_base_sha": "b" * 40,
     }
     assert events[0].event_type == "workspace.remonitor_requested"
+    assert pending_hint == {
+        "operation_id": operations[0].id,
+        "reason": "worker restarted",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": pending_hint["requested_at"],
+        "status": "pending",
+    }
     assert events[0].payload == {
         "reason": "worker restarted",
         "operation_id": operations[0].id,
         "claims_reset": expected_snapshot,
         "expected_version": 1,
+        "pending_operator_hint": pending_hint,
     }
+
+
+@pytest.mark.unit
+async def test_remonitor_before_settle_persists_operator_hint_without_freeze(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/44"
+    workspace.pr_number = 44
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason="please repair the reviewer note",
+        idempotency_key="remonitor-pre-settle-hint",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+
+    assert response.warnings == []
+    assert workspace.version == 2
+    assert persisted_hint == {
+        "operation_id": operations[0].id,
+        "reason": "please repair the reviewer note",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": persisted_hint["requested_at"],
+        "status": "pending",
+    }
+    assert all("initial_review_grace" not in key for key in monitor_state)
+    assert all("non_check_reviewer_settle" not in key for key in monitor_state)
+    assert "warnings" not in operations[0].result
+    assert events[0].payload["pending_operator_hint"] == persisted_hint
+    assert "warnings" not in events[0].payload
+
+
+@pytest.mark.unit
+async def test_remonitor_requested_at_invariant_raises_clear_error(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/45"
+    workspace.pr_number = 45
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+    monkeypatch.setattr(controls_module, "utcnow", lambda: None)
+
+    with pytest.raises(
+        RuntimeError,
+        match="operator remonitor requested_at was not initialized",
+    ):
+        await service.remonitor_workspace(
+            workspace.id,
+            reason="please repair the reviewer note",
+            idempotency_key="remonitor-requested-at-invariant",
+            expected_version=workspace.version,
+        )
+
+
+@pytest.mark.unit
+async def test_remonitor_no_reason_past_settle_warns_without_operator_hint(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(47)
+    initial_started_key = _initial_review_grace_started_key(47)
+    settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=47,
+        head_sha=head_sha,
+    )
+    settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=47,
+        head_sha=head_sha,
+    )
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/47"
+    workspace.pr_number = 47
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = head_sha
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        settle_done_key: "elapsed",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=None,
+        idempotency_key="remonitor-no-reason-past-settle",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is paused "
+                "until reviewer settle is re-evaluated."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert workspace.version == 2
+    assert initial_done_key not in monitor_state
+    assert settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert float(monitor_state[settle_started_key]) >= 1_000_000_000
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+    assert events[0].event_type == "workspace.remonitor_requested"
+    assert "pending_operator_hint" not in events[0].payload
+    assert events[0].payload["warnings"] == warnings
+
+
+@pytest.mark.unit
+async def test_remonitor_no_reason_past_settle_arms_current_candidate_head(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    old_head_sha = "e" * 40
+    current_head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(50)
+    initial_started_key = _initial_review_grace_started_key(50)
+    current_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=50,
+        head_sha=current_head_sha,
+    )
+    old_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=old_head_sha,
+    )
+    current_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=current_head_sha,
+    )
+    workspace.monitor_last_commit_sha = old_head_sha
+    candidate.head_sha = current_head_sha
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        current_settle_done_key: "elapsed",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=None,
+        idempotency_key="remonitor-no-reason-current-candidate-head",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is paused "
+                "until reviewer settle is re-evaluated."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert initial_done_key not in monitor_state
+    assert current_settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert old_settle_started_key not in monitor_state
+    assert float(monitor_state[current_settle_started_key]) >= 1_000_000_000
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+
+
+@pytest.mark.unit
+async def test_remonitor_no_reason_past_settle_prefers_workspace_head_when_open_candidate_stale(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    stale_candidate_head_sha = "e" * 40
+    workspace_head_sha = "f" * 40
+    candidate.head_sha = stale_candidate_head_sha
+    candidate.updated_at = datetime(2026, 5, 31, 14, 0, tzinfo=UTC)
+    await session.flush()
+    initial_done_key = _initial_review_grace_done_key(50)
+    initial_started_key = _initial_review_grace_started_key(50)
+    workspace_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=50,
+        head_sha=workspace_head_sha,
+    )
+    stale_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=stale_candidate_head_sha,
+    )
+    workspace_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=workspace_head_sha,
+    )
+    workspace.monitor_last_commit_sha = workspace_head_sha
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        workspace_settle_done_key: "elapsed",
+    }
+    workspace.updated_at = datetime(2026, 5, 31, 14, 1, tzinfo=UTC)
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=None,
+        idempotency_key="remonitor-no-reason-stale-open-candidate-head",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is paused "
+                "until reviewer settle is re-evaluated."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert candidate.head_sha == stale_candidate_head_sha
+    assert initial_done_key not in monitor_state
+    assert workspace_settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert stale_settle_started_key not in monitor_state
+    assert float(monitor_state[workspace_settle_started_key]) >= 1_000_000_000
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+
+
+@pytest.mark.unit
+async def test_remonitor_no_reason_stale_past_settle_does_not_arm_current_candidate_head(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    old_head_sha = "e" * 40
+    current_head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(50)
+    old_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=50,
+        head_sha=old_head_sha,
+    )
+    current_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=current_head_sha,
+    )
+    workspace.monitor_last_commit_sha = old_head_sha
+    candidate.head_sha = current_head_sha
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        old_settle_done_key: "elapsed",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=None,
+        idempotency_key="remonitor-no-reason-stale-current-candidate-head",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert response.warnings == []
+    assert monitor_state[initial_done_key] == "elapsed"
+    assert monitor_state[old_settle_done_key] == "elapsed"
+    assert current_settle_started_key not in monitor_state
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert operations[0].result is not None
+    assert "warnings" not in operations[0].result
+    assert "warnings" not in events[0].payload
+
+
+@pytest.mark.unit
+async def test_remonitor_failed_workspace_past_settle_arms_latest_closed_candidate_head(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.failed,
+    )
+    hint = "resume reviewer-settle after monitor failure"
+    old_head_sha = "e" * 40
+    live_head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(50)
+    initial_started_key = _initial_review_grace_started_key(50)
+    live_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=50,
+        head_sha=live_head_sha,
+    )
+    old_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=old_head_sha,
+    )
+    live_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=live_head_sha,
+    )
+    workspace.monitor_last_commit_sha = old_head_sha
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "old monitor failed after reviewer settle"
+    workspace.monitor_iter_count = 3
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        live_settle_done_key: "elapsed",
+    }
+    candidate.head_sha = live_head_sha
+    candidate.status = "closed"
+    candidate.close_reason = "STALE_MONITOR_FAILED"
+    candidate.closed_at = datetime.now(UTC)
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=hint,
+        idempotency_key="remonitor-failed-closed-candidate-head",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert candidate.status == "open"
+    assert candidate.head_sha == live_head_sha
+    assert initial_done_key not in monitor_state
+    assert live_settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert old_settle_started_key not in monitor_state
+    assert float(monitor_state[live_settle_started_key]) >= 1_000_000_000
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
 
 
 @pytest.mark.unit
@@ -1011,477 +1176,151 @@ async def test_remonitor_failed_workspace_with_pr_reenters_monitoring(
 
 
 @pytest.mark.unit
-async def test_remonitor_failed_workspace_reserves_state_reset_event_order(
-    session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace = await _workspace(session, status=WorkspaceStatus.failed)
-    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/43"
-    workspace.pr_number = 43
-    await session.flush()
-    service, _stopper, _cleaner = _service(session)
-    calls: list[tuple[str, str, str, str]] = []
-    original_add_event_with_states = WorkspaceRepository.add_event_with_states
-
-    async def _recording_add_event_with_states(
-        self: WorkspaceRepository,
-        event_workspace: Workspace,
-        *,
-        event_type: str,
-        old_state: WorkspaceStatus | str,
-        new_state: WorkspaceStatus | str,
-        reason_code: str | None = None,
-        payload: dict[str, Any] | None = None,
-    ) -> WorkspaceEvent:
-        calls.append((event_workspace.id, event_type, str(old_state), str(new_state)))
-        return await original_add_event_with_states(
-            self,
-            event_workspace,
-            event_type=event_type,
-            old_state=old_state,
-            new_state=new_state,
-            reason_code=reason_code,
-            payload=payload,
-        )
-
-    monkeypatch.setattr(
-        WorkspaceRepository,
-        "add_event_with_states",
-        _recording_add_event_with_states,
-    )
-
-    await service.remonitor_workspace(
-        workspace.id,
-        reason="reattach failed PR",
-        idempotency_key="remonitor-failed-pr-reserve-order",
-        expected_version=workspace.version,
-    )
-    events = await _events(session, workspace.id)
-
-    assert calls == [
-        (
-            workspace.id,
-            "workspace.remonitor_requested",
-            WorkspaceStatus.failed.value,
-            WorkspaceStatus.monitoring_pr.value,
-        )
-    ]
-    assert workspace.version == 2
-    assert events[0].event_order == 2
-    assert events[0].old_state == WorkspaceStatus.failed.value
-    assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
-
-
-@pytest.mark.unit
-async def test_remonitor_failed_workspace_cancels_stale_pr_monitor_recovery_ops(
+async def test_remonitor_failed_workspace_past_settle_persists_operator_hint_and_warns(
     session: AsyncSession,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.failed)
-    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/44"
-    workspace.pr_number = 44
+    hint = "fix the reviewer-requested release note before merge"
+    head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(46)
+    initial_started_key = _initial_review_grace_started_key(46)
+    settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=46,
+        head_sha=head_sha,
+    )
+    settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=46,
+        head_sha=head_sha,
+    )
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/46"
+    workspace.pr_number = 46
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = head_sha
     workspace.failure_reason = "infrastructure_failure"
-    workspace.failure_message = "monitor process died during validation recovery"
-    operation_repo = OperationRepository(session)
-    stale_validate = await operation_repo.create(
-        workspace_id=workspace.id,
-        operation_type=OperationType.validate,
-        status=OperationStatus.running,
-        payload={
-            "owner": "pr_monitor",
-            "source": "pr_monitor",
-            "recovery_mode": "validate_only",
-            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
-        },
-    )
-    operator_validate = await operation_repo.create(
-        workspace_id=workspace.id,
-        operation_type=OperationType.validate,
-        status=OperationStatus.running,
-        payload={
-            "owner": "operator",
-            "source": "operator_api",
-            "recovery_mode": "validate_only",
-            "reason_code": "OPERATOR_VALIDATE",
-        },
-    )
+    workspace.failure_message = "old monitor failed after reviewer settle"
+    workspace.monitor_iter_count = 3
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        settle_done_key: "elapsed",
+    }
     await session.flush()
     service, _stopper, _cleaner = _service(session)
 
     response = await service.remonitor_workspace(
         workspace.id,
-        reason="reattach after stale validation op",
-        idempotency_key="remonitor-cancel-stale-recovery",
+        reason=hint,
+        idempotency_key="remonitor-failed-past-settle-hint",
         expected_version=workspace.version,
     )
-    operations = {op.id: op for op in await _operations(session, workspace.id)}
+    operations = await _operations(session, workspace.id)
     events = await _events(session, workspace.id)
-
-    assert response.status == WorkspaceStatus.monitoring_pr
-    assert operations[stale_validate.id].status == OperationStatus.cancelled.value
-    assert operations[stale_validate.id].error_code == "OPERATOR_REMONITOR"
-    assert operations[stale_validate.id].result == {
-        "status": "cancelled",
-        "reason_code": "OPERATOR_REMONITOR",
-        "requested_action": "remonitor",
-    }
-    assert operations[operator_validate.id].status == OperationStatus.running.value
-    remonitor_event = next(
-        event for event in events if event.event_type == "workspace.remonitor_requested"
-    )
-    assert remonitor_event.payload["cancelled_recovery_operations"] == [
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+    warnings = [
         {
-            "operation_id": stale_validate.id,
-            "operation_type": OperationType.validate.value,
-            "operation_status": OperationStatus.running.value,
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
         }
     ]
 
-
-@pytest.mark.unit
-async def test_refresh_replays_same_idempotency_key_after_destroying_state(
-    session: AsyncSession,
-) -> None:
-    workspace = await _workspace(session, status=WorkspaceStatus.ready)
-    service, _stopper, _cleaner = _service(session)
-
-    operation = await service.request_refresh_workspace(
-        workspace.id,
-        reason="stale merge queue",
-        idempotency_key="refresh-before-destroy",
-    )
-    workspace.status = WorkspaceStatus.destroying.value
-    await session.flush()
-
-    replay = await service.request_refresh_workspace(
-        workspace.id,
-        reason="stale merge queue",
-        idempotency_key="refresh-before-destroy",
-    )
-    operations = await _operations(session, workspace.id)
-
-    assert replay.id == operation.id
-    assert replay.status == OperationStatus.pending.value
-    assert [row.id for row in operations] == [operation.id]
-
-
-@pytest.mark.unit
-async def test_validate_monitoring_pr_creates_validate_only_operation_and_coalesces(
-    session: AsyncSession,
-) -> None:
-    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
-    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/44"
-    workspace.pr_number = 44
-    await session.flush()
-    service, _stopper, _cleaner = _service(session)
-
-    operation = await service.request_validate_workspace(
-        workspace.id,
-        reason="rerun required validation",
-        requested_tier=2,
-        idempotency_key="validate-first",
-        expected_version=workspace.version,
-    )
-    replay = await service.request_validate_workspace(
-        workspace.id,
-        reason="rerun required validation",
-        requested_tier=2,
-        idempotency_key="validate-fresh-key",
-    )
-    operations = await _operations(session, workspace.id)
-    events = await _events(session, workspace.id)
-    validate_event = next(
-        event for event in events if event.event_type == "workspace.validate_requested"
-    )
-    state_event = next(
-        event
-        for event in events
-        if event.event_type == "workspace.state_changed"
-        and event.reason_code == "OPERATOR_VALIDATE"
-    )
-
-    assert replay.id == operation.id
-    assert workspace.status == WorkspaceStatus.ready.value
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert workspace.monitor_iter_count == 0
     assert workspace.version == 2
-    assert [row.id for row in operations] == [operation.id]
-    assert operation.type == OperationType.validate.value
-    assert operation.status == OperationStatus.pending.value
-    assert operation.idempotency_key == "validate-first"
-    assert operation.payload == {
-        "owner": "operator_api",
-        "source": "operator_api",
-        "reason": "rerun required validation",
-        "reason_code": "OPERATOR_VALIDATE",
-        "requested_action": "validate",
-        "recovery_mode": "validate_only",
-        "requested_tier": 2,
-        "expected_version": 1,
+    assert initial_done_key not in monitor_state
+    assert settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert float(monitor_state[settle_started_key]) >= 1_000_000_000
+    assert persisted_hint == {
+        "operation_id": operations[0].id,
+        "reason": hint,
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": persisted_hint["requested_at"],
+        "status": "pending",
     }
-    assert validate_event.reason_code == "OPERATOR_VALIDATE"
-    assert validate_event.payload == {
-        "source": "operator_api",
-        "reason": "rerun required validation",
-        "operation_id": operation.id,
-        "recovery_mode": "validate_only",
-        "requested_tier": 2,
-        "expected_version": 1,
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+    assert events[0].event_type == "workspace.remonitor_requested"
+    assert events[0].old_state == WorkspaceStatus.failed.value
+    assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
+    assert events[0].payload["state_reset"] == {
+        "from": WorkspaceStatus.failed.value,
+        "to": WorkspaceStatus.monitoring_pr.value,
+        "monitor_iter_count_reset_from": 3,
+        "candidate_reopened": False,
     }
-    assert state_event.old_state == WorkspaceStatus.monitoring_pr.value
-    assert state_event.new_state == WorkspaceStatus.ready.value
+    assert events[0].payload["pending_operator_hint"] == persisted_hint
+    assert events[0].payload["warnings"] == warnings
 
 
 @pytest.mark.unit
-async def test_validate_fresh_key_with_stale_if_match_does_not_coalesce_active_operation(
+async def test_remonitor_failed_workspace_past_settle_uses_elapsed_marker_when_last_sha_stale(
     session: AsyncSession,
 ) -> None:
-    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
-    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/48"
-    workspace.pr_number = 48
-    await session.flush()
-    service, _stopper, _cleaner = _service(session)
-
-    operation = await service.request_validate_workspace(
-        workspace.id,
-        reason="rerun required validation",
-        requested_tier=2,
-        idempotency_key="validate-original",
-        expected_version=workspace.version,
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    hint = "fix the reviewer-requested release note before merge"
+    stale_head_sha = "e" * 40
+    live_head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(46)
+    initial_started_key = _initial_review_grace_started_key(46)
+    live_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=46,
+        head_sha=live_head_sha,
     )
-
-    replay = await service.request_validate_workspace(
-        workspace.id,
-        reason="rerun required validation",
-        requested_tier=2,
-        idempotency_key="validate-original",
-        expected_version=1,
+    live_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=46,
+        head_sha=live_head_sha,
     )
-    with pytest.raises(VersionConflictError) as exc_info:
-        await service.request_validate_workspace(
-            workspace.id,
-            reason="rerun required validation",
-            requested_tier=2,
-            idempotency_key="validate-fresh-stale-version",
-            expected_version=1,
-        )
-
-    assert replay.id == operation.id
-    assert workspace.version == 2
-    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
-    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "transient_status",
-    [WorkspaceStatus.running, WorkspaceStatus.validating],
-)
-async def test_validate_replay_coalesces_during_executor_transient_states(
-    session: AsyncSession,
-    transient_status: WorkspaceStatus,
-) -> None:
-    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
-    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/47"
-    workspace.pr_number = 47
-    await session.flush()
-    service, _stopper, _cleaner = _service(session)
-
-    operation = await service.request_validate_workspace(
-        workspace.id,
-        reason="rerun required validation",
-        requested_tier=2,
+    stale_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=46,
+        head_sha=stale_head_sha,
     )
-    operation.status = OperationStatus.running.value
-    workspace.status = transient_status.value
-    await session.flush()
-
-    replay = await service.request_validate_workspace(
-        workspace.id,
-        reason="rerun required validation",
-        requested_tier=2,
-    )
-
-    assert replay.id == operation.id
-    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
-
-
-@pytest.mark.unit
-async def test_validate_without_requested_tier_omits_tier_from_payload(
-    session: AsyncSession,
-) -> None:
-    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
     workspace.pr_url = "https://github.com/example/control-lifecycle/pull/46"
     workspace.pr_number = 46
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = stale_head_sha
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "old monitor failed after reviewer settle"
+    workspace.monitor_iter_count = 3
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        live_settle_done_key: "elapsed",
+    }
     await session.flush()
     service, _stopper, _cleaner = _service(session)
 
-    operation = await service.request_validate_workspace(
+    response = await service.remonitor_workspace(
         workspace.id,
-        reason="rerun default validation",
-    )
-    events = await _events(session, workspace.id)
-    validate_event = next(
-        event for event in events if event.event_type == "workspace.validate_requested"
-    )
-
-    assert operation.payload is not None
-    assert "requested_tier" not in operation.payload
-    assert validate_event.payload is not None
-    assert "requested_tier" not in validate_event.payload
-
-
-@pytest.mark.unit
-async def test_validate_same_key_with_different_requested_tier_conflicts(
-    session: AsyncSession,
-) -> None:
-    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
-    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/45"
-    workspace.pr_number = 45
-    await session.flush()
-    service, _stopper, _cleaner = _service(session)
-
-    await service.request_validate_workspace(
-        workspace.id,
-        reason="rerun required validation",
-        requested_tier=2,
-        idempotency_key="validate-tier-conflict",
-    )
-
-    with pytest.raises(IdempotencyConflictError):
-        await service.request_validate_workspace(
-            workspace.id,
-            reason="rerun required validation",
-            requested_tier=3,
-            idempotency_key="validate-tier-conflict",
-        )
-
-
-@pytest.mark.unit
-async def test_rebase_monitoring_pr_creates_rebase_operation_and_replays_exact_key(
-    session: AsyncSession,
-) -> None:
-    workspace, candidate = await _workspace_with_candidate(session)
-    service, _stopper, _cleaner = _service(session)
-
-    operation = await service.request_rebase_workspace(
-        workspace.id,
-        reason="base branch advanced",
-        idempotency_key="rebase-first",
+        reason=hint,
+        idempotency_key="remonitor-failed-stale-sha-past-settle-hint",
         expected_version=workspace.version,
     )
-    replay = await service.request_rebase_workspace(
-        workspace.id,
-        reason="base branch advanced",
-        idempotency_key="rebase-first",
-        expected_version=1,
-    )
-    with pytest.raises(WorkspaceRebaseStateError) as fresh_key_error:
-        await service.request_rebase_workspace(
-            workspace.id,
-            reason="base branch advanced",
-            idempotency_key="rebase-fresh-key",
-        )
     operations = await _operations(session, workspace.id)
     events = await _events(session, workspace.id)
-    rebase_event = next(
-        event for event in events if event.event_type == "workspace.rebase_requested"
-    )
-    state_event = next(
-        event
-        for event in events
-        if event.event_type == "workspace.state_changed" and event.reason_code == "OPERATOR_REBASE"
-    )
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
 
-    assert replay.id == operation.id
-    assert fresh_key_error.value.detail == {
-        "status": WorkspaceStatus.ready.value,
-        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
-    }
-    assert workspace.status == WorkspaceStatus.ready.value
-    assert workspace.version == 2
-    assert [row.id for row in operations] == [operation.id]
-    assert operation.type == OperationType.rebase.value
-    assert operation.status == OperationStatus.pending.value
-    assert operation.idempotency_key == "rebase-first"
-    assert operation.payload == {
-        "owner": "operator_api",
-        "source": "operator_api",
-        "reason": "base branch advanced",
-        "reason_code": "OPERATOR_REBASE",
-        "requested_action": "rebase",
-        "recovery_mode": "rebase_only",
-        "candidate_id": candidate.id,
-        "attempt_id": candidate.attempt_id,
-        "task_id": candidate.task_id,
-        "pr_number": 50,
-        "pr_url": "https://github.com/example/control-lifecycle/pull/50",
-        "source_head_sha": "h" * 40,
-        "source_base_sha": "a" * 40,
-        "target_branch": "development",
-        "remote_branch": f"awf/{workspace.id}",
-        "expected_version": 1,
-    }
-    assert rebase_event.reason_code == "OPERATOR_REBASE"
-    assert rebase_event.payload == {
-        "source": "operator_api",
-        "reason": "base branch advanced",
-        "operation_id": operation.id,
-        "recovery_mode": "rebase_only",
-        "candidate_id": candidate.id,
-        "expected_version": 1,
-    }
-    assert state_event.old_state == WorkspaceStatus.monitoring_pr.value
-    assert state_event.new_state == WorkspaceStatus.ready.value
-
-
-@pytest.mark.unit
-async def test_rebase_fresh_key_with_stale_if_match_does_not_coalesce_active_operation(
-    session: AsyncSession,
-) -> None:
-    workspace, _candidate = await _workspace_with_candidate(session)
-    service, _stopper, _cleaner = _service(session)
-
-    operation = await service.request_rebase_workspace(
-        workspace.id,
-        reason="base branch advanced",
-        idempotency_key="rebase-original",
-        expected_version=workspace.version,
-    )
-
-    replay = await service.request_rebase_workspace(
-        workspace.id,
-        reason="base branch advanced",
-        idempotency_key="rebase-original",
-        expected_version=1,
-    )
-    with pytest.raises(VersionConflictError) as exc_info:
-        await service.request_rebase_workspace(
-            workspace.id,
-            reason="base branch advanced",
-            idempotency_key="rebase-fresh-stale-version",
-            expected_version=1,
-        )
-
-    assert replay.id == operation.id
-    assert workspace.version == 2
-    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
-    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
-
-
-@pytest.mark.unit
-async def test_rebase_same_key_with_different_reason_conflicts(
-    session: AsyncSession,
-) -> None:
-    workspace, _candidate = await _workspace_with_candidate(session)
-    service, _stopper, _cleaner = _service(session)
-
-    await service.request_rebase_workspace(
-        workspace.id,
-        reason="base branch advanced",
-        idempotency_key="rebase-reason-conflict",
-    )
-
-    with pytest.raises(IdempotencyConflictError):
-        await service.request_rebase_workspace(
-            workspace.id,
-            reason="different base branch reason",
-            idempotency_key="rebase-reason-conflict",
-        )
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert initial_done_key not in monitor_state
+    assert live_settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert float(monitor_state[live_settle_started_key]) >= 1_000_000_000
+    assert stale_settle_started_key not in monitor_state
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+    assert events[0].payload["warnings"] == warnings

@@ -7,11 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import (
-    Iterable,
-    Mapping,
-    Sequence,
-)
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import (
     UTC,
@@ -20,23 +16,38 @@ from datetime import (
 from pathlib import Path
 from typing import Any
 
-from awf.common.github_client import (
-    GitHubClientError,
-)
-from awf.control.quality_gates import QualityGateViolation
+from awf.common.github_client import GitHubClientError
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
     OperationStatus,
     OperationType,
     WorkspaceStatus,
 )
-from awf.db.models import (
-    Operation,
-    Workspace,
+from awf.db.models import Operation, Workspace
+from awf.db.repositories import WorkspaceRepository, pr_feedback_body_hash
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_done_key as _initial_review_grace_done_key,
 )
-from awf.db.repositories import (
-    WorkspaceRepository,
-    pr_feedback_body_hash,
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_started_key as _initial_review_grace_started_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_wall_started_value as _initial_review_grace_wall_started_value,
+)
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_wall_started_value_from_datetime as _initial_review_grace_wall_started_value_from_datetime,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_done_key as _non_check_reviewer_settle_done_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_freeze_key as _non_check_reviewer_settle_freeze_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_started_key as _non_check_reviewer_settle_started_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_started_prefix as _non_check_reviewer_settle_started_prefix,
 )
 from awf.runtime.pr_monitor import (
     CheckFailure,
@@ -86,8 +97,17 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
 )
-from awf.runtime.pr_monitor_runner.path_parsing import (
+from awf.runtime.pr_monitor_runner.path_helpers import (
     _changed_paths_from_name_only_z as _changed_paths_from_name_only_z,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _quality_gate_violation_paths as _quality_gate_violation_paths,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _read_worktree_text as _read_worktree_text,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _supply_chain_policy_blocked_message as _supply_chain_policy_blocked_message,
 )
 from awf.runtime.pr_monitor_runner.path_parsing import (
     _changed_paths_from_name_status_z as _changed_paths_from_name_status_z,
@@ -113,24 +133,31 @@ from awf.runtime.pr_monitor_runner.path_parsing import (
 from awf.runtime.pr_monitor_runner.path_parsing import (
     _untracked_paths_from_porcelain_z as _untracked_paths_from_porcelain_z,
 )
-from awf.runtime.pr_monitor_runner.types import (
-    BaseFetchError,
-    ProtectedScopeDiffError,
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _target_reconcile_failure_payload as _target_reconcile_failure_payload,
 )
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _target_reconcile_log_fields as _target_reconcile_log_fields,
+)
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _target_reconcile_payload as _target_reconcile_payload,
+)
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _truncate_target_reconcile_failure_payload as _truncate_target_reconcile_failure_payload,
+)
+from awf.runtime.pr_monitor_runner.types import BaseFetchError
 
 _datetime_iso = _reviewer_settle._datetime_iso
 _non_check_reviewer_activity_settle_decision = (
     _reviewer_settle._non_check_reviewer_activity_settle_decision
 )
 _non_check_reviewer_activity_signature = _reviewer_settle._non_check_reviewer_activity_signature
+_non_check_reviewer_activity_freeze_elapsed_seconds = (
+    _reviewer_settle._non_check_reviewer_activity_freeze_elapsed_seconds
+)
 _non_check_reviewer_settle_decision = _reviewer_settle._non_check_reviewer_settle_decision
-_non_check_reviewer_settle_done_key = _reviewer_settle._non_check_reviewer_settle_done_key
 _non_check_reviewer_settle_skip_visible_key = (
     _reviewer_settle._non_check_reviewer_settle_skip_visible_key
-)
-_non_check_reviewer_settle_started_key = _reviewer_settle._non_check_reviewer_settle_started_key
-_non_check_reviewer_settle_started_prefix = (
-    _reviewer_settle._non_check_reviewer_settle_started_prefix
 )
 _non_check_reviewer_settle_wait_operation_context = (
     _reviewer_settle._non_check_reviewer_settle_wait_operation_context
@@ -726,25 +753,6 @@ def _operation_observed_at(operation: Operation) -> datetime:
     )
 
 
-def _initial_review_grace_started_key(pr_number: int) -> str:
-    return f"__awf_initial_review_grace_started__:{pr_number}"
-
-
-def _initial_review_grace_done_key(pr_number: int) -> str:
-    return f"__awf_initial_review_grace_done__:{pr_number}"
-
-
-def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
-    return f"{started_wall_seconds:.6f}"
-
-
-def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime) -> str:
-    started_dt = started_at
-    if started_dt.tzinfo is None:
-        started_dt = started_dt.replace(tzinfo=UTC)
-    return _initial_review_grace_wall_started_value(started_dt.timestamp())
-
-
 def _initial_review_grace_wall_seconds(raw: object) -> float | None:
     if not isinstance(raw, (str, bytes, bytearray, int, float)):
         return None
@@ -985,101 +993,3 @@ def _pending_review_feedback_count(status: PRStatus, state: MonitorState) -> int
         if _agent_can_triage_review_comment(comment)
         and _review_comment_needs_attention(state, comment)
     )
-
-
-def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:
-    return list(dict.fromkeys(violation.path for violation in violations))
-
-
-def _read_worktree_text(path: Path, *, display_path: str | None = None) -> str:
-    label = display_path or str(path)
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ProtectedScopeDiffError(
-            f"Could not read protected worktree file {label!r} as UTF-8 for classification"
-        ) from exc
-    except OSError as exc:
-        raise ProtectedScopeDiffError(
-            f"Could not read protected worktree file {label!r} for classification: {exc}"
-        ) from exc
-
-
-def _supply_chain_policy_blocked_message(reason_codes: Iterable[str]) -> str:
-    codes = list(dict.fromkeys(reason_codes))
-    suffix = f": {', '.join(codes)}" if codes else "."
-    return f"Supply-chain policy blocked PR monitor publication{suffix}"
-
-
-def _target_reconcile_payload(result: object) -> dict[str, object]:
-    if isinstance(result, dict):
-        return dict(result)
-    to_dict = getattr(result, "to_dict", None)
-    if callable(to_dict):
-        payload = to_dict()
-        if isinstance(payload, dict):
-            return dict(payload)
-    return {"result": str(result)}
-
-
-def _target_reconcile_log_fields(payload: Mapping[str, object]) -> dict[str, object]:
-    fields = dict(payload)
-    fields.setdefault("resolver_results", [])
-    fields.setdefault("commit_sha", None)
-    fields.setdefault("pushed", False)
-    fields.setdefault("changed_paths", [])
-    fields.setdefault("dry_run", None)
-    fields.setdefault("commit_allowed", None)
-    fields.setdefault("policy_reason_code", None)
-    return fields
-
-
-def _target_reconcile_failure_payload(
-    exc: Exception,
-    *,
-    error_limit: int,
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "status": "failed",
-        "reason_code": "TARGET_BRANCH_RECONCILE_FAILED",
-        "error": str(exc)[:error_limit],
-        "error_type": type(exc).__name__,
-        "resolver_results": [],
-        "commit_sha": None,
-        "pushed": False,
-        "changed_paths": [],
-        "dry_run": None,
-        "commit_allowed": None,
-        "policy_reason_code": None,
-    }
-
-    operation = getattr(exc, "operation", None)
-    if isinstance(operation, str):
-        payload["operation"] = operation
-    result = getattr(exc, "result", None)
-    returncode = getattr(result, "returncode", None)
-    if isinstance(returncode, int):
-        payload["returncode"] = returncode
-    reason_code = getattr(result, "reason_code", None)
-    if isinstance(reason_code, str):
-        payload["command_reason_code"] = reason_code
-    stderr = getattr(result, "stderr", None)
-    if isinstance(stderr, str) and stderr:
-        payload["stderr"] = stderr[:error_limit]
-    stdout = getattr(result, "stdout", None)
-    if isinstance(stdout, str) and stdout:
-        payload["stdout"] = stdout[:error_limit]
-    return payload
-
-
-def _truncate_target_reconcile_failure_payload(
-    payload: Mapping[str, object],
-    *,
-    error_limit: int,
-) -> dict[str, object]:
-    truncated = dict(payload)
-    for key in ("error", "stderr", "stdout"):
-        value = truncated.get(key)
-        if isinstance(value, str):
-            truncated[key] = value[:error_limit]
-    return truncated
