@@ -272,7 +272,18 @@ async def retry_workspace_row(
     host_ports.extend(
         workspaces.host_ports_from_resolved_profile(source.resolved_profile),
     )
-    if await _source_runtime_not_yet_released(session, source):
+    latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
+        source.id, limit=1
+    )
+    source_reservation = latest_source_reservation[0] if latest_source_reservation else None
+    target_node_id = (
+        resolved_settings.worker_node_id
+        or (source_reservation.node_id if source_reservation else None)
+        or source.node_id
+    )
+    if await _source_runtime_not_yet_released(session, source) and (
+        source.node_id is None or target_node_id is None or source.node_id == target_node_id
+    ):
         raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
             source_workspace_id=source.id,
         )
@@ -281,7 +292,7 @@ async def retry_workspace_row(
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
             excluding_workspace_id=source.id,
-            node_id=source.node_id,
+            node_id=target_node_id,
         )
         if conflicts:
             raise workspaces.WorkspaceCreateHostPortConflictError(
@@ -334,14 +345,10 @@ async def retry_workspace_row(
     retry_scheduler_policy["retry_attempt_number"] = max(0, attempt.attempt_number - 1)
     retry_policy[SCHEDULER_POLICY_KEY] = retry_scheduler_policy
     retried.task_policy = retry_policy
-    latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
-        source.id, limit=1
-    )
     retry_resource_summary: dict[str, Any] = {}
-    if latest_source_reservation:
-        source_reservation = latest_source_reservation[0]
+    if source_reservation is not None:
         retry_reservation = workspaces.ResourceReservationPlan(
-            node_id=resolved_settings.worker_node_id or source_reservation.node_id,
+            node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
             steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
             peak_cpu=resolved_settings.workspace_peak_cpu,

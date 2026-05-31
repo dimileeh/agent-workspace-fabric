@@ -1574,6 +1574,7 @@ async def test_retry_rejects_host_port_conflict(
             task_kind="feature_branch_pr",
             remote_push_branch=None,
         )
+        blocker.node_id = "local"
         await repo.transition(blocker, to=WorkspaceStatus.provisioning, reason_code="TEST")
         await repo.transition(blocker, to=WorkspaceStatus.ready, reason_code="TEST")
         await repo.transition(blocker, to=WorkspaceStatus.running, reason_code="TEST")
@@ -1777,3 +1778,70 @@ async def test_retry_rejects_when_no_host_ports_but_source_compose_stack_running
                 provider_readiness_override_reason="no-host-ports runtime guard test",
                 provider_environ={},
             )
+
+
+@pytest.mark.unit
+async def test_retry_allows_when_target_node_differs_from_source(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When the retry targets a different node than the source, the
+    runtime-release gate must be skipped — the source's unreleased
+    compose stack on node A does not block retry placement on node B."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        ws.node_id = "node-a"
+        await session.commit()
+
+    from awf.db.repositories.quality_repo import ResourceReservationRepository
+
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id, limit=1
+        )
+        if reservations:
+            reservations[0].node_id = "node-b"
+            await session.commit()
+
+    different_node_settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        worker_node_id="node-b",
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=different_node_settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="target node differs test",
+            provider_environ={},
+        )
+        assert retry.new_workspace.id != source.id
