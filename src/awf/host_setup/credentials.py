@@ -421,7 +421,32 @@ class PlainFileCredentialBackend:
         self._capabilities = capabilities
         self._allow_plain_secrets = allow_plain_secrets
         self._consent = consent
-        raw_secrets_dir = Path(secrets_dir) if secrets_dir is not None else _default_secrets_dir()
+        # Keep the configured secrets dir *unresolved* here and expand it lazily in
+        # ``_secrets_dir``. Resolving eagerly would call ``_default_secrets_dir()``
+        # (and ``Path.expanduser``) in the constructor, which raises a raw
+        # ``RuntimeError`` when the host home directory cannot be determined — e.g. a
+        # minimal container user with no ``HOME``/passwd entry. That fires *before*
+        # ``create_ref`` can return its reason-coded platform/consent/input
+        # diagnostics, crashing first-run setup with a bare ``pathlib`` exception
+        # instead of the ``CredentialError`` this backend guarantees for backend
+        # failures. Deferring lets ``create_ref`` run its gates first and translate a
+        # home-resolution failure into a ``CredentialError`` (PRRT_kwDOSJAM6s6F-tfO).
+        self._raw_secrets_dir = secrets_dir
+
+    @property
+    def _secrets_dir(self) -> Path:
+        """Resolve the configured (or default) secrets dir, never following links.
+
+        Computed lazily rather than in ``__init__`` so a host whose home directory
+        cannot be resolved does not crash backend construction with a raw
+        ``RuntimeError``: ``create_ref`` accesses this only after its platform and
+        consent gates and maps that failure to a reason-coded ``CredentialError``.
+        """
+        raw_secrets_dir = (
+            Path(self._raw_secrets_dir)
+            if self._raw_secrets_dir is not None
+            else _default_secrets_dir()
+        )
         # Expand a leading ``~``/``~user`` *before* absolutising. An explicit
         # ``secrets_dir="~/.awf/secrets"`` would otherwise have ``Path.absolute``
         # anchor the literal ``~`` under the cwd (``<repo>/~/.awf/secrets``),
@@ -440,7 +465,7 @@ class PlainFileCredentialBackend:
         # ``secrets_dir`` still yields an absolute ``plain-file://`` ref) and never
         # traverses a link, preserving the un-followed path for the write-time
         # symlink check.
-        self._secrets_dir = raw_secrets_dir.expanduser().absolute()
+        return raw_secrets_dir.expanduser().absolute()
 
     def is_available(self) -> bool:
         """Return whether flag, consent, and a headless-Linux host all hold."""
@@ -478,6 +503,25 @@ class PlainFileCredentialBackend:
             )
         provider = _require_safe_identifier(request.provider, field="provider")
         account = _require_safe_identifier(request.account, field="account")
+        # Resolve the secrets dir only now — after the platform/consent gates and the
+        # identifier validation above. Resolution expands ``~`` against the host home
+        # directory, which raises ``RuntimeError`` when none can be determined (a
+        # minimal container user with no ``HOME``/passwd entry). Translate that into
+        # the reason-coded ``CredentialError`` every other backend failure uses so a
+        # missing home never escapes as a raw ``pathlib`` exception, and so the more
+        # fundamental platform/consent/input diagnostics above still take precedence
+        # (PRRT_kwDOSJAM6s6F-tfO).
+        try:
+            secrets_dir = self._secrets_dir
+        except RuntimeError as exc:
+            raise CredentialError(
+                reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
+                message=(
+                    "Unable to resolve the plain-file secrets directory: the host "
+                    "home directory could not be determined."
+                ),
+                details={"backend": self.kind, "error_type": type(exc).__name__},
+            ) from exc
         # Scope the secret file by account, mirroring the keyring backend's
         # ``service/account`` scoping: without it, two accounts for one provider
         # share a single ``<provider>`` file and the second write overwrites the
@@ -487,7 +531,7 @@ class PlainFileCredentialBackend:
         # secrets-dir 0700 guarantee (a per-provider subdir would demote the
         # secrets dir to an intermediate ``mkdir`` parent that escapes the leaf
         # create-time mode).
-        target = self._secrets_dir / f"{provider}.{account}"
+        target = secrets_dir / f"{provider}.{account}"
         # Validate the ref before pulling the secret (and before writing) so an
         # over-long path never leaves an orphaned secret file the resulting ref
         # could not be stored against. ``_pull_secret`` consumes

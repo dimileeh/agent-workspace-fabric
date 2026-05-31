@@ -985,6 +985,116 @@ def test_plain_file_backend_expands_home_in_secrets_dir() -> None:
 
 
 @pytest.mark.unit
+def test_plain_file_unresolvable_home_does_not_crash_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a host with no resolvable home does not crash backend construction.
+
+    On a minimal container user with no ``HOME``/passwd entry, expanding the
+    default ``~/.awf/secrets`` raises ``RuntimeError``. That must not escape the
+    constructor as a raw ``pathlib`` exception before ``create_ref`` can return its
+    reason-coded diagnostics — the secrets dir resolves lazily (PRRT_kwDOSJAM6s6F-tfO).
+    """
+
+    def _no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(credentials, "_default_secrets_dir", _no_home)
+
+    # Construction must not raise even though the default home cannot be resolved.
+    PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+    )
+
+
+@pytest.mark.unit
+def test_plain_file_unresolvable_home_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify an unresolvable home maps to a secret-free backend-unavailable error.
+
+    The raw ``RuntimeError`` from home expansion must be translated to the same
+    reason-coded ``CredentialError`` every other plain-file backend failure uses,
+    carrying only the backend kind and the exception *type* — never path internals.
+    """
+
+    def _no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(credentials, "_default_secrets_dir", _no_home)
+
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "plain_file", "error_type": "RuntimeError"}
+
+
+@pytest.mark.unit
+def test_plain_file_platform_gate_precedes_home_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the headless-Linux platform gate is reported before home resolution.
+
+    An unresolvable home must not pre-empt the more fundamental platform
+    diagnostic: a caller on a non-headless host still learns plain-file storage is
+    unsupported there, rather than getting a home-resolution failure.
+    """
+
+    def _no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(credentials, "_default_secrets_dir", _no_home)
+
+    backend = PlainFileCredentialBackend(
+        capabilities=_MACOS,
+        allow_plain_secrets=True,
+        consent=True,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The platform gate fired (its details carry the host facts), not home resolution.
+    assert error.details["os_name"] == _MACOS.os_name
+
+
+@pytest.mark.unit
+def test_plain_file_consent_gate_precedes_home_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the consent gate is reported before home resolution.
+
+    A headless-Linux caller who has not recorded consent must still get the
+    actionable consent diagnostic even when the home directory cannot be resolved.
+    """
+
+    def _no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(credentials, "_default_secrets_dir", _no_home)
+
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=False,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    assert exc_info.value.reason_code == CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED
+
+
+@pytest.mark.unit
 def test_plain_file_write_failure_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
