@@ -626,6 +626,7 @@ class WorkspaceControlService:
         state_reset = await _reset_failed_workspace_for_remonitor(
             self._session,
             workspace,
+            candidate_head_sha=current_head_sha,
         )
         cancelled_recovery_operations = await _cancel_stale_pr_monitor_recovery_operations(
             operations,

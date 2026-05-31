@@ -162,6 +162,8 @@ def default_cleaner() -> WorkspaceCleaner:
 async def _reset_failed_workspace_for_remonitor(
     session: AsyncSession,
     workspace: Workspace,
+    *,
+    candidate_head_sha: str | None = None,
 ) -> dict[str, object] | None:
     if workspace.status != WorkspaceStatus.failed.value:
         return None
@@ -180,11 +182,14 @@ async def _reset_failed_workspace_for_remonitor(
         candidate_repo = MergeCandidateRepository(session)
         candidate = await candidate_repo.get_by_attempt_id(attempt.id)
         if candidate is not None:
+            reopen_head_sha = (
+                candidate_head_sha or candidate.head_sha or workspace.monitor_last_commit_sha
+            )
             await candidate_repo.create_or_update_open_for_attempt(
                 task=candidate.task,
                 attempt=candidate.attempt,
                 workspace=workspace,
-                head_sha=workspace.monitor_last_commit_sha,
+                head_sha=reopen_head_sha,
                 base_sha=workspace.base_commit,
             )
             candidate_reopened = True

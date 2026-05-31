@@ -788,6 +788,84 @@ async def test_remonitor_past_settle_persists_operator_hint_and_warns(
 
 
 @pytest.mark.unit
+async def test_remonitor_reopens_failed_candidate_with_latest_head_when_monitor_sha_lags(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_monitor_head = "b" * 40
+    latest_candidate_head = "c" * 40
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+        with_open_candidate=True,
+    )
+    initial_done_key = _initial_review_grace_done_key(42)
+    latest_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=latest_candidate_head,
+    )
+    stale_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=stale_monitor_head,
+    )
+    stale_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=stale_monitor_head,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        candidate = (
+            await session.execute(
+                select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        workspace.monitor_last_commit_sha = stale_monitor_head
+        workspace.monitor_threads_addressed = {
+            initial_done_key: "elapsed",
+            stale_settle_done_key: "elapsed",
+        }
+        candidate.head_sha = latest_candidate_head
+        candidate.status = "closed"
+        candidate.close_reason = "MONITOR_FAILED"
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach latest PR head"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-latest-head"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        candidate = (
+            await session.execute(
+                select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+    assert candidate.status == "open"
+    assert candidate.head_sha == latest_candidate_head
+    state = workspace.monitor_threads_addressed
+    assert stale_settle_done_key not in state
+    assert float(state[stale_settle_started_key]) >= 1_000_000_000
+    assert float(state[latest_settle_started_key]) >= 1_000_000_000
+
+
+@pytest.mark.unit
 async def test_remonitor_same_key_with_different_reason_returns_idempotency_conflict(
     client: AsyncClient,
     engine: AsyncEngine,
