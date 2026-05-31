@@ -5,6 +5,7 @@ import type {
   ValidationTier,
   Workspace,
   WorkspaceControlResponse,
+  WorkspaceControlWarning,
   WorkspaceOperatorAction,
   WorkspaceOverview,
 } from "./types.ts";
@@ -30,6 +31,7 @@ export interface WorkspaceOperatorSuccessSummary {
   operationId: string;
   status: string;
   message: string;
+  warnings: WorkspaceControlWarning[];
 }
 
 export interface WorkspaceOperatorFailureSummary {
@@ -76,6 +78,7 @@ export function summarizeWorkspaceOperatorSuccess(
     operationId,
     status,
     message: `${labels[action]} ${status}: ${operationId}`,
+    warnings: controlWarnings(response),
   };
 }
 
@@ -222,6 +225,21 @@ function workspacePrUrl(context: WorkspaceOperatorContext): string | null {
 
 function validationReasonMatches(value: string | null | undefined, expected: string): boolean {
   return value?.toLowerCase() === expected.toLowerCase();
+}
+
+function controlWarnings(response: WorkspaceControlResponse | Operation): WorkspaceControlWarning[] {
+  if (!("warnings" in response) || !Array.isArray(response.warnings)) {
+    return [];
+  }
+  return response.warnings.filter(isControlWarning);
+}
+
+function isControlWarning(value: unknown): value is WorkspaceControlWarning {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.warning_code === "string" && typeof record.message === "string";
 }
 
 function structuredErrorDetail(detail: unknown): { errorCode?: string; message?: string } {

@@ -1,5 +1,7 @@
 """Pull request monitor runner public API."""
 
+from __future__ import annotations
+
 from awf.runtime.pr_monitor_runner.config import (
     MonitorRunnerConfig,
     PostMergeTargetReconciler,

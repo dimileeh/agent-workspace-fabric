@@ -6,42 +6,16 @@ import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_freeze_key,
+    _non_check_reviewer_settle_started_key,
+)
 from awf.runtime.pr_monitor import CheckTiming, MonitorConfig, MonitorState, PRStatus
 from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
     _NonCheckReviewerSettleWaitOperationContext,
 )
-
-
-def _non_check_reviewer_settle_started_key(
-    *,
-    pr_number: int,
-    head_sha: str,
-    activity_signature: str | None = None,
-) -> str:
-    """Build state key for a non-check reviewer settle start marker."""
-    key = f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
-    if activity_signature is not None:
-        return f"{key}:{activity_signature}"
-    return key
-
-
-def _non_check_reviewer_settle_started_prefix(*, pr_number: int) -> str:
-    """Build namespace prefix for non-check reviewer settle state keys."""
-    return f"__awf_non_check_reviewer_settle_started__:{pr_number}:"
-
-
-def _non_check_reviewer_settle_done_key(
-    *,
-    pr_number: int,
-    head_sha: str,
-    activity_signature: str | None = None,
-) -> str:
-    """Build state key for a completed non-check reviewer settle window."""
-    key = f"__awf_non_check_reviewer_settle_done__:{pr_number}:{head_sha}"
-    if activity_signature is not None:
-        return f"{key}:{activity_signature}"
-    return key
 
 
 def _non_check_reviewer_settle_skip_visible_key(*, pr_number: int, head_sha: str) -> str:
@@ -77,12 +51,48 @@ def _non_check_reviewer_settle_decision(
         configured_reviewers=configured_reviewers,
         checks=status.checks,
     )
+    done_key = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
+    started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
+    freeze_key = _non_check_reviewer_settle_freeze_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
     if not missing_reviewers:
+        if (
+            state.threads_addressed_ids.get(done_key) != "elapsed"
+            and state.threads_addressed_ids.get(freeze_key) == "armed"
+            and started_key in state.threads_addressed_ids
+        ):
+            return _non_check_reviewer_head_settle_decision(
+                state,
+                config,
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+                now=now,
+                configured_reviewers=configured_reviewers,
+                missing_reviewers=missing_reviewers,
+                visible_reviewers=visible_reviewers,
+            )
+        freeze_cleared = state.threads_addressed_ids.pop(freeze_key, None) is not None
+        stale_wait_cleared = (
+            state.threads_addressed_ids.get(done_key) != "elapsed"
+            and state.threads_addressed_ids.pop(started_key, None) is not None
+        )
         skip_key = _non_check_reviewer_settle_skip_visible_key(
             pr_number=pr_number,
             head_sha=status.head_sha,
         )
-        state_changed = state.threads_addressed_ids.get(skip_key) != "visible_check"
+        state_changed = (
+            state.threads_addressed_ids.get(skip_key) != "visible_check"
+            or freeze_cleared
+            or stale_wait_cleared
+        )
         if state_changed:
             state.mark_addressed(skip_key, "visible_check")
         return _NonCheckReviewerSettleDecision(
@@ -98,15 +108,40 @@ def _non_check_reviewer_settle_decision(
             state,
             config,
             pr_number=pr_number,
+            now=now,
             now_wall=now_wall or datetime.now(UTC),
             configured_reviewers=configured_reviewers,
             missing_reviewers=missing_reviewers,
             visible_reviewers=visible_reviewers,
         )
 
-    done_key = _non_check_reviewer_settle_done_key(
+    return _non_check_reviewer_head_settle_decision(
+        state,
+        config,
         pr_number=pr_number,
         head_sha=status.head_sha,
+        now=now,
+        configured_reviewers=configured_reviewers,
+        missing_reviewers=missing_reviewers,
+        visible_reviewers=visible_reviewers,
+    )
+
+
+def _non_check_reviewer_head_settle_decision(
+    state: MonitorState,
+    config: MonitorConfig,
+    *,
+    pr_number: int,
+    head_sha: str,
+    now: float,
+    configured_reviewers: tuple[str, ...],
+    missing_reviewers: tuple[str, ...],
+    visible_reviewers: tuple[str, ...],
+) -> _NonCheckReviewerSettleDecision:
+    """Return the head-scoped settle decision for a running wait marker."""
+    done_key = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha=head_sha,
     )
     if state.threads_addressed_ids.get(done_key) == "elapsed":
         return _NonCheckReviewerSettleDecision(
@@ -118,7 +153,7 @@ def _non_check_reviewer_settle_decision(
 
     started_key = _non_check_reviewer_settle_started_key(
         pr_number=pr_number,
-        head_sha=status.head_sha,
+        head_sha=head_sha,
     )
     started_raw = state.threads_addressed_ids.get(started_key)
     started_now = False
@@ -138,6 +173,13 @@ def _non_check_reviewer_settle_decision(
     remaining_seconds = config.non_check_reviewer_settle_seconds - elapsed_seconds
     if remaining_seconds <= 0:
         state.mark_addressed(done_key, "elapsed")
+        state.threads_addressed_ids.pop(
+            _non_check_reviewer_settle_freeze_key(
+                pr_number=pr_number,
+                head_sha=head_sha,
+            ),
+            None,
+        )
         return _NonCheckReviewerSettleDecision(
             action="elapsed",
             configured_reviewers=configured_reviewers,
@@ -174,6 +216,7 @@ def _non_check_reviewer_activity_settle_decision(
     config: MonitorConfig,
     *,
     pr_number: int,
+    now: float,
     now_wall: datetime,
     configured_reviewers: tuple[str, ...],
     missing_reviewers: tuple[str, ...],
@@ -195,6 +238,107 @@ def _non_check_reviewer_activity_settle_decision(
         head_sha=status.head_sha,
         activity_signature=signature,
     )
+    started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+        activity_signature=signature,
+    )
+    activity_freeze_seeded = _seed_non_check_reviewer_activity_freeze_marker(
+        state,
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+        activity_started_key=started_key,
+    )
+    freeze_elapsed_seconds = _non_check_reviewer_activity_freeze_elapsed_seconds(
+        state,
+        started_key=started_key,
+        now=now,
+        now_wall=now_dt,
+    )
+    if freeze_elapsed_seconds is not None:
+        remaining_seconds = max(
+            config.non_check_reviewer_settle_seconds - freeze_elapsed_seconds,
+            0.0,
+        )
+        freeze_started_wall = now_dt - timedelta(seconds=freeze_elapsed_seconds)
+        quiet_until = freeze_started_wall + timedelta(
+            seconds=config.non_check_reviewer_settle_seconds
+        )
+        if remaining_seconds <= 0:
+            head_done_key = _non_check_reviewer_settle_done_key(
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+            )
+            freeze_cleared = (
+                state.threads_addressed_ids.pop(
+                    _non_check_reviewer_settle_freeze_key(
+                        pr_number=pr_number,
+                        head_sha=status.head_sha,
+                    ),
+                    None,
+                )
+                is not None
+            )
+            head_done_recorded = state.threads_addressed_ids.get(head_done_key) == "elapsed"
+            if not head_done_recorded:
+                state.mark_addressed(head_done_key, "elapsed")
+            if state.threads_addressed_ids.get(done_key) == "elapsed":
+                return _NonCheckReviewerSettleDecision(
+                    action="already_elapsed",
+                    configured_reviewers=configured_reviewers,
+                    missing_reviewers=missing_reviewers,
+                    visible_reviewers=visible_reviewers,
+                    elapsed_seconds=freeze_elapsed_seconds,
+                    remaining_seconds=0.0,
+                    activity_anchor_at=anchor_at,
+                    activity_anchor_source=status.quiet_period_anchor_source,
+                    quiet_until=quiet_until,
+                    latest_external_review_activity_at=(status.latest_external_review_activity_at),
+                    latest_external_review_activity_source=(
+                        status.latest_external_review_activity_source
+                    ),
+                    activity_signature=signature,
+                    state_changed=(freeze_cleared or not head_done_recorded),
+                )
+            state.mark_addressed(done_key, "elapsed")
+            return _NonCheckReviewerSettleDecision(
+                action="elapsed",
+                configured_reviewers=configured_reviewers,
+                missing_reviewers=missing_reviewers,
+                visible_reviewers=visible_reviewers,
+                elapsed_seconds=freeze_elapsed_seconds,
+                remaining_seconds=0.0,
+                activity_anchor_at=anchor_at,
+                activity_anchor_source=status.quiet_period_anchor_source,
+                quiet_until=quiet_until,
+                latest_external_review_activity_at=status.latest_external_review_activity_at,
+                latest_external_review_activity_source=(
+                    status.latest_external_review_activity_source
+                ),
+                activity_signature=signature,
+                state_changed=True,
+            )
+        wait_seconds = (
+            remaining_seconds
+            if config.poll_interval_seconds <= 0
+            else min(config.poll_interval_seconds, remaining_seconds)
+        )
+        return _NonCheckReviewerSettleDecision(
+            action="waiting",
+            wait_seconds=wait_seconds,
+            configured_reviewers=configured_reviewers,
+            missing_reviewers=missing_reviewers,
+            visible_reviewers=visible_reviewers,
+            elapsed_seconds=freeze_elapsed_seconds,
+            remaining_seconds=remaining_seconds,
+            activity_anchor_at=anchor_at,
+            activity_anchor_source=status.quiet_period_anchor_source,
+            quiet_until=quiet_until,
+            latest_external_review_activity_at=status.latest_external_review_activity_at,
+            latest_external_review_activity_source=status.latest_external_review_activity_source,
+            activity_signature=signature,
+            state_changed=activity_freeze_seeded,
+        )
     if state.threads_addressed_ids.get(done_key) == "elapsed":
         return _NonCheckReviewerSettleDecision(
             action="already_elapsed",
@@ -233,11 +377,6 @@ def _non_check_reviewer_activity_settle_decision(
         if config.poll_interval_seconds <= 0
         else min(config.poll_interval_seconds, remaining_seconds)
     )
-    started_key = _non_check_reviewer_settle_started_key(
-        pr_number=pr_number,
-        head_sha=status.head_sha,
-        activity_signature=signature,
-    )
     state_changed = state.threads_addressed_ids.get(started_key) != "activity_wait"
     if state_changed:
         state.mark_addressed(started_key, "activity_wait")
@@ -257,6 +396,66 @@ def _non_check_reviewer_activity_settle_decision(
         activity_signature=signature,
         state_changed=state_changed,
     )
+
+
+def _seed_non_check_reviewer_activity_freeze_marker(
+    state: MonitorState,
+    *,
+    pr_number: int,
+    head_sha: str,
+    activity_started_key: str,
+) -> bool:
+    """Copy an armed head-scoped remonitor freeze marker to the activity key."""
+    if activity_started_key in state.threads_addressed_ids:
+        return False
+    freeze_key = _non_check_reviewer_settle_freeze_key(
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    if state.threads_addressed_ids.get(freeze_key) != "armed":
+        return False
+    head_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    started_raw = state.threads_addressed_ids.get(head_started_key)
+    if started_raw is None:
+        return False
+    state.mark_addressed(activity_started_key, started_raw)
+    return True
+
+
+def _non_check_reviewer_activity_freeze_elapsed_seconds(
+    state: MonitorState,
+    *,
+    started_key: str,
+    now: float,
+    now_wall: datetime,
+) -> float | None:
+    """Return elapsed seconds for a remonitor-armed activity freeze marker."""
+    started_raw = state.threads_addressed_ids.get(started_key)
+    started_wall_seconds = _settle_wall_seconds(started_raw)
+    if started_wall_seconds is not None:
+        return max(now_wall.timestamp() - started_wall_seconds, 0.0)
+    if started_raw is None or started_raw == "activity_wait":
+        return None
+    try:
+        started_monotonic = float(started_raw)
+    except (TypeError, ValueError):
+        return None
+    return max(now - started_monotonic, 0.0)
+
+
+def _settle_wall_seconds(raw: object) -> float | None:
+    if not isinstance(raw, (str, bytes, bytearray, int, float)):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value >= 1_000_000_000:
+        return value
+    return None
 
 
 def _non_check_reviewer_activity_signature(status: PRStatus, *, anchor_at: datetime) -> str:
