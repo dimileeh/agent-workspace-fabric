@@ -1687,6 +1687,41 @@ async def test_cancel_workspace_without_stop_stack_skips_terminal_runtime_releas
 
 
 @pytest.mark.unit
+async def test_cancel_workspace_skip_runtime_released_when_no_compose_project(
+    engine: AsyncEngine,
+) -> None:
+    """When compose_project_name is None (workspace cancelled before provisioning),
+    cancel with stop_stack=True must not record a terminal_runtime_released event
+    because no runtime was ever acquired."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.requested,
+            compose_project_name=None,
+        )
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        await service.cancel_workspace(
+            workspace.id,
+            reason="cancel pre-provision",
+            stop_stack=True,
+            idempotency_key="cancel-no-compose-project",
+        )
+
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 0
+
+
+@pytest.mark.unit
 async def test_cancel_workspace_records_terminal_runtime_released_when_launching(
     engine: AsyncEngine,
 ) -> None:

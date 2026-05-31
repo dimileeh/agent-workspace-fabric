@@ -393,8 +393,10 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
                 payload=event_payload,
             )
-        if stop_stack and not await _has_terminal_runtime_released_event(
-            self._session, workspace.id
+        if (
+            stop_stack
+            and workspace.compose_project_name is not None
+            and not await _has_terminal_runtime_released_event(self._session, workspace.id)
         ):
             await repo.add_event(
                 workspace,
