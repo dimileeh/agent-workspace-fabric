@@ -28,6 +28,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
+    _NonCheckReviewerSettleDecision,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_base_fetch_retry_state,
@@ -253,6 +254,7 @@ async def handle_merge_action(
         merge_status = status
         queue_blockers_after_lock: list[MergeQueueBlocker] = []
         merge_gate_after_lock: _MergeGateResult | None = None
+        settle_recheck_decision: _NonCheckReviewerSettleDecision | None = None
         async with self._merge_coordinator.serialized_merge(
             repo_url=repo_url,
             base_branch=base_branch,
@@ -352,7 +354,7 @@ async def handle_merge_action(
                     else:
                         merge_status = checked_status
 
-            if fresh_action is None and await self._refresh_operator_hint_from_workspace(
+            if fresh_action is None and await self._refresh_operator_state_from_workspace(
                 workspace_id,
                 state,
             ):
@@ -368,12 +370,30 @@ async def handle_merge_action(
                         fresh_action=type(checked_action).__name__,
                         head_sha=merge_status.head_sha[:10],
                     )
+                else:
+                    checked_settle_decision = _non_check_reviewer_settle_decision(
+                        merge_status,
+                        state,
+                        self._config,
+                        pr_number=pr_number,
+                        now=time.monotonic(),
+                    )
+                    await self._record_non_check_reviewer_settle_decision(
+                        decision=checked_settle_decision,
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        status=merge_status,
+                        monitor_log=monitor_log,
+                    )
+                    if checked_settle_decision.wait_seconds > 0:
+                        settle_recheck_decision = checked_settle_decision
 
             if (
                 recheck_error is None
                 and recheck_base_error is None
                 and recheck_behind_error is None
                 and fresh_action is None
+                and settle_recheck_decision is None
             ):
                 queue_blockers_after_lock = await self._merge_queue_blockers_for_workspace(
                     workspace_id
@@ -483,6 +503,28 @@ async def handle_merge_action(
                             monitor_log=monitor_log,
                             evidence={"merge_sha": merge_sha},
                         )
+
+        if settle_recheck_decision is not None:
+            settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
+                self._config,
+                settle_recheck_decision,
+            )
+            await self._sleep_with_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="reviewer_settle_wait",
+                requested_action="merge",
+                reason="Waiting for configured non-check reviewers to settle.",
+                reason_code="NON_CHECK_REVIEWER_SETTLE",
+                pr_number=pr_number,
+                status=merge_status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                wait_seconds=settle_recheck_decision.wait_seconds,
+                monitor_log=monitor_log,
+                extra_payload=settle_operation_context.extra_payload,
+                extra_identity=settle_operation_context.extra_identity,
+            )
+            return False
 
         if queue_blockers_after_lock:
             await self._wait_for_merge_queue(

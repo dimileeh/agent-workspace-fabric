@@ -526,3 +526,81 @@ async def test_merge_rechecks_persisted_operator_hint_before_merge_pr(
     assert terminal is False
     assert calls == [hint]
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_merge_rechecks_freeze_only_remonitor_before_merge_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    initial_done_key = runner_helpers._initial_review_grace_done_key(42)
+    initial_started_key = runner_helpers._initial_review_grace_started_key(42)
+    settle_done_key = runner_helpers._non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_started_key = runner_helpers._non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    stale_state = MonitorState(
+        threads_addressed_ids={
+            initial_done_key: "elapsed",
+            settle_done_key: "elapsed",
+        }
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        monitor_state = dict(workspace.monitor_threads_addressed or {})
+        operator_hints.arm_operator_hint_freeze(
+            monitor_state,
+            pr_number=42,
+            head_sha=head_sha,
+            now=datetime.now(UTC),
+        )
+        workspace.monitor_threads_addressed = monitor_state
+        await session.commit()
+
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(head_sha=head_sha),
+        state=stale_state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert OPERATOR_HINT_STATE_KEY not in stale_state.threads_addressed_ids
+    assert initial_done_key not in stale_state.threads_addressed_ids
+    assert settle_done_key not in stale_state.threads_addressed_ids
+    assert initial_started_key in stale_state.threads_addressed_ids
+    assert settle_started_key in stale_state.threads_addressed_ids
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)

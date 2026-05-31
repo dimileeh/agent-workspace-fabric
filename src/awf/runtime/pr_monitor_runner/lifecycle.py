@@ -163,24 +163,76 @@ async def _refresh_operator_hint_from_workspace(
     workspace_id: str,
     state: MonitorState,
 ) -> bool:
-    """Import a concurrently persisted operator hint without discarding runtime state."""
+    return await _refresh_operator_state_from_workspace(self, workspace_id, state)
+
+
+async def _refresh_operator_state_from_workspace(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+) -> bool:
+    """Import concurrent operator hint/freeze state without discarding runtime state."""
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         if ws is None:
             return False
         db_threads_addressed = dict(ws.monitor_threads_addressed or {})
+        pr_number = ws.pr_number
 
+    changed = False
     db_hint = operator_hint_from_threads(db_threads_addressed)
-    if db_hint is None:
-        return False
-    if state.pending_operator_hint is not None and _operator_hint_matches(
-        state.pending_operator_hint,
-        db_hint,
+    if (
+        db_hint is not None
+        and not (
+            state.pending_operator_hint is not None
+            and _operator_hint_matches(state.pending_operator_hint, db_hint)
+        )
+        and not _operator_hint_is_processed(state.threads_addressed_ids, db_hint)
     ):
-        return False
-    if _operator_hint_is_processed(state.threads_addressed_ids, db_hint):
-        return False
-    state.pending_operator_hint = db_hint
+        state.pending_operator_hint = db_hint
+        changed = True
+
+    if pr_number is None:
+        return changed
+
+    now_monotonic = time.monotonic()
+    now_wall = datetime.now(UTC)
+    now_wall_seconds = now_wall.timestamp()
+    persisted_threads = dict(state.threads_addressed_ids)
+    persisted_threads = _initial_review_grace_state_for_persistence(
+        persisted_threads,
+        pr_number=pr_number,
+        now_monotonic=now_monotonic,
+        now_wall_seconds=now_wall_seconds,
+    )
+    persisted_threads = _non_check_reviewer_settle_state_for_persistence(
+        persisted_threads,
+        pr_number=pr_number,
+        now_monotonic=now_monotonic,
+        now_wall_seconds=now_wall_seconds,
+    )
+    merged_threads = _merge_concurrent_operator_freeze_state(
+        dict(persisted_threads),
+        db_threads_addressed=db_threads_addressed,
+        pr_number=pr_number,
+    )
+    if merged_threads == persisted_threads:
+        return changed
+
+    runtime_threads = _initial_review_grace_state_for_runtime(
+        merged_threads,
+        pr_number=pr_number,
+        now_monotonic=now_monotonic,
+        now_wall_seconds=now_wall_seconds,
+        legacy_monotonic_fallback=state.started_at,
+    )
+    runtime_threads = _non_check_reviewer_settle_state_for_runtime(
+        runtime_threads,
+        pr_number=pr_number,
+        now_monotonic=now_monotonic,
+        now_wall_seconds=now_wall_seconds,
+    )
+    state.threads_addressed_ids = runtime_threads
     return True
 
 
