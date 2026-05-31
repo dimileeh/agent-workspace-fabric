@@ -236,6 +236,72 @@ def test_visible_greptile_check_skips_extra_wait() -> None:
 
 
 @pytest.mark.unit
+def test_visible_check_remonitor_freeze_waits_before_skip() -> None:
+    remonitored_at = datetime(2026, 5, 31, 4, 0, tzinfo=UTC)
+    settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=93,
+        head_sha="head-a",
+    )
+    settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=93,
+        head_sha="head-a",
+    )
+    skip_visible_key = _non_check_reviewer_settle_skip_visible_key(
+        pr_number=93,
+        head_sha="head-a",
+    )
+    state = MonitorState(
+        threads_addressed_ids={
+            settle_done_key: "elapsed",
+            skip_visible_key: "visible_check",
+        }
+    )
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    arm_operator_hint_freeze(
+        state.threads_addressed_ids,
+        pr_number=93,
+        head_sha="head-a",
+        now=remonitored_at,
+    )
+    _non_check_reviewer_settle_state_for_runtime(
+        state.threads_addressed_ids,
+        pr_number=93,
+        now_monotonic=1060.0,
+        now_wall_seconds=(remonitored_at + timedelta(seconds=60)).timestamp(),
+    )
+    waiting = _non_check_reviewer_settle_decision(
+        _ready_status(checks=(CheckTiming(name="Greptile", conclusion="SUCCESS"),)),
+        state,
+        cfg,
+        pr_number=93,
+        now=1060.0,
+    )
+    elapsed = _non_check_reviewer_settle_decision(
+        _ready_status(checks=(CheckTiming(name="Greptile", conclusion="SUCCESS"),)),
+        state,
+        cfg,
+        pr_number=93,
+        now=1181.0,
+    )
+
+    assert waiting.action == "waiting"
+    assert waiting.wait_seconds == 60
+    assert waiting.visible_reviewers == ("greptile-apps",)
+    assert waiting.missing_reviewers == ()
+    assert waiting.elapsed_seconds == 60
+    assert waiting.remaining_seconds == 120
+    assert state.threads_addressed_ids[settle_started_key] == "1000.000000"
+    assert elapsed.action == "elapsed"
+    assert state.threads_addressed_ids[settle_done_key] == "elapsed"
+
+
+@pytest.mark.unit
 def test_no_configured_non_check_reviewers_is_noop() -> None:
     state = MonitorState()
     cfg = MonitorConfig(

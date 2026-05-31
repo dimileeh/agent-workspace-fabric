@@ -625,7 +625,29 @@ def _non_check_reviewer_settle_decision(
         configured_reviewers=configured_reviewers,
         checks=status.checks,
     )
+    done_key = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
+    started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
     if not missing_reviewers:
+        if (
+            state.threads_addressed_ids.get(done_key) != "elapsed"
+            and started_key in state.threads_addressed_ids
+        ):
+            return _non_check_reviewer_head_settle_decision(
+                state,
+                config,
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+                now=now,
+                configured_reviewers=configured_reviewers,
+                missing_reviewers=missing_reviewers,
+                visible_reviewers=visible_reviewers,
+            )
         skip_key = _non_check_reviewer_settle_skip_visible_key(
             pr_number=pr_number,
             head_sha=status.head_sha,
@@ -653,9 +675,33 @@ def _non_check_reviewer_settle_decision(
             visible_reviewers=visible_reviewers,
         )
 
-    done_key = _non_check_reviewer_settle_done_key(
+    return _non_check_reviewer_head_settle_decision(
+        state,
+        config,
         pr_number=pr_number,
         head_sha=status.head_sha,
+        now=now,
+        configured_reviewers=configured_reviewers,
+        missing_reviewers=missing_reviewers,
+        visible_reviewers=visible_reviewers,
+    )
+
+
+def _non_check_reviewer_head_settle_decision(
+    state: MonitorState,
+    config: MonitorConfig,
+    *,
+    pr_number: int,
+    head_sha: str,
+    now: float,
+    configured_reviewers: tuple[str, ...],
+    missing_reviewers: tuple[str, ...],
+    visible_reviewers: tuple[str, ...],
+) -> _NonCheckReviewerSettleDecision:
+    """Return the head-scoped settle decision for a running wait marker."""
+    done_key = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha=head_sha,
     )
     if state.threads_addressed_ids.get(done_key) == "elapsed":
         return _NonCheckReviewerSettleDecision(
@@ -667,7 +713,7 @@ def _non_check_reviewer_settle_decision(
 
     started_key = _non_check_reviewer_settle_started_key(
         pr_number=pr_number,
-        head_sha=status.head_sha,
+        head_sha=head_sha,
     )
     started_raw = state.threads_addressed_ids.get(started_key)
     started_now = False
