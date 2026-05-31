@@ -236,6 +236,48 @@ def test_visible_greptile_check_skips_extra_wait() -> None:
 
 
 @pytest.mark.unit
+def test_visible_reviewer_arrival_skips_ordinary_missing_wait() -> None:
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    started = _non_check_reviewer_settle_decision(
+        _ready_status(checks=(CheckTiming(name="ci/build", conclusion="SUCCESS"),)),
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+    )
+    visible = _non_check_reviewer_settle_decision(
+        _ready_status(checks=(CheckTiming(name="Greptile", conclusion="SUCCESS"),)),
+        state,
+        cfg,
+        pr_number=93,
+        now=1030.0,
+    )
+
+    assert started.action == "started"
+    assert visible.action == "visible_check"
+    assert visible.wait_seconds == 0
+    assert visible.visible_reviewers == ("greptile-apps",)
+    assert visible.state_changed is True
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_skip_visible_key(pr_number=93, head_sha="head-a")
+        ]
+        == "visible_check"
+    )
+    assert (
+        _non_check_reviewer_settle_done_key(pr_number=93, head_sha="head-a")
+        not in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 def test_visible_check_remonitor_freeze_waits_before_skip() -> None:
     remonitored_at = datetime(2026, 5, 31, 4, 0, tzinfo=UTC)
     settle_done_key = _non_check_reviewer_settle_done_key(

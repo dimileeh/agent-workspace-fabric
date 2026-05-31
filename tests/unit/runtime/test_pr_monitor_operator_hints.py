@@ -1568,6 +1568,10 @@ async def test_persist_state_preserves_newly_elapsed_settle_done_marker(
         pr_number=42,
         head_sha=head_sha,
     )
+    settle_freeze_key = runner_helpers._non_check_reviewer_settle_freeze_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
     started_value = runner_helpers._initial_review_grace_wall_started_value_from_datetime(
         datetime.now(UTC) - timedelta(seconds=300)
     )
@@ -1575,7 +1579,10 @@ async def test_persist_state_preserves_newly_elapsed_settle_done_marker(
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
         workspace.monitor_last_commit_sha = head_sha
-        workspace.monitor_threads_addressed = {settle_started_key: started_value}
+        workspace.monitor_threads_addressed = {
+            settle_started_key: started_value,
+            settle_freeze_key: "armed",
+        }
         await session.commit()
     runner = make_runner(
         factory=factory,
@@ -1601,6 +1608,7 @@ async def test_persist_state_preserves_newly_elapsed_settle_done_marker(
     )
     assert decision.action == "elapsed"
     assert state.threads_addressed_ids[settle_done_key] == "elapsed"
+    assert settle_freeze_key not in state.threads_addressed_ids
 
     await runner._persist_state(workspace_id, state)
 
@@ -1611,6 +1619,7 @@ async def test_persist_state_preserves_newly_elapsed_settle_done_marker(
     assert persisted is not None
     monitor_state = dict(persisted.monitor_threads_addressed)
     assert monitor_state[settle_done_key] == "elapsed"
+    assert settle_freeze_key not in monitor_state
     assert (
         runner_helpers._initial_review_grace_wall_seconds(monitor_state[settle_started_key])
         is not None

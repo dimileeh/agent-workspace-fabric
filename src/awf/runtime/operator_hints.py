@@ -12,6 +12,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_started_key,
     _initial_review_grace_wall_started_value_from_datetime,
     _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_freeze_key,
     _non_check_reviewer_settle_started_key,
 )
 
@@ -194,6 +195,12 @@ def arm_operator_hint_freeze(
         if key == settle_started_key or key.startswith(f"{settle_started_key}:"):
             threads_addressed.pop(key, None)
     threads_addressed[settle_started_key] = started_at
+    threads_addressed[
+        _non_check_reviewer_settle_freeze_key(
+            pr_number=pr_number,
+            head_sha=head_sha,
+        )
+    ] = "armed"
     for activity_signature in settle_started_activity_signatures:
         threads_addressed[
             _non_check_reviewer_settle_started_key(

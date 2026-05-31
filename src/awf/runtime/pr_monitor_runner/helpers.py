@@ -592,6 +592,11 @@ def _non_check_reviewer_settle_done_key(
     return key
 
 
+def _non_check_reviewer_settle_freeze_key(*, pr_number: int, head_sha: str) -> str:
+    """Build state key for a remonitor-armed head settle freeze."""
+    return f"__awf_non_check_reviewer_settle_freeze__:{pr_number}:{head_sha}"
+
+
 def _non_check_reviewer_settle_skip_visible_key(*, pr_number: int, head_sha: str) -> str:
     """Build skip marker key for missing non-check reviewer visibility checks."""
     return f"__awf_non_check_reviewer_settle_skipped_visible__:{pr_number}:{head_sha}"
@@ -633,9 +638,14 @@ def _non_check_reviewer_settle_decision(
         pr_number=pr_number,
         head_sha=status.head_sha,
     )
+    freeze_key = _non_check_reviewer_settle_freeze_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
     if not missing_reviewers:
         if (
             state.threads_addressed_ids.get(done_key) != "elapsed"
+            and state.threads_addressed_ids.get(freeze_key) == "armed"
             and started_key in state.threads_addressed_ids
         ):
             return _non_check_reviewer_head_settle_decision(
@@ -648,11 +658,20 @@ def _non_check_reviewer_settle_decision(
                 missing_reviewers=missing_reviewers,
                 visible_reviewers=visible_reviewers,
             )
+        freeze_cleared = state.threads_addressed_ids.pop(freeze_key, None) is not None
+        stale_wait_cleared = (
+            state.threads_addressed_ids.get(done_key) != "elapsed"
+            and state.threads_addressed_ids.pop(started_key, None) is not None
+        )
         skip_key = _non_check_reviewer_settle_skip_visible_key(
             pr_number=pr_number,
             head_sha=status.head_sha,
         )
-        state_changed = state.threads_addressed_ids.get(skip_key) != "visible_check"
+        state_changed = (
+            state.threads_addressed_ids.get(skip_key) != "visible_check"
+            or freeze_cleared
+            or stale_wait_cleared
+        )
         if state_changed:
             state.mark_addressed(skip_key, "visible_check")
         return _NonCheckReviewerSettleDecision(
@@ -733,6 +752,13 @@ def _non_check_reviewer_head_settle_decision(
     remaining_seconds = config.non_check_reviewer_settle_seconds - elapsed_seconds
     if remaining_seconds <= 0:
         state.mark_addressed(done_key, "elapsed")
+        state.threads_addressed_ids.pop(
+            _non_check_reviewer_settle_freeze_key(
+                pr_number=pr_number,
+                head_sha=head_sha,
+            ),
+            None,
+        )
         return _NonCheckReviewerSettleDecision(
             action="elapsed",
             configured_reviewers=configured_reviewers,

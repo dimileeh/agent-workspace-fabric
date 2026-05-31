@@ -48,6 +48,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_state_for_runtime,
     _initial_review_grace_wall_seconds,
     _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_freeze_key,
     _non_check_reviewer_settle_started_prefix,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
@@ -336,11 +337,32 @@ def _merge_concurrent_operator_freeze_state(
         suffix = started_key.removeprefix(settle_started_prefix)
         if not suffix:
             continue
+        db_started = db_threads_addressed.get(started_key)
+        if db_started is None:
+            continue
+        done_key = f"{settle_done_prefix}{suffix}"
+        started_matches_db = _same_persisted_wait_marker(
+            threads_addressed.get(started_key),
+            db_started,
+        )
+        head_sha = suffix.split(":", 1)[0]
+        freeze_key = _non_check_reviewer_settle_freeze_key(
+            pr_number=pr_number,
+            head_sha=head_sha,
+        )
+        db_has_freeze = db_threads_addressed.get(freeze_key) == "armed"
+        if not db_has_freeze and threads_addressed.get(done_key) != "elapsed":
+            continue
+        preserve_freeze = db_has_freeze and (
+            done_key not in newly_marked_thread_ids or not started_matches_db
+        )
+        if preserve_freeze:
+            threads_addressed[freeze_key] = "armed"
         _preserve_concurrent_wait_marker(
             threads_addressed,
             db_threads_addressed=db_threads_addressed,
             started_key=started_key,
-            done_key=f"{settle_done_prefix}{suffix}",
+            done_key=done_key,
             newly_marked_thread_ids=newly_marked_thread_ids,
         )
     return threads_addressed
