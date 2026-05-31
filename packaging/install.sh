@@ -13,8 +13,9 @@
 # stderr (it does not depend on the Python first-run error catalog):
 #
 #   UNSUPPORTED_PLATFORM MISSING_DEPENDENCY MANIFEST_UNAVAILABLE MANIFEST_INVALID
-#   CHANNEL_MISMATCH VERSION_MISMATCH PACKAGE_MISMATCH DOWNLOAD_FAILED CHECKSUM_MISMATCH
-#   INSTALL_METHOD_FAILED AWF_NOT_REACHABLE UNINSTALL_REFUSED_UNMANAGED BAD_USAGE
+#   CHANNEL_MISMATCH VERSION_MISMATCH PACKAGE_MISMATCH INSECURE_URL DOWNLOAD_FAILED
+#   CHECKSUM_MISMATCH INSTALL_METHOD_FAILED AWF_NOT_REACHABLE UNINSTALL_REFUSED_UNMANAGED
+#   BAD_USAGE
 #
 # Testability seams (keep fixture tests hermetic, no real release/network):
 #   AWF_INSTALL_MANIFEST   path or file:// URL to a local manifest JSON.
@@ -38,8 +39,6 @@ DO_UNINSTALL=0
 WORK_DIR=""
 
 # Resolved during a run.
-PLATFORM_OS=""
-PLATFORM_ARCH=""
 MANIFEST_SOURCE=""
 MANIFEST_FILE=""
 MANIFEST_CHANNEL=""
@@ -254,9 +253,6 @@ detect_platform() {
         x86_64 | amd64 | arm64 | aarch64) ;;
         *) fail UNSUPPORTED_PLATFORM "unsupported architecture: $arch" ;;
     esac
-
-    PLATFORM_OS="$os"
-    PLATFORM_ARCH="$arch"
 }
 
 # --------------------------------------------------------------------------
@@ -285,7 +281,13 @@ need_download_tool() {
 }
 
 # fetch <src> <dest> -> copy/download src to dest. Returns non-zero on failure.
-# Supports file:// URLs, local paths, and http(s) URLs.
+# Supports file:// URLs, local paths, and https:// URLs. Plain http:// is
+# refused (INSECURE_URL): the sha256 gate proves the wheel matches the manifest
+# but cannot detect a *substituted* manifest, so a manifest fetched over plain
+# HTTP — or one whose artifact url is http:// — lets a network-adjacent attacker
+# swap both the manifest and a matching-sha256 malicious wheel before the gate
+# runs. file:// stays allowed as the hermetic test seam; https:// and local
+# paths are the production sources.
 fetch() {
     local src="$1"
     local dest="$2"
@@ -295,7 +297,10 @@ fetch() {
             [ -f "$path" ] || return 1
             cp "$path" "$dest" || return 1
             ;;
-        http://* | https://*)
+        http://*)
+            fail INSECURE_URL "refusing to fetch over plain HTTP ($src): the sha256 gate cannot detect a substituted manifest, so an http:// source breaks the install trust chain; use https:// (or a file:// path for local testing)"
+            ;;
+        https://*)
             need_download_tool
             if command -v curl >/dev/null 2>&1; then
                 curl -fsSL "$src" -o "$dest" || return 1
