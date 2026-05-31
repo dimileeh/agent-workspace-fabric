@@ -514,6 +514,76 @@ verify_package() {
     fi
 }
 
+# Normalize a distribution name with PEP 503 / wheel-filename (PEP 427) rules:
+# lowercase, then collapse any run of '-', '_' and '.' to a single '-'. This
+# mirrors scripts/generate_install_manifest.py's _normalize_distribution_package
+# (re.sub(r"[-_.]+", "-", name).lower()) so the installer compares the wheel's
+# escaped distribution component against PACKAGE on the same footing the generator
+# used to validate it. A jq-free, BRE sed expression keeps this portable to the
+# bash 3.2 / BSD userland the installer targets (no `sed -E`).
+normalize_dist_name() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[-_.][-_.]*/-/g'
+}
+
+# The manifest's *selected wheel artifact* must itself be a wheel for ${PACKAGE} at
+# the version the manifest declares. parse_manifest only proves the wheel name is a
+# safe plain basename, and verify_package/verify_version only check the manifest's
+# top-level fields, so a misattached or hand-crafted manifest could pair a top-level
+# package=${PACKAGE} / version=X with a wheel artifact for a *different* distribution
+# or version (e.g. other_tool-0.1.0-py3-none-any.whl, or
+# agent_workspace_fabric-9.9.9-...). The checksum gate only proves the downloaded
+# bytes match that artifact's own sha256 -- not that the artifact is a wheel for
+# ${PACKAGE} -- so without this check the installer would download that wheel and
+# hand it to uv/pipx, mutating the environment with the wrong package before
+# reachability fails (or even reporting success if it exposes an `awf` command).
+# Cross-check the wheel filename's own distribution/version before downloading.
+# Wheel filenames are {distribution}-{version}-{python}-{abi}-{platform}.whl with
+# the distribution and version escaped (PEP 427/503), so normalize both sides the
+# way the generator's _validate_distribution_metadata does before comparing. A
+# manifest that omits the top-level version (legacy/hand-authored) is not enforced
+# for the version arm, mirroring verify_version's tolerance of a missing field.
+verify_artifact_name() {
+    case "$ARTIFACT_NAME" in
+        *.whl) ;;
+        *)
+            fail MANIFEST_INVALID "manifest wheel artifact name is not a .whl file ('${ARTIFACT_NAME}'): $MANIFEST_SOURCE"
+            ;;
+    esac
+
+    local stem dist after_dist wheel_version
+    stem="${ARTIFACT_NAME%.whl}"
+    dist="${stem%%-*}"
+    after_dist="${stem#*-}"
+    if [ "$after_dist" = "$stem" ]; then
+        # No '-' after the distribution component: not a {dist}-{version}-... wheel,
+        # so its version cannot be identified. Refuse rather than guess.
+        fail MANIFEST_INVALID "manifest wheel artifact name is not a {dist}-{version} wheel ('${ARTIFACT_NAME}'): $MANIFEST_SOURCE"
+    fi
+    wheel_version="${after_dist%%-*}"
+
+    local norm_dist norm_package
+    norm_dist="$(normalize_dist_name "$dist")"
+    norm_package="$(normalize_dist_name "$PACKAGE")"
+    if [ "$norm_dist" != "$norm_package" ]; then
+        fail PACKAGE_MISMATCH "manifest wheel artifact ${ARTIFACT_NAME} is for distribution '${dist}', not ${PACKAGE} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest whose wheel is for a different package"
+    fi
+
+    # extract_manifest_version pipes sed into `head -n 1`; as in verify_version, head
+    # can close the pipe before sed finishes and leave sed taking SIGPIPE, so under
+    # pipefail the pipeline may exit non-zero. `|| true` degrades that to an empty
+    # value, which the guard below treats as "field absent" rather than letting
+    # set -e abort the install with no reason token.
+    local manifest_version
+    manifest_version="$(extract_manifest_version || true)"
+    [ -n "$manifest_version" ] || return 0
+    local lc_wheel_version lc_manifest_version
+    lc_wheel_version="$(printf '%s' "$wheel_version" | tr '[:upper:]' '[:lower:]')"
+    lc_manifest_version="$(printf '%s' "$manifest_version" | tr '[:upper:]' '[:lower:]')"
+    if [ "$lc_wheel_version" != "$lc_manifest_version" ]; then
+        fail VERSION_MISMATCH "manifest wheel artifact ${ARTIFACT_NAME} is for version ${wheel_version} but the manifest declares version ${manifest_version} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest whose wheel is for a different release"
+    fi
+}
+
 download_artifact() {
     ARTIFACT_FILE="${WORK_DIR}/${ARTIFACT_NAME}"
     fetch "$ARTIFACT_URL" "$ARTIFACT_FILE" || fail DOWNLOAD_FAILED "could not download artifact: $ARTIFACT_URL"
@@ -921,6 +991,7 @@ run_install() {
     verify_channel
     verify_version
     verify_package
+    verify_artifact_name
     say "Resolved manifest: ${MANIFEST_SOURCE}"
 
     plan "download artifact: ${ARTIFACT_URL}"
