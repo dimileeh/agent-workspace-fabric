@@ -343,6 +343,20 @@ class PlainFileCredentialBackend:
 
     def create_ref(self, request: CredentialRequest) -> CredentialRef:
         """Write the secret to a ``0600`` file and return a ``plain-file://`` ref."""
+        # Check the platform restriction before the flag/consent gate: it is the
+        # more fundamental constraint, so a caller on macOS or desktop Linux who
+        # has also not set the flag should learn the host is unsupported rather
+        # than be sent down the consent path — adding the flag and consent on
+        # that host would still be rejected here.
+        if not self._capabilities.supports_plain_file:
+            raise CredentialError(
+                reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
+                message="Plain-file credential storage is limited to headless Linux hosts.",
+                details={
+                    "os_name": self._capabilities.os_name,
+                    "is_headless": self._capabilities.is_headless,
+                },
+            )
         if not (self._allow_plain_secrets and self._consent):
             raise CredentialError(
                 reason_code=CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED,
@@ -353,15 +367,6 @@ class PlainFileCredentialBackend:
                 details={
                     "allow_plain_secrets": self._allow_plain_secrets,
                     "consent": self._consent,
-                },
-            )
-        if not self._capabilities.supports_plain_file:
-            raise CredentialError(
-                reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
-                message="Plain-file credential storage is limited to headless Linux hosts.",
-                details={
-                    "os_name": self._capabilities.os_name,
-                    "is_headless": self._capabilities.is_headless,
                 },
             )
         provider = _require_safe_identifier(request.provider, field="provider")

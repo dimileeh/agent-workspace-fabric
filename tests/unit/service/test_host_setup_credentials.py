@@ -537,6 +537,36 @@ def test_plain_file_rejected_on_unsupported_hosts(
     assert _FAKE_TOKEN not in str(error.to_dict())
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("capabilities", [_MACOS, _WINDOWS, _DESKTOP_LINUX])
+def test_plain_file_unsupported_host_reports_platform_before_consent(
+    capabilities: HostCredentialCapabilities,
+    tmp_path: Path,
+) -> None:
+    """Verify an unsupported host reports BACKEND_UNAVAILABLE even with no consent.
+
+    The platform restriction is the more fundamental gate, so a caller on macOS
+    or desktop Linux who also has not set the flag/consent should learn the host
+    is unsupported rather than be sent down the consent path — adding the flag
+    and consent on that host would still be rejected.
+    """
+    secrets_dir = tmp_path / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=capabilities,
+        allow_plain_secrets=False,
+        consent=False,
+        secrets_dir=secrets_dir,
+    )
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert not secrets_dir.exists()
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
 # --------------------------------------------------------------------------- #
 # 8. Non-interactive enforcement for missing input.
 # --------------------------------------------------------------------------- #
