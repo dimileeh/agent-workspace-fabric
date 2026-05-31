@@ -482,6 +482,8 @@ def register_workspace_tools(
             return _provider_readiness_blocked_result(exc)
         except WorkspaceRetryError as exc:
             return _workspace_retry_error_result(exc)
+        except WorkspaceCreateHostPortConflictError as exc:
+            return _workspace_error_result(exc)
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_workspace")
