@@ -1263,6 +1263,11 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_without_te
     assert "T_workflow_scope" not in state.threads_addressed_ids
     assert "__review_thread_body_hash__:T_workflow_scope" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_workflow_scope" not in state.threads_addressed_ids
+    comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
+    assert len(comment_calls) == 1
+    body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
+    assert "GitHub rejected the workflow-file push" in body
+    assert "`workflow` scope for .github/workflows/publish.yml" in body
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)

@@ -152,6 +152,7 @@ async def test_address_comments_workflow_scope_push_failure_requeues_monitor(
         reason_code="GITHUB_WORKFLOW_SCOPE_REQUIRED",
     )
     terminations: list[tuple[str, str, object | None]] = []
+    notifications: list[str | None] = []
 
     async def _workflow_scope_rejection(**kwargs: object) -> _GitPushResult:
         assert kwargs["initial_threads"] == (thread,)
@@ -165,8 +166,15 @@ async def test_address_comments_workflow_scope_push_failure_requeues_monitor(
     ) -> None:
         terminations.append((terminated_workspace_id, message, reason_code))
 
+    async def _record_notification(**kwargs: object) -> None:
+        assert kwargs["repo"] == RepoRef(owner="dimileeh", name="aira-web")
+        assert kwargs["pr_number"] == 42
+        assert kwargs["status"].head_sha == "abc1234567890def"
+        notifications.append(kwargs["blocker_reason"])
+
     monkeypatch.setattr(runner, "_run_fix_cycle", _workflow_scope_rejection)
     monkeypatch.setattr(runner, "_terminate_failed", _record_termination)
+    monkeypatch.setattr(runner, "_post_human_notification_once", _record_notification)
 
     terminal = await runner._execute(
         action=AddressComments(threads=(thread,), review_comments=()),
@@ -185,6 +193,7 @@ async def test_address_comments_workflow_scope_push_failure_requeues_monitor(
 
     assert terminal is False
     assert terminations == []
+    assert notifications == [push_result.error_message]
     assert state.iter_count == 1
 
 
