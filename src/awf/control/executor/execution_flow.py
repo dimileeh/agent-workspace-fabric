@@ -59,6 +59,7 @@ from awf.control.executor.metadata import _str_or_none
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
+    _is_nothing_to_commit,
     _log,
     _PostAgentCommitStepError,
 )
@@ -577,6 +578,7 @@ async def execute(
     base_commit: str = ws.base_commit
 
     async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+        """Run a git command inside the workspace worktree."""
         return await self._runner.run(
             [
                 "git",
@@ -811,6 +813,7 @@ async def execute(
                 commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
 
                 async def _run_commit() -> CommandResult:
+                    """Execute the post-agent ``git commit`` with AWF's identity."""
                     return cast(
                         CommandResult,
                         await self._runner.run(
@@ -836,32 +839,41 @@ async def execute(
                     reason="post_agent_git_commit",
                 )
                 if not commit_result.ok:
-                    classification = _classify_post_agent_commit_failure(commit_result)
-                    if classification.repair_strategy in {"deterministic", "agent"}:
-                        await self._run_post_agent_commit_repair(
+                    if _is_nothing_to_commit(commit_result):
+                        _log.info(
+                            "executor.post_agent_commit_nothing_to_commit",
                             workspace_id=workspace_id,
-                            worktree_path=worktree_path,
-                            base_commit=base_commit,
-                            commit_result=commit_result,
-                            classification=classification,
-                            staged_paths=staged_paths,
-                            run_commit=_run_commit,
-                            git_in_worktree=_git_in_worktree,
-                            adapter=adapter,
-                            compose_project=compose_project,
-                            compose_file=compose_file,
-                            model=default_model,
-                            allow_agent_repair=agent_run_failure_reason is None,
-                            ws=ws,
-                            command_evidence=agent_command_evidence,
+                            output=(commit_result.stderr or commit_result.stdout or "").strip()[
+                                :200
+                            ],
                         )
                     else:
-                        raise _PostAgentCommitStepError(
-                            stage="git commit",
-                            result=commit_result,
-                            classification=classification,
-                            format_repair_attempted=False,
-                        )
+                        classification = _classify_post_agent_commit_failure(commit_result)
+                        if classification.repair_strategy in {"deterministic", "agent"}:
+                            await self._run_post_agent_commit_repair(
+                                workspace_id=workspace_id,
+                                worktree_path=worktree_path,
+                                base_commit=base_commit,
+                                commit_result=commit_result,
+                                classification=classification,
+                                staged_paths=staged_paths,
+                                run_commit=_run_commit,
+                                git_in_worktree=_git_in_worktree,
+                                adapter=adapter,
+                                compose_project=compose_project,
+                                compose_file=compose_file,
+                                model=default_model,
+                                allow_agent_repair=agent_run_failure_reason is None,
+                                ws=ws,
+                                command_evidence=agent_command_evidence,
+                            )
+                        else:
+                            raise _PostAgentCommitStepError(
+                                stage="git commit",
+                                result=commit_result,
+                                classification=classification,
+                                format_repair_attempted=False,
+                            )
             # Regardless of whether we just committed, verify HEAD has advanced
             # past the base commit. If not, the agent produced no change.
             rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
