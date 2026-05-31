@@ -578,6 +578,7 @@ async def execute(
     base_commit: str = ws.base_commit
 
     async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
+        """Run a git command inside the workspace worktree."""
         return await self._runner.run(
             [
                 "git",
@@ -811,6 +812,7 @@ async def execute(
                 commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
 
                 async def _run_commit() -> CommandResult:
+                    """Execute the post-agent ``git commit`` with AWF's identity."""
                     return cast(
                         CommandResult,
                         await self._runner.run(
