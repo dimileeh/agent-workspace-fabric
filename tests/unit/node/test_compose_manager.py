@@ -1155,31 +1155,3 @@ class TestCompanionImageCommands:
                 build_context="/host/backend",
                 dockerfile="Dockerfile",
             )
-
-    @pytest.mark.unit
-    async def test_prune_companion_images_filters_by_label_and_age(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """prune_companion_images filters by managed label and retention age."""
-        calls: list[tuple[object, ...]] = []
-
-        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
-            calls.append(args)
-            return _FakeProcess(returncode=0, stdout=b"Total reclaimed space: 1.2GB\n")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        output = await manager.prune_companion_images(retention_hours=168)
-
-        assert "reclaimed" in output
-        assert calls[0] == (
-            "docker",
-            "image",
-            "prune",
-            "--all",
-            "--force",
-            "--filter",
-            "label=awf.managed-companion=true",
-            "--filter",
-            "until=168h",
-        )

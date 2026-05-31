@@ -506,25 +506,6 @@ class ComposeManager:
             capture_timeout_seconds=capture_timeout_seconds,
         )
 
-    async def prune_companion_images(self, *, retention_hours: int) -> str:
-        """Prune unused managed companion images older than the retention window.
-
-        ``docker image prune`` never removes an image backing a live container,
-        so images for active workspaces are protected automatically; only
-        unreferenced companion builds past the retention window are removed.
-        """
-        args = [
-            "image",
-            "prune",
-            "--all",
-            "--force",
-            "--filter",
-            f"label={COMPANION_IMAGE_MANAGED_LABEL}=true",
-            "--filter",
-            f"until={retention_hours}h",
-        ]
-        return await self._docker_capture(args, operation="image prune")
-
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _paths_for(self, spec: WorkspaceComposeSpec) -> ComposeProjectPaths:
