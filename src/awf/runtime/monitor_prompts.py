@@ -18,6 +18,7 @@ AWF and the coding CLI for post-agent work, so keep them:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -41,7 +42,9 @@ _SAFETY_POLICY = (
 
 
 def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
-    declared = [path.strip() for path in owned_paths if path and path.strip()]
+    declared = [
+        _render_owned_path_for_prompt(path.strip()) for path in owned_paths if path and path.strip()
+    ]
     if declared:
         owned_block = "\n".join(f"  - {path}" for path in declared)
         return (
@@ -66,6 +69,12 @@ def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
         "branch unchanged and print `AWF-VERDICT: NEEDS_HUMAN: protected file "
         "approval required: <path/reason>`.\n"
     )
+
+
+def _render_owned_path_for_prompt(path: str) -> str:
+    """Render operator-provided path data without allowing prompt line breaks."""
+
+    return json.dumps(path, ensure_ascii=True)
 
 
 def address_thread_prompt(
