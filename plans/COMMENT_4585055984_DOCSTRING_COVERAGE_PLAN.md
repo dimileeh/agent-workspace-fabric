@@ -46,6 +46,11 @@ Later PR review-repair commits added one more workflow-scope regression test
 after the first docstring pass. Re-run the same diff-scoped docstring audit and
 add the missing behavior-neutral test docstring without changing assertions.
 
+A later workflow-scope retry commit introduced one diff-added pydocstyle D202
+finding in `fix_cycle.py` by leaving a blank line immediately after a helper
+docstring. Remove only that formatter/docstring-style blank line and re-run the
+same focused audit and targeted helper tests.
+
 ## Verification Commands
 
 - Diff-scoped `ruff --select D` audit over changed Python files intersected

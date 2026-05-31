@@ -530,7 +530,6 @@ def _requeue_workflow_scope_publish_dependent_items(
     ``fix_committed`` state so unresolved review items route back through
     ``AddressComments`` after the operator grants a token with workflow scope.
     """
-
     for item_id in item_ids:
         if state.threads_addressed_ids.get(item_id) != "fix_committed":
             continue
