@@ -396,6 +396,8 @@ class Provisioner:
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
             )
+            if await self._launch_lost_to_terminal_cleanup(workspace_id):
+                return
             try:
                 async with self._session_factory() as compose_fail_session:
                     compose_fail_repo = WorkspaceRepository(compose_fail_session)
