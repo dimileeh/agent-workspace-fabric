@@ -790,7 +790,7 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Ensure a dirty worktree fails validation without creating a new run."""
+    """Ensure a dirty worktree finalizes its started validation run."""
     profile = WorkspaceProfile.model_validate({"name": "validation-dirty-worktree"})
     workspace = SimpleNamespace(
         resolved_profile={"name": "validation-dirty-worktree"},
@@ -872,11 +872,22 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
     assert result.stop
     assert result.successful_validation_run_id is None
     assert result.has_known_non_plan_output is False
-    executor._start_validation_run.assert_not_awaited()
-    executor._finish_validation_run.assert_not_awaited()
+    executor._start_validation_run.assert_awaited_once_with(
+        workspace_id="ws_dirty_validation",
+        profile=profile,
+        base_commit="b" * 40,
+        workspace_head_sha="c" * 40,
+        target_branch="awf/ws_dirty_validation",
+        target_head_sha=None,
+        tier=1,
+    )
+    executor._finish_validation_run.assert_awaited_once()
+    finish_run_kwargs = executor._finish_validation_run.await_args.kwargs
+    assert finish_run_kwargs["status"] == "failed"
+    assert finish_run_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     executor._finish_pending_validate_operations.assert_awaited_once()
     finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
-    assert finish_kwargs["validation_run_id"] is None
+    assert finish_kwargs["validation_run_id"] == "vr-dirty-worktree"
     assert finish_kwargs["status"] == OperationStatus.failed
     assert finish_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     executor._mark_failed.assert_awaited_once()
