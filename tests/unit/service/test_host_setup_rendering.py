@@ -183,7 +183,7 @@ def test_first_run_pretty_renders_issue_with_missing_optional_fields(
 def test_first_run_report_payload_blocked_when_any_blocking_issue() -> None:
     """Verify a report with a blocked issue derives blocked status + first reason."""
     blocked = first_run_issue_from_reason_code("SETUP_READINESS_FAILED", severity="blocked")
-    warning = first_run_issue_from_reason_code("SETUP_READINESS_FAILED", severity="warning")
+    warning = first_run_issue_from_reason_code("PROVIDER_SETUP_AUTH_INVALID", severity="warning")
     payload = first_run_report_payload(
         command="awf setup",
         summary="AWF setup found blockers.",
@@ -192,6 +192,9 @@ def test_first_run_report_payload_blocked_when_any_blocking_issue() -> None:
     )
     assert payload.status == "blocked"
     assert payload.reason_code == "SETUP_READINESS_FAILED"
+    # Distinct reason codes prove precedence: the blocked issue's code wins even
+    # though the warning issue appears first in the tuple.
+    assert payload.reason_code != warning.reason_code
     assert payload.issues == (warning, blocked)
 
 
