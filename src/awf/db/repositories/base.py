@@ -653,29 +653,21 @@ async def has_terminal_runtime_released_event(
     workspace_id: str,
 ) -> bool:
     """Return True if a ``terminal_runtime_released`` event exists for *workspace_id* and has not been revoked."""
-    released_stmt = (
-        select(WorkspaceEvent.occurred_at)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-            WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-        )
-        .limit(1)
+    released_stmt = select(func.max(WorkspaceEvent.occurred_at)).where(
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     )
-    revoked_stmt = (
-        select(WorkspaceEvent.occurred_at)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-            WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-        )
-        .limit(1)
+    revoked_stmt = select(func.max(WorkspaceEvent.occurred_at)).where(
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     )
     released_at = (await session.execute(released_stmt)).scalar_one_or_none()
     if released_at is None:
         return False
     revoked_at = (await session.execute(revoked_stmt)).scalar_one_or_none()
-    return not (revoked_at is not None and revoked_at >= released_at)
+    return revoked_at is None or released_at > revoked_at
 
 
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
