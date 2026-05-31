@@ -27,7 +27,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _needs_human_reason_state_key,
     _notify_human_reason,
 )
-from awf.runtime.pr_monitor_runner.remote_ops import _workflow_scope_push_block
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _workflow_scope_push_block
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -116,6 +116,82 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     assert result.workflow_scope_required is True
     assert result.terminal_monitor_failure is False
     assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_address_comments_workflow_scope_push_failure_terminates_monitor(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify comment repair surfaces workflow-scope push failures to operators."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_workflow",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow still needs the reviewed fix",
+        author="cursor[bot]",
+    )
+    state = MonitorState()
+    push_result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+        reason_code="GITHUB_WORKFLOW_SCOPE_REQUIRED",
+    )
+    terminations: list[tuple[str, str, object | None]] = []
+
+    async def _workflow_scope_rejection(**kwargs: object) -> _GitPushResult:
+        assert kwargs["initial_threads"] == (thread,)
+        return push_result
+
+    async def _record_termination(
+        terminated_workspace_id: str,
+        *,
+        message: str,
+        reason_code: object | None = None,
+    ) -> None:
+        terminations.append((terminated_workspace_id, message, reason_code))
+
+    monkeypatch.setattr(runner, "_run_fix_cycle", _workflow_scope_rejection)
+    monkeypatch.setattr(runner, "_terminate_failed", _record_termination)
+
+    terminal = await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(head_sha="abc1234567890def", inline=(thread,)),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert terminations == [
+        (
+            workspace_id,
+            push_result.error_message,
+            "GITHUB_WORKFLOW_SCOPE_REQUIRED",
+        )
+    ]
+    assert state.iter_count == 0
 
 
 @pytest.mark.unit
