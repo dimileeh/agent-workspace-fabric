@@ -1118,6 +1118,32 @@ async def _handoff_sync_release_pr_monitor(
         return
 
     try:
+        commits_ahead = await count_commits_ahead(
+            runner=self._runner,
+            cwd=str(worktree_path),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+    except ReleasePrSyncError as exc:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
+            details=exc.detail,
+        )
+        return
+
+    if commits_ahead <= 0:
+        await self._complete_release_pr_sync_no_op(
+            workspace_id=workspace_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+        return
+
+    try:
         metadata, created = await find_or_create_release_pr(
             runner=self._runner,
             gh=GitHubClient(self._runner),

@@ -770,6 +770,59 @@ class TestSyncReleasePrHandoff:
             assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
 
     @pytest.mark.unit
+    async def test_rechecks_commits_ahead_after_setup_and_completes_no_op_when_source_catches_up(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _RecordingValidation()
+        fake.queue_result(returncode=0)  # initial git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # initial rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="0\n")  # post-setup rev-list --count
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=_release_sync_policy(),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not run after source catches up")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert [c.args[:3] for c in fake.calls] == [
+            ["git", "fetch", "origin"],
+            ["git", "rev-list", "--count"],
+            ["git", "fetch", "origin"],
+            ["git", "rev-list", "--count"],
+        ]
+        assert all(c.args[:3] != ["gh", "pr", "list"] for c in fake.calls)
+        assert all(c.args[:3] != ["gh", "pr", "create"] for c in fake.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url is None
+            no_change_events = [
+                e for e in ws.events if e.event_type == "workspace.release_pr_sync_no_changes"
+            ]
+            assert len(no_change_events) == 1
+            assert no_change_events[0].reason_code == "NO_CHANGES_TO_SYNC"
+
+    @pytest.mark.unit
     async def test_ahead_creates_release_pr_and_enters_monitoring(
         self,
         fake: FakeCommandRunner,
@@ -788,6 +841,8 @@ class TestSyncReleasePrHandoff:
 
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="3\n")  # post-setup rev-list --count
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/321\n")  # gh pr create
         fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=321))  # gh pr view
@@ -856,6 +911,8 @@ class TestSyncReleasePrHandoff:
 
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # post-setup rev-list --count
         fake.queue_result(
             returncode=0, stdout=_release_open_pr_list_payload(number=88)
         )  # gh pr list
@@ -959,6 +1016,8 @@ class TestSyncReleasePrHandoff:
     ) -> None:
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
         fake.queue_result(returncode=1, stderr="gh: not authorized")  # gh pr list fails
 
         ws_id = await _seed_ready(
@@ -991,6 +1050,8 @@ class TestSyncReleasePrHandoff:
     ) -> None:
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> no existing PR
         fake.queue_result(returncode=1, stderr="gh: API rate limit exceeded")  # gh pr create fails
 
@@ -1115,6 +1176,8 @@ class TestSyncReleasePrHandoff:
         monitor_runs: list[str] = []
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # post-setup rev-list
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/321\n")  # create
         fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=321))  # view
