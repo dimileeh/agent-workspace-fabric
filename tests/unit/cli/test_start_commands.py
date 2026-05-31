@@ -780,6 +780,15 @@ def test_normalize_local_url_handles_local_host_without_port() -> None:
 
 
 @pytest.mark.unit
+def test_normalize_local_url_rewrites_ipv6_loopback() -> None:
+    """An IPv6 loopback host is normalized to the 127.0.0.1 display host."""
+    assert (
+        start_commands._normalize_local_url("http://[::1]:8000")  # noqa: SLF001
+        == "http://127.0.0.1:8000"
+    )
+
+
+@pytest.mark.unit
 def test_docker_summary_unknown_for_non_mapping() -> None:
     """A non-mapping docker check degrades to an unknown-status summary."""
     assert start_commands._docker_summary(None) == {"status": "unknown"}  # noqa: SLF001

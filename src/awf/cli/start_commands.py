@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_START_TIMEOUT_SECONDS = 180.0
 _LOCAL_DISPLAY_HOST = "127.0.0.1"
-_LOCAL_HOST_ALIASES = frozenset({"localhost", "0.0.0.0", "127.0.0.1"})
+_LOCAL_HOST_ALIASES = frozenset({"localhost", "0.0.0.0", "127.0.0.1", "::1"})
 
 # Known Docker port-bind failure signatures used to classify a stage failure as a
 # port conflict while preserving the original bootstrap diagnostic.
