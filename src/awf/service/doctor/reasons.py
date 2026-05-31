@@ -753,6 +753,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "https://docs.x.ai/build/enterprise",
     ),
+    "GROK_RUNTIME_CLI_NOT_FOUND": _ReasonText(
+        "The Grok Build CLI binary ('grok') was not found in the agent runtime container.",
+        "Rebuild the agent-runtime Docker image or ensure 'grok' is installed on the PATH.",
+        "The grok executable is missing or not executable.",
+        "awf service doctor",
+        "https://docs.x.ai/build/cli",
+    ),
     "PORT_OPEN": _ReasonText(
         "Required local port is accepting connections.",
         "No action required.",

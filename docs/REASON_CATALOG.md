@@ -247,6 +247,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.x.ai/build/enterprise](https://docs.x.ai/build/enterprise)
 
+### GROK_RUNTIME_CLI_NOT_FOUND
+**Problem:** The Grok Build CLI binary ('grok') was not found in the agent runtime container.
+**Likely Cause:** The grok executable is missing or not executable.
+**Operator Fix:** Rebuild the agent-runtime Docker image or ensure 'grok' is installed on the PATH.
+**Related Command:** `awf service doctor`
+**Docs Link:** [https://docs.x.ai/build/cli](https://docs.x.ai/build/cli)
+
 ### HOST_SETUP_CONFIG_CORRUPT
 **Problem:** AWF could not read the host setup config.
 **Likely Cause:** The config file is malformed, has duplicate keys, uses unsupported schema versions, or cannot be interpreted safely.
