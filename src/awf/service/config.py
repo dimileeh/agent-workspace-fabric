@@ -74,6 +74,8 @@ class ServiceSettings:
     database_url: str
     docker_host: str
     agent_runtime_image: str
+    companion_image_cache_enabled: bool = True
+    companion_image_retention_hours: int = 168
     work_dir: str
     api_token: str | None
     github_token: str | None
@@ -205,6 +207,8 @@ def resolve_service_settings(
         database_url=database_url,
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,
+        companion_image_cache_enabled=settings.companion_image_cache_enabled,
+        companion_image_retention_hours=settings.companion_image_retention_hours,
         work_dir=work_dir,
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
