@@ -903,7 +903,30 @@ def _mkdir_secure(directory: Path) -> None:
             break
         probe = parent
     for path in reversed(missing):
-        path.mkdir(mode=0o700, exist_ok=True)
+        # ``exist_ok`` is intentionally omitted so the create is *atomic*: every
+        # entry in ``missing`` was confirmed absent (and the leaf non-symlink) by
+        # the walk above, so a bare ``mkdir`` either creates a fresh real directory
+        # or fails. ``exist_ok=True`` would instead mask a TOCTOU race — if an
+        # attacker plants a ``component -> /attacker`` symlink in the window between
+        # the ``lstat`` check above and this create, ``mkdir(exist_ok=True)``
+        # swallows the ``FileExistsError`` (its follow-up ``is_dir()`` follows the
+        # link to a real directory) and silently accepts the link, so the hardening
+        # chmod and every subsequent secret write follow it into the attacker
+        # target — defeating the "symlinks are refused, never followed" guarantee.
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            # Something raced into this component between the symlink walk and the
+            # create. Re-``lstat`` (``is_symlink``, non-following) and refuse a
+            # symlink (the attack above) or any non-directory, so neither the
+            # hardening chmod nor a later secret write follows it. A real directory
+            # built concurrently by another trusted run is tolerated (benign
+            # ``mkdir -p`` idempotency). ``is_symlink`` short-circuits before the
+            # link-following ``is_dir`` so the check itself never traverses a link.
+            if path.is_symlink() or not path.is_dir():
+                raise NotADirectoryError(
+                    errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path)
+                ) from None
         _chmod_best_effort(path, 0o700)
     # A ``directory`` that already existed as a regular file (or a symlink to
     # one) never enters the creation loop above — ``probe.exists()`` is true on

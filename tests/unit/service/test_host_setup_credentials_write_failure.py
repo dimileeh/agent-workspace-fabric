@@ -178,6 +178,122 @@ def test_write_secret_file_refuses_preexisting_dir_under_symlinked_ancestor(
 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+def test_write_secret_file_rejects_symlink_racing_into_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlink planted *between* the lstat walk and the create is refused.
+
+    Regression for PRRT_kwDOSJAM6s6F8Civ: the symlink walk verifies each missing
+    component is absent and not a link, but the subsequent create is a separate
+    syscall. With ``mkdir(..., exist_ok=True)`` an attacker who plants a
+    ``component -> /attacker`` symlink in that TOCTOU window wins silently —
+    ``mkdir`` raises ``FileExistsError`` and ``exist_ok`` swallows it because the
+    follow-up ``is_dir()`` follows the link to a real directory, so the hardening
+    chmod and every secret write then land in the attacker target. Dropping
+    ``exist_ok`` makes the create atomic; the ``FileExistsError`` is re-``lstat``-ed
+    and the raced-in symlink refused. The patched ``mkdir`` below stands in for
+    that adversarial scheduler by planting the link the instant before the create.
+    """
+    attacker_dir = tmp_path / "attacker"
+    attacker_dir.mkdir()
+    attacker_dir.chmod(0o755)
+    anchor = tmp_path / "home"
+    anchor.mkdir()
+    secrets_dir = anchor / "secrets"  # missing leaf; ``anchor`` is the real anchor
+    target = secrets_dir / "github.secret"
+
+    real_mkdir = Path.mkdir
+
+    def racing_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        # Win the TOCTOU race: a symlink to the attacker dir appears at the secrets
+        # component the instant before our create lands.
+        if self == secrets_dir and not self.exists() and not self.is_symlink():
+            self.symlink_to(attacker_dir)
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The secret never followed the raced-in link into the attacker target...
+    assert list(attacker_dir.iterdir()) == []
+    # ...and the link target was not hardened to 0o700 through the symlink.
+    assert stat.S_IMODE(attacker_dir.stat().st_mode) == 0o755
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="chmod hardening only runs on POSIX")
+def test_write_secret_file_rejects_regular_file_racing_into_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-directory racing into a missing component is refused, not chmod'd.
+
+    Companion to the symlink-race guard: the re-``lstat`` after a concurrent
+    ``FileExistsError`` must also refuse a plain file that appears in the window,
+    so the hardening chmod never re-permissions an unrelated raced-in file.
+    """
+    anchor = tmp_path / "home"
+    anchor.mkdir()
+    secrets_dir = anchor / "secrets"
+    target = secrets_dir / "github.secret"
+
+    real_mkdir = Path.mkdir
+
+    def racing_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        if self == secrets_dir and not self.exists():
+            self.write_text("raced-in unrelated file")
+            self.chmod(0o644)
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The raced-in file was neither re-permissioned to 0o700 nor written through.
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o644
+    assert secrets_dir.read_text() == "raced-in unrelated file"
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+def test_write_secret_file_tolerates_real_dir_racing_into_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real directory built concurrently is tolerated (mkdir -p idempotency).
+
+    Dropping ``exist_ok`` must not turn a benign concurrent create of the same
+    managed tree — by a parallel trusted host-setup run — into a hard failure: a
+    plain *directory* that races in is accepted and the secret is still written.
+    """
+    anchor = tmp_path / "home"
+    anchor.mkdir()
+    secrets_dir = anchor / "secrets"
+    target = secrets_dir / "github.secret"
+
+    real_mkdir = Path.mkdir
+
+    def racing_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        # A trusted concurrent run materialises the real directory first.
+        if self == secrets_dir and not self.exists():
+            real_mkdir(self, mode=0o700)
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    credentials._write_secret_file(target, "tok-value")
+
+    assert target.read_text() == "tok-value"
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 def test_plain_file_backend_refuses_symlinked_secrets_dir(tmp_path: Path) -> None:
     """``create_ref`` refuses a symlinked secrets dir end-to-end (no resolve-away).
 
