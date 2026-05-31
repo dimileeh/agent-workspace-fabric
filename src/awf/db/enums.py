@@ -181,6 +181,9 @@ class AgentRuntime(StrEnum):
     opencode = "opencode"
     """OpenCode CLI — ``opencode run`` with an AWF-managed provider config."""
 
+    grok = "grok"
+    """xAI Grok Build CLI — ``grok -p`` with headless auto-approval flags."""
+
 
 class EgressDecision(StrEnum):
     """Per-workspace egress enforcement outcome recorded in audit evidence."""

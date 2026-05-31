@@ -328,6 +328,36 @@ class TestCollectSmokeReportLiveMode:
         assert auth_phase["reason_code"] == "SMOKE_AUTH_PARTIAL"
         assert auth_phase["status"] == "warn"
 
+    async def test_no_usable_provider_action_lists_grok(self, tmp_path: Path) -> None:
+        def _no_usable_auth(settings, *, environ=None, strict_providers=None, **kwargs):
+            return {
+                "status": "fail",
+                "strict_providers": [],
+                "providers": {
+                    "grok": {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": "GROK_AUTH_MISSING",
+                        "message": "Grok Build missing.",
+                    }
+                },
+                "security": {},
+            }
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_no_usable_auth,
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        auth_phase = next(p for p in report["phases"] if p["name"] == "auth_readiness")
+        assert auth_phase["reason_code"] == "SMOKE_AUTH_UNAVAILABLE"
+        assert "Grok" in auth_phase["action"]
+
     async def test_profile_phase_detects_template(self, tmp_path: Path) -> None:
         (tmp_path / "package.json").write_text('{"dependencies": {"next": "^14"}}')
 

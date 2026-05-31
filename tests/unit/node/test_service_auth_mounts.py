@@ -24,6 +24,8 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     (host_home / ".gemini" / "settings.json").write_text('{"selectedAuthType": "oauth"}\n')
     (host_home / ".config" / "opencode").mkdir(parents=True)
     (host_home / ".config" / "opencode" / "opencode.json").write_text('{"model": "ollama/x"}\n')
+    (host_home / ".grok").mkdir()
+    (host_home / ".grok" / "auth.json").write_text('{"token":"do-not-mount"}\n')
     (host_home / ".ollama").mkdir()
     (host_home / ".ollama" / "config.json").write_text('{"integrations": {}}\n')
     (host_home / ".ollama" / "id_ed25519").write_text("private-key\n")
@@ -75,6 +77,8 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     assert (ollama_home / ".ollama" / "config.json").read_text() == ('{"integrations": {}}\n')
     assert (ollama_home / ".ollama" / "id_ed25519").read_text() == "private-key\n"
     assert not (ollama_home / ".ollama" / "models").exists()
+    assert "/home/agent/.grok" not in by_target
+    assert not (work_dir / "auth" / "ws_auth" / "grok").exists()
 
 
 @pytest.mark.unit

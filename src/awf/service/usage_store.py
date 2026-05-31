@@ -40,6 +40,7 @@ REASON_NO_RECORDS = "ccusage_no_records"
 
 # AWF runtime -> ccusage per-source subcommand. Generic table; any runtime not
 # present here has no ccusage source and reports ``ccusage_source_unsupported``.
+# Grok Build is intentionally absent until ccusage supports an xAI/Grok source.
 _PROVIDER_CCUSAGE_SOURCE: dict[AgentRuntime, str] = {
     AgentRuntime.claude_code: "claude",
     AgentRuntime.codex: "codex",
