@@ -943,7 +943,14 @@ verify_awf() {
     fi
 
     if ! "$resolved" --help >/dev/null 2>&1; then
-        print_path_advice "$bindir"
+        # A binary was found at $resolved but will not run, so the failure is a
+        # broken/incomplete install, not a missing PATH entry. The default
+        # opening ("awf is installed in ${bindir}, which is not on your PATH")
+        # would mislead the user into editing PATH for a binary that is present
+        # but unusable — and is doubly wrong when $resolved came from a PATH
+        # lookup rather than ${bindir}. Pass an honest, context-aware opening
+        # that names the real cause, mirroring the not-found branch above.
+        print_path_advice "$bindir" "awf was found at $resolved but is not runnable; the install may be incomplete."
         fail AWF_NOT_REACHABLE "awf installed at $resolved but is not runnable"
     fi
 

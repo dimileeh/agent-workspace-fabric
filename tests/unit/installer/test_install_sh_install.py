@@ -97,6 +97,42 @@ def test_default_install_bin_off_path_is_reachable_with_advice(
 
 
 @pytest.mark.unit
+def test_found_binary_not_runnable_reports_broken_not_path(
+    harness: InstallerHarness,
+) -> None:
+    """A found-but-non-runnable awf reports a broken install, not a PATH gap.
+
+    When the installed binary exists in the bin dir but ``--help`` fails, the
+    failure is a broken/incomplete install — not a missing PATH entry. The
+    advice opening must say so rather than the misleading default
+    "awf is installed in <dir>, which is not on your PATH", which would send the
+    user to edit PATH for a binary that is present but unusable.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # install "succeeds"
+    default_bin = harness.home / ".local" / "bin"
+    default_bin.mkdir(parents=True)
+    harness.add_awf(directory=default_bin, rc=1)  # found in bin dir but non-runnable
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "AWF_NOT_REACHABLE" in result.stderr
+    # Assert the overridden opening specifically: "was found at" and "the install
+    # may be incomplete" are printed only by this branch's context-aware opening,
+    # never by the trailing fail() message ("awf installed at ... is not
+    # runnable") — so they prove the opening changed, not just the failure text.
+    assert "was found at" in result.stderr
+    assert "the install may be incomplete" in result.stderr
+    # The misleading default opening must not appear for a found-but-broken binary.
+    assert "is installed in" not in result.stderr
+    # The PATH export line is still emitted as a best-effort recovery hint.
+    assert "export PATH=" in result.stderr
+
+
+@pytest.mark.unit
 def test_default_install_verifies_installed_binary_not_path_shadow(
     harness: InstallerHarness,
 ) -> None:
