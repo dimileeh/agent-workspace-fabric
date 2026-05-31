@@ -1537,6 +1537,26 @@ def test_port_probe_result_is_publicly_exported() -> None:
     assert host_setup.PortProbeResult is system_checks.PortProbeResult
 
 
+@pytest.mark.unit
+def test_injected_callable_aliases_are_publicly_exported() -> None:
+    """Verify the injected-dependency callable aliases are on the public surface.
+
+    ``WhichFn``, ``FreeDiskFn``, ``CpuCountFn``, ``MemoryFn`` and ``PortProbeFn``
+    are the parameter types of the public ``check_*`` keyword-only dependencies
+    (e.g. ``check_disk(free_bytes: FreeDiskFn)``, ``check_gh(which: WhichFn)``,
+    ``check_ports(probe: PortProbeFn)``). Callers wiring their own probes for
+    testing must be able to annotate them from the public package, exactly like
+    ``CommandRunner``/``CommandResult``/``PortProbeResult`` already can be — not by
+    reaching into the submodule directly.
+    """
+    import awf.host_setup as host_setup
+
+    for name in ("WhichFn", "FreeDiskFn", "CpuCountFn", "MemoryFn", "PortProbeFn"):
+        assert name in system_checks.__all__, f"{name} missing from system_checks.__all__"
+        assert name in host_setup.__all__, f"{name} missing from awf.host_setup.__all__"
+        assert getattr(host_setup, name) is getattr(system_checks, name)
+
+
 def _patch_probes_capture_port(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, object],
