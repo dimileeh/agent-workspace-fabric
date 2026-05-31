@@ -28,7 +28,10 @@ For first-time users: the current runnable first path is
 `awf init <path>` to prepare your project repository. `awf setup` is a
 reserved future command surface.
 """
-_PROVIDER_HELP = "Repeatable provider strictness check: github, codex, claude_code, cursor, gemini, opencode, or docker."
+_PROVIDER_HELP = (
+    "Repeatable provider strictness check: github, codex, claude_code, cursor, "
+    "gemini, opencode, grok, or docker."
+)
 
 service_app = typer.Typer(help="Local service operations.")
 

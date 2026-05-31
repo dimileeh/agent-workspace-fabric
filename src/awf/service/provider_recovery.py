@@ -660,6 +660,7 @@ def provider_for_agent_model(agent: str, model: str | None) -> str | None:
         "gemini": "google",
         "claude_code": "anthropic",
         "opencode": "opencode",
+        "grok": "xai",
     }.get(agent)
 
 

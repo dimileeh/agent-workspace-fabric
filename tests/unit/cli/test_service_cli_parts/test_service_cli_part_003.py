@@ -435,6 +435,7 @@ def test_service_provider_help_lists_codex_and_docker() -> None:
     assert bootstrap_result.exit_code == 0, bootstrap_result.output
     for output in (status_result.output, bootstrap_result.output):
         assert "codex" in output
+        assert "grok" in output
         assert "docker" in output
 
 

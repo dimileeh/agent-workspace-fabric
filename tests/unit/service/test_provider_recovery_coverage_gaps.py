@@ -225,6 +225,8 @@ def test_provider_for_agent_model_falls_back_to_known_agent_provider() -> None:
     assert provider_for_agent_model("gemini", None) == "google"
     assert provider_for_agent_model("claude_code", None) == "anthropic"
     assert provider_for_agent_model("opencode", None) == "opencode"
+    assert provider_for_agent_model("grok", None) == "xai"
+    assert provider_for_agent_model("grok", "grok-build-0.1") == "xai"
     assert provider_for_agent_model("unknown-agent", None) is None
 
 

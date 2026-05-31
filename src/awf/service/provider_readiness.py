@@ -22,6 +22,7 @@ ProviderName = Literal[
     "cursor",
     "gemini",
     "opencode",
+    "grok",
     "docker",
 ]
 
@@ -32,6 +33,7 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
     "cursor",
     "gemini",
     "opencode",
+    "grok",
     "docker",
 )
 
@@ -62,6 +64,7 @@ _GEMINI_ENV_KEYS = (
     "GOOGLE_CLOUD_ACCESS_TOKEN",
 )
 _OPENCODE_ENV_KEYS = ("OLLAMA_API_KEY",)
+_XAI_ENV_KEYS = ("XAI_API_KEY",)
 _DOCKER_AUTH_ENV_KEYS = ("DOCKER_AUTH_CONFIG",)
 KNOWN_SECRET_ENV_KEYS = frozenset(
     (
@@ -71,6 +74,7 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         *_CURSOR_ENV_KEYS,
         *_GEMINI_ENV_KEYS,
         *_OPENCODE_ENV_KEYS,
+        *_XAI_ENV_KEYS,
         *_DOCKER_AUTH_ENV_KEYS,
         "GOOGLE_APPLICATION_CREDENTIALS_JSON",
     )
@@ -102,6 +106,7 @@ _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.cursor: "cursor",
     AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
+    AgentRuntime.grok: "grok",
 }
 _RedactionSegment = tuple[Literal["literal", "redaction"], str]
 _log = logging.getLogger(__name__)
@@ -410,6 +415,12 @@ def _check_provider_readiness(
             http_get=http_get,
             secrets=secrets,
         )
+    if provider == "grok":
+        return _check_grok(
+            environ=environ,
+            strict=strict,
+            secrets=secrets,
+        )
     if provider == "docker":
         return _check_docker_provider(
             settings,
@@ -448,7 +459,7 @@ def _selected_launch_probe(
         )
         if runtime_probe.get("status") != "ok":
             return runtime_probe
-        if provider in {"codex", "claude_code", "cursor", "gemini"}:
+        if provider in {"codex", "claude_code", "cursor", "gemini", "grok"}:
             return runtime_probe
     if provider == "opencode":
         return _probe_ollama_model(
@@ -467,6 +478,7 @@ def _agent_runtime_cli_executable(provider: ProviderName) -> str | None:
         "cursor": "cursor-agent",
         "gemini": "gemini",
         "opencode": "opencode",
+        "grok": "grok",
     }.get(provider)
 
 
@@ -477,6 +489,7 @@ def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
         "cursor": "CURSOR",
         "gemini": "GEMINI",
         "opencode": "OPENCODE",
+        "grok": "GROK",
     }.get(provider, "PROVIDER")
 
 
@@ -1399,6 +1412,48 @@ def _check_opencode(
     )
 
 
+def _check_grok(
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    signal = _first_present_env(environ, _XAI_ENV_KEYS)
+    if signal is not None:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="GROK_ENV_AUTH_PRESENT",
+            message="Grok Build auth is visible through service environment variables.",
+            signals=[signal],
+            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=_static_env_warnings(
+                provider_label="Grok Build",
+                signals=[signal],
+            ),
+        )
+
+    return _provider_result(
+        ok=False,
+        strict=strict,
+        reason="GROK_AUTH_MISSING",
+        message="No Grok Build auth signal was visible. Set XAI_API_KEY.",
+        secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
+    )
+
+
 def _check_docker_provider(
     settings: ServiceSettings,
     *,
@@ -1540,63 +1595,6 @@ def _credential_source(
     }
 
 
-def _security_warning(
-    reason: str,
-    message: str,
-    *,
-    severity: str = "warning",
-) -> dict[str, str]:
-    return {"reason": reason, "message": message, "severity": severity}
-
-
-def _redacted_warning(warning: Mapping[str, str], secrets: frozenset[str]) -> dict[str, str]:
-    return {
-        "reason": _redact(str(warning.get("reason", "UNKNOWN")), secrets),
-        "message": _redact(str(warning.get("message", "")), secrets),
-        "severity": _redact(str(warning.get("severity", "warning")), secrets),
-    }
-
-
-def _static_env_warnings(
-    *,
-    provider_label: str,
-    signals: Iterable[str],
-) -> list[dict[str, str]]:
-    return [
-        _security_warning(
-            "STATIC_TOKEN_FALLBACK",
-            f"{provider_label} auth is supplied by static service environment variable {signal}.",
-        )
-        for signal in signals
-    ]
-
-
-def _primary_credential_scope(sources: Iterable[Mapping[str, str]]) -> str:
-    scopes = [str(source.get("credential_scope", "")) for source in sources]
-    for preferred in (
-        "isolated_workspace",
-        "read_only_host_path",
-        "docker_host_control",
-        "static_env_token",
-    ):
-        if preferred in scopes:
-            return preferred
-    return "not_observed"
-
-
-def _primary_isolation(sources: Iterable[Mapping[str, str]]) -> str:
-    isolations = [str(source.get("isolation", "")) for source in sources]
-    for preferred in (
-        "per_workspace_copy",
-        "read_only_bind",
-        "host_daemon",
-        "service_env",
-    ):
-        if preferred in isolations:
-            return preferred
-    return "none"
-
-
 from awf.service.provider_readiness_helpers import (  # noqa: E402
     _codex_file_sources,
     _docker_registry_sources,
@@ -1608,13 +1606,18 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _ollama_tags_urls,
     _ollama_version_urls,
     _ordered_names,
+    _primary_credential_scope,
+    _primary_isolation,
     _probe_ollama,
     _probe_ollama_model,
     _redact,
     _redact_with_redaction_parts,
+    _redacted_warning,
     _run_subprocess,
     _secret_values,
     _security_summary,
+    _security_warning,
+    _static_env_warnings,
     _truncate,
 )
 

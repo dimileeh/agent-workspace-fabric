@@ -643,9 +643,33 @@ async def test_cursor_records_unsupported_source_until_ccusage_adds_cursor(
     snap = read_latest_usage_snapshot("ws_cursor_usage", work_dir=tmp_path)
     assert snap is not None
     assert snap.provider == "cursor"
+    assert snap.phase == "final"
     assert snap.ccusage_source is None
     assert snap.reason == "ccusage_source_unsupported"
     assert snap.status == "unavailable"
+
+
+@pytest.mark.unit
+async def test_grok_records_unsupported_ccusage_source_without_running_ccusage(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_grok_usage",
+        provider=AgentRuntime.grok,
+    )
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_grok_usage", work_dir=tmp_path)
+    assert runner.calls == []
+    assert snap is not None
+    assert snap.phase == "final"
+    assert snap.status == "unavailable"
+    assert snap.reason == "ccusage_source_unsupported"
+    assert snap.ccusage_source is None
 
 
 @pytest.mark.unit

@@ -42,7 +42,8 @@
           "claude_code",
           "gemini",
           "cursor",
-          "opencode"
+          "opencode",
+          "grok"
         ],
         "title": "AgentRuntime",
         "type": "string"

@@ -48,6 +48,9 @@ _AUTH_FAILURE_MARKERS = (
     "ollama api key",
     "ollama cloud authentication",
     "opencode auth",
+    "xai_api_key",
+    "xai api key",
+    "grok auth",
     "unauthorized",
 )
 
@@ -95,6 +98,7 @@ _CURSOR_MARKERS = (
 )
 _ANTHROPIC_MARKERS = ("claude", "anthropic", "sonnet", "opus", "haiku")
 _OLLAMA_MARKERS = ("ollama",)
+_XAI_MARKERS = ("grok", "xai", "grok-build")
 
 _RETRY_AFTER_RE = re.compile(
     r"\bretry(?:-|\s*)after\b\s*(?:[:=]|\bin\b)?\s*(?P<seconds>\d{1,6})",
@@ -208,6 +212,8 @@ def infer_provider(*, model: str | None, output: str | None = None) -> str | Non
         return "anthropic"
     if any(marker in text for marker in _OLLAMA_MARKERS):
         return "ollama"
+    if any(marker in text for marker in _XAI_MARKERS):
+        return "xai"
     if any(marker in text for marker in _OPENAI_MARKERS):
         return "openai"
     return None

@@ -92,10 +92,12 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "ARG GEMINI_VERSION=0.42.0" in dockerfile
     assert "ARG OPENCODE_VERSION=1.15.2" in dockerfile
     assert "Cursor CLI tracks the official installer" in dockerfile
+    assert "ARG GROK_VERSION=0.2.14" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
     assert "ARG GEMINI_VERSION=latest" not in dockerfile
     assert "ARG OPENCODE_VERSION=latest" not in dockerfile
+    assert "ARG GROK_VERSION=latest" not in dockerfile
     assert "@openai/codex@${CODEX_VERSION}" in dockerfile
     assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in dockerfile
     assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile
@@ -115,9 +117,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "cursor-agent --version || true" in dockerfile
     assert dockerfile.index(
         'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node'
-    ) < dockerfile.index(
-        "curl https://cursor.com/install -fsS"
-    )
+    ) < dockerfile.index("curl https://cursor.com/install -fsS")
     assert (
         "USER agent\n"
         "WORKDIR /workspace\n\n"
@@ -127,11 +127,18 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
         "    cursor-agent --version"
     ) in dockerfile
     assert "npm install -g cursor-agent" not in dockerfile
+    assert "@xai-official/grok@${GROK_VERSION}" in dockerfile
+    assert "https://x.ai/cli/install.sh" not in dockerfile
+    assert "GROK_BIN_DIR=/usr/local/bin" not in dockerfile
+    assert 'bash -s "${GROK_VERSION}"' not in dockerfile
+    assert "superagent-ai/grok-cli" not in dockerfile
+    assert "npm install -g grok" not in dockerfile
     assert "codex --version" in dockerfile
     assert "claude --version" in dockerfile
     assert "cursor-agent --version" in dockerfile
     assert "gemini --version" in dockerfile
     assert "opencode --version" in dockerfile
+    assert "grok --version" in dockerfile
 
 
 @pytest.mark.unit

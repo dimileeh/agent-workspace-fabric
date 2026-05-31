@@ -206,6 +206,31 @@ class TestWorkspaceAdoptPr:
         assert body["effort"] == "high"
 
     @pytest.mark.unit
+    def test_posts_grok_agent_when_adopting_pr(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--agent",
+                    "grok",
+                    "--model",
+                    "grok-build-0.1",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["agent"] == "grok"
+        assert body["model"] == "grok-build-0.1"
+
+    @pytest.mark.unit
     def test_posts_owned_paths_when_requested(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:

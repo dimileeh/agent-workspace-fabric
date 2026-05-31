@@ -54,6 +54,7 @@ _PROVIDER_LABELS = {
     "cursor": "Cursor Credentials",
     "gemini": "Gemini Credentials",
     "opencode": "OpenCode Credentials",
+    "grok": "Grok Build Credentials",
 }
 
 

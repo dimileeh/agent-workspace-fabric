@@ -254,7 +254,7 @@ def _phase_auth_readiness(
         "reason_code": "SMOKE_AUTH_UNAVAILABLE",
         "message": "No usable provider found.",
         "evidence": {"providers_ready": 0, "providers_total": total},
-        "action": "Configure at least one agent provider (Codex, Claude, Cursor, Gemini, OpenCode).",
+        "action": "Configure at least one agent provider (Codex, Claude, Cursor, Gemini, OpenCode, Grok).",
     }
 
 
