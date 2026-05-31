@@ -41,7 +41,8 @@
           "codex",
           "claude_code",
           "gemini",
-          "opencode"
+          "opencode",
+          "grok"
         ],
         "title": "AgentRuntime",
         "type": "string"

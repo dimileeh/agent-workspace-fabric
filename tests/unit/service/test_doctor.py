@@ -119,6 +119,12 @@ def _green_status() -> dict[str, object]:
                     "reason": "OPENCODE_FILE_AUTH_PRESENT",
                     "message": "OpenCode/Ollama auth is visible.",
                 },
+                "grok": {
+                    "ok": True,
+                    "status": "ok",
+                    "reason": "GROK_ENV_AUTH_PRESENT",
+                    "message": "Grok Build auth is visible.",
+                },
             },
         },
     }
@@ -185,6 +191,7 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
         "provider.claude_code",
         "provider.gemini",
         "provider.opencode",
+        "provider.grok",
         "port.api",
         "port.db",
         "disk",
@@ -452,6 +459,7 @@ def test_doctor_network_posture_metadata_surfaces_templates(tmp_path: Path) -> N
         ("claude_code", "CLAUDE_CODE_AUTH_OK", "Claude Code auth is usable for agent workspaces."),
         ("gemini", "GEMINI_AUTH_OK", "Gemini auth is usable for agent workspaces."),
         ("opencode", "OPENCODE_AUTH_OK", "OpenCode/Ollama auth is usable for agent workspaces."),
+        ("grok", "GROK_AUTH_OK", "Grok Build auth is usable for agent workspaces."),
     ],
 )
 def test_doctor_maps_provider_ok_fallback_reasons_to_operator_output(
@@ -563,6 +571,12 @@ def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
         "reason": "OPENCODE_OLLAMA_AUTH_MISSING",
         "message": "No OpenCode/Ollama auth signal was visible.",
     }
+    providers["grok"] = {
+        "ok": False,
+        "status": "fail",
+        "reason": "GROK_AUTH_MISSING",
+        "message": "No Grok Build auth signal was visible.",
+    }
 
     async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
         return failing_status
@@ -596,6 +610,7 @@ def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
     assert diagnostics["provider.claude_code"]["reason"] == "CLAUDE_AUTH_MISSING"
     assert diagnostics["provider.gemini"]["reason"] == "GEMINI_AUTH_MISSING"
     assert diagnostics["provider.opencode"]["reason"] == "OPENCODE_OLLAMA_AUTH_MISSING"
+    assert diagnostics["provider.grok"]["reason"] == "GROK_AUTH_MISSING"
     assert diagnostics["port.api"]["reason"] == "PORT_CLOSED"
     assert diagnostics["port.db"]["reason"] == "PORT_CLOSED"
     assert diagnostics["disk"]["message"] == "Free disk is below the configured AWF threshold."

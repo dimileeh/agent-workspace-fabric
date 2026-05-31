@@ -280,6 +280,7 @@ async def test_readyz_response_shape_matches_contract(
         "claude_code",
         "gemini",
         "opencode",
+        "grok",
         "docker",
     }
     assert body["agent_readiness"]["security"]["status"] == "warning"
