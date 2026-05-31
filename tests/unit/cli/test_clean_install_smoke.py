@@ -172,4 +172,5 @@ def test_clean_venv_install_help(built: BuiltDistributions, tmp_path: Path) -> N
         cwd=str(outside),
         timeout=60,
     )
+    assert provenance.returncode == 0, f"stdout={provenance.stdout}\nstderr={provenance.stderr}"
     assert str(venv_dir) in provenance.stdout, provenance.stdout
