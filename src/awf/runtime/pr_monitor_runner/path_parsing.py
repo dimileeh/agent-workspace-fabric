@@ -169,10 +169,10 @@ def _changed_paths_from_name_only_z(diff_stdout: str) -> tuple[str, ...]:
 
 
 def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
-    """Extract untracked paths from ``git status --porcelain`` output."""
+    """Extract untracked or ignored paths from ``git status --porcelain`` output."""
     paths: list[str] = []
     for line in status_stdout.splitlines():
-        if not line.startswith("?? "):
+        if not (line.startswith("?? ") or line.startswith("!! ")):
             continue
         paths.append(_unquote_porcelain_path(line[3:]))
     return list(dict.fromkeys(paths))
@@ -184,6 +184,6 @@ def _untracked_paths_from_porcelain_z(status_stdout: str) -> list[str]:
         dict.fromkeys(
             path
             for status, path, _original_path in _porcelain_z_records(status_stdout)
-            if status == "??"
+            if status in {"??", "!!"}
         )
     )

@@ -160,6 +160,60 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_cleans_ignored_files_with_none_stderr(
+    tmp_path: Path,
+) -> None:
+    """Ignored files should be removed through `git clean` when pre-existing dirt is cleaned."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate ignore-path cleanup after a tracked edit and an ignored artifact."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            if len(commands) == 1:
+                return _CommandResultLike(0, " M tracked.py\n!! ignored-output/fixture.json\n", "")
+            return _CommandResultLike(0, "", None)
+        if args == [
+            "restore",
+            "--source",
+            restore_ref,
+            "--staged",
+            "--worktree",
+            "--",
+            "tracked.py",
+        ]:
+            return _CommandResultLike(0, "", None)
+        if args == ["clean", "-fdx", "--", "ignored-output/fixture.json"]:
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert (
+        "restore",
+        "--source",
+        restore_ref,
+        "--staged",
+        "--worktree",
+        "--",
+        "tracked.py",
+    ) in commands
+    assert ("clean", "-fdx", "--", "ignored-output/fixture.json") in commands
+
+
+@pytest.mark.unit
 async def test_cleanup_validation_worktree_verify_check_does_not_report_status_as_cleanup_command(
     tmp_path: Path,
 ) -> None:
