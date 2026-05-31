@@ -354,7 +354,7 @@ class Provisioner:
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
             )
-            raise
+            return
         except ProfileResolutionError as exc:
             _log.error(
                 "provisioner.profile_resolution_failed",

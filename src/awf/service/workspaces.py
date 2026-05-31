@@ -281,8 +281,13 @@ class WorkspaceCreateInsufficientDiskError(Exception):
         super().__init__(self.message)
 
 
-class WorkspaceCreateHostPortConflictError(WorkspaceRetryError):
+class WorkspaceCreateHostPortConflictError(Exception):
     """Raised when a companion host_port is already mapped by a non-terminal workspace.
+
+    This error can occur on both the create and retry admission paths, so it
+    does not inherit from ``WorkspaceRetryError``.  Route handlers and MCP
+    tools must catch it explicitly before any broader ``WorkspaceRetryError``
+    catch-all.
 
     TOCTOU note: the check-and-create sequence for host-port admission is
     serialized with a per-port PostgreSQL advisory transaction lock
@@ -308,7 +313,7 @@ class WorkspaceCreateHostPortConflictError(WorkspaceRetryError):
             "conflicting_workspace_id": conflicting_workspace_id,
         }
         self.detail = detail
-        super().__init__(self.message, detail=detail)
+        super().__init__(self.message)
 
 
 class WorkspaceRetrySourceRuntimeNotReleasedError(WorkspaceRetryError):

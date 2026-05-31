@@ -30,7 +30,6 @@ from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.resolver import ProfileResolutionError
-from awf.service.workspaces import WorkspaceCreateHostPortConflictError
 from tests.postgres import postgres_test_engine
 
 _COMPOSE_TEMPLATE = (
@@ -995,8 +994,7 @@ class TestAutoProfileHostPortConflict:
             await s.commit()
             ws_id = ws.id
 
-        with pytest.raises(WorkspaceCreateHostPortConflictError):
-            await provisioner.provision(ws_id)
+        await provisioner.provision(ws_id)
 
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
