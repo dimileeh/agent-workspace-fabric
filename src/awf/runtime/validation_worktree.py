@@ -309,5 +309,8 @@ def validation_worktree_preexisting_dirty_message(check: ValidationWorktreeCheck
 
 
 def validation_worktree_cleanup_failure_message(cleanup: ValidationWorktreeCleanup) -> str:
-    paths = ", ".join(cleanup.check.paths) if cleanup.check.paths else "<unknown>"
+    if cleanup.verify_check is not None and cleanup.verify_check.paths:
+        paths = ", ".join(cleanup.verify_check.paths)
+    else:
+        paths = ", ".join(cleanup.check.paths) if cleanup.check.paths else "<unknown>"
     return f"{cleanup.message} Dirty paths: {paths}"

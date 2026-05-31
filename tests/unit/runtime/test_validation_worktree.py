@@ -10,8 +10,11 @@ import pytest
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    ValidationWorktreeCheck,
+    ValidationWorktreeCleanup,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
+    validation_worktree_cleanup_failure_message,
 )
 
 
@@ -147,3 +150,36 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command is None
     assert cleanup.verify_check is not None and not cleanup.verify_check.clean
+
+
+@pytest.mark.unit
+def test_validation_worktree_cleanup_failure_message_prefers_verify_paths() -> None:
+    """Human-readable cleanup failures should report remaining dirty paths when verification runs."""
+
+    cleanup = ValidationWorktreeCleanup(
+        cleaned=False,
+        check=ValidationWorktreeCheck(
+            clean=False,
+            paths=("initial.py",),
+            untracked_paths=(),
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message="AWF validation worktree cleanup completed but the worktree is still dirty.",
+        ),
+        restore_ref="HEAD",
+        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        message="AWF validation worktree cleanup completed but the worktree is still dirty.",
+        cleanup_command=None,
+        verify_check=ValidationWorktreeCheck(
+            clean=False,
+            paths=("remaining.py",),
+            untracked_paths=("remaining_untracked.py",),
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message="AWF validation worktree cleanup completed but the worktree is still dirty.",
+        ),
+    )
+
+    message = validation_worktree_cleanup_failure_message(cleanup)
+
+    assert "remaining.py" in message
+    assert "initial.py" not in message
+    assert "remaining_untracked.py" not in message
