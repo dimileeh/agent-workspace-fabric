@@ -54,6 +54,8 @@ AGENT_AUTH_ENV_VARS = (
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",
     "OLLAMA_API_KEY",
+    # xAI Grok Build headless auth.
+    "XAI_API_KEY",
     # OpenCode shell-tool runtime tuning. This is not auth, but it must follow
     # the same service -> workspace placeholder path to affect agent containers.
     "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
