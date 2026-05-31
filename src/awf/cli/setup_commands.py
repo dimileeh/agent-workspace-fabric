@@ -25,6 +25,7 @@ from awf.host_setup.config import (
 from awf.host_setup.rendering import (
     FirstRunPayload,
     first_run_issue_from_reason_code,
+    first_run_report_payload,
     render_first_run_json,
     render_first_run_pretty,
 )
@@ -130,13 +131,45 @@ def _run_setup(
             # which T04 forwards to provider setup (T07). Under --non-interactive
             # there is no way to collect it, so surface the machine-readable signal.
             require_interactive(non_interactive, "configure the selected provider(s)")
-        _persist_safe_config(
-            config,
-            source_checkout=verified_source,
-            allow_plain_secrets=allow_plain_secrets,
-        )
+        try:
+            _persist_safe_config(
+                config,
+                source_checkout=verified_source,
+                allow_plain_secrets=allow_plain_secrets,
+            )
+        except HostSetupConfigError as error:
+            # The safe-config write happens after the host checks finish. Folding
+            # the failure into the readiness payload keeps the check blockers and
+            # warnings the operator ran setup to see, rather than dropping them in
+            # favour of a config-write-only diagnostic.
+            return _readiness_with_config_write_failure(payload, error)
 
     return payload
+
+
+def _readiness_with_config_write_failure(
+    payload: FirstRunPayload,
+    error: HostSetupConfigError,
+) -> FirstRunPayload:
+    """Fold a config-write failure into the readiness payload as a blocked issue.
+
+    The write error path lives on ``error.path`` (not ``error.details``), so it
+    is merged in alongside the existing diagnostic details; the readiness
+    issues, check provenance, and details are preserved so a failed write never
+    hides the host-check report.
+    """
+    write_issue = first_run_issue_from_reason_code(
+        error.reason_code,
+        severity="blocked",
+        details={**error.details, "path": str(error.path)},
+    )
+    return first_run_report_payload(
+        command=_SETUP_COMMAND,
+        summary=f"{payload.summary} {error.message}",
+        issues=(*payload.issues, write_issue),
+        details=payload.details,
+        next_steps=("Fix the reported blockers above, then re-run awf setup.",),
+    )
 
 
 def _persist_safe_config(

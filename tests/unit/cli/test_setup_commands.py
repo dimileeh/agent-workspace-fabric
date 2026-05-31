@@ -395,6 +395,73 @@ def test_setup_write_failure_blocks_includes_path(
 
 
 @pytest.mark.unit
+def test_setup_write_failure_preserves_readiness_report_json(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a failed config write still surfaces host-check blockers/warnings.
+
+    Regression for PRRT_kwDOSJAM6s6F6DjR: a non-dry-run write happens after the
+    host checks finish, so a write failure must not hide the readiness report
+    (blockers, warnings, and check facts) the operator ran setup to see.
+    """
+    monkeypatch.setattr(setup_commands, "run_system_checks", _docker_blocked)
+
+    def raise_write_failed(_config: HostSetupConfig, **_kw: object) -> None:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_WRITE_FAILED",
+            message="Unable to write host setup config.",
+            path=Path("/tmp/.awf/config.yml"),
+            details={"error_type": "PermissionError"},
+        )
+
+    monkeypatch.setattr(setup_commands, "write_host_setup_config", raise_write_failed)
+    result = _runner.invoke(app, ["setup", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    # The host-check readiness issues survive alongside the config-write failure.
+    assert "SETUP_READINESS_FAILED" in reason_codes
+    assert "HOST_SETUP_CONFIG_WRITE_FAILED" in reason_codes
+    write_issues = [
+        issue
+        for issue in payload["issues"]
+        if issue["reason_code"] == "HOST_SETUP_CONFIG_WRITE_FAILED"
+    ]
+    # The write-failure path/diagnostic details remain available to fix it.
+    assert write_issues[0]["details"]["path"] == "/tmp/.awf/config.yml"
+    assert write_issues[0]["details"]["error_type"] == "PermissionError"
+    # The host-check provenance (the per-check levels) stays in the payload.
+    assert payload["details"]["checks"]
+
+
+@pytest.mark.unit
+def test_setup_write_failure_preserves_readiness_report_pretty(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify pretty output also keeps both the readiness and write diagnostics."""
+    monkeypatch.setattr(setup_commands, "run_system_checks", _docker_blocked)
+
+    def raise_write_failed(_config: HostSetupConfig, **_kw: object) -> None:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_WRITE_FAILED",
+            message="Unable to write host setup config.",
+            path=Path("/tmp/.awf/config.yml"),
+            details={"error_type": "PermissionError"},
+        )
+
+    monkeypatch.setattr(setup_commands, "write_host_setup_config", raise_write_failed)
+    result = _runner.invoke(app, ["setup", "--format", "pretty"])
+
+    assert result.exit_code == 1
+    assert "Status: blocked" in result.stderr
+    assert "SETUP_READINESS_FAILED" in result.stderr
+    assert "HOST_SETUP_CONFIG_WRITE_FAILED" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.unit
 def test_setup_config_error_pretty_includes_path(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
