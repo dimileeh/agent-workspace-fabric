@@ -827,6 +827,56 @@ class TestExecutorMonitorHandoffSetup:
         assert "details" not in fallback_failure
 
     @pytest.mark.unit
+    async def test_handoff_setup_mark_failed_fallback_error_after_command_failure_is_local(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Validation:
+            async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+                return ValidationResult(
+                    commands=[
+                        _setup_dependency_command_result(
+                            tmp_path,
+                            returncode=1,
+                            retry_exhausted=True,
+                        )
+                    ]
+                )
+
+        class _Executor:
+            _validation = _Validation()
+
+            async def _record_setup_dependency_network_events(
+                self,
+                **_kwargs: object,
+            ) -> None:
+                return None
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+                raise RuntimeError("workspace failure state unavailable")
+
+        result = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-db-down",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert result is False
+        assert len(mark_failed_calls) == 2
+        detailed_failure = mark_failed_calls[0]
+        assert detailed_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+        assert detailed_failure["details"]["retry_exhausted"] is True
+        fallback_failure = mark_failed_calls[1]
+        assert fallback_failure["reason_code"] == PR_MONITOR_SETUP_FAILED_REASON_CODE
+        assert "details" not in fallback_failure
+
+    @pytest.mark.unit
     async def test_handoff_setup_cleanup_failure_marks_infrastructure_failure(
         self,
         tmp_path: Path,

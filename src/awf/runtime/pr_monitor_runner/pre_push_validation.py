@@ -140,6 +140,8 @@ def _pre_push_validation_reason_code_for_preferred_failure(
     if preferred_failure is None:
         return validation_reason_code
     coverage_command = result.coverage.command_result if result.coverage is not None else None
+    # ValidationResult.first_failure returns this same coverage command object when
+    # a coverage policy fails; preserve that identity if coverage results are copied.
     if (
         result.coverage is not None
         and not result.coverage.ok
