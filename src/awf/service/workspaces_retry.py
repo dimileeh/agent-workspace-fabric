@@ -289,6 +289,7 @@ async def retry_workspace_row(
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
             excluding_workspace_id=source.id,
+            node_id=source.node_id,
         )
         if conflicts:
             raise workspaces.WorkspaceCreateHostPortConflictError(

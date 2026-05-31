@@ -873,6 +873,7 @@ class Provisioner:
             conflicts = await repo.find_host_port_conflicts(
                 host_ports=auto_profile_host_ports,
                 excluding_workspace_id=excluding_workspace_id,
+                node_id=self._config.node_id,
             )
             if conflicts:
                 _log.error(

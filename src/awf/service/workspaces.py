@@ -341,6 +341,7 @@ async def check_host_port_conflicts(
     *,
     resolved_profile: Mapping[str, Any] | None = None,
     excluding_workspace_id: str | None = None,
+    node_id: str | None = None,
 ) -> None:
     """Check for host-port conflicts among companion and profile-service ports and raise if found.
 
@@ -353,6 +354,10 @@ async def check_host_port_conflicts(
     *incoming* workspace request.  Its ``services[].ports`` host-side entries
     are included in the conflict check so that a profile-service port on the
     new workspace is caught before Docker Compose provisioning starts.
+
+    When *node_id* is provided, only workspaces on that node (or with a null
+    ``node_id``) are checked.  Host ports are Docker host ports scoped to the
+    worker node, so cross-node conflicts are false positives.
 
     A per-port PostgreSQL advisory lock is acquired before the conflict
     SELECT so that two concurrent requests for the same host port cannot
@@ -367,6 +372,7 @@ async def check_host_port_conflicts(
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
             excluding_workspace_id=excluding_workspace_id,
+            node_id=node_id,
         )
         if conflicts:
             raise WorkspaceCreateHostPortConflictError(
@@ -537,10 +543,12 @@ class WorkspaceService:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
             req_profile, resolved_profile = workspace_create_profile_snapshots(req)
+            node_id = self._settings.worker_node_id if self._settings else None
             await check_host_port_conflicts(
                 repo,
                 req.companions,
                 resolved_profile=resolved_profile,
+                node_id=node_id,
             )
 
             ws = await create_workspace_row(

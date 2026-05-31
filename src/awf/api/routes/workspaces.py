@@ -318,6 +318,7 @@ async def create_workspace(
             payload.companions,
             resolved_profile=_resolved_profile,
             excluding_workspace_id=None,
+            node_id=settings.worker_node_id,
         )
 
         ws = await create_workspace_row(

@@ -549,6 +549,7 @@ class WorkspaceRepository:
         *,
         host_ports: builtins.list[int],
         excluding_workspace_id: str | None = None,
+        node_id: str | None = None,
     ) -> builtins.list[HostPortConflict]:
         """Find active workspaces whose companions or profile services claim any of the given host ports.
 
@@ -566,6 +567,12 @@ class WorkspaceRepository:
         workspace that failed during provisioning before the compose
         stack was launched never bound a host port, so it does not
         block port reuse even without a release event.
+
+        When *node_id* is provided, only workspaces on that node (or
+        with a null ``node_id``, meaning unplaced/local) are considered.
+        Host ports are Docker host ports and are scoped to the worker
+        node, so a workspace on node A binding port 8080 must not block
+        a create on node B that also wants 8080.
 
         NOTE: The TOCTOU window between this SELECT and the subsequent INSERT
         is closed by acquiring a per-port ``pg_advisory_xact_lock`` before
@@ -595,6 +602,9 @@ class WorkspaceRepository:
                 ),
             )
         )
+
+        if node_id is not None:
+            stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
 
         if excluding_workspace_id is not None:
             stmt = stmt.where(Workspace.id != excluding_workspace_id)
