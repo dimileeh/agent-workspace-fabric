@@ -895,6 +895,8 @@ async def _build_handoff_pr_monitor(
     a second time.
     """
     monitor: _MonitorRunnerProto | None = self._pr_monitor
+    if profile is not None and run_profile_setup:
+        raise ValueError("pre-resolved handoff profiles must pass run_profile_setup=False")
     if monitor is None and self._pr_monitor_factory is None:
         await self._mark_failed(
             workspace_id=workspace_id,
@@ -906,8 +908,6 @@ async def _build_handoff_pr_monitor(
         return None
 
     try:
-        if profile is not None and run_profile_setup:
-            raise ValueError("pre-resolved handoff profiles must pass run_profile_setup=False")
         if profile is None:
             profile = _profile_for_workspace(
                 workspace,

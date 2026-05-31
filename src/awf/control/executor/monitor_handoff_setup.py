@@ -102,16 +102,23 @@ async def _run_monitor_handoff_profile_setup(
         if setup_dependency_details is not None
         else PR_MONITOR_SETUP_FAILED_REASON_CODE
     )
-    await self._mark_failed(
-        workspace_id=workspace_id,
-        from_status=WorkspaceStatus.running,
-        failure_reason=_failure_reason_for_phase(first_fail),
-        message=(
-            f"profile setup failed: {redact_audit_text(first_fail.command)}"
-            if first_fail is not None
-            else "profile setup failed"
-        )[:2000],
-        reason_code=setup_failure_reason_code,
-        details=setup_dependency_details,
-    )
+    try:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=_failure_reason_for_phase(first_fail),
+            message=(
+                f"profile setup failed: {redact_audit_text(first_fail.command)}"
+                if first_fail is not None
+                else "profile setup failed"
+            )[:2000],
+            reason_code=setup_failure_reason_code,
+            details=setup_dependency_details,
+        )
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_setup_mark_failed_after_command_failure_failed",
+            workspace_id=workspace_id,
+            setup_failure_reason_code=setup_failure_reason_code,
+        )
     return False

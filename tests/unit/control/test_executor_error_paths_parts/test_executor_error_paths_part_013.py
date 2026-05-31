@@ -165,25 +165,22 @@ class TestExecutorMonitorHandoffSetup:
             async def _mark_failed(self, **kwargs: Any) -> None:
                 mark_failed_calls.append(kwargs)
 
-        result = await _build_handoff_pr_monitor(
-            _Executor(),
-            workspace_id="ws-contract",
-            workspace=object(),
-            worktree_path=tmp_path,
-            compose_project="awf_x",
-            compose_file=tmp_path / "compose.yml",
-            build_failed_log_event="test.handoff_monitor_build_failed",
-            build_failed_message_prefix="handoff failed: ",
-            profile=object(),
-            run_profile_setup=True,
-        )
+        with pytest.raises(ValueError, match="run_profile_setup=False"):
+            await _build_handoff_pr_monitor(
+                _Executor(),
+                workspace_id="ws-contract",
+                workspace=object(),
+                worktree_path=tmp_path,
+                compose_project="awf_x",
+                compose_file=tmp_path / "compose.yml",
+                build_failed_log_event="test.handoff_monitor_build_failed",
+                build_failed_message_prefix="handoff failed: ",
+                profile=object(),
+                run_profile_setup=True,
+            )
 
-        assert result is None
         assert setup_calls == []
-        assert mark_failed_calls
-        failure = mark_failed_calls[-1]
-        assert failure["reason_code"] == "PR_ADOPTION_MONITOR_UNAVAILABLE"
-        assert "run_profile_setup=False" in failure["message"]
+        assert mark_failed_calls == []
 
     @pytest.mark.unit
     async def test_setup_dependency_exhausted_event_without_retry_event_when_count_zero(
@@ -614,6 +611,54 @@ class TestExecutorMonitorHandoffSetup:
         message = mark_failed_calls[-1]["message"]
         assert "profile setup failed: git clone https://[redacted]@" in message
         assert "supersecret" not in message
+
+    @pytest.mark.unit
+    async def test_handoff_setup_mark_failed_error_after_command_failure_is_local(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Validation:
+            async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+                return ValidationResult(
+                    commands=[
+                        _setup_dependency_command_result(
+                            tmp_path,
+                            returncode=1,
+                            retry_exhausted=True,
+                        )
+                    ]
+                )
+
+        class _Executor:
+            _validation = _Validation()
+
+            async def _record_setup_dependency_network_events(
+                self,
+                **_kwargs: object,
+            ) -> None:
+                return None
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+                raise RuntimeError("database temporarily unavailable")
+
+        result = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-db-down",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert result is False
+        assert len(mark_failed_calls) == 1
+        failure = mark_failed_calls[0]
+        assert failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+        assert failure["message"] == "profile setup failed: uv sync --extra dev"
+        assert failure["details"]["retry_exhausted"] is True
 
     @pytest.mark.unit
     async def test_handoff_setup_cleanup_failure_marks_infrastructure_failure(
