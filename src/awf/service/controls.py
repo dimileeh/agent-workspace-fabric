@@ -916,20 +916,6 @@ class WorkspaceControlService:
                 reason_code="WORKSPACE_ALREADY_DESTROYED"
             )
             cleanup_payload = cleanup_result.to_dict()
-            if (
-                workspace.compose_project_name is not None
-                and not await has_terminal_runtime_released_event(self._session, workspace.id)
-            ):
-                await repo.add_event(
-                    workspace,
-                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-                    payload={
-                        "compose_project_name": workspace.compose_project_name,
-                        "workspace_status": WorkspaceStatus.destroyed.value,
-                        "cleanup": cleanup_payload,
-                    },
-                )
             operation_result = _with_secret_lease_result(
                 {
                     "status": WorkspaceStatus.destroyed.value,
