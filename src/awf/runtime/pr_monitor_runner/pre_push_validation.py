@@ -260,6 +260,8 @@ async def _pre_push_validation_worktree_check(
     *,
     worktree_path: Path,
 ) -> ValidationWorktreeCheck:
+    """Check pre-push validation preconditions for clean validation worktree state."""
+
     async def _run_git(args: list[str]) -> Any:
         return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
 
@@ -274,6 +276,8 @@ async def _pre_push_validation_cleanup(
     worktree_path: Path,
     restore_ref: str,
 ) -> ValidationWorktreeCleanup:
+    """Clean validation side effects and restore the worktree to the requested ref."""
+
     async def _run_git(args: list[str]) -> Any:
         return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
 
@@ -291,6 +295,7 @@ def _pre_push_dirty_result(
     workspace_head_sha: str | None,
     check: ValidationWorktreeCheck,
 ) -> _PrePushValidationResult:
+    """Build a pre-push validation result for pre-existing dirt."""
     from awf.runtime.validation_worktree import validation_worktree_preexisting_dirty_message
 
     reason_code = check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
@@ -316,6 +321,7 @@ def _pre_push_cleanup_result(
     *,
     upstream_failure: Mapping[str, object] | None = None,
 ) -> _PrePushValidationResult:
+    """Build a pre-push validation result from cleanup failure details."""
     from awf.runtime.validation_worktree import validation_worktree_cleanup_failure_message
 
     extra_details: dict[str, object] = cleanup.details()

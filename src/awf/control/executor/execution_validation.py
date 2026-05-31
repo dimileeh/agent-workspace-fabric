@@ -96,6 +96,7 @@ async def _fail_validation_worktree_guard(
     reason_code: str,
     message: str,
 ) -> ExecutionValidationResult:
+    """Record and surface a fatal validation-worktree guard failure."""
     failure_message = f"{reason_code}: {message}"
     await self._finish_validation_run(
         validation_run_id,

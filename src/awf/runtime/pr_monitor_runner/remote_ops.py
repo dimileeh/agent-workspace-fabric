@@ -607,10 +607,12 @@ async def _git_push_result(
 
 
 def _combined_git_output(*outputs: str | None) -> str:
+    """Join git output fragments, ignoring empty pieces."""
     return "\n".join(output for output in outputs if output)
 
 
 def _log_unmatched_workflow_file_push_output(output: str) -> None:
+    """Log detected workflow file context from a push-failure output."""
     paths = tuple(
         dict.fromkeys(
             match.group(0).rstrip(".,;:") for match in _WORKFLOW_FILE_PATH_RE.finditer(output)
@@ -626,6 +628,7 @@ def _log_unmatched_workflow_file_push_output(output: str) -> None:
 
 
 def _workflow_scope_push_block(output: str) -> _WorkflowScopePushBlock:
+    """Detect whether push failure is due to missing workflow scope."""
     normalized = " ".join(output.split())
     if not any(pattern.search(normalized) for pattern in _MISSING_WORKFLOW_SCOPE_PATTERNS):
         return _WorkflowScopePushBlock(blocked=False)
