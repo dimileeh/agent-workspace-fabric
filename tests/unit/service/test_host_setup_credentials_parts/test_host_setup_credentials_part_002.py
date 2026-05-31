@@ -56,6 +56,21 @@ def test_credential_ref_rejects_secret_like_value() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("name", ["GITHUB_PAT_TOKEN", "GHP_TOKEN", "GHU_TOKEN"])
+def test_credential_ref_allows_descriptive_env_var_name(name: str) -> None:
+    """Verify a valid uppercase env-var name is not flagged as a raw secret.
+
+    The raw-secret guard in ``_validate_ref`` rejects an embedded token *value*,
+    but a legitimate uppercase identifier such as ``GITHUB_PAT_TOKEN``/``GHP_TOKEN``
+    only collides with the lowercase provider prefixes when case is folded. An
+    ``env://NAME`` ref carries a variable name, not a value, so it must construct
+    cleanly while a real (lowercase-prefixed) token stays rejected.
+    """
+    ref = CredentialRef(backend="env_ref", ref=f"env://{name}")
+    assert ref.ref == f"env://{name}"
+
+
+@pytest.mark.unit
 def test_credential_ref_validation_error_does_not_echo_input() -> None:
     """Verify Pydantic never echoes the offending input into the error string.
 

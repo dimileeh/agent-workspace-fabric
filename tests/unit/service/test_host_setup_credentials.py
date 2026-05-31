@@ -431,6 +431,28 @@ def test_env_ref_rejects_invalid_or_token_shaped_names(env_var: str) -> None:
     assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "env_var",
+    ["GITHUB_PAT_TOKEN", "GHP_TOKEN", "GHO_TOKEN", "GHU_TOKEN", "GHP_TOKEN_FOR_CI"],
+)
+def test_env_ref_allows_descriptive_github_pat_names(env_var: str) -> None:
+    """Verify descriptive uppercase env-var names are not mistaken for tokens.
+
+    ``_TOKEN_SHAPE_RE`` is case-insensitive and matches truncated provider
+    prefixes, so a valid uppercase env-var name such as ``GITHUB_PAT_TOKEN`` or
+    ``GHP_TOKEN`` collides with the ``github_pat_``/``gh[apousr]_`` token shapes.
+    env-ref stores only the variable *name* (never a value) and a real provider
+    token is always lowercase-prefixed, so these names must yield the expected
+    ``env://NAME`` reference rather than being rejected as raw secrets.
+    """
+    ref = EnvRefCredentialBackend().create_ref(
+        CredentialRequest(provider="github", env_var=env_var)
+    )
+    assert ref.backend == "env_ref"
+    assert ref.ref == f"env://{env_var}"
+
+
 # --------------------------------------------------------------------------- #
 # 4. Plain-file consent / flag gating.
 # --------------------------------------------------------------------------- #

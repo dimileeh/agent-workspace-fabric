@@ -68,10 +68,22 @@ MAX_CREDENTIAL_REF_LENGTH = 512
 # ``GH_TOKEN``); provider/account identifiers stay filesystem- and ref-safe.
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-# Reuse the shared token recognizer so token-shaped inputs are rejected/redacted
-# the same way as everywhere else in AWF.
+# Reuse the shared token recognizer so token-shaped inputs are redacted the same
+# way as everywhere else in AWF. Case-insensitive on purpose: *diagnostic
+# redaction* over-redacts case-variant shapes (e.g. ``SK-PROJ-...``) that a real
+# secret would never use, which is safe.
 _TOKEN_SHAPE_RE = compile_known_token_re(
     ignorecase=True,
+    match_truncated_provider_tokens=True,
+)
+# Case-sensitive recognizer used to decide whether operator-supplied input *is* a
+# raw secret value (and must be rejected). Real provider tokens always carry a
+# lowercase prefix (``ghp_``/``github_pat_``/``sk-``/...), so folding case here —
+# unlike for redaction above — is unsafe: it misclassifies a legitimate uppercase
+# env-var name such as ``GITHUB_PAT_TOKEN`` or ``GHP_TOKEN`` as a token and blocks
+# a valid env-ref setup path, even though env-ref only stores the name.
+_TOKEN_VALUE_RE = compile_known_token_re(
+    ignorecase=False,
     match_truncated_provider_tokens=True,
 )
 # ``keyring`` resolves to these no-op backends on hosts without a usable
@@ -347,13 +359,21 @@ class EnvRefCredentialBackend:
         if not env_var or not env_var.strip():
             raise _interactive_input_required(request, missing="env_var")
         name = env_var.strip()
-        if _TOKEN_SHAPE_RE.search(name) is not None:
-            raise CredentialError(
-                reason_code=CREDENTIAL_REF_INVALID,
-                message="Environment variable name resembles a raw secret value.",
-                details={"field": "env_var"},
-            )
         if not _ENV_VAR_NAME_RE.fullmatch(name):
+            # The raw-secret guard catches an operator who pasted a token *value*
+            # into the name field. It runs only once the input has already failed
+            # the uppercase-identifier check: a valid env-var name such as
+            # ``GITHUB_PAT_TOKEN`` or ``GHP_TOKEN`` can never be a real provider
+            # token (those are lowercase-prefixed) and env-ref stores only the
+            # name, never a value — scanning for token shape first (and
+            # case-insensitively) would block that valid setup path. Prefer the
+            # secret-shape message when the invalid input does look like a token.
+            if _looks_like_secret(name):
+                raise CredentialError(
+                    reason_code=CREDENTIAL_REF_INVALID,
+                    message="Environment variable name resembles a raw secret value.",
+                    details={"field": "env_var"},
+                )
             raise CredentialError(
                 reason_code=CREDENTIAL_REF_INVALID,
                 message="Environment variable name is not a valid identifier.",
@@ -753,8 +773,15 @@ def _require_safe_identifier(value: str, *, field: str) -> str:
 
 
 def _looks_like_secret(value: str) -> bool:
-    """Return whether a value contains a token-shaped substring."""
-    return _TOKEN_SHAPE_RE.search(value) is not None
+    """Return whether a value contains a raw secret (token-shaped) substring.
+
+    Uses the case-sensitive recognizer: a value is treated as a secret only when
+    it carries a real provider token's lowercase prefix, so a legitimate
+    uppercase env-var name (e.g. ``GITHUB_PAT_TOKEN``/``GHP_TOKEN``) is not
+    mistaken for one. The case-insensitive ``_TOKEN_SHAPE_RE`` stays reserved for
+    diagnostic redaction, where over-matching is safe.
+    """
+    return _TOKEN_VALUE_RE.search(value) is not None
 
 
 def _redact_token_shaped(value: str) -> str:
