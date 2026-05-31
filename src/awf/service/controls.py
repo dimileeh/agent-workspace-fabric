@@ -568,7 +568,18 @@ class WorkspaceControlService:
         monitor_state = dict(workspace.monitor_threads_addressed or {})
         candidate_repo = MergeCandidateRepository(self._session)
         candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace_id)
-        current_head_sha = candidate.head_sha if candidate is not None else None
+        current_head_sha = (
+            candidate.head_sha if candidate is not None and candidate.head_sha else None
+        )
+        if current_head_sha is None:
+            latest_candidate = await candidate_repo.get_latest_for_workspace_with_merge_inputs(
+                workspace_id
+            )
+            current_head_sha = (
+                latest_candidate.head_sha
+                if latest_candidate is not None and latest_candidate.head_sha
+                else None
+            )
         settle_head_shas = remonitor_elapsed_settle_head_shas(
             monitor_state,
             pr_number=workspace.pr_number,

@@ -1021,6 +1021,77 @@ async def test_remonitor_no_reason_past_settle_arms_current_candidate_head(
 
 
 @pytest.mark.unit
+async def test_remonitor_failed_workspace_past_settle_arms_latest_closed_candidate_head(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.failed,
+    )
+    hint = "resume reviewer-settle after monitor failure"
+    old_head_sha = "e" * 40
+    live_head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(50)
+    initial_started_key = _initial_review_grace_started_key(50)
+    old_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=50,
+        head_sha=old_head_sha,
+    )
+    old_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=old_head_sha,
+    )
+    live_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=live_head_sha,
+    )
+    workspace.monitor_last_commit_sha = live_head_sha
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "old monitor failed after reviewer settle"
+    workspace.monitor_iter_count = 3
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        old_settle_done_key: "elapsed",
+    }
+    candidate.head_sha = live_head_sha
+    candidate.status = "closed"
+    candidate.close_reason = "STALE_MONITOR_FAILED"
+    candidate.closed_at = datetime.now(UTC)
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=hint,
+        idempotency_key="remonitor-failed-closed-candidate-head",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert candidate.status == "open"
+    assert candidate.head_sha == live_head_sha
+    assert initial_done_key not in monitor_state
+    assert old_settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert float(monitor_state[old_settle_started_key]) >= 1_000_000_000
+    assert float(monitor_state[live_settle_started_key]) >= 1_000_000_000
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+
+
+@pytest.mark.unit
 async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
     session: AsyncSession,
 ) -> None:
