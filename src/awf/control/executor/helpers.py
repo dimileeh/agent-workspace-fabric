@@ -584,8 +584,8 @@ def _provider_recovery_default_model_for_monitor_handoff(
     effort policy can intentionally select no model for lower effort, so its
     provider recovery metadata must follow the adapter-selected implicit model.
     """
-    if adapter.name is AgentRuntime.cursor:
-        return adapter.provider_recovery_default_model
+    if getattr(adapter, "name", None) is AgentRuntime.cursor:
+        return getattr(adapter, "provider_recovery_default_model", None)
     return defaults.model if defaults is not None else None
 
 

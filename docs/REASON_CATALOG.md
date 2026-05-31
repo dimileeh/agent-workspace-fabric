@@ -121,13 +121,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#codex_auth_missing](#codex_auth_missing)
 
-### CURSOR_AUTH_MISSING
-**Problem:** No Cursor auth signal was visible.
-**Likely Cause:** Missing Cursor API credentials.
-**Operator Fix:** Set CURSOR_API_KEY before starting AWF.
-**Related Command:** `awf service doctor`
-**Docs Link:** [docs/REASON_CATALOG.md#cursor_auth_missing](#cursor_auth_missing)
-
 ### COMPLETED_PR_NOT_MERGED
 **Problem:** A completed workspace has a PR, but the PR has not been merged.
 **Likely Cause:** The PR is still open, was closed without merging, or the merge SHA was not recorded.
@@ -169,6 +162,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Use a `keyring://`, `env://`, or approved `plain-file://` reference and keep raw token values out of config and JSON payloads.
 **Related Command:** `awf setup --provider <provider>`
 **Docs Link:** [docs/REASON_CATALOG.md#credential_ref_invalid](#credential_ref_invalid)
+
+### CURSOR_AUTH_MISSING
+**Problem:** No Cursor auth signal was visible.
+**Likely Cause:** Missing Cursor API credentials.
+**Operator Fix:** Set CURSOR_API_KEY before starting AWF.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#cursor_auth_missing](#cursor_auth_missing)
 
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.

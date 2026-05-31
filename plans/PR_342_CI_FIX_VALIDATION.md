@@ -121,3 +121,76 @@ contract.
 ### Gaps
 
 No planned implementation gaps remain.
+
+## Iteration 3: Python Coverage Regressions After Cursor Wiring
+
+### Requirement Status
+
+- Preserve validation stale-stop behavior: Complete. `run_validation_and_fix_cycle`
+  accepts both `run_model` and historical `default_model` keywords, and the
+  stale transition/recheck tests pass without running downstream git work.
+- Keep monitor resume profile sync retry and timeout handoff behavior intact:
+  Complete. Provider-recovery default selection now tolerates lightweight test
+  adapter doubles while preserving Cursor-specific behavior for production
+  adapters.
+- Regenerate reason catalog without weakening checks: Complete.
+  `docs/REASON_CATALOG.md` was regenerated from
+  `src/awf/service/doctor/reasons.py`.
+- Split oversized files without weakening maintainability checks: Complete.
+  Provider runtime CLI probe helpers moved into
+  `src/awf/service/provider_readiness_helpers.py`, provider-readiness tests were
+  redistributed into part files, and one monitor-recovery test moved into a new
+  part file.
+- Run only focused local checks: Complete. No full coverage, full repository
+  test suite, frontend build, or CI-equivalent validation was run locally.
+
+### Evidence
+
+Additional files changed:
+
+- `docs/REASON_CATALOG.md`
+- `plans/PR_342_CI_FIX_PLAN.md`
+- `plans/PR_342_CI_FIX_VALIDATION.md`
+- `src/awf/control/executor/execution_validation.py`
+- `src/awf/control/executor/helpers.py`
+- `src/awf/service/provider_readiness.py`
+- `src/awf/service/provider_readiness_helpers.py`
+- `tests/unit/control/test_executor_monitor_recovery_parts/test_executor_monitor_recovery_part_002.py`
+- `tests/unit/control/test_executor_monitor_recovery_parts/test_executor_monitor_recovery_part_005.py`
+- `tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py`
+- `tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py`
+- `tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_003.py`
+
+Focused checks run:
+
+- AWF-provided repro before implementation:
+  `uv run --python 3.12 --extra dev pytest tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_003.py::test_execution_validation_returns_stop_when_start_transition_is_stale tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_003.py::test_execution_validation_returns_stop_when_validate_recheck_is_stale tests/unit/control/test_executor_runtime_profile_snapshot.py::test_validation_cycle_syncs_profile_before_command_planning tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_009.py::TestExecutorCoverageEdgesPart003::test_resume_pr_monitor_retries_profile_sync_before_monitor_factory tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q`
+  failed with the reported validation keyword, monitor handoff, and line-limit
+  failures.
+- `uv run --python 3.12 --extra dev python scripts/generate_reason_catalog.py`
+  regenerated `docs/REASON_CATALOG.md`.
+- AWF-provided repro after implementation:
+  `uv run --python 3.12 --extra dev pytest tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_003.py::test_execution_validation_returns_stop_when_start_transition_is_stale tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_003.py::test_execution_validation_returns_stop_when_validate_recheck_is_stale tests/unit/control/test_executor_runtime_profile_snapshot.py::test_validation_cycle_syncs_profile_before_command_planning tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_009.py::TestExecutorCoverageEdgesPart003::test_resume_pr_monitor_retries_profile_sync_before_monitor_factory tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q`
+  passed: 5 tests.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_doctor_reasons.py::test_reason_catalog_is_synchronized_with_python_source tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_011.py::TestExecutorCoverageEdgesPart011::test_resume_pr_monitor_passes_timeouts_to_adapter -q`
+  passed: 2 tests.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_003.py tests/unit/control/test_executor_monitor_recovery_parts/test_executor_monitor_recovery_part_005.py -q`
+  passed: 119 tests.
+- `uv run --python 3.12 --extra dev ruff check src/awf/control/executor/execution_validation.py src/awf/control/executor/helpers.py src/awf/service/provider_readiness.py src/awf/service/provider_readiness_helpers.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_003.py tests/unit/control/test_executor_monitor_recovery_parts/test_executor_monitor_recovery_part_002.py tests/unit/control/test_executor_monitor_recovery_parts/test_executor_monitor_recovery_part_005.py`
+  passed after organizing the provider-readiness helper import block.
+- `uv run --python 3.12 --extra dev mypy src/awf/control/executor/execution_validation.py src/awf/control/executor/helpers.py src/awf/service/provider_readiness.py src/awf/service/provider_readiness_helpers.py`
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit tests/unit/service/test_doctor_reasons.py::test_reason_catalog_is_synchronized_with_python_source -q`
+  passed: 2 tests.
+- `git diff --check`
+  passed.
+
+### Deferred Validation
+
+Full AWF/GitHub validation, including `python-full-coverage`, broad unit tests,
+full coverage gates, release artifacts, and frontend checks, is managed by
+AWF/GitHub after agent completion per the workspace contract.
+
+### Gaps
+
+No planned implementation gaps remain.

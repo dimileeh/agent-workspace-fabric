@@ -76,3 +76,42 @@ Additional implementation steps:
 3. Replace the Dockerfile copy/install step with `ln -sf "$cursor_path"
    /usr/local/bin/cursor-agent`.
 4. Run the focused Dockerfile unit test and record results in validation.
+
+### Iteration 3: Python coverage regressions after Cursor wiring
+
+The latest CI run moved past the Docker image issue and now fails in
+`python-full-coverage`. The focused AWF repro reports:
+
+- `run_validation_and_fix_cycle` no longer accepts the historical
+  `default_model` keyword used by focused tests and compatibility callers.
+- `resume_pr_monitor` can fail before constructing the monitor when tests inject
+  a lightweight object adapter because provider-recovery metadata assumes every
+  adapter has a `name` attribute.
+- `docs/REASON_CATALOG.md` drifted from `src/awf/service/doctor/reasons.py`.
+- Cursor/provider-readiness additions pushed one source file and several test
+  part files over the repository's 1,500-line decomposition guard.
+
+Additional requirements:
+
+- Preserve validation status stale-stop behavior: after a stale transition or
+  stale validation recheck, no git/validation side effects should run.
+- Keep monitor resume profile sync retry semantics and timeout handoff behavior
+  intact for production adapters and test doubles.
+- Regenerate the reason catalog instead of weakening the synchronization test.
+- Split or move code/tests without weakening maintainability checks or deleting
+  coverage.
+- Run only focused repro, decomposition, catalog, and affected unit tests; leave
+  full coverage and broad CI gates to AWF/GitHub.
+
+Additional implementation steps:
+
+1. Add a backwards-compatible `default_model` alias to
+   `run_validation_and_fix_cycle`, mapping it to the existing `run_model` value.
+2. Make monitor-handoff provider-recovery default selection tolerate adapters
+   without a `name` attribute while preserving Cursor-specific behavior.
+3. Move provider runtime CLI probe helpers into the existing provider-readiness
+   helper module and split oversized provider-readiness/monitor-recovery test
+   parts into smaller part files.
+4. Regenerate `docs/REASON_CATALOG.md` from the Python source.
+5. Run the AWF-provided focused repro plus the reason-catalog and line-limit
+   focused tests, then record evidence in validation.
