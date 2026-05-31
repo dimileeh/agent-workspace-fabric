@@ -276,13 +276,18 @@ async def retry_workspace_row(
         source.id, limit=1
     )
     source_reservation = latest_source_reservation[0] if latest_source_reservation else None
+    source_effective_node_id = source.node_id or (
+        source_reservation.node_id if source_reservation else None
+    )
     target_node_id = (
         resolved_settings.worker_node_id
         or (source_reservation.node_id if source_reservation else None)
         or source.node_id
     )
     if await _source_runtime_not_yet_released(session, source) and (
-        source.node_id is None or target_node_id is None or source.node_id == target_node_id
+        source_effective_node_id is None
+        or target_node_id is None
+        or source_effective_node_id == target_node_id
     ):
         raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
             source_workspace_id=source.id,
