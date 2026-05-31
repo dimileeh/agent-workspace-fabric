@@ -508,7 +508,7 @@ async def _git_push_result(
             pushed=False,
             failed=True,
             returncode=r.returncode,
-            stdout=r.stdout,
+            stdout=r.stdout or "",
             stderr=message,
             reason_code=_GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
             details={

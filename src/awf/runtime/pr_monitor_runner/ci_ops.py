@@ -28,7 +28,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
-from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
+from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt_or_empty
 from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -83,7 +83,7 @@ async def _run_ci_fix(
         repo_slug=repo.slug(),
         failures=failures,
         workspace_runtime_context=self._workspace_runtime_context,
-        owned_paths=await _owned_paths_for_prompt(self, workspace_id),
+        owned_paths=await _owned_paths_for_prompt_or_empty(self, workspace_id),
     )
     agent_run_err = None
     command_evidence: list[str] = []

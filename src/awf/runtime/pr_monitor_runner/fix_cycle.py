@@ -210,10 +210,9 @@ async def _run_fix_cycle(
                     # re-resolved) next cycle instead of staying
                     # marked-addressed-but-unresolved and wedging the merge
                     # gate. The filed-issue marker survives the clear, so the
-                    # idempotent capture never re-files. Workflow-scope push
-                    # failures preserve this state because the durable
-                    # follow-up capture does not depend on publishing commits.
+                    # idempotent capture never re-files.
                     publish_dependent_ids.append(t.thread_id)
+                    workflow_scope_resolution_dependent_ids.append(t.thread_id)
                 elif captured is False:
                     _mark_review_thread_addressed(state, t, "needs_human")
                 # captured is None: a transient capture failure already cleared
@@ -570,8 +569,9 @@ def _requeue_workflow_scope_publish_dependent_items(
     token with ``workflow`` scope. Convert committed fixes whose publication was
     blocked so the standard human-notification path can surface the exact
     permission reason. Clear inline false-positive state that still depends on a
-    later GraphQL ``resolve_thread`` call, while preserving captured defers and
-    durable review-level false-positive resolutions.
+    later GraphQL ``resolve_thread`` call, including captured defers whose
+    durable issue marker survives state cleanup. Preserve durable review-level
+    false-positive resolutions.
     """
     publish_blocked_ids = set(item_ids)
     for item_id in dict.fromkeys(resolution_dependent_ids):

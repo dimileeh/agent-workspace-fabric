@@ -68,7 +68,7 @@ async def _address_thread(
     prompt_owned_paths = (
         owned_paths
         if owned_paths is not None
-        else await _owned_paths_for_prompt(runner, workspace_id)
+        else await _owned_paths_for_prompt_or_empty(runner, workspace_id)
     )
     prompt = address_thread_prompt(
         pr_number=pr_number,
@@ -140,7 +140,7 @@ async def _address_review_comment_result(
     prompt_owned_paths = (
         owned_paths
         if owned_paths is not None
-        else await _owned_paths_for_prompt(runner, workspace_id)
+        else await _owned_paths_for_prompt_or_empty(runner, workspace_id)
     )
     prompt = address_review_comment_prompt(
         pr_number=pr_number,
@@ -168,6 +168,21 @@ async def _owned_paths_for_prompt(
     async with session_context as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         return list(workspace.owned_paths) if workspace is not None else []
+
+
+async def _owned_paths_for_prompt_or_empty(
+    runner: PullRequestMonitorRunner,
+    workspace_id: str,
+) -> list[str]:
+    try:
+        return await _owned_paths_for_prompt(runner, workspace_id)
+    except Exception as exc:
+        _log.warning(
+            "monitor.owned_paths_prompt_load_failed",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+        )
+        return []
 
 
 async def _invoke_cli_for_verdict(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import structlog
@@ -20,9 +21,11 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     ReviewComment,
     ReviewThread,
+    _review_thread_body_hash,
     decide,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, fix_cycle
+from awf.runtime.pr_monitor_runner.comments import VerdictResult, _address_thread
 from awf.runtime.pr_monitor_runner.fix_cycle import (
     _requeue_workflow_scope_publish_dependent_items,
 )
@@ -97,7 +100,7 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
         "`.github/workflows/publish.yml` without `workflow` scope\n"
         " ! [remote rejected] HEAD -> awf/ws (protected branch hook declined)"
     )
-    cmd.queue_result(returncode=1, stderr=stderr)
+    cmd.queue_result(returncode=1, stdout=None, stderr=stderr)  # type: ignore[arg-type]
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
@@ -119,6 +122,7 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     assert result.error_message is not None
     assert ".github/workflows/publish.yml" in result.error_message
     assert "`workflow` scope" in result.error_message
+    assert result.stdout == ""
     assert result.workflow_scope_required is True
     assert result.terminal_monitor_failure is False
     assert len(cmd.calls) == 1
@@ -820,12 +824,12 @@ async def test_workflow_scope_push_failure_preserves_false_positive_review_comme
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_preserves_captured_defer_thread_state(
+async def test_workflow_scope_push_failure_requeues_captured_defer_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify workflow-scope failures preserve captured-defer inline verdicts."""
+    """Verify workflow-scope failures retry deferred thread resolution later."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
@@ -853,9 +857,14 @@ async def test_workflow_scope_push_failure_preserves_captured_defer_thread_state
         author="cursor[bot]",
     )
     state = MonitorState()
+    deferred_issue_marker = fix_cycle._deferred_issue_filed_marker(
+        deferred_thread.thread_id,
+        _review_thread_body_hash(deferred_thread),
+    )
 
     async def _capture_deferred(*_args: object, **kwargs: object) -> bool:
         assert kwargs["thread"] == deferred_thread
+        state.mark_addressed(deferred_issue_marker, "https://github.example/issues/305")
         return True
 
     monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_deferred)
@@ -875,25 +884,25 @@ async def test_workflow_scope_push_failure_preserves_captured_defer_thread_state
 
     assert result.failed is True
     assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert state.threads_addressed_ids["T_defer"] == "defer"
-    assert "__review_thread_body_hash__:T_defer" in state.threads_addressed_ids
-    assert state.threads_addressed_ids[_defer_reason_state_key("T_defer")] == (
-        "track follow-up separately"
-    )
+    assert "T_defer" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
+    assert _defer_reason_state_key("T_defer") not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[deferred_issue_marker].endswith("/issues/305")
 
     action = decide(_status(inline=(deferred_thread,)), state, MonitorConfig())
 
-    assert isinstance(action, NotifyHuman)
+    assert isinstance(action, AddressComments)
+    assert action.threads == (deferred_thread,)
 
 
 @pytest.mark.unit
-async def test_later_generic_push_failure_keeps_workflow_scope_preserved_defer_state(
+async def test_later_generic_push_failure_keeps_workflow_scope_requeued_defer_retryable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify preserved defer state is not re-addressed by a later push failure."""
+    """Verify requeued defers stay retryable without duplicate capture issues."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
@@ -939,7 +948,14 @@ async def test_later_generic_push_failure_keeps_workflow_scope_preserved_defer_s
     captured_threads: list[str] = []
 
     async def _capture_deferred(*_args: object, **kwargs: object) -> bool:
-        captured_threads.append(kwargs["thread"].thread_id)
+        thread = kwargs["thread"]
+        marker = fix_cycle._deferred_issue_filed_marker(
+            thread.thread_id,
+            _review_thread_body_hash(thread),
+        )
+        if marker not in state.threads_addressed_ids:
+            captured_threads.append(thread.thread_id)
+            state.mark_addressed(marker, f"https://github.example/issues/{len(captured_threads)}")
         return True
 
     monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_deferred)
@@ -959,7 +975,7 @@ async def test_later_generic_push_failure_keeps_workflow_scope_preserved_defer_s
 
     assert workflow_scope_result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
     assert captured_threads == ["T_defer"]
-    assert state.threads_addressed_ids["T_defer"] == "defer"
+    assert "T_defer" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["T_workflow"] == "needs_human"
 
     action = decide(
@@ -969,8 +985,9 @@ async def test_later_generic_push_failure_keeps_workflow_scope_preserved_defer_s
     )
 
     assert isinstance(action, AddressComments)
-    assert action.threads == (later_thread,)
+    assert action.threads == (deferred_thread, later_thread)
 
+    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
     adapter.queue(stdout="AWF-VERDICT: FIXED: handled later follow-up")
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(returncode=1, stderr="remote: pre-receive hook declined")
@@ -990,13 +1007,14 @@ async def test_later_generic_push_failure_keeps_workflow_scope_preserved_defer_s
 
     assert generic_push_result.reason_code == "GIT_PUSH_FAILED"
     assert captured_threads == ["T_defer"]
-    assert state.threads_addressed_ids["T_defer"] == "defer"
-    assert "__review_thread_body_hash__:T_defer" in state.threads_addressed_ids
-    assert state.threads_addressed_ids[_defer_reason_state_key("T_defer")] == (
-        "track follow-up separately"
+    assert "T_defer" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
+    assert _defer_reason_state_key("T_defer") not in state.threads_addressed_ids
+    assert any(
+        key.startswith("__deferred_issue_filed__:T_defer:") for key in state.threads_addressed_ids
     )
     assert "T_later" not in state.threads_addressed_ids
-    assert len(adapter.calls) == 3
+    assert len(adapter.calls) == 4
 
 
 @pytest.mark.unit
@@ -1029,17 +1047,17 @@ def test_workflow_scope_requeue_marks_publish_dependent_fixes_needs_human() -> N
     _requeue_workflow_scope_publish_dependent_items(
         state,
         ["T_workflow", "issue:fixed"],
-        resolution_dependent_ids=["T_false_positive"],
+        resolution_dependent_ids=["T_false_positive", "T_defer"],
         reason=expected_reason,
     )
 
     assert "T_false_positive" not in state.threads_addressed_ids
     assert "__review_thread_body_hash__:T_false_positive" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids["T_defer"] == "defer"
-    assert state.threads_addressed_ids["__review_thread_body_hash__:T_defer"] == "defer-hash"
+    assert "T_defer" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids["__defer_reason__:T_defer"] == "captured defer reason"
+    assert "__defer_reason__:T_defer" not in state.threads_addressed_ids
     assert state.threads_addressed_ids[deferred_issue_marker].endswith("/issues/305")
     assert state.threads_addressed_ids["T_workflow"] == "needs_human"
     assert state.threads_addressed_ids["__review_thread_body_hash__:T_workflow"] == (
@@ -1057,6 +1075,48 @@ def test_workflow_scope_requeue_marks_publish_dependent_fixes_needs_human() -> N
     assert state.threads_addressed_ids[_needs_human_reason_state_key("issue:fixed")] == (
         expected_reason
     )
+
+
+@pytest.mark.unit
+async def test_address_thread_owned_paths_fallback_treats_prompt_lookup_failure_as_empty(
+    tmp_path: Path,
+) -> None:
+    """Verify secondary prompt callers do not fail when owned paths cannot load."""
+    thread = ReviewThread(
+        thread_id="T_owned_paths",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="please address this",
+        author="cursor[bot]",
+    )
+    prompts: list[str] = []
+
+    def _broken_session_factory() -> object:
+        raise TypeError("legacy test double")
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        prompts.append(str(kwargs["prompt"]))
+        return VerdictResult(verdict="false_positive", reason="already handled")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(session_factory=_broken_session_factory),
+        _workspace_runtime_context="",
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+    )
+
+    verdict = await _address_thread(
+        runner,  # type: ignore[arg-type]
+        workspace_id="ws_prompt_fallback",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        thread=thread,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=MonitorState(),
+    )
+
+    assert verdict == "false_positive"
+    assert len(prompts) == 1
 
 
 @pytest.mark.unit
