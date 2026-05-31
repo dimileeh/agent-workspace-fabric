@@ -19,6 +19,7 @@ ALLOWLIST = {
     "CLAUDE_CODE_AUTH_OK": "Success states do not need failure documentation.",
     "GEMINI_AUTH_OK": "Success states do not need failure documentation.",
     "OPENCODE_AUTH_OK": "Success states do not need failure documentation.",
+    "GROK_AUTH_OK": "Success states do not need failure documentation.",
     "PORT_OPEN": "Success states do not need failure documentation.",
     "SUFFICIENT_DISK": "Success states do not need failure documentation.",
     "NO_STRANDED_WORKSPACES": "Success states do not need failure documentation.",

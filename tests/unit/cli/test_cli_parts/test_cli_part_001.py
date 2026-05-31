@@ -107,6 +107,33 @@ class TestWorkspaceCreate:
         assert body["repo"]["base_branch"] == "development"
 
     @pytest.mark.unit
+    def test_workspace_create_accepts_grok_agent(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_grok"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Add Grok runtime",
+                    "--prompt",
+                    "Wire the grok adapter.",
+                    "--agent",
+                    "grok",
+                    "--model",
+                    "grok-build-0.1",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["task"]["agent"] == "grok"
+        assert body["task"]["model"] == "grok-build-0.1"
+
+    @pytest.mark.unit
     def test_companion_json_can_include_compose_up_timeout(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_companion"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
