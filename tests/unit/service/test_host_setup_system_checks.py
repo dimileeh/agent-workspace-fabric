@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -20,6 +20,7 @@ from awf.host_setup.system_checks import (
     INTERACTIVE_INPUT_REQUIRED,
     KNOWN_SETUP_PROVIDERS,
     CommandResult,
+    PortProbeResult,
     SetupCheckError,
     SetupCheckLevel,
     SetupCheckResult,
@@ -184,14 +185,43 @@ def test_check_ports_ok_when_free_and_blocks_when_in_use() -> None:
     let ``awf setup --dry-run`` exit 0 and still advise ``awf start``, which then
     fails — so an occupied API port is a readiness blocker, not advisory.
     """
-    free = check_ports(8000, is_available=lambda _port: True)
-    in_use = check_ports(8000, is_available=lambda _port: False)
+    free = check_ports(8000, probe=lambda _port: PortProbeResult.FREE)
+    in_use = check_ports(8000, probe=lambda _port: PortProbeResult.IN_USE)
     assert free.level is SetupCheckLevel.OK
+    assert free.data["available"] is True
     assert in_use.level is SetupCheckLevel.BLOCKED
     assert in_use.data["port"] == 8000
+    assert in_use.data["available"] is False
     assert in_use.fix is not None
     # The fix must not promise an auto-fallback that the codebase does not implement.
     assert "can also start on another port" not in in_use.fix
+
+
+@pytest.mark.unit
+def test_check_ports_distinguishes_permission_and_other_bind_errors() -> None:
+    """Verify non-occupancy bind failures get their own cause/fix, not "in use".
+
+    The setup probe runs as the current (possibly unprivileged) user, while
+    ``awf start`` publishes the port through the root Docker daemon, so a
+    permission or other bind error does not prove the port is unusable. Such
+    failures must be reported as advisory warnings with an accurate cause and
+    remediation — never mislabelled as occupancy with a "free the port" fix.
+    """
+    permission = check_ports(80, probe=lambda _port: PortProbeResult.PERMISSION_DENIED)
+    other = check_ports(8000, probe=lambda _port: PortProbeResult.UNAVAILABLE)
+
+    assert permission.level is SetupCheckLevel.WARNING
+    assert permission.data["probe"] == PortProbeResult.PERMISSION_DENIED.value
+    assert "permission" in permission.summary.lower()
+    assert "already in use" not in permission.summary
+    assert permission.fix is not None
+    assert "Free the port" not in permission.fix
+
+    assert other.level is SetupCheckLevel.WARNING
+    assert other.data["probe"] == PortProbeResult.UNAVAILABLE.value
+    assert "already in use" not in other.summary
+    assert other.fix is not None
+    assert "Free the port" not in other.fix
 
 
 # --- Disk -----------------------------------------------------------------
@@ -656,7 +686,7 @@ def test_default_command_runner_decodes_with_replacement(
 
 
 @pytest.mark.unit
-def test_default_port_available_detects_in_use_and_free() -> None:
+def test_default_port_probe_detects_in_use_and_free() -> None:
     """Verify the default port probe distinguishes in-use from free ports."""
     import socket
 
@@ -666,14 +696,56 @@ def test_default_port_available_detects_in_use_and_free() -> None:
     port = listener.getsockname()[1]
     listener.listen(1)
     try:
-        assert system_checks._default_port_available(port) is False
+        assert system_checks._default_port_probe(port) is PortProbeResult.IN_USE
     finally:
         listener.close()
-    assert system_checks._default_port_available(port) is True
+    assert system_checks._default_port_probe(port) is PortProbeResult.FREE
 
 
 @pytest.mark.unit
-def test_default_port_available_detects_non_loopback_listener() -> None:
+def test_default_port_probe_classifies_bind_errno() -> None:
+    """Verify the probe maps bind errnos to distinct outcomes, not just in-use.
+
+    EADDRINUSE is occupancy, EACCES/EPERM is a permission failure (e.g. a
+    privileged ``<1024`` port without root), and any other OSError is an
+    unspecified bind failure rather than being collapsed into "port in use".
+    """
+    import errno
+    import socket
+
+    class _BindError:
+        def __init__(self, exc: OSError) -> None:
+            self._exc = exc
+
+        def __enter__(self) -> _BindError:
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def setsockopt(self, *_args: object) -> None:
+            return None
+
+        def bind(self, *_args: object) -> None:
+            raise self._exc
+
+    def _factory(exc: OSError) -> Callable[..., _BindError]:
+        return lambda *_args, **_kwargs: _BindError(exc)
+
+    cases = {
+        errno.EADDRINUSE: PortProbeResult.IN_USE,
+        errno.EACCES: PortProbeResult.PERMISSION_DENIED,
+        errno.EPERM: PortProbeResult.PERMISSION_DENIED,
+        errno.EADDRNOTAVAIL: PortProbeResult.UNAVAILABLE,
+    }
+    for code, expected in cases.items():
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(socket, "socket", _factory(OSError(code, "boom")))
+            assert system_checks._default_port_probe(8000) is expected
+
+
+@pytest.mark.unit
+def test_default_port_probe_detects_non_loopback_listener() -> None:
     """Verify the probe matches Docker's all-interface bind, not just loopback.
 
     ``docker/compose/local-service.yml`` publishes the API port without a host
@@ -703,7 +775,7 @@ def test_default_port_available_detects_non_loopback_listener() -> None:
     port = listener.getsockname()[1]
     listener.listen(1)
     try:
-        assert system_checks._default_port_available(port) is False
+        assert system_checks._default_port_probe(port) is PortProbeResult.IN_USE
     finally:
         listener.close()
 

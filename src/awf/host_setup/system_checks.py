@@ -55,6 +55,21 @@ class SetupCheckLevel(StrEnum):
     BLOCKED = "blocked"
 
 
+class PortProbeResult(StrEnum):
+    """Why an attempt to bind the AWF API host port succeeded or failed.
+
+    A bare boolean cannot tell an occupied port apart from a port the probe was
+    not allowed to bind, so the readiness check would report the wrong cause and
+    fix for every non-occupancy bind error. Classifying the bind outcome by
+    ``errno`` keeps the operator-facing remediation accurate.
+    """
+
+    FREE = "free"
+    IN_USE = "in_use"
+    PERMISSION_DENIED = "permission_denied"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True)
 class SetupCheckResult:
     """Outcome of one read-only host system check (non-secret facts only)."""
@@ -95,7 +110,7 @@ class SetupCheckError(RuntimeError):
 
 WhichFn = Callable[[str], str | None]
 CommandRunner = Callable[[Sequence[str]], CommandResult | None]
-PortAvailableFn = Callable[[int], bool]
+PortProbeFn = Callable[[int], PortProbeResult]
 FreeDiskFn = Callable[[str | Path], int | None]
 CpuCountFn = Callable[[], int | None]
 MemoryFn = Callable[[], int | None]
@@ -125,8 +140,8 @@ def _default_command_runner(
     )
 
 
-def _default_port_available(port: int) -> bool:
-    """Return whether ``<port>`` can be bound on all host interfaces right now.
+def _default_port_probe(port: int) -> PortProbeResult:
+    """Classify whether the AWF API host port can be bound on all interfaces.
 
     The probe binds the IPv4 wildcard address (``0.0.0.0``) rather than just
     loopback because the local-service Compose file publishes the API port
@@ -134,16 +149,27 @@ def _default_port_available(port: int) -> bool:
     it on every host interface. A loopback-only probe would report the port free
     even when something is listening on another interface, only for ``awf start``
     to fail later when Docker tries to publish the all-interface bind.
+
+    A bind failure is classified by ``errno`` so the readiness check reports the
+    real cause rather than mislabelling everything as occupancy: ``EADDRINUSE``
+    means the port is taken, ``EACCES``/``EPERM`` means the probe lacks
+    permission to bind it (e.g. a privileged ``<1024`` port without root), and
+    any other ``OSError`` is surfaced as an unspecified bind failure.
     """
+    import errno
     import socket
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(("0.0.0.0", port))  # all interfaces — match Docker's published bind
-        return True
-    except OSError:
-        return False
+        return PortProbeResult.FREE
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            return PortProbeResult.IN_USE
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            return PortProbeResult.PERMISSION_DENIED
+        return PortProbeResult.UNAVAILABLE
 
 
 def _default_free_disk_bytes(path: str | Path) -> int | None:
@@ -336,22 +362,54 @@ def check_python_runtime(
 def check_ports(
     port: int,
     *,
-    is_available: PortAvailableFn = _default_port_available,
+    probe: PortProbeFn = _default_port_probe,
 ) -> SetupCheckResult:
     """Check the configured AWF API host port can be bound (a startup blocker if not).
 
     The local-service Compose stack publishes the API on a fixed host port
     (``${AWF_API_HOST_PORT:-8000}:8000``) and nothing auto-selects a free port at
-    start time, so an occupied port is a hard readiness blocker — ``awf start``
+    start time, so an *occupied* port is a hard readiness blocker — ``awf start``
     cannot publish the port and fails — rather than an advisory warning.
+
+    A bind failure that is *not* occupancy (permission denied on a privileged
+    port, or another bind error) gets its own cause and fix and stays advisory:
+    this probe runs as the current user while ``awf start`` publishes the port
+    through the root Docker daemon, so such a failure does not prove the port is
+    unusable.
     """
-    if is_available(port):
+    outcome = probe(port)
+    if outcome is PortProbeResult.FREE:
         return SetupCheckResult(
             name="ports",
             level=SetupCheckLevel.OK,
             summary=f"API host port {port} is free.",
             detail=f"0.0.0.0:{port} (all interfaces) could be bound for the local AWF API.",
-            data={"port": port, "available": True},
+            data={"port": port, "available": True, "probe": outcome.value},
+        )
+    if outcome is PortProbeResult.PERMISSION_DENIED:
+        return SetupCheckResult(
+            name="ports",
+            level=SetupCheckLevel.WARNING,
+            summary=f"API host port {port} could not be probed: permission denied.",
+            detail=f"Binding 0.0.0.0:{port} (all interfaces) was refused with a permission "
+            "error; ports below 1024 are privileged and cannot be bound by an unprivileged "
+            "user. awf start publishes the port through the root Docker daemon and may still "
+            "succeed, so this probe cannot confirm the port is bindable.",
+            fix="Set a non-privileged api.host_port (AWF_API_HOST_PORT >= 1024), or verify "
+            "the port is reachable after awf start.",
+            data={"port": port, "available": False, "probe": outcome.value},
+        )
+    if outcome is PortProbeResult.UNAVAILABLE:
+        return SetupCheckResult(
+            name="ports",
+            level=SetupCheckLevel.WARNING,
+            summary=f"API host port {port} could not be probed.",
+            detail=f"Binding 0.0.0.0:{port} (all interfaces) failed for a reason other than "
+            "occupancy or permissions, so this probe could not confirm the port is bindable.",
+            fix="Verify the host can bind 0.0.0.0 on this port (check the address and any "
+            "network policy), or set a different api.host_port (AWF_API_HOST_PORT), "
+            "then re-run awf setup --dry-run.",
+            data={"port": port, "available": False, "probe": outcome.value},
         )
     return SetupCheckResult(
         name="ports",
@@ -362,7 +420,7 @@ def check_ports(
         "awf start cannot publish it and will fail until the port is free.",
         fix="Free the port or set a different api.host_port (AWF_API_HOST_PORT), "
         "then re-run awf setup --dry-run.",
-        data={"port": port, "available": False},
+        data={"port": port, "available": False, "probe": outcome.value},
     )
 
 
