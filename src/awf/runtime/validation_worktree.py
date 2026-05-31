@@ -379,6 +379,10 @@ async def cleanup_validation_worktree_side_effects(
         ignore_ignored_paths=ignore_ignored_paths,
     )
     if not verify.clean:
+        if verify.reason_code != VALIDATION_WORKTREE_STATUS_FAILED:
+            head_check = await _verify_head_unchanged(restore_ref=restore_ref)
+            if head_check is not None:
+                return head_check
         if verify.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
             return ValidationWorktreeCleanup(
                 cleaned=False,
