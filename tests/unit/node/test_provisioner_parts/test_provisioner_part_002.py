@@ -559,7 +559,7 @@ class TestOperatorControlRaces:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.destroyed.value
-            assert reloaded.compose_project_name == f"awf_{ws_id}"
+            assert reloaded.compose_project_name is None
 
     @pytest.mark.unit
     async def test_cancel_after_launch_guard_skips_terminal_runtime_released(
