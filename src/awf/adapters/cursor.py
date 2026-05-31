@@ -58,21 +58,6 @@ class CursorAdapter(AgentAdapter):
         )
 
 
-def _cursor_selected_model(
-    *,
-    model: str | None,
-    default_model: str | None,
-    effort: str | None,
-) -> str | None:
-    """Return the Cursor model for one run.
-
-    ``model`` is an explicit per-run override. The bound Cursor thinking model
-    default is effort-derived, so lower efforts without an override should not
-    inherit it and accidentally force thinking mode.
-    """
-    return cursor_selected_model(model=model, default_model=default_model, effort=effort)
-
-
 def _cursor_model_for_effort(*, model: str | None, effort: str | None) -> str | None:
     """Map AWF effort to Cursor's documented portable controls.
 
