@@ -63,6 +63,7 @@ from awf.db.repositories.base import (
     _workspace_idempotency_advisory_lock_key,
     _workspace_status_value,
     host_ports_from_resolved_profile,
+    host_ports_from_task_policy_companions,
     resolve_session_dialect_name,
 )
 from awf.db.repositories.quality_repo import (
@@ -560,29 +561,12 @@ class WorkspaceRepository:
         conflicts: builtins.list[HostPortConflict] = []
         seen: builtins.set[builtins.tuple[str, int]] = set()
         for row in rows:
-            task_policy = row.task_policy
-            if task_policy and isinstance(task_policy, dict):
-                companions = task_policy.get("companions")
-                if companions and isinstance(companions, list):
-                    for companion in companions:
-                        if not isinstance(companion, dict):
-                            continue
-                        ports = companion.get("ports")
-                        if not ports or not isinstance(ports, list):
-                            continue
-                        for port_mapping in ports:
-                            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
-                                try:
-                                    hp = int(port_mapping[1])
-                                except (ValueError, TypeError):
-                                    continue
-                                if hp in host_ports_set:
-                                    key = (row.id, hp)
-                                    if key not in seen:
-                                        seen.add(key)
-                                        conflicts.append(
-                                            HostPortConflict(host_port=hp, workspace_id=row.id)
-                                        )
+            for hp in host_ports_from_task_policy_companions(row.task_policy):
+                if hp in host_ports_set:
+                    key = (row.id, hp)
+                    if key not in seen:
+                        seen.add(key)
+                        conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
 
             resolved_profile = row.resolved_profile
             for hp in host_ports_from_resolved_profile(resolved_profile):

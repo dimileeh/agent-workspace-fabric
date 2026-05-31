@@ -199,6 +199,35 @@ def host_ports_from_resolved_profile(
     return host_ports
 
 
+def host_ports_from_task_policy_companions(
+    task_policy: Mapping[str, Any] | None,
+) -> builtins.list[int]:
+    """Extract host-side ports from companions stored inside a workspace task_policy.
+
+    Shared by the service layer and the repository layer so that the
+    companion port-mapping data shape is parsed in exactly one place.
+    """
+    if not task_policy or not isinstance(task_policy, dict):
+        return []
+    companions = task_policy.get("companions")
+    if not companions or not isinstance(companions, list):
+        return []
+    host_ports: builtins.list[int] = []
+    for companion in companions:
+        if not isinstance(companion, dict):
+            continue
+        ports = companion.get("ports")
+        if not ports or not isinstance(ports, list):
+            continue
+        for port_mapping in ports:
+            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+                try:
+                    host_ports.append(int(port_mapping[1]))
+                except (ValueError, TypeError):
+                    continue
+    return host_ports
+
+
 @dataclass(frozen=True)
 class OwnedPathOverlapMatch:
     left_path: str

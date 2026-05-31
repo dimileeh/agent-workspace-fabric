@@ -42,7 +42,11 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.db.repositories.base import HostPortConflict, host_ports_from_resolved_profile
+from awf.db.repositories.base import (
+    HostPortConflict,
+    host_ports_from_resolved_profile,
+    host_ports_from_task_policy_companions,
+)
 from awf.profiles.models import ProfileAppEndpoint
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
@@ -311,31 +315,7 @@ DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 
 
 _host_ports_from_resolved_profile = host_ports_from_resolved_profile
-
-
-def _host_ports_from_task_policy_companions(
-    task_policy: Mapping[str, Any] | None,
-) -> builtins.list[int]:
-    """Extract host-side ports from companions stored inside a workspace task_policy."""
-    if not task_policy or not isinstance(task_policy, dict):
-        return []
-    companions = task_policy.get("companions")
-    if not companions or not isinstance(companions, list):
-        return []
-    host_ports: builtins.list[int] = []
-    for companion in companions:
-        if not isinstance(companion, dict):
-            continue
-        ports = companion.get("ports")
-        if not ports or not isinstance(ports, list):
-            continue
-        for port_mapping in ports:
-            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
-                try:
-                    host_ports.append(int(port_mapping[1]))
-                except (ValueError, TypeError):
-                    continue
-    return host_ports
+_host_ports_from_task_policy_companions = host_ports_from_task_policy_companions
 
 
 async def check_host_port_conflicts(

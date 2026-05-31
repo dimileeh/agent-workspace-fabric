@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from awf.service.workspaces import (
-    _host_ports_from_resolved_profile,
-    _host_ports_from_task_policy_companions,
+from awf.db.repositories.base import (
+    host_ports_from_resolved_profile as _host_ports_from_resolved_profile,
+)
+from awf.db.repositories.base import (
+    host_ports_from_task_policy_companions as _host_ports_from_task_policy_companions,
 )
 
 
