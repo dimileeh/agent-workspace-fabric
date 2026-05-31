@@ -280,8 +280,13 @@ async def cleanup_validation_worktree_side_effects(
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
 
-    async def _verify_head_unchanged(*, restore_ref: str) -> ValidationWorktreeCleanup | None:
+    async def _verify_head_unchanged(
+        *, restore_ref: str | None
+    ) -> ValidationWorktreeCleanup | None:
         """Verify HEAD still points at the pre-validation reference."""
+        if restore_ref is None:
+            return None
+
         restore_target = await run_git(["rev-parse", restore_ref])
         if not restore_target.ok:
             return ValidationWorktreeCleanup(
@@ -372,10 +377,9 @@ async def cleanup_validation_worktree_side_effects(
         return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
 
     if check.clean:
-        if restore_ref is not None:
-            head_check = await _verify_head_unchanged(restore_ref=restore_ref)
-            if head_check is not None:
-                return head_check
+        head_check = await _verify_head_unchanged(restore_ref=restore_ref)
+        if head_check is not None:
+            return head_check
         return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
     if check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
         return ValidationWorktreeCleanup(
@@ -455,10 +459,9 @@ async def cleanup_validation_worktree_side_effects(
             verify_check=verify,
         )
 
-    if restore_ref is not None:
-        head_check = await _verify_head_unchanged(restore_ref=restore_ref)
-        if head_check is not None:
-            return head_check
+    head_check = await _verify_head_unchanged(restore_ref=restore_ref)
+    if head_check is not None:
+        return head_check
 
     return ValidationWorktreeCleanup(
         cleaned=True,
