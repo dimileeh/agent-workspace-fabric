@@ -17,7 +17,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -27,6 +27,8 @@ from awf.control.worker.constants import (
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
     _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    _TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+    _TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
 )
 from awf.control.worker.helpers import (
     _worker_exception_is_transient_db_connection,
@@ -179,12 +181,28 @@ async def _list_terminal_runtime_candidates(
     if limit is not None and limit <= 0:
         return []
     terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
-    released_event_exists = (
-        select(WorkspaceEvent.id)
+    latest_released_at = (
+        select(func.max(WorkspaceEvent.occurred_at))
         .where(WorkspaceEvent.workspace_id == Workspace.id)
         .where(WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
         .where(WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-        .exists()
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    latest_revoked_at = (
+        select(func.max(WorkspaceEvent.occurred_at))
+        .where(WorkspaceEvent.workspace_id == Workspace.id)
+        .where(WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+        .where(WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    effectively_released = and_(
+        latest_released_at.isnot(None),
+        or_(
+            latest_revoked_at.is_(None),
+            latest_released_at > latest_revoked_at,
+        ),
     )
     stmt = (
         select(
@@ -209,15 +227,16 @@ async def _list_terminal_runtime_candidates(
         # is only safe while AWF is single-node (Phase 1 PRD §20.1). When
         # Phase 2 introduces multi-node, this branch must gain a node
         # ownership claim or a "found-something" precondition before it
-        # records ``terminal_runtime_released``. ``~released_event_exists``
-        # keeps each row to a single sweep.
+        # records ``terminal_runtime_released``. ``~effectively_released``
+        # keeps each row to a single sweep, but re-includes workspaces
+        # whose release was later revoked (orphan containers still running).
         .where(
             or_(
                 Workspace.node_id == self._config.node_id,
                 Workspace.node_id.is_(None),
             )
         )
-        .where(~released_event_exists)
+        .where(~effectively_released)
         # Order by the retry marker if one has been recorded, falling back
         # to ``updated_at`` for rows that have never failed a release. The
         # marker lets persistently-failing workspaces rotate to the back of
@@ -516,16 +535,21 @@ async def _has_terminal_runtime_release_event(
     workspace_id: str,
 ) -> bool:
     _ = self
-    stmt = (
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-            WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-        )
-        .limit(1)
+    released_at_stmt = select(func.max(WorkspaceEvent.occurred_at)).where(
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
+    released_at = (await session.execute(released_at_stmt)).scalar_one_or_none()
+    if released_at is None:
+        return False
+    revoked_at_stmt = select(func.max(WorkspaceEvent.occurred_at)).where(
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    )
+    revoked_at = (await session.execute(revoked_at_stmt)).scalar_one_or_none()
+    return revoked_at is None or released_at > revoked_at
 
 
 async def _has_terminal_runtime_release_failure_event(

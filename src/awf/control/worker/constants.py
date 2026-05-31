@@ -8,11 +8,19 @@ from awf.db.enums import TaskKind, WorkspaceStatus
 from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
 )
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
 )
+
+_TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE = TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE
+"""Module-local alias for the revoked-release event type."""
+
+_TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE = TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE
+"""Module-local alias for the revoked-release reason code."""
 
 _ACTIVE_EXECUTION_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.running,
