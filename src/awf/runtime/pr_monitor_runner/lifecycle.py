@@ -187,10 +187,19 @@ async def _refresh_operator_state_from_workspace(
         pr_number = ws.pr_number
 
     changed = False
+    state_hint = state.pending_operator_hint
+    if state_hint is not None and state_hint.operation_id is not None:
+        processed_key = operator_hint_processed_key(state_hint.operation_id)
+        if db_threads_addressed.get(processed_key) == "processed":
+            state.mark_addressed(processed_key, "processed")
+        if _operator_hint_is_processed(state.threads_addressed_ids, state_hint):
+            state.pending_operator_hint = None
+            changed = True
+
     db_hint = operator_hint_from_threads(db_threads_addressed)
-    if db_hint is not None and not _operator_hint_is_processed(
-        state.threads_addressed_ids,
-        db_hint,
+    if db_hint is not None and not (
+        _operator_hint_is_processed(state.threads_addressed_ids, db_hint)
+        or _operator_hint_is_processed(db_threads_addressed, db_hint)
     ):
         state_hint = state.pending_operator_hint
         state_hint_matches = state_hint is not None and _operator_hint_matches(

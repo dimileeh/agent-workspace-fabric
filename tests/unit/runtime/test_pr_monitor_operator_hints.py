@@ -1344,6 +1344,50 @@ async def test_refresh_operator_state_imports_concurrent_terminal_same_operation
 
 
 @pytest.mark.unit
+async def test_refresh_operator_state_clears_processed_operator_hint_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    hint = OperatorHint(
+        reason="operator hint was processed by another monitor pass",
+        operation_id="op_hint_refresh_processed_elsewhere",
+        requested_at="2026-05-31T01:05:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    stale_workspace = await runner._load_workspace(workspace_id)
+    stale_state = runner._load_state(stale_workspace)
+    assert stale_state.pending_operator_hint == hint
+
+    processed_key = operator_hint_processed_key("op_hint_refresh_processed_elsewhere")
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {processed_key: "processed"}
+        await session.commit()
+
+    changed = await runner._refresh_operator_state_from_workspace(workspace_id, stale_state)
+    action = decide(_ready_status(), stale_state, MonitorConfig(auto_merge=True))
+
+    assert changed is True
+    assert stale_state.pending_operator_hint is None
+    assert stale_state.threads_addressed_ids[processed_key] == "processed"
+    assert isinstance(action, Merge)
+
+
+@pytest.mark.unit
 async def test_persist_state_preserves_concurrent_operator_hint_and_freeze(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
