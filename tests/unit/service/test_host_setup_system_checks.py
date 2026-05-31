@@ -11,6 +11,7 @@ import pytest
 from awf.host_setup import system_checks
 from awf.host_setup.config import DEFAULT_API_HOST_PORT, ApiConfig, HostSetupConfig
 from awf.host_setup.rendering import (
+    INTERACTIVE_INPUT_REQUIRED,
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
     render_first_run_json,
@@ -18,7 +19,6 @@ from awf.host_setup.rendering import (
 )
 from awf.host_setup.source_assets import SOURCE_CHECKOUT_INVALID, SourceCheckoutError
 from awf.host_setup.system_checks import (
-    INTERACTIVE_INPUT_REQUIRED,
     KNOWN_SETUP_PROVIDERS,
     CommandResult,
     PortProbeResult,
