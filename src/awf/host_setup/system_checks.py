@@ -19,7 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from awf.host_setup.config import DEFAULT_API_HOST_PORT, HostSetupConfig
+from awf.host_setup.config import DEFAULT_API_HOST_PORT
 
 # The reason-code constants below are rendering-layer contracts owned by
 # ``awf.host_setup.rendering``. They are imported here purely for internal use
@@ -2289,7 +2289,6 @@ def check_required_service_env(*, environ: Mapping[str, str] | None = None) -> S
 
 def run_system_checks(
     *,
-    config: HostSetupConfig,  # noqa: ARG001 - retained as the canonical host-setup input; no probe reads the persisted config (awf start resolves port/work dir from the Compose env only)
     work_dir: Path | None = None,
     port: int | None = None,
     environ: Mapping[str, str] | None = None,

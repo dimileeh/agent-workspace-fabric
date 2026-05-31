@@ -181,7 +181,6 @@ def _run_setup(
     # so setup probes the same values ``awf start`` will honor instead of the
     # default 8000/work dir.
     results = run_system_checks(
-        config=config,
         environ=_readiness_environ(probe_source),
     )
     payload = build_setup_readiness_payload(

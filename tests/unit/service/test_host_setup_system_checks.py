@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from awf.host_setup import system_checks
-from awf.host_setup.config import DEFAULT_API_HOST_PORT, ApiConfig, HostSetupConfig
+from awf.host_setup.config import DEFAULT_API_HOST_PORT, HostSetupConfig
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_PROVIDER_UNKNOWN,
@@ -190,7 +190,6 @@ def test_run_system_checks_docker_probe_targets_resolved_docker_host(
     _stub_non_docker_checks_ok(monkeypatch)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         environ={"AWF_DOCKER_HOST": "tcp://remote:2375"},
     )
 
@@ -235,7 +234,7 @@ def test_run_system_checks_docker_probe_inherits_env_without_service_env(
     monkeypatch.setattr(system_checks.shutil, "which", lambda _cmd: "/usr/bin/docker")
     _stub_non_docker_checks_ok(monkeypatch)
 
-    run_system_checks(config=HostSetupConfig())
+    run_system_checks()
 
     info_env = next(env for args, env in calls if args[:2] == ("docker", "info"))
     assert info_env is None
@@ -289,7 +288,6 @@ def test_run_system_checks_docker_binary_lookup_uses_resolved_path(
     _stub_non_docker_checks_ok(monkeypatch)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         environ={"PATH": "/opt/docker/bin"},
     )
 
@@ -794,7 +792,7 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
     monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))
 
-    results = run_system_checks(config=HostSetupConfig())
+    results = run_system_checks()
 
     assert [r.name for r in results] == [
         "docker",
@@ -864,7 +862,7 @@ def test_run_system_checks_omits_compose_when_docker_binary_absent(
     monkeypatch.setattr(system_checks, "check_compose", tracking_compose)
     _stub_non_docker_checks_ok(monkeypatch)
 
-    results = run_system_checks(config=HostSetupConfig())
+    results = run_system_checks()
 
     names = [r.name for r in results]
     assert compose_calls == []
@@ -912,7 +910,7 @@ def test_run_system_checks_keeps_compose_when_docker_daemon_down(
     )
     _stub_non_docker_checks_ok(monkeypatch)
 
-    names = [r.name for r in run_system_checks(config=HostSetupConfig())]
+    names = [r.name for r in run_system_checks()]
 
     assert names.index("compose") == 1
 
@@ -964,7 +962,6 @@ def test_run_system_checks_blocks_unresolvable_work_dir_user(
     monkeypatch.setattr(system_checks, "check_disk", fake_disk)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         environ={"AWF_HOST_WORK_DIR": "~olduser/.awf/service"},
     )
 
@@ -1622,7 +1619,6 @@ def test_run_system_checks_honors_awf_api_host_port_env(
     _patch_probes_capture_port(monkeypatch, captured)
 
     run_system_checks(
-        config=HostSetupConfig(api=ApiConfig(host_port=8000)),
         work_dir=Path("/tmp"),
         environ={"AWF_API_HOST_PORT": "9100"},
     )
@@ -1639,7 +1635,6 @@ def test_run_system_checks_explicit_port_overrides_env(
     _patch_probes_capture_port(monkeypatch, captured)
 
     run_system_checks(
-        config=HostSetupConfig(api=ApiConfig(host_port=8000)),
         work_dir=Path("/tmp"),
         port=9999,
         environ={"AWF_API_HOST_PORT": "9100"},
@@ -1671,7 +1666,6 @@ def test_run_system_checks_falls_back_to_compose_default_when_override_absent(
     for blank in (None, ""):
         environ = {} if blank is None else {"AWF_API_HOST_PORT": blank}
         run_system_checks(
-            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
             work_dir=Path("/tmp"),
             environ=environ,
         )
@@ -1699,7 +1693,6 @@ def test_run_system_checks_blocks_on_whitespace_only_override(
         _patch_probes_capture_port(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
             work_dir=Path("/tmp"),
             environ={"AWF_API_HOST_PORT": whitespace},
         )
@@ -1731,7 +1724,6 @@ def test_run_system_checks_blocks_on_padded_api_host_port_override(
         _patch_probes_capture_port(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
             work_dir=Path("/tmp"),
             environ={"AWF_API_HOST_PORT": padded},
         )
@@ -1762,7 +1754,6 @@ def test_run_system_checks_blocks_on_python_only_api_host_port_spelling(
         _patch_probes_capture_port(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
             work_dir=Path("/tmp"),
             environ={"AWF_API_HOST_PORT": spelling},
         )
@@ -1791,7 +1782,6 @@ def test_run_system_checks_blocks_on_set_but_invalid_override(
         _patch_probes_capture_port(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
             work_dir=Path("/tmp"),
             environ={"AWF_API_HOST_PORT": invalid},
         )
@@ -1812,7 +1802,6 @@ def test_run_system_checks_explicit_port_suppresses_invalid_override_block(
     _patch_probes_capture_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(api=ApiConfig(host_port=8000)),
         work_dir=Path("/tmp"),
         port=9999,
         environ={"AWF_API_HOST_PORT": "not-a-port"},
@@ -1996,7 +1985,6 @@ def test_run_system_checks_probes_postgres_default_host_port(
     monkeypatch.setattr(system_checks, "check_postgres_port", fake_postgres_port)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={},
     )
@@ -2016,7 +2004,6 @@ def test_run_system_checks_honors_awf_postgres_host_port_env(
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"AWF_POSTGRES_HOST_PORT": "6543"},
     )
@@ -2034,7 +2021,6 @@ def test_run_system_checks_blocks_on_set_but_invalid_postgres_override(
         _patch_probes_capture_postgres_port(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(),
             work_dir=Path("/tmp"),
             environ={"AWF_POSTGRES_HOST_PORT": invalid},
         )
@@ -2063,7 +2049,6 @@ def test_run_system_checks_blocks_on_padded_postgres_host_port_override(
         _patch_probes_capture_postgres_port(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(),
             work_dir=Path("/tmp"),
             environ={"AWF_POSTGRES_HOST_PORT": padded},
         )
@@ -2093,7 +2078,6 @@ def test_run_system_checks_blocks_on_python_only_postgres_host_port_spelling(
         _patch_probes_capture_postgres_port(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(),
             work_dir=Path("/tmp"),
             environ={"AWF_POSTGRES_HOST_PORT": spelling},
         )
@@ -2116,7 +2100,6 @@ def test_run_system_checks_falls_back_to_postgres_default_when_override_absent(
     for blank in (None, ""):
         environ = {} if blank is None else {"AWF_POSTGRES_HOST_PORT": blank}
         run_system_checks(
-            config=HostSetupConfig(),
             work_dir=Path("/tmp"),
             environ=environ,
         )
@@ -2172,7 +2155,6 @@ def test_run_system_checks_blocks_when_api_and_postgres_host_ports_collide(
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"AWF_API_HOST_PORT": "5433"},
     )
@@ -2199,7 +2181,6 @@ def test_run_system_checks_omits_port_conflict_when_ports_differ(
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={},
     )
@@ -2222,7 +2203,6 @@ def test_run_system_checks_skips_port_conflict_when_an_override_is_invalid(
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"AWF_API_HOST_PORT": "abc", "AWF_POSTGRES_HOST_PORT": "5433"},
     )
@@ -2278,7 +2258,6 @@ def test_run_system_checks_blocks_when_api_and_ollama_bridge_ports_collide(
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "8000"},
     )
@@ -2310,7 +2289,6 @@ def test_run_system_checks_omits_ollama_bridge_port_conflict_when_profile_disabl
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"AWF_OLLAMA_BRIDGE_LISTEN_PORT": "8000"},
     )
@@ -2327,7 +2305,6 @@ def test_run_system_checks_omits_ollama_bridge_port_conflict_when_ports_differ(
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"COMPOSE_PROFILES": "ollama-bridge"},
     )
@@ -2349,7 +2326,6 @@ def test_run_system_checks_skips_ollama_bridge_port_conflict_when_api_override_i
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={
             "COMPOSE_PROFILES": "ollama-bridge",
@@ -2377,7 +2353,6 @@ def test_run_system_checks_skips_ollama_bridge_port_conflict_when_bridge_overrid
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "abc"},
     )
@@ -2442,7 +2417,6 @@ def test_run_system_checks_honors_awf_host_work_dir_env(
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
     run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
         environ={"AWF_HOST_WORK_DIR": "/custom/state"},
     )
 
@@ -2474,7 +2448,6 @@ def test_run_system_checks_blocks_on_non_absolute_work_dir_override(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": "/home/op", "AWF_HOST_WORK_DIR": non_absolute},
         )
 
@@ -2494,7 +2467,6 @@ def test_run_system_checks_explicit_work_dir_overrides_env(
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
     run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
         work_dir=Path("/explicit/state"),
         environ={"AWF_HOST_WORK_DIR": "/custom/state"},
     )
@@ -2528,7 +2500,6 @@ def test_run_system_checks_falls_back_to_compose_default_work_dir_when_override_
         if blank is not None:
             environ["AWF_HOST_WORK_DIR"] = blank
         run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ=environ,
         )
         assert captured["disk_path"] == Path("/home/op/.awf/service"), repr(blank)
@@ -2555,7 +2526,6 @@ def test_run_system_checks_blocks_on_whitespace_only_work_dir_override(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": "/home/op", "AWF_HOST_WORK_DIR": whitespace},
         )
 
@@ -2586,7 +2556,6 @@ def test_run_system_checks_blocks_on_padded_work_dir_override(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": "/home/op", "AWF_HOST_WORK_DIR": padded},
         )
 
@@ -2606,7 +2575,6 @@ def test_run_system_checks_explicit_work_dir_suppresses_whitespace_override_bloc
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
         work_dir=Path("/explicit/state"),
         environ={"AWF_HOST_WORK_DIR": "   "},
     )
@@ -2634,7 +2602,6 @@ def test_run_system_checks_blocks_on_unset_home_work_dir_fallback(
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
         environ={"AWF_HOST_HOME": "/home/op"},
     )
 
@@ -2669,7 +2636,6 @@ def test_run_system_checks_blocks_on_non_absolute_host_home_override(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": "/home/op", "AWF_HOST_HOME": non_absolute},
         )
 
@@ -2697,7 +2663,6 @@ def test_run_system_checks_blocks_on_whitespace_only_host_home_override(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": "/home/op", "AWF_HOST_HOME": whitespace},
         )
 
@@ -2724,7 +2689,6 @@ def test_run_system_checks_blocks_on_padded_host_home_override(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": "/home/op", "AWF_HOST_HOME": padded},
         )
 
@@ -2752,7 +2716,6 @@ def test_run_system_checks_host_home_ok_when_absolute_or_unset(
         if value is not None:
             environ["AWF_HOST_HOME"] = value
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ=environ,
         )
 
@@ -3018,7 +2981,6 @@ def test_run_system_checks_blocks_on_missing_required_service_env(
     monkeypatch.setattr(system_checks, "check_host_home", lambda **_kwargs: fake_ok("host_home"))
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         environ={
             "AWF_API_HOST_PORT": "8000",
             "AWF_POSTGRES_HOST_PORT": "5433",
@@ -3060,7 +3022,6 @@ def test_run_system_checks_blocks_on_non_absolute_home_work_dir_fallback(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": bad_home, "AWF_HOST_HOME": "/home/op"},
         )
 
@@ -3087,7 +3048,6 @@ def test_run_system_checks_blocks_on_padded_home_work_dir_fallback(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": bad_home, "AWF_HOST_HOME": "/home/op"},
         )
 
@@ -3117,7 +3077,6 @@ def test_run_system_checks_blocks_on_non_absolute_home_auth_mount_fallback(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": bad_home, "AWF_HOST_WORK_DIR": "/data/awf"},
         )
 
@@ -3142,7 +3101,6 @@ def test_run_system_checks_blocks_on_padded_home_auth_mount_fallback(
         _patch_probes_capture_disk_path(monkeypatch, captured)
 
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ={"HOME": bad_home, "AWF_HOST_WORK_DIR": "/data/awf"},
         )
 
@@ -3161,7 +3119,6 @@ def test_run_system_checks_home_fallback_ok_when_absolute(
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
         environ={"HOME": "/home/op"},
     )
 
@@ -3194,7 +3151,6 @@ def test_run_system_checks_blocks_on_unset_or_empty_home_fallback(
         if empty is not None:
             environ["HOME"] = empty
         results = run_system_checks(
-            config=HostSetupConfig(work_dir="/persisted/state"),
             environ=environ,
         )
 
@@ -3222,7 +3178,6 @@ def test_run_system_checks_home_fallback_suppressed_by_usable_overrides(
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
         environ={
             "HOME": "tmp",
             "AWF_HOST_WORK_DIR": "/data/awf",
@@ -3250,7 +3205,6 @@ def test_run_system_checks_home_fallback_suppressed_by_explicit_work_dir(
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
         work_dir=Path("/explicit/state"),
         environ={"HOME": "tmp"},
     )
@@ -3448,7 +3402,7 @@ def test_run_system_checks_omits_ollama_bridge_checks_when_profile_disabled(
     captured: dict[str, object] = {}
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
-    results = run_system_checks(config=HostSetupConfig(), work_dir=Path("/tmp"), environ={})
+    results = run_system_checks(work_dir=Path("/tmp"), environ={})
 
     names = [result.name for result in results]
     assert "ollama_bridge_port" not in names
@@ -3466,7 +3420,6 @@ def test_run_system_checks_validates_ollama_bridge_when_profile_active(
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"COMPOSE_PROFILES": "ollama-bridge"},
     )
@@ -3500,7 +3453,6 @@ def test_run_system_checks_blocks_on_invalid_ollama_bridge_port_when_profile_act
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "abc"},
     )
@@ -3519,7 +3471,6 @@ def test_run_system_checks_blocks_on_invalid_ollama_bridge_address_when_profile_
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={
             "COMPOSE_PROFILES": "ollama-bridge",
@@ -3611,7 +3562,6 @@ def test_run_system_checks_blocks_on_invalid_ollama_bridge_target_port_when_prof
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_TARGET_PORT": "abc"},
     )
@@ -3690,7 +3640,6 @@ def test_run_system_checks_blocks_on_invalid_ollama_bridge_target_host_when_prof
     _patch_probes_capture_postgres_port(monkeypatch, captured)
 
     results = run_system_checks(
-        config=HostSetupConfig(),
         work_dir=Path("/tmp"),
         environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_TARGET_HOST": "foo bar"},
     )
