@@ -73,6 +73,19 @@ class _FailBackend:
 _FailBackend.__module__ = "keyring.backends.fail"
 
 
+class _ChainerBackend:
+    """Keyring backend that mimics ``keyring.backends.chainer.ChainerBackend``.
+
+    On headless Linux ``keyring`` can resolve to a chainer with no usable child
+    backend: its module leaf is ``chainer`` (not ``fail``/``null``), so it passes
+    the no-op availability probe, yet a write silently persists nothing.
+    """
+
+
+# Mimic the import location of the real chainer backend.
+_ChainerBackend.__module__ = "keyring.backends.chainer"
+
+
 class FakeKeyringModule:
     """Injectable fake keyring module that records secrets in memory only."""
 
@@ -84,6 +97,8 @@ class FakeKeyringModule:
         raise_on_set: bool = False,
         get_error: BaseException | None = None,
         set_error: BaseException | None = None,
+        drop_writes: bool = False,
+        read_back_error: BaseException | None = None,
     ) -> None:
         """Configure a fake keyring backend without touching any real keychain."""
         self._backend: object = _UsableBackend() if backend is None else backend
@@ -91,8 +106,14 @@ class FakeKeyringModule:
         self._raise_on_set = raise_on_set
         self._get_error = get_error
         self._set_error = set_error
+        # ``drop_writes`` models a backend (e.g. a ChainerBackend with no usable
+        # child) whose ``set_password`` returns without raising yet persists
+        # nothing, so a later ``get_password`` read-back finds the slot empty.
+        self._drop_writes = drop_writes
+        self._read_back_error = read_back_error
         self.errors = _FakeKeyringErrors
         self.set_calls: list[tuple[str, str, str]] = []
+        self._stored: dict[tuple[str, str], str] = {}
 
     def get_keyring(self) -> object:
         """Return the configured backend or raise like a missing keychain."""
@@ -109,6 +130,14 @@ class FakeKeyringModule:
         if self._raise_on_set:
             raise _FakeKeyringError("keychain locked")
         self.set_calls.append((service, username, password))
+        if not self._drop_writes:
+            self._stored[(service, username)] = password
+
+    def get_password(self, service: str, username: str) -> str | None:
+        """Return the stored secret, or raise like a broken keychain read."""
+        if self._read_back_error is not None:
+            raise self._read_back_error
+        return self._stored.get((service, username))
 
 
 def _secret(value: str | None) -> Callable[[], str | None]:
@@ -1108,6 +1137,63 @@ def test_keyring_non_keyring_error_is_reason_coded(set_error: BaseException) -> 
     assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
     assert error.details == {"backend": "keyring", "error_type": type(set_error).__name__}
     assert error.__cause__ is set_error
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_create_ref_rejects_backend_that_drops_write() -> None:
+    """Verify a non-noop backend that silently drops the write yields no ref.
+
+    On headless Linux ``keyring.get_keyring()`` can resolve to a ChainerBackend
+    with no usable child: its module leaf is not ``fail``/``null`` so it passes
+    the availability probe, and its ``set_password`` returns without raising while
+    storing nothing. Without a read-back check ``create_ref`` would mint a
+    ``keyring://`` reference pointing at an empty slot that silently fails at
+    resolution time, so the write is verified and degrades to a reason-coded
+    unavailable error instead of a bogus ref.
+    """
+    module = FakeKeyringModule(backend=_ChainerBackend(), drop_writes=True)
+    backend = KeyringCredentialBackend(keyring_module=module)
+    # The chainer backend is not a fail/null no-op, so availability reports True.
+    assert backend.is_available() is True
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "keyring"}
+    # The write was attempted, but the empty read-back blocks the bogus ref and
+    # the secret never leaks into the error surface.
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_create_ref_readback_failure_is_reason_coded() -> None:
+    """Verify a read-back error after the write maps to a secret-free reason code.
+
+    The read-back touches the same unbounded third-party surface as the write, so
+    a ``get_password`` that raises (e.g. ``OSError`` when DBus drops mid-call)
+    must surface as a reason-coded ``CredentialError`` with the original type
+    preserved, never crash the caller, and never leak the secret.
+    """
+    read_error = OSError("DBus session closed")
+    module = FakeKeyringModule(read_back_error=read_error)
+    backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "keyring", "error_type": "OSError"}
+    assert error.__cause__ is read_error
+    assert "DBus session closed" not in str(error.to_dict())
     assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 

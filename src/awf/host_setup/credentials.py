@@ -203,6 +203,9 @@ class KeyringModule(Protocol):
     def set_password(self, service: str, username: str, password: str) -> None:
         """Store a secret under ``service``/``username`` in the OS keychain."""
 
+    def get_password(self, service: str, username: str) -> str | None:
+        """Return the stored secret for ``service``/``username``, or ``None``."""
+
 
 class CredentialBackend(Protocol):
     """One credential backend that yields a safe reference."""
@@ -276,6 +279,32 @@ class KeyringCredentialBackend:
                 message="The keyring backend rejected the credential write.",
                 details={"backend": self.kind, "error_type": type(exc).__name__},
             ) from exc
+        # Verify the write actually persisted before returning a ``keyring://``
+        # ref. ``is_available`` only rejects the ``fail``/``null`` no-op backends;
+        # any other resolved backend passes that probe. On headless Linux
+        # ``keyring.get_keyring()`` can resolve to a ``ChainerBackend`` with no
+        # usable child: it is not a fail/null no-op, so it reports available and
+        # accepts ``set_password`` without raising, yet stores nothing. Returning
+        # a ref to that empty slot would silently fail at credential-resolution
+        # time, so read the secret back and require it to round-trip. The
+        # read-back touches the same unbounded third-party surface as the write,
+        # so translate any failure into the same reason-coded error (callers
+        # degrade to env-ref instead of trusting a ref that points at nothing);
+        # ``BaseException`` still propagates.
+        try:
+            stored = module.get_password(service, account)
+        except Exception as exc:
+            raise CredentialError(
+                reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
+                message="The keyring backend rejected the credential read-back.",
+                details={"backend": self.kind, "error_type": type(exc).__name__},
+            ) from exc
+        if stored != secret:
+            raise CredentialError(
+                reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
+                message="The keyring backend did not durably store the credential.",
+                details={"backend": self.kind},
+            )
         return ref
 
 
@@ -483,7 +512,16 @@ def _keyring_module_has_usable_backend(module: KeyringModule) -> bool:
 
 
 def _is_noop_keyring_backend(backend: object) -> bool:
-    """Return whether a keyring backend is a fail/null no-op implementation."""
+    """Return whether a keyring backend is a fail/null no-op implementation.
+
+    This is a cheap, side-effect-free pre-filter for the ``fail``/``null``
+    backends ``keyring`` resolves to when no keychain exists. It deliberately
+    does not enumerate every non-durable backend (e.g. a ``ChainerBackend`` with
+    no usable child on headless Linux passes here): the authoritative durability
+    guarantee is the write/read-back round-trip in
+    ``KeyringCredentialBackend.create_ref``, which refuses to mint a ref when the
+    secret does not survive storage.
+    """
     backend_module = type(backend).__module__ or ""
     return backend_module.rsplit(".", 1)[-1] in _NOOP_KEYRING_BACKEND_LEAVES
 
