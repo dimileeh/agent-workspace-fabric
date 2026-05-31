@@ -385,6 +385,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
         operationId: success.operationId,
         operationStatus: success.status,
         message: success.message,
+        warnings: success.warnings,
       });
       await Promise.all([
         loadOverview(),

@@ -41,6 +41,14 @@ test("capacity panel falls back to full reserved pressure reasons", () => {
   assert.match(panelSource, /pressureReasons\.map\(\(reason\) =>/);
 });
 
+test("operator controls block renders success warnings", () => {
+  const blockSource = extractFunctionSource("OperatorControlsBlock");
+
+  assert.match(blockSource, /state\.status === "success" && state\.warnings\.length > 0/);
+  assert.match(blockSource, /state\.warnings\.map\(\(warning\) =>/);
+  assert.match(blockSource, /warning\.message \|\| warning\.warning_code/);
+});
+
 function extractFunctionSource(functionName) {
   const markers = [`export function ${functionName}(`, `function ${functionName}(`];
   let matchSource = null;

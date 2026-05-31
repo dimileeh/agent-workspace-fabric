@@ -175,6 +175,7 @@ test("action success summary handles control and operation responses", () => {
       operationId: "op_remonitor",
       status: "succeeded",
       message: "Remonitor succeeded: op_remonitor",
+      warnings: [],
     },
   );
   assert.deepEqual(
@@ -184,6 +185,37 @@ test("action success summary handles control and operation responses", () => {
       operationId: "op_validate",
       status: "pending",
       message: "Revalidate pending: op_validate",
+      warnings: [],
+    },
+  );
+});
+
+test("action success summary retains control warnings", () => {
+  assert.deepEqual(
+    summarizeWorkspaceOperatorSuccess("remonitor", {
+      workspace_id: "ws_123",
+      operation_id: "op_remonitor",
+      operation_status: "succeeded",
+      status: "monitoring_pr",
+      message: "monitor resumed",
+      warnings: [
+        {
+          warning_code: "REMONITOR_PAST_SETTLE",
+          message: "Auto-merge is paused until a reviewer resumes it.",
+        },
+      ],
+    }),
+    {
+      action: "remonitor",
+      operationId: "op_remonitor",
+      status: "succeeded",
+      message: "Remonitor succeeded: op_remonitor",
+      warnings: [
+        {
+          warning_code: "REMONITOR_PAST_SETTLE",
+          message: "Auto-merge is paused until a reviewer resumes it.",
+        },
+      ],
     },
   );
 });
