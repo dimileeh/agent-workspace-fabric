@@ -847,6 +847,12 @@ def _non_check_reviewer_activity_settle_decision(
         head_sha=status.head_sha,
         activity_signature=signature,
     )
+    activity_freeze_seeded = _seed_non_check_reviewer_activity_freeze_marker(
+        state,
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+        activity_started_key=started_key,
+    )
     freeze_elapsed_seconds = _non_check_reviewer_activity_freeze_elapsed_seconds(
         state,
         started_key=started_key,
@@ -935,6 +941,7 @@ def _non_check_reviewer_activity_settle_decision(
             latest_external_review_activity_at=status.latest_external_review_activity_at,
             latest_external_review_activity_source=status.latest_external_review_activity_source,
             activity_signature=signature,
+            state_changed=activity_freeze_seeded,
         )
     if state.threads_addressed_ids.get(done_key) == "elapsed":
         return _NonCheckReviewerSettleDecision(
@@ -993,6 +1000,33 @@ def _non_check_reviewer_activity_settle_decision(
         activity_signature=signature,
         state_changed=state_changed,
     )
+
+
+def _seed_non_check_reviewer_activity_freeze_marker(
+    state: MonitorState,
+    *,
+    pr_number: int,
+    head_sha: str,
+    activity_started_key: str,
+) -> bool:
+    """Copy an armed head-scoped remonitor freeze marker to the current activity key."""
+    if activity_started_key in state.threads_addressed_ids:
+        return False
+    freeze_key = _non_check_reviewer_settle_freeze_key(
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    if state.threads_addressed_ids.get(freeze_key) != "armed":
+        return False
+    head_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    started_raw = state.threads_addressed_ids.get(head_started_key)
+    if started_raw is None:
+        return False
+    state.mark_addressed(activity_started_key, started_raw)
+    return True
 
 
 def _non_check_reviewer_activity_freeze_elapsed_seconds(
