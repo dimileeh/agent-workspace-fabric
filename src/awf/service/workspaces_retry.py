@@ -100,6 +100,8 @@ async def _source_runtime_not_yet_released(
         WorkspaceStatus.cancelled,
     ):
         return False
+    if source.compose_project_name is None:
+        return False
     stmt = (
         select(WorkspaceEvent.id)
         .where(
