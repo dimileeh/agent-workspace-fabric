@@ -70,6 +70,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    ValidationWorktreeCleanup,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     validation_worktree_cleanup_failure_message,
@@ -123,6 +124,55 @@ async def _fail_validation_worktree_guard(
         successful_validation_run_id=None,
         successful_validation_workspace_head_sha=None,
         has_known_non_plan_output=False,
+    )
+
+
+async def _handle_validation_cleanup_guard(
+    self: Any,
+    *,
+    workspace_id: str,
+    validation_run_id: str,
+    validation_tier: int,
+    successful_validation_run_id: str | None,
+    successful_validation_workspace_head_sha: str | None,
+    has_known_non_plan_output: bool,
+    callback_ignored: bool,
+    cleanup_result: ValidationWorktreeCleanup,
+) -> ExecutionValidationResult | None:
+    """Handle post-validation cleanup failures consistently across handler types."""
+    if cleanup_result.ok:
+        if callback_ignored:
+            return ExecutionValidationResult(
+                stop=True,
+                successful_validation_run_id=successful_validation_run_id,
+                successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                has_known_non_plan_output=has_known_non_plan_output,
+            )
+        return None
+
+    if callback_ignored:
+        _log.warning(
+            "executor.validation_cleanup_failed_after_stale_validation_callback",
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            reason_code=cleanup_result.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+        return ExecutionValidationResult(
+            stop=True,
+            successful_validation_run_id=successful_validation_run_id,
+            successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+            has_known_non_plan_output=has_known_non_plan_output,
+        )
+
+    reason_code = cleanup_result.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
+    cleanup_message = validation_worktree_cleanup_failure_message(cleanup_result)
+    return await _fail_validation_worktree_guard(
+        self,
+        workspace_id=workspace_id,
+        validation_run_id=validation_run_id,
+        validation_tier=validation_tier,
+        reason_code=reason_code,
+        message=cleanup_message,
     )
 
 
@@ -311,38 +361,20 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
             )
-            if not cleanup_result.ok:
-                if callback_ignored:
-                    _log.warning(
-                        "executor.validation_cleanup_failed_after_stale_validation_callback",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        reason_code=cleanup_result.reason_code
-                        or VALIDATION_WORKTREE_CLEANUP_FAILED,
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                        has_known_non_plan_output=has_known_non_plan_output,
-                    )
-                reason_code = cleanup_result.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
-                cleanup_message = validation_worktree_cleanup_failure_message(cleanup_result)
-                return await _fail_validation_worktree_guard(
+            if (
+                cleanup_guard_result := await _handle_validation_cleanup_guard(
                     self,
                     workspace_id=workspace_id,
                     validation_run_id=validation_run_id,
                     validation_tier=validation_tier,
-                    reason_code=reason_code,
-                    message=cleanup_message,
-                )
-            if callback_ignored:
-                return ExecutionValidationResult(
-                    stop=True,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     has_known_non_plan_output=has_known_non_plan_output,
+                    callback_ignored=callback_ignored,
+                    cleanup_result=cleanup_result,
                 )
+            ) is not None:
+                return cleanup_guard_result
             await self._finish_validation_run(
                 validation_run_id,
                 status="failed",
@@ -386,38 +418,20 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
             )
-            if not cleanup_result.ok:
-                if callback_ignored:
-                    _log.warning(
-                        "executor.validation_cleanup_failed_after_stale_validation_callback",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        reason_code=cleanup_result.reason_code
-                        or VALIDATION_WORKTREE_CLEANUP_FAILED,
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                        has_known_non_plan_output=has_known_non_plan_output,
-                    )
-                reason_code = cleanup_result.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
-                cleanup_message = validation_worktree_cleanup_failure_message(cleanup_result)
-                return await _fail_validation_worktree_guard(
+            if (
+                cleanup_guard_result := await _handle_validation_cleanup_guard(
                     self,
                     workspace_id=workspace_id,
                     validation_run_id=validation_run_id,
                     validation_tier=validation_tier,
-                    reason_code=reason_code,
-                    message=cleanup_message,
-                )
-            if callback_ignored:
-                return ExecutionValidationResult(
-                    stop=True,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     has_known_non_plan_output=has_known_non_plan_output,
+                    callback_ignored=callback_ignored,
+                    cleanup_result=cleanup_result,
                 )
+            ) is not None:
+                return cleanup_guard_result
             await self._finish_validation_run(
                 validation_run_id,
                 status="failed",
