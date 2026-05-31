@@ -293,10 +293,7 @@ def _pre_push_dirty_result(
         workspace_head_sha=workspace_head_sha,
         reason_code=reason_code,
         message=message,
-        extra_details={
-            "paths": list(check.paths),
-            "untracked_paths": list(check.untracked_paths),
-        },
+        extra_details=check.details(),
     )
 
 

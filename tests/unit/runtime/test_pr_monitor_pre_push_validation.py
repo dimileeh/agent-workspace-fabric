@@ -34,6 +34,7 @@ from awf.runtime.validation_types import (
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -716,6 +717,44 @@ async def test_pre_push_validation_pre_existing_dirty_blocks_before_validation(
     assert validation.calls == []
     assert result.details is not None
     assert result.details["paths"] == ["apps/console/next-env.d.ts"]
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_pre_push_status_check_failure_includes_stderr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Status failures should retain command stderr so operators can diagnose why pre-check failed."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "h" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=1, stderr="permission denied (publickey)")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert result.details is not None
+    assert result.details["command_stderr"] == "permission denied (publickey)"
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
 
 
