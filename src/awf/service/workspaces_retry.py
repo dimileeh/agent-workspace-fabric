@@ -89,15 +89,26 @@ async def _source_runtime_not_yet_released(
     session: AsyncSession,
     source: Workspace,
 ) -> bool:
-    """Return True if the source workspace is in a terminal status but its
-    compose runtime has not been released yet (no ``terminal_runtime_released``
-    event).  In that state the source's host ports are still claimed and a
-    retry would collide at Docker Compose time."""
-    if WorkspaceStatus(source.status) not in HOST_PORT_TERMINAL_RELEASE_STATUSES:
-        return False
-    if source.compose_project_name is None:
-        return False
-    return not await has_terminal_runtime_released_event(session, source.id)
+    """Return True if the source workspace's compose runtime has not been released yet.
+
+    A workspace in a terminal status (failed, cancelled, completed, destroyed)
+    without a ``terminal_runtime_released`` event still holds host ports, so a
+    retry would collide at Docker Compose time.  A workspace in ``destroying``
+    state also still holds its runtime — its compose stack is alive and the
+    cleanup sweep has not yet finished, so a retry dispatched while the source
+    is ``destroying`` would collide at compose time rather than being rejected
+    at dispatch with a 409.
+    """
+    source_status = WorkspaceStatus(source.status)
+    if source_status in HOST_PORT_TERMINAL_RELEASE_STATUSES:
+        if source.compose_project_name is None:
+            return False
+        return not await has_terminal_runtime_released_event(session, source.id)
+    if source_status == WorkspaceStatus.destroying:
+        if source.compose_project_name is None:
+            return False
+        return not await has_terminal_runtime_released_event(session, source.id)
+    return False
 
 
 async def retry_workspace_row(
