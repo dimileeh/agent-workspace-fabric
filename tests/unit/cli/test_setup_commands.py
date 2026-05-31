@@ -1038,6 +1038,78 @@ def test_setup_secret_config_preserves_field_path(
 
 
 @pytest.mark.unit
+def test_setup_explicit_source_checkout_dry_run_skips_corrupt_config(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A corrupt host config must not abort an explicit --source-checkout dry-run probe.
+
+    Regression for PRRT_kwDOSJAM6s6F-Zv0: an explicit ``--source-checkout`` is
+    validated without reading host config (mirroring ``awf start``'s
+    ``_resolve_start_source_checkout``), so a corrupt or secret-bearing
+    ``~/.awf/config.yml`` the read-only dry-run probe never consumes cannot block
+    it. Host config is only read where it is actually needed -- to resolve
+    persisted source metadata (no explicit checkout) or to persist safe config
+    (non-dry-run) -- so this path never opens ``read_host_setup_config``.
+    """
+    reads: list[object] = []
+
+    def raise_corrupt(**_kw: object) -> HostSetupConfig:
+        reads.append(object())
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message="Host setup config is corrupt or unsupported.",
+            path=Path("/tmp/.awf/config.yml"),
+        )
+
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", raise_corrupt)
+    root = _make_source_checkout(tmp_path / "awf")
+    result = _runner.invoke(
+        app,
+        ["setup", "--dry-run", "--source-checkout", str(root), "--format", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    assert "source_checkout" in payload["details"]
+    # The explicit-checkout dry-run path never reads host config, so the corrupt
+    # config is never even opened.
+    assert reads == []
+
+
+@pytest.mark.unit
+def test_setup_explicit_source_checkout_non_dry_run_still_blocks_corrupt_config(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-dry-run explicit-checkout setup still blocks on a corrupt host config.
+
+    Companion to ``test_setup_explicit_source_checkout_dry_run_skips_corrupt_config``:
+    the dry-run skip is deliberately narrow. A non-dry-run run persists safe
+    config, which must read and merge the existing on-disk config, so a corrupt
+    ``~/.awf/config.yml`` remains a legitimate reason-coded blocker rather than
+    being silently clobbered.
+    """
+
+    def raise_corrupt(**_kw: object) -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message="Host setup config is corrupt or unsupported.",
+            path=Path("/tmp/.awf/config.yml"),
+        )
+
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", raise_corrupt)
+    root = _make_source_checkout(tmp_path / "awf")
+    result = _runner.invoke(
+        app,
+        ["setup", "--source-checkout", str(root), "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "HOST_SETUP_CONFIG_CORRUPT"
+
+
+@pytest.mark.unit
 def test_setup_write_failure_blocks_includes_path(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:

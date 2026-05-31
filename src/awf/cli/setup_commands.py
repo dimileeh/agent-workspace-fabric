@@ -132,7 +132,16 @@ def _run_setup(
 ) -> FirstRunPayload:
     """Run provider validation, host checks, and (when not dry-run) a safe write."""
     selected_providers = normalize_providers(providers)
-    config = read_host_setup_config()
+    # Mirror ``awf start``'s ``_resolve_start_source_checkout``: an explicit
+    # ``--source-checkout`` is validated without reading host config, so a corrupt
+    # or secret-bearing ``~/.awf/config.yml`` cannot abort a read-only dry-run probe
+    # that never consumes that config. Host config is still read wherever it is
+    # actually needed -- to resolve persisted source metadata (no explicit
+    # ``--source-checkout``) or to persist safe config (non-dry-run, where a corrupt
+    # config is a legitimate blocker because it cannot be safely merged) -- so only
+    # the explicit-checkout dry-run path skips the read. ``config`` is therefore
+    # ``None`` *only* on that path, which dereferences it nowhere below.
+    config = read_host_setup_config() if source_checkout is None or not dry_run else None
 
     probe_source, source_error, explicit_source = _resolve_setup_source_checkout(
         source_checkout, config
@@ -158,6 +167,10 @@ def _run_setup(
         )
         if dry_run:
             return blocked_payload
+        # Past the dry-run return this is a non-dry-run path, so the guarded read
+        # above resolved ``config`` (it skips the read only for explicit-checkout
+        # dry-run) and the consent write below can rely on it.
+        assert config is not None
         # The host-check path persists safe consent even when the readiness
         # status is blocked (e.g. missing Docker reaches the non-dry-run write
         # below), so an explicit, non-secret ``--allow-plain-secrets`` consent
@@ -208,6 +221,10 @@ def _run_setup(
     )
 
     if not dry_run:
+        # The guarded read above always resolves ``config`` on a non-dry-run path
+        # (it skips the read only for explicit-checkout dry-run), so the safe write
+        # below can rely on it.
+        assert config is not None
         # Readiness blockers win over the interactive-input guard. When the host
         # checks already failed (e.g. missing Docker), raising
         # INTERACTIVE_INPUT_REQUIRED here would mask the SETUP_READINESS_FAILED
@@ -256,7 +273,7 @@ def _run_setup(
 
 def _resolve_setup_source_checkout(
     source_checkout: Path | None,
-    config: HostSetupConfig,
+    config: HostSetupConfig | None,
 ) -> tuple[
     VerifiedSourceCheckout | None, SourceCheckoutError | None, VerifiedSourceCheckout | None
 ]:
@@ -267,6 +284,11 @@ def _resolve_setup_source_checkout(
     is only set for an explicit ``--source-checkout`` selection and drives
     metadata persistence, so re-running ``awf setup`` without the flag never
     rewrites or refreshes the persisted metadata.
+
+    ``config`` is consulted only on the no-explicit-``--source-checkout`` path (to
+    revalidate persisted metadata), so the caller passes ``None`` when an explicit
+    checkout was selected for a dry-run probe and no host config was read; that
+    case never reaches the ``config``-dependent branch below.
 
     The resolution mirrors ``awf start``'s ``_resolve_start_source_checkout`` so
     setup probes the same port/work dir ``awf start`` will use: an explicit
@@ -283,7 +305,7 @@ def _resolve_setup_source_checkout(
             return None, exc, None
         return explicit, None, explicit
 
-    if config.source_checkout is None:
+    if config is None or config.source_checkout is None:
         return None, None, None
     try:
         return verified_source_from_metadata(config.source_checkout), None, None
