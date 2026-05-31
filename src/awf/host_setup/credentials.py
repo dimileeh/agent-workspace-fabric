@@ -455,7 +455,7 @@ class PlainFileCredentialBackend:
 
 def select_credential_backend(
     *,
-    preferred: str | None,
+    preferred: CredentialBackendKind | None,
     capabilities: HostCredentialCapabilities,
     allow_plain_secrets: bool,
     plain_file_consent: bool,
@@ -520,7 +520,7 @@ def select_credential_backend(
 def store_provider_credential(
     request: CredentialRequest,
     *,
-    preferred: str | None = None,
+    preferred: CredentialBackendKind | None = None,
     capabilities: HostCredentialCapabilities,
     allow_plain_secrets: bool = False,
     plain_file_consent: bool = False,
