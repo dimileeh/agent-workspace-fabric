@@ -33,6 +33,11 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
+)
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
@@ -144,6 +149,9 @@ class _GitPushResult:
                 _PRE_EXISTING_DIRTY_WORKTREE_REASON,
                 _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+                VALIDATION_WORKTREE_CLEANUP_FAILED,
+                VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                VALIDATION_WORKTREE_STATUS_FAILED,
             }
         )
 
@@ -186,6 +194,9 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _PRE_PUSH_VALIDATION_FAILED_REASON,
         _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
         _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+        VALIDATION_WORKTREE_CLEANUP_FAILED,
+        VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+        VALIDATION_WORKTREE_STATUS_FAILED,
     }:
         return "pre_push_validation_failed"
     if push_result.workflow_scope_required:

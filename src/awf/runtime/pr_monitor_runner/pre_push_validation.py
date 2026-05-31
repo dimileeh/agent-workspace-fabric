@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
@@ -46,6 +48,17 @@ from awf.runtime.validation_types import (
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
+)
+from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
+    ValidationWorktreeCheck,
+    ValidationWorktreeCleanup,
+    check_validation_worktree_clean,
+    cleanup_validation_worktree_side_effects,
+    validation_worktree_cleanup_failure_message,
+    validation_worktree_preexisting_dirty_message,
 )
 
 _log = get_logger(__name__)
@@ -67,6 +80,7 @@ class _PrePushValidationResult:
     validation_reason_code: str | None = None
     result: ValidationResult | None = None
     coverage: ValidationCoverageResult | None = None
+    extra_details: Mapping[str, object] | None = None
 
     @property
     def first_failure(self) -> ValidationCommandResult | None:
@@ -88,6 +102,8 @@ class _PrePushValidationResult:
             details["target_head_sha"] = self.workspace_head_sha
         if self.validation_reason_code is not None:
             details["validation_reason_code"] = self.validation_reason_code
+        if self.extra_details is not None:
+            details.update(self.extra_details)
         return details
 
 
@@ -222,6 +238,73 @@ async def _pre_push_validation_commands(
     return tuple(
         step.command.command
         for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+    )
+
+
+async def _pre_push_validation_worktree_check(
+    self: Any,
+    *,
+    worktree_path: Path,
+) -> ValidationWorktreeCheck:
+    async def _run_git(args: list[str]) -> Any:
+        return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
+
+    return await check_validation_worktree_clean(run_git=_run_git, worktree_path=worktree_path)
+
+
+async def _pre_push_validation_cleanup(
+    self: Any,
+    *,
+    worktree_path: Path,
+    restore_ref: str,
+) -> ValidationWorktreeCleanup:
+    async def _run_git(args: list[str]) -> Any:
+        return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
+
+    return await cleanup_validation_worktree_side_effects(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        restore_ref=restore_ref,
+    )
+
+
+def _pre_push_dirty_result(
+    *,
+    workspace_head_sha: str | None,
+    check: ValidationWorktreeCheck,
+) -> _PrePushValidationResult:
+    reason_code = check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    message = (
+        check.message
+        if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+        else validation_worktree_preexisting_dirty_message(check)
+    )
+    return _PrePushValidationResult(
+        passed=False,
+        validation_run_id=None,
+        workspace_head_sha=workspace_head_sha,
+        reason_code=reason_code,
+        message=message,
+        extra_details={
+            "paths": list(check.paths),
+            "untracked_paths": list(check.untracked_paths),
+        },
+    )
+
+
+def _pre_push_cleanup_result(
+    *,
+    validation_run_id: str | None,
+    workspace_head_sha: str | None,
+    cleanup: ValidationWorktreeCleanup,
+) -> _PrePushValidationResult:
+    return _PrePushValidationResult(
+        passed=False,
+        validation_run_id=validation_run_id,
+        workspace_head_sha=workspace_head_sha,
+        reason_code=cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED,
+        message=validation_worktree_cleanup_failure_message(cleanup),
+        extra_details=cleanup.details(),
     )
 
 
@@ -366,6 +449,16 @@ async def _run_pre_push_validation(
             message="could not capture local HEAD before PR monitor pre-push validation",
         )
 
+    pre_validation_check = await _pre_push_validation_worktree_check(
+        self,
+        worktree_path=worktree_path,
+    )
+    if not pre_validation_check.clean:
+        return _pre_push_dirty_result(
+            workspace_head_sha=workspace_head_sha,
+            check=pre_validation_check,
+        )
+
     validation_run_id = await _start_pre_push_validation_run(
         self,
         workspace_id=workspace_id,
@@ -408,6 +501,23 @@ async def _run_pre_push_validation(
                 result = replace(result, coverage=coverage_result)
     except ComposeExecCleanupError as exc:
         message = cleanup_failure_message(exc)
+        cleanup_result = await _pre_push_validation_cleanup(
+            self,
+            worktree_path=worktree_path,
+            restore_ref=workspace_head_sha,
+        )
+        if not cleanup_result.ok:
+            await _finish_pre_push_validation_run(
+                self,
+                validation_run_id,
+                status="failed",
+                reason_code=cleanup_result.reason_code,
+            )
+            return _pre_push_cleanup_result(
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                cleanup=cleanup_result,
+            )
         await _finish_pre_push_validation_run(
             self,
             validation_run_id,
@@ -423,6 +533,23 @@ async def _run_pre_push_validation(
         )
     except Exception as exc:
         message = f"unexpected error during PR monitor pre-push validation: {exc!r}"[:2000]
+        cleanup_result = await _pre_push_validation_cleanup(
+            self,
+            worktree_path=worktree_path,
+            restore_ref=workspace_head_sha,
+        )
+        if not cleanup_result.ok:
+            await _finish_pre_push_validation_run(
+                self,
+                validation_run_id,
+                status="failed",
+                reason_code=cleanup_result.reason_code,
+            )
+            return _pre_push_cleanup_result(
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                cleanup=cleanup_result,
+            )
         await _finish_pre_push_validation_run(
             self,
             validation_run_id,
@@ -435,6 +562,24 @@ async def _run_pre_push_validation(
             workspace_head_sha=workspace_head_sha,
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message=message,
+        )
+
+    cleanup_result = await _pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=workspace_head_sha,
+    )
+    if not cleanup_result.ok:
+        await _finish_pre_push_validation_run(
+            self,
+            validation_run_id,
+            status="failed",
+            reason_code=cleanup_result.reason_code,
+        )
+        return _pre_push_cleanup_result(
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            cleanup=cleanup_result,
         )
 
     reason_code = _validation_run_reason_code(result)

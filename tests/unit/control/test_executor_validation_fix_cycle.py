@@ -340,6 +340,61 @@ class _RemoveWorktreeAfterSecondAdapterRun(_RemoveWorktreeOnCall):
         )
 
 
+class _ValidationSideEffectRunner:
+    """Validation fake that mutates a tracked generated file."""
+
+    def __init__(self, *, artifacts_dir: Path, results: list[bool]) -> None:
+        self._artifacts_dir = artifacts_dir
+        self._results = list(results)
+        self.calls = 0
+
+    async def run_profile_coverage(self, **_kwargs: object) -> None:
+        return None
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...] | list[str],
+        worktree_path: Path | None = None,
+        **_kwargs: object,
+    ) -> ValidationResult:
+        if tuple(phase_names) == ("setup", "pre_agent"):
+            return ValidationResult()
+        self.calls += 1
+        assert worktree_path is not None
+        generated = worktree_path / "apps" / "console" / "next-env.d.ts"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text(
+            '/// <reference types="next" />\nimport "./.next/types/routes.d.ts";\n',
+            encoding="utf-8",
+        )
+        ok = self._results.pop(0)
+        artifacts = self._artifacts_dir / workspace_id
+        artifacts.mkdir(parents=True, exist_ok=True)
+        stdout = artifacts / f"{self.calls:02d}_validate.stdout"
+        stderr = artifacts / f"{self.calls:02d}_validate.stderr"
+        stdout.write_text("ok\n" if ok else "failed\n", encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        return ValidationResult(
+            commands=[
+                ValidationCommandResult(
+                    command="pytest -q",
+                    returncode=0 if ok else 1,
+                    duration_seconds=0.1,
+                    stdout_path=stdout,
+                    stderr_path=stderr,
+                    reason_code="VALIDATION_OK" if ok else "COMMAND_FAILED",
+                )
+            ]
+        )
+
+
+def _mark_git_worktree(worktree_path: Path) -> None:
+    worktree_path.mkdir(parents=True, exist_ok=True)
+    (worktree_path / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+
+
 class TestValidationPassesOnFirstTry:
     @pytest.mark.unit
     async def test_no_fix_cycle_invoked_when_validation_green(
@@ -363,6 +418,94 @@ class TestValidationPassesOnFirstTry:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/x/y/pull/1"
+
+
+class TestValidationSideEffectCleanup:
+    @pytest.mark.unit
+    async def test_executor_cleans_validation_side_effect_before_pr_push(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _ValidationSideEffectRunner(
+            artifacts_dir=tmp_path / "artifacts",
+            results=[True],
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        _mark_git_worktree(worktree_path)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=0, stdout="")  # clean before validation
+        fake.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+        fake.queue_result(returncode=0)  # restore tracked side effect
+        fake.queue_result(returncode=0, stdout="")  # clean after cleanup
+        _queue_push_and_pr(fake)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/1"
+        joined_calls = [" ".join(call.args) for call in fake.calls]
+        restore_index = next(
+            index
+            for index, call in enumerate(joined_calls)
+            if "restore --source deadbeef01 --staged --worktree -- apps/console/next-env.d.ts"
+            in call
+        )
+        push_index = next(index for index, call in enumerate(joined_calls) if "push" in call)
+        assert restore_index < push_index
+
+    @pytest.mark.unit
+    async def test_executor_cleanup_failure_fails_validation_before_push(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _ValidationSideEffectRunner(
+            artifacts_dir=tmp_path / "artifacts",
+            results=[True],
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        _mark_git_worktree(worktree_path)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+        fake.queue_result(returncode=1, stderr="restore failed")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert ws.failure_message is not None
+        assert "VALIDATION_WORKTREE_CLEANUP_FAILED" in ws.failure_message
+        assert "apps/console/next-env.d.ts" in ws.failure_message
+        assert runs[-1].status == "failed"
+        assert runs[-1].reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+        assert not any("git push" in " ".join(call.args) for call in fake.calls)
 
 
 class TestFixCycleRecoversAfterOneFailure:

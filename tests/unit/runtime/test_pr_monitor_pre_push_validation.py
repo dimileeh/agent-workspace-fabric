@@ -31,6 +31,10 @@ from awf.runtime.validation_types import (
     ValidationCoverageResult,
     ValidationResult,
 )
+from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -143,6 +147,12 @@ async def _set_resolved_profile(
         assert ws is not None
         ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
         await session.commit()
+
+
+def _mark_git_worktree(worktree: Path) -> None:
+    """Make a lightweight temp directory look like a git worktree to guards."""
+    worktree.mkdir(parents=True, exist_ok=True)
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
 
 
 async def _seed_monitoring_workspace_without_attempt(
@@ -520,6 +530,190 @@ async def test_pre_push_validation_runs_profile_coverage_before_push(
     assert runs[-1].coverage is not None
     assert runs[-1].coverage["percent"] == 99.5
     assert runs[-1].coverage["reason_code"] == "COVERAGE_OK"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_cleans_tracked_side_effect_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Validation-generated tracked dirt should be restored before push."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "a" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout="")  # clean before validation
+    cmd.queue_result(
+        returncode=0,
+        stdout=" M apps/console/next-env.d.ts\n",
+    )  # validation side effect
+    cmd.queue_result(returncode=0)  # restore tracked side effect
+    cmd.queue_result(returncode=0, stdout="")  # clean after cleanup
+    cmd.queue_result(returncode=0, stdout="", stderr="")  # git push
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        f"restore --source {local_head} --staged --worktree -- apps/console/next-env.d.ts" in call
+        for call in joined_calls
+    )
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_pre_existing_dirty_blocks_before_validation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Pre-existing dirt must fail before running validation or pushing."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "b" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert validation.calls == []
+    assert result.details is not None
+    assert result.details["paths"] == ["apps/console/next-env.d.ts"]
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_cleanup_failure_blocks_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Cleanup failures must be surfaced before any push attempt."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "c" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+    cmd.queue_result(returncode=1, stderr="restore failed")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert result.details is not None
+    assert result.details["paths"] == ["apps/console/next-env.d.ts"]
+    assert result.details["cleanup_command"] == "git restore"
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_failed_pre_push_validation_cleans_before_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed validation pass must not hand dirty validation side effects to the fix agent."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "d" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
+    fix_called = False
+
+    async def _assert_clean_before_fix(_runner: object, **_kwargs: object) -> bool:
+        nonlocal fix_called
+        fix_called = True
+        assert cmd.calls[-1].args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]
+        return False
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation_fix_pass",
+        _assert_clean_before_fix,
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert fix_called is True
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FIX_FAILED"
 
 
 @pytest.mark.unit
