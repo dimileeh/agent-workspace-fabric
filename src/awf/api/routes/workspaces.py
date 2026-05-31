@@ -310,7 +310,16 @@ async def create_workspace(
         return _insufficient_disk_response(disk_check)
 
     try:
-        await check_host_port_conflicts(repo, payload.companions)
+        if idempotency_key is not None:
+            existing = await repo.get_by_idempotency_key(idempotency_key)
+        else:
+            existing = None
+        excluding_workspace_id = existing.id if existing is not None else None
+        await check_host_port_conflicts(
+            repo,
+            payload.companions,
+            excluding_workspace_id=excluding_workspace_id,
+        )
 
         ws = await create_workspace_row(
             session,
@@ -348,10 +357,7 @@ async def create_workspace(
             status_code=status.HTTP_409_CONFLICT,
             content=ErrorResponse(
                 error_code=exc.error_code,
-                message=(
-                    f"Companion host port {exc.host_port} is already in use by "
-                    f"workspace {exc.conflicting_workspace_id}"
-                ),
+                message=exc.message,
                 detail=exc.detail,
             ).model_dump(),
         )
