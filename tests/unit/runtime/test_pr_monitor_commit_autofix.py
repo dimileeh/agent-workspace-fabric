@@ -60,7 +60,7 @@ def test_monitor_precommit_autofix_keeps_deterministic_hook_repair_paths() -> No
 
 
 @pytest.mark.unit
-def test_monitor_precommit_autofix_deduplicates_formatter_repair_paths() -> None:
+def test_monitor_precommit_autofix_skips_formatter_check_repair_paths() -> None:
     output = (
         "ruff format........................................................Failed\n"
         "- hook id: awf-ruff-format-check\n"
@@ -71,9 +71,25 @@ def test_monitor_precommit_autofix_deduplicates_formatter_repair_paths() -> None
     )
     commit_result = CommandResult(returncode=1, stdout=output, stderr="")
 
-    assert _monitor_precommit_autofix_repair_paths(commit_result) == (
-        "src/awf/runtime/pr_monitor_runner/precommit_autofix.py",
+    assert _monitor_precommit_autofix_repair_paths(commit_result) == ()
+
+
+@pytest.mark.unit
+def test_monitor_precommit_autofix_skips_mixed_normalizer_and_format_check_paths() -> None:
+    output = (
+        "fix end of files................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        "Fixing docs/awf-plans/ws_761.conformance.json\n"
+        "ruff format........................................................Failed\n"
+        "- hook id: awf-ruff-format-check\n"
+        "- exit code: 1\n\n"
+        "Would reformat: src/awf/runtime/pr_monitor_runner/precommit_autofix.py\n"
     )
+    commit_result = CommandResult(returncode=1, stdout=output, stderr="")
+
+    assert _monitor_precommit_autofix_repair_paths(commit_result) == ()
 
 
 def _deterministic_autofix_stderr(*paths: str) -> str:
