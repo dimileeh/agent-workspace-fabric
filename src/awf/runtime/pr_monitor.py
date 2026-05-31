@@ -254,9 +254,22 @@ class MonitorState:
     threads_addressed_ids: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
     pending_operator_hint: OperatorHint | None = None
+    _changed_thread_ids: set[str] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def mark_addressed(self, thread_id: str, verdict: str) -> None:
         self.threads_addressed_ids[thread_id] = verdict
+        self._changed_thread_ids.add(thread_id)
+
+    def changed_thread_ids(self) -> set[str]:
+        return set(self._changed_thread_ids)
+
+    def clear_changed_thread_ids(self, thread_ids: set[str]) -> None:
+        self._changed_thread_ids.difference_update(thread_ids)
 
 
 @dataclass(frozen=True)

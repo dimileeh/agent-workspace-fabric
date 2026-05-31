@@ -221,10 +221,12 @@ async def _refresh_operator_state_from_workspace(
         now_monotonic=now_monotonic,
         now_wall_seconds=now_wall_seconds,
     )
+    newly_marked_thread_ids = state.changed_thread_ids()
     merged_threads = _merge_concurrent_operator_freeze_state(
         dict(persisted_threads),
         db_threads_addressed=db_threads_addressed,
         pr_number=pr_number,
+        newly_marked_thread_ids=newly_marked_thread_ids,
     )
     if merged_threads == persisted_threads:
         return changed
@@ -262,13 +264,20 @@ def _preserve_concurrent_wait_marker(
     db_threads_addressed: dict[str, str],
     started_key: str,
     done_key: str,
+    newly_marked_thread_ids: set[str],
 ) -> None:
     db_started = db_threads_addressed.get(started_key)
     if db_started is None:
         return
-    if not _same_persisted_wait_marker(threads_addressed.get(started_key), db_started):
+    started_matches_db = _same_persisted_wait_marker(
+        threads_addressed.get(started_key),
+        db_started,
+    )
+    if not started_matches_db:
         threads_addressed[started_key] = db_started
-    if done_key not in db_threads_addressed:
+    if done_key not in db_threads_addressed and (
+        done_key not in newly_marked_thread_ids or not started_matches_db
+    ):
         threads_addressed.pop(done_key, None)
 
 
@@ -277,15 +286,18 @@ def _merge_concurrent_operator_freeze_state(
     *,
     db_threads_addressed: dict[str, str],
     pr_number: int | None,
+    newly_marked_thread_ids: set[str] | None = None,
 ) -> dict[str, str]:
     if pr_number is None:
         return threads_addressed
+    newly_marked_thread_ids = newly_marked_thread_ids or set()
 
     _preserve_concurrent_wait_marker(
         threads_addressed,
         db_threads_addressed=db_threads_addressed,
         started_key=_initial_review_grace_started_key(pr_number),
         done_key=_initial_review_grace_done_key(pr_number),
+        newly_marked_thread_ids=newly_marked_thread_ids,
     )
 
     settle_started_prefix = _non_check_reviewer_settle_started_prefix(
@@ -306,6 +318,7 @@ def _merge_concurrent_operator_freeze_state(
             db_threads_addressed=db_threads_addressed,
             started_key=started_key,
             done_key=f"{settle_done_prefix}{suffix}",
+            newly_marked_thread_ids=newly_marked_thread_ids,
         )
     return threads_addressed
 
@@ -319,6 +332,7 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
         now_wall = datetime.now(UTC)
         db_threads_addressed = dict(ws.monitor_threads_addressed or {})
         threads_addressed = dict(state.threads_addressed_ids)
+        newly_marked_thread_ids = state.changed_thread_ids()
         if ws.pr_number is not None:
             threads_addressed = _initial_review_grace_state_for_persistence(
                 threads_addressed,
@@ -342,6 +356,7 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
             threads_addressed,
             db_threads_addressed=db_threads_addressed,
             pr_number=ws.pr_number,
+            newly_marked_thread_ids=newly_marked_thread_ids,
         )
         if (
             state.sync_base_no_progress_signature is not None
@@ -361,6 +376,7 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
             elapsed_seconds = max(now_monotonic - state.started_at, 0.0)
             ws.monitor_started_at = now_wall - timedelta(seconds=elapsed_seconds)
         await s.commit()
+        state.clear_changed_thread_ids(newly_marked_thread_ids)
 
 
 async def _terminate_completed(

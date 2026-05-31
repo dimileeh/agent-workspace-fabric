@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -1495,6 +1496,147 @@ async def test_persist_state_drops_stale_done_marker_when_freeze_started_matches
     assert initial_done_key not in monitor_state
     assert settle_done_key not in monitor_state
     assert monitor_state["review-thread"] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_persist_state_preserves_newly_elapsed_settle_done_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_done_key = runner_helpers._non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_started_key = runner_helpers._non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    started_value = runner_helpers._initial_review_grace_wall_started_value_from_datetime(
+        datetime.now(UTC) - timedelta(seconds=300)
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_last_commit_sha = head_sha
+        workspace.monitor_threads_addressed = {settle_started_key: started_value}
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    workspace = await runner._load_workspace(workspace_id)
+    state = runner._load_state(workspace)
+    decision = runner_helpers._non_check_reviewer_settle_decision(
+        _ready_status(head_sha=head_sha),
+        state,
+        MonitorConfig(
+            auto_merge=True,
+            poll_interval_seconds=60,
+            non_check_reviewer_settle_seconds=180,
+            non_check_reviewer_logins=("greptile-apps",),
+        ),
+        pr_number=42,
+        now=time.monotonic(),
+    )
+    assert decision.action == "elapsed"
+    assert state.threads_addressed_ids[settle_done_key] == "elapsed"
+
+    await runner._persist_state(workspace_id, state)
+
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert settle_done_key not in state.changed_thread_ids()
+    assert persisted is not None
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    assert monitor_state[settle_done_key] == "elapsed"
+    assert (
+        runner_helpers._initial_review_grace_wall_seconds(monitor_state[settle_started_key])
+        is not None
+    )
+
+
+@pytest.mark.unit
+async def test_persist_state_drops_newly_elapsed_settle_done_after_concurrent_rearm(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_done_key = runner_helpers._non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_started_key = runner_helpers._non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    old_started_value = runner_helpers._initial_review_grace_wall_started_value_from_datetime(
+        datetime.now(UTC) - timedelta(seconds=300)
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_last_commit_sha = head_sha
+        workspace.monitor_threads_addressed = {settle_started_key: old_started_value}
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    workspace = await runner._load_workspace(workspace_id)
+    state = runner._load_state(workspace)
+    decision = runner_helpers._non_check_reviewer_settle_decision(
+        _ready_status(head_sha=head_sha),
+        state,
+        MonitorConfig(
+            auto_merge=True,
+            poll_interval_seconds=60,
+            non_check_reviewer_settle_seconds=180,
+            non_check_reviewer_logins=("greptile-apps",),
+        ),
+        pr_number=42,
+        now=time.monotonic(),
+    )
+    assert decision.action == "elapsed"
+    assert state.threads_addressed_ids[settle_done_key] == "elapsed"
+
+    rearmed_started_value = runner_helpers._initial_review_grace_wall_started_value_from_datetime(
+        datetime.now(UTC)
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {settle_started_key: rearmed_started_value}
+        await session.commit()
+
+    await runner._persist_state(workspace_id, state)
+
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert persisted is not None
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    assert monitor_state[settle_started_key] == rearmed_started_value
+    assert settle_done_key not in monitor_state
 
 
 @pytest.mark.unit
