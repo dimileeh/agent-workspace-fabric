@@ -12,7 +12,7 @@ requirement-by-requirement. Status legend: `Complete`, `Partial`, `Missing`.
 | File | Change | Lines |
 | --- | --- | --- |
 | `src/awf/host_setup/credentials.py` | **New** module: `CredentialError`, `CredentialRef`, `HostCredentialCapabilities` + `detect_host_credential_capabilities`, `CredentialRequest`, `CredentialBackend`/`KeyringModule` protocols, `KeyringCredentialBackend`, `EnvRefCredentialBackend`, `PlainFileCredentialBackend`, `select_credential_backend`, `store_provider_credential`, plus private helpers. | +219 stmts |
-| `src/awf/host_setup/config.py` | Add optional `ProviderConfig.backend: str | None` (default `None`) + `_validate_backend` validator; `_CREDENTIAL_BACKEND_KINDS` constant. | +15 |
+| `src/awf/host_setup/config.py` | Add optional `ProviderConfig.backend: str \| None` (default `None`) + `_validate_backend` validator; `_CREDENTIAL_BACKEND_KINDS` constant. | +15 |
 | `src/awf/host_setup/__init__.py` | Additive re-export of the new public credential symbols (owned-path overlap R3: additive only). | +30 |
 | `pyproject.toml` | Add `keyring>=24` to `[project] dependencies`. | +1 |
 | `uv.lock` | Regenerated: additive only (+92 lines, 0 deletions) — adds `keyring`, `jaraco-*`, `jeepney`, `secretstorage` (Linux-gated), `more-itertools`, `pywin32-ctypes`; no unrelated pins bumped. | +92 |
