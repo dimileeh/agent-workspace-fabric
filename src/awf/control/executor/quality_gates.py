@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -185,6 +186,25 @@ def _classify_post_agent_commit_failure(
         format_repair_files=(),
         summary=summary or "git commit exited non-zero with no output",
     )
+
+
+_NOTHING_TO_COMMIT_PATTERN = re.compile(
+    r"nothing to commit|working tree clean|no changes added",
+    re.IGNORECASE,
+)
+
+
+def _is_nothing_to_commit(result: CommandResult) -> bool:
+    """Return True when ``git commit`` failed because there was nothing to commit.
+
+    Detects the benign ``nothing to commit, working tree clean`` output
+    (or variants) that git emits when the index matches HEAD. This is
+    NOT a real git error — it means the agent (or a prior repair step)
+    already committed the work, so the post-agent commit should fall
+    through to the rev-list check instead of failing the workspace.
+    """
+    combined = f"{result.stdout or ''}\n{result.stderr or ''}"
+    return bool(_NOTHING_TO_COMMIT_PATTERN.search(combined))
 
 
 def _build_post_agent_precommit_repair_prompt(

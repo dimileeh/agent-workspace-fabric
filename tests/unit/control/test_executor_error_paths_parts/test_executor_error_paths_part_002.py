@@ -1074,17 +1074,18 @@ class TestCommitStepRuntimeError:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """A non-pre-commit ``git commit`` failure surfaces with the
-        structured ``POST_AGENT_COMMIT_FAILED`` reason code (not the
-        generic ``INFRASTRUCTURE_FAILURE`` default)."""
+        """A non-pre-commit ``git commit`` failure (real git error, not
+        "nothing to commit") surfaces with the structured
+        ``POST_AGENT_COMMIT_FAILED`` reason code (not the generic
+        ``INFRASTRUCTURE_FAILURE`` default)."""
         ws_id = await _seed_ready(factory)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (non-empty)
         fake.queue_result(
-            returncode=1, stderr="nothing to commit, working tree clean"
-        )  # git commit FAILS
+            returncode=1, stderr="fatal: empty ident name (for <>) not allowed"
+        )  # git commit FAILS (real error)
 
         executor = _make_executor(fake, factory, tmp_path)
         await executor.execute(ws_id)
@@ -1101,6 +1102,164 @@ class TestCommitStepRuntimeError:
                 and event.new_state == WorkspaceStatus.failed.value
             )
             assert failed_event.reason_code == "POST_AGENT_COMMIT_FAILED"
+
+
+class TestSelfCommittedAgent:
+    """Regression tests for issue #327: when the agent self-commits its
+    work (clean tree, branch ahead of base), the post-agent commit
+    step must NOT fail the workspace."""
+
+    @pytest.mark.unit
+    async def test_nothing_to_commit_branch_ahead_proceeds(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """When ``git add -A`` re-stages files (e.g. mode/line-ending
+        changes) but ``git commit`` says "nothing to commit", and the
+        branch is ahead of base, the workspace must proceed (not fail
+        with POST_AGENT_COMMIT_FAILED)."""
+        ws_id = await _seed_ready(factory)
+
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (re-staged)
+        # git commit fails: nothing to commit (staged but no content diff)
+        fake.queue_result(returncode=1, stderr="nothing to commit, working tree clean\n")
+        # rev-list --count base..HEAD → 1 (agent committed ahead)
+        fake.queue_result(returncode=0, stdout="1\n")
+        # merge-base --is-ancestor check (not orphan)
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake, head="deadbeef01")
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        _queue_pre_push_checks(fake, head="deadbeef01")
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")  # pr create
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value, (
+                f"expected completed, got {ws.status!r} (failure_reason={ws.failure_reason!r})"
+            )
+
+    @pytest.mark.unit
+    async def test_nothing_to_commit_not_ahead_fails_as_agent_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """When ``git add -A`` re-stages files, ``git commit`` says
+        "nothing to commit", and branch is NOT ahead of base, the
+        workspace must fail as ``agent_failure`` (not infrastructure
+        failure)."""
+        from awf.db.enums import FailureReason
+
+        ws_id = await _seed_ready(factory)
+
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff
+        # git commit fails: nothing to commit
+        fake.queue_result(returncode=1, stderr="nothing to commit, working tree clean\n")
+        # rev-list --count base..HEAD → 0 (no commits ahead of base)
+        fake.queue_result(returncode=0, stdout="0\n")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.agent_failure.value
+
+    @pytest.mark.unit
+    async def test_nothing_to_commit_empty_staged_not_ahead_fails_as_agent_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """When the agent self-commits everything, leaving an empty
+        cached diff (staged_paths is []), and the branch is NOT ahead
+        of base, the workspace must fail as ``agent_failure``.
+        (Tests the direct-to-rev-list path when staged_paths is empty.)"""
+        from awf.db.enums import FailureReason
+
+        ws_id = await _seed_ready(factory)
+
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="")  # cached diff (empty)
+        # rev-list --count base..HEAD → 0 (no commits ahead)
+        fake.queue_result(returncode=0, stdout="0\n")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.agent_failure.value
+
+    @pytest.mark.unit
+    async def test_nothing_to_commit_orphan_history_is_reattached(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """When the agent self-commits (nothing to commit), branch is ahead
+        of base, but git history is orphaned (merge-base --is-ancestor
+        fails), the orphan-history guard must still run and reattach the
+        branch via reset --soft + fresh commit. Regression test for
+        issue #327 plan test #4."""
+        ws_id = await _seed_ready(factory)
+
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (re-staged)
+        # git commit fails: nothing to commit (agent already committed)
+        fake.queue_result(returncode=1, stderr="nothing to commit, working tree clean\n")
+        # rev-list --count base..HEAD → 2 (branch ahead)
+        fake.queue_result(returncode=0, stdout="2\n")
+        # merge-base --is-ancestor: FAIL (orphan history)
+        fake.queue_result(returncode=1, stderr="")
+        # git reset --soft <base> (orphan recovery)
+        fake.queue_result(returncode=0)
+        # git commit (re-anchor orphan)
+        fake.queue_result(returncode=0)
+        # merge-base --is-ancestor: OK after recovery
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake, head="deadbeef01")
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        _queue_pre_push_checks(fake, head="deadbeef01")
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")  # pr create
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value, (
+                f"expected completed, got {ws.status!r} (failure_reason={ws.failure_reason!r})"
+            )
+        # Verify orphan recovery actually ran
+        reset_call = next(c for c in fake.calls if "reset" in c.args and "--soft" in c.args)
+        assert reset_call.args[-1] == "a" * 40  # base_commit
 
 
 class TestValidationInfrastructureError:
