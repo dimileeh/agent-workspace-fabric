@@ -37,6 +37,10 @@ _AUTH_FAILURE_MARKERS = (
     "error authenticating",
     "invalid_grant",
     "anthropic_api_key",
+    "cursor_api_key",
+    "cursor api key",
+    "cursor auth",
+    "cursor authentication",
     "gemini_api_key",
     "google_api_key",
     "google_genai_use_vertexai",
@@ -85,6 +89,14 @@ _GOOGLE_MARKERS = (
     "retryablequotaerror",
 )
 _OPENAI_MARKERS = ("codex", "openai", "gpt-", "o3", "o4")
+_CURSOR_MARKERS = (
+    "cursor-agent",
+    "sonnet-4-thinking",
+    "cursor_api_key",
+    "cursor api key",
+    "cursor auth",
+    "cursor authentication",
+)
 _ANTHROPIC_MARKERS = ("claude", "anthropic", "sonnet", "opus", "haiku")
 _OLLAMA_MARKERS = ("ollama",)
 _XAI_MARKERS = ("grok", "xai", "grok-build")
@@ -193,6 +205,8 @@ def classify_provider_failure(
 
 def infer_provider(*, model: str | None, output: str | None = None) -> str | None:
     text = f"{model or ''}\n{output or ''}".lower()
+    if any(marker in text for marker in _CURSOR_MARKERS):
+        return "cursor"
     if any(marker in text for marker in _GOOGLE_MARKERS):
         return "google"
     if any(marker in text for marker in _ANTHROPIC_MARKERS):

@@ -411,6 +411,177 @@ def _primary_isolation(sources: Iterable[Mapping[str, str]]) -> str:
     return "none"
 
 
+def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
+    return {
+        "codex": "CODEX",
+        "claude_code": "CLAUDE",
+        "cursor": "CURSOR",
+        "gemini": "GEMINI",
+        "opencode": "OPENCODE",
+        "grok": "GROK",
+    }.get(provider, "PROVIDER")
+
+
+def _probe_agent_runtime_cli(
+    settings: ServiceSettings,
+    *,
+    executable: str,
+    provider: ProviderName,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    reason_prefix = _agent_runtime_cli_reason_prefix(provider)
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        settings.agent_runtime_image,
+        "-lc",
+        f"command -v {executable}",
+    ]
+    try:
+        result = run_subprocess(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
+            env=environ,
+        )
+    except FileNotFoundError:
+        return {
+            "status": "fail",
+            "reason_code": "DOCKER_CLI_NOT_FOUND",
+            "message": (
+                "Docker CLI was not found while probing the configured agent runtime image."
+            ),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "fail",
+            "reason_code": f"{reason_prefix}_RUNTIME_CLI_PROBE_TIMEOUT",
+            "message": (
+                f"Agent runtime CLI probe for {executable!r} exceeded "
+                f"{_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
+            ),
+        }
+    except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.agent_runtime_cli_probe_exception",
+            exc,
+            secrets,
+        )
+        detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
+        return {
+            "status": "fail",
+            "reason_code": f"{reason_prefix}_RUNTIME_CLI_PROBE_ERROR",
+            "message": "Agent runtime CLI probe failed before completion.",
+            "detail": detail,
+        }
+
+    if result.returncode == 0:
+        return {
+            "status": "ok",
+            "reason_code": f"{reason_prefix}_RUNTIME_CLI_AVAILABLE",
+            "detail": _redact(_truncate(result.stdout.strip()), secrets)
+            if result.stdout.strip()
+            else None,
+        }
+
+    detail = _redact(
+        _truncate(result.stderr or result.stdout or f"{executable} was not found"),
+        secrets,
+    )
+    return {
+        "status": "fail",
+        "reason_code": f"{reason_prefix}_RUNTIME_CLI_NOT_FOUND",
+        "message": (
+            f"The configured agent runtime image {settings.agent_runtime_image!r} "
+            f"does not expose the {executable!r} CLI required by provider {provider!r}."
+        ),
+        "detail": detail,
+    }
+
+
+def _runtime_cli_probe_payload(probe: Mapping[str, Any]) -> dict[str, str]:
+    """Return the public string fields from a runtime CLI probe result."""
+    return {
+        key: value
+        for key in ("status", "reason_code", "message", "detail")
+        if isinstance((value := probe.get(key)), str) and value
+    }
+
+
+def _probe_cli_auth_status(
+    *,
+    provider_label: str,
+    args: list[str],
+    failure_reason: str,
+    timeout_reason: str,
+    missing_reason: str,
+    error_reason: str,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    try:
+        result = run_subprocess(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
+            env=environ,
+        )
+    except FileNotFoundError:
+        return {
+            "status": "fail",
+            "reason_code": missing_reason,
+            "message": f"{provider_label} CLI was not found for auth status probing.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "fail",
+            "reason_code": timeout_reason,
+            "message": (
+                f"{provider_label} auth status probe exceeded {_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
+            ),
+        }
+    except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.cli_auth_probe_exception",
+            exc,
+            secrets,
+        )
+        detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
+        return {
+            "status": "fail",
+            "reason_code": error_reason,
+            "message": f"{provider_label} auth status probe failed before completion.",
+            "detail": detail,
+        }
+
+    if result.returncode == 0:
+        return {
+            "status": "ok",
+            "reason_code": f"{failure_reason.removesuffix('_FAILED')}_OK",
+        }
+
+    detail = _redact(
+        _truncate(result.stderr or result.stdout or "auth status exited non-zero"),
+        secrets,
+    )
+    return {
+        "status": "fail",
+        "reason_code": failure_reason,
+        "message": f"{provider_label} auth status probe reported unusable auth.",
+        "detail": detail,
+    }
+
+
 def _ollama_version_url(environ: Mapping[str, str]) -> str:
     return _ollama_version_urls(environ)[0]
 
@@ -697,6 +868,7 @@ from awf.service.provider_readiness import (  # noqa: E402
     _CODEX_AUTH_FILES,
     _GITHUB_TOKEN_ENV_KEYS,
     _HTTP_TIMEOUT_SECONDS,
+    _PROVIDER_PROBE_TIMEOUT_SECONDS,
     _REDACTION,
     _TRACEBACK_LOG_LIMIT,
     KNOWN_SECRET_ENV_KEYS,
@@ -707,6 +879,7 @@ from awf.service.provider_readiness import (  # noqa: E402
     HttpGet,
     HttpResponseLike,
     ProviderName,
+    SubprocessRun,
     _credential_source,
     _log,
     _RedactionSegment,

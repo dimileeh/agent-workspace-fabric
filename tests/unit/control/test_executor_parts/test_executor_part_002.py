@@ -663,6 +663,49 @@ class TestHappyPathPart001:
         assert "(agent: `opencode`, model: `ollama/gemma4:31b-cloud`, effort: `xhigh`)." in pr_body
 
     @pytest.mark.unit
+    async def test_cursor_lower_effort_without_model_override_omits_thinking_model(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Verify lower Cursor effort does not force the thinking model."""
+        ws_id = await _seed_ready_workspace(
+            factory,
+            agent="cursor",
+            task_policy={"agent_effort": "medium"},
+        )
+
+        fake.queue_result(returncode=0, stdout="cursor finished")  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-agent/pull/126\n",
+        )  # gh pr create
+
+        await executor.execute(ws_id)
+
+        adapter_args = fake.calls[0].args
+        cursor_start = adapter_args.index("cursor-agent")
+        assert adapter_args[cursor_start:] == [
+            "cursor-agent",
+            "-p",
+            "--force",
+            "--output-format",
+            "text",
+        ]
+        assert "-m" not in adapter_args[cursor_start:]
+
+    @pytest.mark.unit
     async def test_pr_monitor_receives_adapter_bound_to_workspace_model(
         self,
         fake: FakeCommandRunner,

@@ -53,6 +53,7 @@ from awf.control.executor.helpers import (
     _missing_monitor_recovery_metadata,
     _missing_sync_feature_pr_adoption_metadata,
     _profile_for_workspace,
+    _provider_recovery_default_model_for_monitor_handoff,
     _redacted_exception_traceback,
     _release_sync_source_branch,
     _release_sync_target_branch,
@@ -369,7 +370,12 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                 adapter=adapter,
                 profile=profile,
                 workspace=ws,
-                provider_recovery_default_model=defaults.model if defaults is not None else None,
+                provider_recovery_default_model=(
+                    _provider_recovery_default_model_for_monitor_handoff(
+                        adapter=adapter,
+                        defaults=defaults,
+                    )
+                ),
             )
     except Exception as exc:
         _log.exception("executor.pr_monitor_resume_build_failed", workspace_id=workspace_id)
@@ -1009,7 +1015,12 @@ async def _build_handoff_pr_monitor(
                 adapter=adapter,
                 profile=profile,
                 workspace=workspace,
-                provider_recovery_default_model=(defaults.model if defaults is not None else None),
+                provider_recovery_default_model=(
+                    _provider_recovery_default_model_for_monitor_handoff(
+                        adapter=adapter,
+                        defaults=defaults,
+                    )
+                ),
             )
     except Exception as exc:
         _log.error(

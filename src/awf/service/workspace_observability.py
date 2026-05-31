@@ -17,6 +17,7 @@ from typing import Any, Literal, Protocol, TypedDict, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.api.schemas import (
     StaleReasonListResponse,
     StaleReasonResponse,
@@ -457,16 +458,6 @@ def effective_agent_identity(
     explicit_model = _nonblank_policy_string(task_policy, "agent_model")
     explicit_effort = _nonblank_policy_string(task_policy, "agent_effort")
 
-    if explicit_model is not None:
-        model = explicit_model
-        model_source: AgentIdentitySource = "task_policy"
-    elif defaults is not None:
-        model = defaults.model
-        model_source = "default"
-    else:
-        model = None
-        model_source = "unavailable"
-
     if explicit_effort is not None:
         effort: str | None = explicit_effort
         effort_source: AgentIdentitySource = "task_policy"
@@ -476,6 +467,21 @@ def effective_agent_identity(
     else:
         effort = None
         effort_source = "unavailable"
+
+    if explicit_model is not None:
+        model: str | None = explicit_model
+        model_source: AgentIdentitySource = "task_policy"
+    elif defaults is not None:
+        model = selected_runtime_model_for_defaults(
+            agent=runtime,
+            explicit_model=None,
+            default_model=defaults.model,
+            effort=effort,
+        )
+        model_source = "default"
+    else:
+        model = None
+        model_source = "unavailable"
 
     return AgentIdentity(
         model=model,

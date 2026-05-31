@@ -51,6 +51,7 @@ _SECRET_KEY_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH")
 _PROVIDER_LABELS = {
     "codex": "Codex Credentials",
     "claude_code": "Claude Code Credentials",
+    "cursor": "Cursor Credentials",
     "gemini": "Gemini Credentials",
     "opencode": "OpenCode Credentials",
     "grok": "Grok Build Credentials",

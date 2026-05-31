@@ -42,7 +42,7 @@ For persistent values across shells in source checkouts, copy `.env.example` to
 
 ## One-message prompt
 
-Use this with Codex, Claude Code, Gemini, OpenCode, OpenClaw, or a human
+Use this with Codex, Claude Code, Cursor, Gemini, OpenCode, OpenClaw, or a human
 operator:
 
 ```text

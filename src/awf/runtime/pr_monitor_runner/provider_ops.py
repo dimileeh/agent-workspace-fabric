@@ -256,7 +256,7 @@ async def _record_provider_agent_run_error(
         effective_default_model = (
             self._deps.provider_recovery_default_model
             if self._deps.provider_recovery_default_model is not None
-            else self._deps.adapter.default_model
+            else self._deps.adapter.provider_recovery_default_model
         )
         metadata = provider_recovery_metadata_from_failure(
             reason_code=exc.reason_code,

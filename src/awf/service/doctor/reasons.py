@@ -535,6 +535,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "",
         "",
     ),
+    "CURSOR_AUTH_OK": _ReasonText(
+        "Cursor auth is usable for agent workspaces.",
+        "No action required.",
+        "",
+        "",
+        "",
+    ),
     "GEMINI_AUTH_OK": _ReasonText(
         "Gemini auth is usable for agent workspaces.",
         "No action required.",
@@ -731,6 +738,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Missing Claude API credentials.",
         "awf service doctor",
         "docs/REASON_CATALOG.md#claude_auth_missing",
+    ),
+    "CURSOR_AUTH_MISSING": _ReasonText(
+        "No Cursor auth signal was visible.",
+        "Set CURSOR_API_KEY before starting AWF.",
+        "Missing Cursor API credentials.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#cursor_auth_missing",
     ),
     "GEMINI_AUTH_MISSING": _ReasonText(
         "No Gemini auth signal was visible.",
