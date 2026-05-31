@@ -680,6 +680,34 @@ def test_reject_writable_ancestor_refuses_sticky_dir_owned_by_other_user(
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="ownership/rename semantics are POSIX-specific")
+def test_reject_writable_ancestor_refuses_non_writable_dir_owned_by_other_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An owner-private (0o700) ancestor owned by *another* local user is still refused.
+
+    Regression for PRRT_kwDOSJAM6s6F83VM: clear group/other write bits do not on their
+    own make a pre-existing ancestor safe. A directory's *owner* always holds rename
+    rights over the entries within it (an owner of even a 0o700 dir has rwx on it), so
+    under elevated privileges (AWF runs as root) the owner of an owner-private 0o700
+    ancestor can still rename AWF's secrets dir aside and plant a redirecting symlink
+    before the later secret write, defeating the symlink checks. The guard must require
+    trusted ownership (root or the current euid), not merely non-writable mode bits;
+    here the ancestor is reported owned by a synthetic third user (neither root nor the
+    current euid), which the pre-fix mode-only early return wrongly treated as safe.
+    """
+    ancestor = tmp_path / "private"
+    ancestor.mkdir()
+    ancestor.chmod(0o700)  # owner-private: no group/other write bits at all
+    other_uid = os.geteuid() + 1  # neither root (0) nor the current effective user
+    monkeypatch.setattr(Path, "stat", _stat_owned_by(ancestor, other_uid))
+
+    with pytest.raises(PermissionError):
+        credentials._reject_writable_ancestor(ancestor)
+
+
+@pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="sticky-bit ownership semantics are POSIX-specific")
 def test_reject_writable_ancestor_exempts_root_owned_sticky_dir(
     monkeypatch: pytest.MonkeyPatch,
