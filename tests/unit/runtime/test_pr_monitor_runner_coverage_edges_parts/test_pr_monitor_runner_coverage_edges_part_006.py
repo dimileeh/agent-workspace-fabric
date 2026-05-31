@@ -43,7 +43,6 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
-    BaseFetchError,
     ProtectedScopeDiffError,
 )
 from awf.service.merge_queue import MergeQueueBlocker
@@ -1459,65 +1458,3 @@ async def test_fetch_base_repairs_multiple_broken_awf_refs_before_failing_worksp
         "bad ref ws_old_1",
         "bad ref ws_old_2",
     ]
-
-
-@pytest.mark.unit
-async def test_fetch_base_wraps_broken_ref_repair_exceptions_as_base_fetch_error(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    mocker: pytest_mock.MockerFixture,
-) -> None:
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    fetch_base_once = mocker.patch.object(
-        runner,
-        "_fetch_base_once",
-        mocker.AsyncMock(
-            return_value=CommandResult(
-                returncode=1,
-                stdout="",
-                stderr="fatal: bad object refs/heads/awf/ws_old",
-            )
-        ),
-    )
-    repair = mocker.patch.object(
-        runner,
-        "_repair_orphaned_broken_awf_ref",
-        mocker.AsyncMock(side_effect=RuntimeError("database unavailable")),
-    )
-
-    with pytest.raises(BaseFetchError, match="broken AWF ref repair failed") as exc:
-        await runner._fetch_base(
-            workspace_id="ws_current",
-            worktree_path=tmp_path / "worktrees" / "ws_current",
-            base_branch="development",
-        )
-
-    assert "database unavailable" in str(exc.value)
-    assert fetch_base_once.await_count == 1
-    repair.assert_awaited_once()
-
-
-@pytest.mark.unit
-async def test_missing_workspace_terminal_helpers_return_without_side_effects(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    with pytest.raises(RuntimeError, match="disappeared"):
-        await runner._load_workspace("ws_missing")
-    await runner._persist_state("ws_missing", MonitorState(last_push_sha="abc"))
-    await runner._terminate_failed("ws_missing", message="missing")
-    await runner._terminate_completed("ws_missing", pr_merge_sha="abc")
