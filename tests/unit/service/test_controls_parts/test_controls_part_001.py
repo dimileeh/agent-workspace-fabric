@@ -1671,3 +1671,54 @@ async def test_cancel_workspace_without_stop_stack_skips_terminal_runtime_releas
             e for e in events if e.event_type == "workspace.terminal_runtime_released"
         ]
         assert len(release_events) == 0
+
+
+@pytest.mark.unit
+async def test_cancel_workspace_skips_terminal_runtime_released_when_launching(
+    engine: AsyncEngine,
+) -> None:
+    """When a provisioning_launching guard event exists, cancel should not
+    record terminal_runtime_released because the provisioner may still be
+    starting containers for this workspace."""
+    from awf.db.repositories.base import (
+        PROVISIONING_LAUNCHING_EVENT_TYPE,
+        PROVISIONING_LAUNCHING_REASON_CODE,
+    )
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.provisioning,
+            compose_project_name="awf_ws_cancel_launching",
+        )
+        await session.flush()
+        repo = WorkspaceRepository(session)
+        await repo.add_event(
+            workspace,
+            event_type=PROVISIONING_LAUNCHING_EVENT_TYPE,
+            reason_code=PROVISIONING_LAUNCHING_REASON_CODE,
+            payload={"workspace_id": workspace.id},
+        )
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        await service.cancel_workspace(
+            workspace.id,
+            reason="cancel while launching",
+            stop_stack=True,
+            idempotency_key="cancel-launching-guard",
+        )
+
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 0, (
+            "terminal_runtime_released must not be recorded when "
+            "provisioning_launching guard exists"
+        )

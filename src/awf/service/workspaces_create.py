@@ -71,22 +71,15 @@ _log = get_logger(__name__)
 
 
 class _ProfileNotProvided:
-    """Sentinel indicating the caller wants profile computation from the payload.
+    """Sentinel type for ``PROFILE_NOT_PROVIDED``.
 
     ``create_workspace_row`` uses three-valued semantics for
     ``requested_profile`` and ``resolved_profile``:
 
-    * Omit the argument (``_ProfileNotProvided`` default) — compute from payload.
+    * Omit the argument (``PROFILE_NOT_PROVIDED`` default) — compute from payload.
     * Pass ``None`` — explicitly request no profile (``requested_profile`` only).
     * Pass a ``dict`` — use the caller-supplied pre-computed snapshot.
     """
-
-    _instance: _ProfileNotProvided | None = None
-
-    def __new__(cls) -> _ProfileNotProvided:
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __repr__(self) -> str:
         return "PROFILE_NOT_PROVIDED"
@@ -483,11 +476,12 @@ def _requested_resource_reservation_values(
 def _requested_resource_dind_slots(
     payload: WorkspaceCreateRequest,
     *,
-    resolved_profile: dict[str, Any] | None = PROFILE_NOT_PROVIDED,  # type: ignore[assignment]
+    resolved_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
 ) -> int:
     """Return the number of DinD slots requested by the payload's resolved profile."""
-    if resolved_profile is PROFILE_NOT_PROVIDED:  # type: ignore[comparison-overlap]
-        resolved_profile = workspace_create_profile_snapshots(payload)[1]  # type: ignore[unreachable]
+    if isinstance(resolved_profile, _ProfileNotProvided):
+        resolved_profile = workspace_create_profile_snapshots(payload)[1]
+    assert not isinstance(resolved_profile, _ProfileNotProvided)
     return 1 if _dind_mode_from_profile_snapshot(resolved_profile) == "dind" else 0
 
 
@@ -964,13 +958,14 @@ def resource_reservation_plan(
     payload: WorkspaceCreateRequest,
     *,
     settings: Settings,
-    resolved_profile: dict[str, Any] | None = PROFILE_NOT_PROVIDED,  # type: ignore[assignment]
+    resolved_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
 ) -> ResourceReservationPlan:
     """Build a resource reservation plan from a rich create request and settings."""
     from awf.service.workspaces import ResourceReservationPlan  # noqa: E402
 
-    if resolved_profile is PROFILE_NOT_PROVIDED:  # type: ignore[comparison-overlap]
-        resolved_profile = workspace_create_profile_snapshots(payload)[1]  # type: ignore[unreachable]
+    if isinstance(resolved_profile, _ProfileNotProvided):
+        resolved_profile = workspace_create_profile_snapshots(payload)[1]
+    assert not isinstance(resolved_profile, _ProfileNotProvided)
     resources = payload.resources
     legacy_memory_gb = _parse_memory_gb(resources.memory)
     dind_mode = _dind_mode_from_profile_snapshot(resolved_profile)

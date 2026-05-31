@@ -23,6 +23,8 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.repositories.base import (
+    PROVISIONING_LAUNCHING_EVENT_TYPE,
+    PROVISIONING_LAUNCHING_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
 )
@@ -98,6 +100,22 @@ async def _has_terminal_runtime_released_event(
             WorkspaceEvent.workspace_id == workspace_id,
             WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
             WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def _has_provisioning_launching_event(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == PROVISIONING_LAUNCHING_EVENT_TYPE,
+            WorkspaceEvent.reason_code == PROVISIONING_LAUNCHING_REASON_CODE,
         )
         .limit(1)
     )
@@ -394,6 +412,8 @@ class WorkspaceControlService:
                 payload=event_payload,
             )
         if stop_stack and not await _has_terminal_runtime_released_event(
+            self._session, workspace.id
+        ) and not await _has_provisioning_launching_event(
             self._session, workspace.id
         ):
             await repo.add_event(
@@ -1239,7 +1259,11 @@ class WorkspaceControlService:
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
                 )
-            if not await _has_terminal_runtime_released_event(self._session, workspace.id):
+            if not await _has_terminal_runtime_released_event(
+                self._session, workspace.id
+            ) and not await _has_provisioning_launching_event(
+                self._session, workspace.id
+            ):
                 await repo.add_event(
                     workspace,
                     event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,

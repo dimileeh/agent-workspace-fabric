@@ -36,6 +36,10 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import (
+    PROVISIONING_LAUNCHING_EVENT_TYPE,
+    PROVISIONING_LAUNCHING_REASON_CODE,
+)
 from awf.node.companion_services import (
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
@@ -275,12 +279,7 @@ class Provisioner:
                         workspace_id=workspace_id,
                         reason_code="PRE_LAUNCH_COMMIT_NON_FATAL",
                     )
-                if not await self._recheck_status(
-                    workspace_id,
-                    expected=WorkspaceStatus.provisioning,
-                    action="provision",
-                    reason_code="PROVISIONER_STALE_STATUS",
-                ):
+                if not await self._recheck_before_launch(workspace_id):
                     return
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
@@ -797,6 +796,51 @@ class Provisioner:
             )
             await session.commit()
             return False
+
+    async def _recheck_before_launch(self, workspace_id: str) -> bool:
+        """Recheck workspace status with a row lock and record a launch guard.
+
+        Unlike :meth:`_recheck_status`, this method holds a ``SELECT FOR UPDATE``
+        row lock while checking status and recording a
+        ``workspace.provisioning_launching`` event in the same transaction.  The
+        row lock serializes with concurrent cancel/stop/destroy operations that
+        also read the workspace row before transitioning it to a terminal state.
+        The ``provisioning_launching`` event persists after the lock is released,
+        so cancel/stop code that runs later can detect that a launch is already
+        committed and skip recording ``terminal_runtime_released`` for a
+        workspace whose containers may still be starting up.
+
+        Returns ``True`` when the workspace is still ``provisioning`` and the
+        launch-guard event was recorded; ``False`` otherwise.
+        """
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(workspace_id)
+            if ws is None:
+                _log.warning(
+                    "provisioner.skip_unknown_before_launch",
+                    workspace_id=workspace_id,
+                )
+                await session.commit()
+                return False
+            if ws.status != WorkspaceStatus.provisioning.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    ws,
+                    action="provision",
+                    expected=WorkspaceStatus.provisioning,
+                    reason_code="PROVISIONER_STALE_STATUS",
+                )
+                await session.commit()
+                return False
+            await repo.add_event(
+                ws,
+                event_type=PROVISIONING_LAUNCHING_EVENT_TYPE,
+                reason_code=PROVISIONING_LAUNCHING_REASON_CODE,
+                payload={"workspace_id": workspace_id},
+            )
+            await session.commit()
+            return True
 
     async def _record_stale_action_skip(
         self,

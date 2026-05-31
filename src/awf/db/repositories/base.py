@@ -606,6 +606,8 @@ async def _fetch_resource_reservation_totals(
     }
 
 
+PROVISIONING_LAUNCHING_EVENT_TYPE: Final = "workspace.provisioning_launching"
+PROVISIONING_LAUNCHING_REASON_CODE: Final = "PROVISIONING_LAUNCHING"
 TERMINAL_RUNTIME_RELEASE_EVENT_TYPE: Final = "workspace.terminal_runtime_released"
 TERMINAL_RUNTIME_RELEASE_REASON_CODE: Final = "TERMINAL_RUNTIME_RELEASED"
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
