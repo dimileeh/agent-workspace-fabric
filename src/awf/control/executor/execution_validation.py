@@ -67,6 +67,7 @@ from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.runtime.validation import ValidationCoverageResult, profile_phase_command_plan
 from awf.runtime.validation_worktree import (
+    VALIDATION_INFRASTRUCTURE_ERROR,
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
@@ -316,7 +317,7 @@ async def run_validation_and_fix_cycle(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
                 validation_tier=validation_tier,
-                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 message="could not capture workspace HEAD before AWF validation",
             )
         validation_run_id = await self._start_validation_run(
@@ -471,14 +472,14 @@ async def run_validation_and_fix_cycle(
             await self._finish_validation_run(
                 validation_run_id,
                 status="failed",
-                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
             )
             await self._finish_pending_validate_operations(
                 workspace_id=workspace_id,
                 status=OperationStatus.failed,
                 validation_run_id=validation_run_id,
                 requested_tier=validation_tier,
-                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 error_message=message,
             )
             await self._mark_failed(
@@ -486,7 +487,7 @@ async def run_validation_and_fix_cycle(
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
                 message=message,
-                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
             )
             return ExecutionValidationResult(
                 stop=True,

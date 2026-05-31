@@ -18,6 +18,9 @@ from awf.runtime.pr_monitor_runner.path_parsing import (
     _untracked_paths_from_porcelain as _untracked_paths_from_porcelain,
 )
 from awf.runtime.validation_worktree_constants import (
+    VALIDATION_INFRASTRUCTURE_ERROR as _VALIDATION_INFRASTRUCTURE_ERROR,
+)
+from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_CLEANUP_FAILED as _VALIDATION_WORKTREE_CLEANUP_FAILED,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -30,6 +33,7 @@ from awf.runtime.validation_worktree_constants import (
 VALIDATION_WORKTREE_CLEANUP_FAILED: str = _VALIDATION_WORKTREE_CLEANUP_FAILED
 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY: str = _VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
 VALIDATION_WORKTREE_STATUS_FAILED: str = _VALIDATION_WORKTREE_STATUS_FAILED
+VALIDATION_INFRASTRUCTURE_ERROR: str = _VALIDATION_INFRASTRUCTURE_ERROR
 
 GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
