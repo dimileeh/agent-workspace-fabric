@@ -1105,6 +1105,61 @@ def test_default_port_probe_detects_non_loopback_listener() -> None:
 
 
 @pytest.mark.unit
+def test_loopback_port_probe_detects_in_use_and_free() -> None:
+    """Verify the loopback probe distinguishes an occupied loopback port from free."""
+    import socket
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen(1)
+    try:
+        assert system_checks._loopback_port_probe(port) is PortProbeResult.IN_USE
+    finally:
+        listener.close()
+    assert system_checks._loopback_port_probe(port) is PortProbeResult.FREE
+
+
+@pytest.mark.unit
+def test_loopback_port_probe_ignores_non_loopback_listener() -> None:
+    """Verify the loopback probe matches Docker's loopback-only Postgres bind.
+
+    ``docker/compose/local-service.yml`` publishes Postgres bound to loopback
+    (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``), so Docker reserves the
+    port on ``127.0.0.1`` only. A listener on a *different* (non-loopback) host
+    address does not conflict with that bind, so the loopback probe must report
+    the port free -- the all-interface (``0.0.0.0``) probe would wrongly report it
+    in-use and block ``awf setup --dry-run`` even though ``awf start`` would
+    succeed.
+    """
+    import socket
+
+    def _non_loopback_ipv4() -> str | None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as discover:
+                discover.connect(("8.8.8.8", 80))
+                address = discover.getsockname()[0]
+        except OSError:
+            return None
+        return address if address and not address.startswith("127.") else None
+
+    host_ip = _non_loopback_ipv4()
+    if host_ip is None:
+        pytest.skip("no non-loopback IPv4 interface available to bind")
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((host_ip, 0))
+    port = listener.getsockname()[1]
+    listener.listen(1)
+    try:
+        assert system_checks._loopback_port_probe(port) is PortProbeResult.FREE
+    finally:
+        listener.close()
+
+
+@pytest.mark.unit
 def test_default_free_disk_bytes_real_and_parent_fallback(tmp_path: Path) -> None:
     """Verify free-disk reads a real path and falls back to an existing parent."""
     assert system_checks._default_free_disk_bytes(tmp_path) >= 0
@@ -1465,6 +1520,24 @@ def test_check_postgres_port_ok_when_free_and_blocks_when_in_use() -> None:
     assert in_use.data["port"] == 5433
     assert in_use.data["available"] is False
     assert in_use.fix is not None
+    # Compose publishes Postgres on loopback only, so the operator-facing detail
+    # must describe a loopback bind, not an all-interface (0.0.0.0) bind.
+    assert "127.0.0.1" in in_use.detail
+    assert "0.0.0.0" not in in_use.detail
+
+
+@pytest.mark.unit
+def test_check_postgres_port_default_probe_is_loopback() -> None:
+    """Verify the Postgres check defaults to the loopback probe.
+
+    Compose publishes Postgres as ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``
+    (loopback only), so readiness must probe the loopback bind Docker will reserve
+    rather than the all-interface bind used for the API port.
+    """
+    import inspect
+
+    default_probe = inspect.signature(system_checks.check_postgres_port).parameters["probe"].default
+    assert default_probe is system_checks._loopback_port_probe
 
 
 @pytest.mark.unit

@@ -150,15 +150,13 @@ def _default_command_runner(
     )
 
 
-def _default_port_probe(port: int) -> PortProbeResult:
-    """Classify whether the AWF API host port can be bound on all interfaces.
+def _probe_port_bind(port: int, host: str) -> PortProbeResult:
+    """Classify whether ``port`` can be bound on ``host``, by ``errno``.
 
-    The probe binds the IPv4 wildcard address (``0.0.0.0``) rather than just
-    loopback because the local-service Compose file publishes the API port
-    without a host IP (``${AWF_API_HOST_PORT:-8000}:8000``), so Docker reserves
-    it on every host interface. A loopback-only probe would report the port free
-    even when something is listening on another interface, only for ``awf start``
-    to fail later when Docker tries to publish the all-interface bind.
+    Binding the same address Docker will publish is what makes the readiness
+    result match what ``awf start`` reserves — the all-interface wildcard
+    (``0.0.0.0``) for the API port, loopback (``127.0.0.1``) for the Postgres
+    port — so the host is a parameter rather than hard-coded here.
 
     A bind failure is classified by ``errno`` so the readiness check reports the
     real cause rather than mislabelling everything as occupancy: ``EADDRINUSE``
@@ -172,7 +170,7 @@ def _default_port_probe(port: int) -> PortProbeResult:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind(("0.0.0.0", port))  # all interfaces — match Docker's published bind
+            probe.bind((host, port))  # match the address Docker will publish
         return PortProbeResult.FREE
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
@@ -180,6 +178,34 @@ def _default_port_probe(port: int) -> PortProbeResult:
         if exc.errno in (errno.EACCES, errno.EPERM):
             return PortProbeResult.PERMISSION_DENIED
         return PortProbeResult.UNAVAILABLE
+
+
+def _default_port_probe(port: int) -> PortProbeResult:
+    """Classify whether the AWF API host port can be bound on all interfaces.
+
+    The probe binds the IPv4 wildcard address (``0.0.0.0``) rather than just
+    loopback because the local-service Compose file publishes the API port
+    without a host IP (``${AWF_API_HOST_PORT:-8000}:8000``), so Docker reserves
+    it on every host interface. A loopback-only probe would report the port free
+    even when something is listening on another interface, only for ``awf start``
+    to fail later when Docker tries to publish the all-interface bind.
+    """
+    return _probe_port_bind(port, "0.0.0.0")
+
+
+def _loopback_port_probe(port: int) -> PortProbeResult:
+    """Classify whether the AWF Postgres host port can be bound on loopback.
+
+    The probe binds loopback (``127.0.0.1``) rather than the wildcard because the
+    local-service Compose file publishes Postgres bound to loopback
+    (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``), so Docker reserves the
+    port on ``127.0.0.1`` only. An all-interface (``0.0.0.0``) probe would report
+    IN_USE when an unrelated process holds the same port on a *different* host
+    address — a bind that does not conflict with Docker's loopback reservation —
+    wrongly blocking ``awf setup --dry-run`` even though ``awf start`` would
+    succeed. Probing loopback keeps readiness aligned with the bind Docker takes.
+    """
+    return _probe_port_bind(port, "127.0.0.1")
 
 
 def _safe_expanduser(path: str | Path) -> Path:
@@ -467,7 +493,7 @@ def check_ports(
 def check_postgres_port(
     port: int,
     *,
-    probe: PortProbeFn = _default_port_probe,
+    probe: PortProbeFn = _loopback_port_probe,
 ) -> SetupCheckResult:
     """Check the Postgres host port can be bound (a startup blocker if not).
 
@@ -478,6 +504,12 @@ def check_postgres_port(
     the port and fails — rather than an advisory warning. ``awf setup --dry-run``
     used to probe only the API port, so an occupied 5433 (or override) passed
     readiness yet still broke ``awf start``; this closes that parity gap.
+
+    Unlike the API port, Compose binds Postgres to loopback only, so the default
+    probe is :func:`_loopback_port_probe` (``127.0.0.1``) rather than the
+    all-interface probe used for the API: Docker reserves only ``127.0.0.1``, and
+    an all-interface probe would falsely block when an unrelated process holds the
+    port on a *different* host address that never conflicts with that reservation.
 
     A bind failure that is *not* occupancy (permission denied on a privileged
     port, or another bind error) gets its own cause and fix and stays advisory:
@@ -491,7 +523,7 @@ def check_postgres_port(
             name="postgres_port",
             level=SetupCheckLevel.OK,
             summary=f"Postgres host port {port} is free.",
-            detail=f"0.0.0.0:{port} (all interfaces) could be bound for the local AWF Postgres.",
+            detail=f"127.0.0.1:{port} (loopback) could be bound for the local AWF Postgres.",
             data={"port": port, "available": True, "probe": outcome.value},
         )
     if outcome is PortProbeResult.PERMISSION_DENIED:
@@ -499,7 +531,7 @@ def check_postgres_port(
             name="postgres_port",
             level=SetupCheckLevel.WARNING,
             summary=f"Postgres host port {port} could not be probed: permission denied.",
-            detail=f"Binding 0.0.0.0:{port} (all interfaces) was refused with a permission "
+            detail=f"Binding 127.0.0.1:{port} (loopback) was refused with a permission "
             "error; ports below 1024 are privileged and cannot be bound by an unprivileged "
             "user. awf start publishes the port through the root Docker daemon and may still "
             "succeed, so this probe cannot confirm the port is bindable.",
@@ -512,9 +544,9 @@ def check_postgres_port(
             name="postgres_port",
             level=SetupCheckLevel.WARNING,
             summary=f"Postgres host port {port} could not be probed.",
-            detail=f"Binding 0.0.0.0:{port} (all interfaces) failed for a reason other than "
+            detail=f"Binding 127.0.0.1:{port} (loopback) failed for a reason other than "
             "occupancy or permissions, so this probe could not confirm the port is bindable.",
-            fix="Verify the host can bind 0.0.0.0 on this port (check the address and any "
+            fix="Verify the host can bind 127.0.0.1 on this port (check the address and any "
             "network policy), or set a different AWF_POSTGRES_HOST_PORT, "
             "then re-run awf setup --dry-run.",
             data={"port": port, "available": False, "probe": outcome.value},
@@ -523,7 +555,7 @@ def check_postgres_port(
         name="postgres_port",
         level=SetupCheckLevel.BLOCKED,
         summary=f"Postgres host port {port} is already in use.",
-        detail=f"0.0.0.0:{port} (all interfaces) is currently bound by another process. "
+        detail=f"127.0.0.1:{port} (loopback) is currently bound by another process. "
         "The local-service Compose stack publishes Postgres on this fixed host port "
         "(127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432) and brings it up first, so "
         "awf start cannot publish it and will fail until the port is free.",
