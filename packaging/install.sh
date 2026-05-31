@@ -503,12 +503,23 @@ verify_checksum() {
 # Install
 # --------------------------------------------------------------------------
 
-# The exact command the chosen method runs, rendered identically in the dry-run
-# plan and the real-install plan so a dry-run preview and a live run log show the
-# same "install via <method>: <command>" line. uv and pipx diverge: the real
-# commands are `uv tool install` and `pipx install` (pipx has no `tool`
-# subcommand), so the plan must not template a single `${METHOD} tool install`
-# string for both.
+# A human-readable summary of the install step — NOT a copy-pasteable command.
+# It names the chosen method (`uv tool install` / `pipx install`) and the wheel
+# by its manifest filename, rendered identically in the dry-run plan and the
+# real-install plan so a dry-run preview and a live run log show the same
+# "install via <method>: <command>" line. uv and pipx diverge: the real commands
+# are `uv tool install` and `pipx install` (pipx has no `tool` subcommand), so
+# the plan must not template a single `${METHOD} tool install` string for both.
+#
+# This summary intentionally differs from what install_uv()/install_pipx()
+# actually exec: those pass `--force` and the absolute "$ARTIFACT_FILE" path
+# (plus a UV_TOOL_BIN_DIR/PIPX_BIN_DIR prefix when --install-dir is set). Both
+# are omitted on purpose. "$ARTIFACT_FILE" lives under the per-run mktemp work
+# dir that the EXIT trap deletes, so echoing it would be neither reproducible by
+# the reader nor identical across runs — using the stable wheel name keeps the
+# dry-run and real-install plan lines byte-for-byte equal (see
+# test_real_install_plan_matches_dry_run_command). `--force` is an operational
+# reinstall flag, not part of identifying what is being installed.
 install_command() {
     case "$METHOD" in
         uv) printf 'uv tool install %s' "$ARTIFACT_NAME" ;;
