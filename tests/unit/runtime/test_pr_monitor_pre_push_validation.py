@@ -78,18 +78,25 @@ class _FakeValidation:
 
 
 def _command_result(
-    tmp_path: Path, *, ok: bool, reason_code: str | None = None
+    tmp_path: Path,
+    *,
+    ok: bool,
+    reason_code: str | None = None,
+    command: str = "pytest -q",
+    returncode: int | None = None,
+    artifact_name: str | None = None,
 ) -> ValidationCommandResult:
     """Build a deterministic validation command result with local artifact paths."""
     if reason_code is None:
         reason_code = "VALIDATION_OK" if ok else "PYTEST_TEST_FAILURE"
-    stdout_path = tmp_path / ("ok.stdout" if ok else "failed.stdout")
-    stderr_path = tmp_path / ("ok.stderr" if ok else "failed.stderr")
+    label = artifact_name or ("ok" if ok else command.replace("/", "_").replace(" ", "_"))
+    stdout_path = tmp_path / f"{label}.stdout"
+    stderr_path = tmp_path / f"{label}.stderr"
     stdout_path.write_text("passed\n" if ok else "failed\n", encoding="utf-8")
     stderr_path.write_text("", encoding="utf-8")
     return ValidationCommandResult(
-        command="pytest -q",
-        returncode=0 if ok else 1,
+        command=command,
+        returncode=0 if ok else (returncode if returncode is not None else 1),
         duration_seconds=0.1,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
@@ -98,10 +105,27 @@ def _command_result(
 
 
 def _validation_result(
-    tmp_path: Path, *, ok: bool, reason_code: str | None = None
+    tmp_path: Path,
+    *,
+    ok: bool,
+    reason_code: str | None = None,
+    command: str = "pytest -q",
+    returncode: int | None = None,
+    artifact_name: str | None = None,
 ) -> ValidationResult:
     """Wrap one command result into a single-command validation result."""
-    return ValidationResult(commands=[_command_result(tmp_path, ok=ok, reason_code=reason_code)])
+    return ValidationResult(
+        commands=[
+            _command_result(
+                tmp_path,
+                ok=ok,
+                reason_code=reason_code,
+                command=command,
+                returncode=returncode,
+                artifact_name=artifact_name,
+            )
+        ]
+    )
 
 
 def _coverage_result(tmp_path: Path) -> ValidationCoverageResult:
@@ -266,6 +290,143 @@ async def test_pre_push_validation_failure_does_not_push(
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
     assert result.details is not None
     assert result.details["validation_reason_code"] == "PYTEST_TEST_FAILURE"
+    assert result.details["failing_command"] == "pytest -q"
+    assert result.details["failing_returncode"] == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_toolchain_missing_bypasses_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pure command-not-found validation failure should not spend fix-pass budget."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "1" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    adapter = FakeAdapter()
+    validation = _FakeValidation(
+        _validation_result(
+            tmp_path,
+            ok=False,
+            command="ruff check .",
+            returncode=127,
+            reason_code="COMMAND_FAILED",
+            artifact_name="ruff_missing",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _unexpected_commit(**_kwargs: object) -> bool:
+        """Fail loudly if a toolchain-missing failure reaches the fix-pass commit step."""
+        pytest.fail("toolchain-missing validation must not run a fix pass")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert len(validation.calls) == 1
+    assert adapter.calls == []
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    assert result.details is not None
+    assert result.details["reason_code"] == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert result.details["validation_reason_code"] == "COMMAND_FAILED"
+    assert result.details["failing_command"] == "ruff check ."
+    assert result.details["failing_returncode"] == 127
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_mixed_127_prefers_real_failure_for_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed 127 and non-127 failures should surface the genuine validation failure."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'2' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'3' * 40}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed mixed validation\n")
+    mixed = ValidationResult(
+        commands=[
+            _command_result(
+                tmp_path,
+                ok=False,
+                command="ruff check .",
+                returncode=127,
+                reason_code="COMMAND_FAILED",
+                artifact_name="mixed_ruff_missing",
+            ),
+            _command_result(
+                tmp_path,
+                ok=False,
+                command="pytest -q",
+                returncode=1,
+                reason_code="PYTEST_TEST_FAILURE",
+                artifact_name="mixed_pytest_failure",
+            ),
+        ]
+    )
+    validation = _FakeValidation(mixed, _validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        """Report a successful synthetic fix commit."""
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert len(validation.calls) == 2
+    assert len(adapter.calls) == 1
+    assert "Failing command: pytest -q" in adapter.calls[0]
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-2].reason_code == "PYTEST_TEST_FAILURE"
 
 
 @pytest.mark.unit
@@ -776,6 +937,8 @@ async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reaso
     assert result.reason_code == "PRE_PUSH_VALIDATION_FIX_FAILED"
     assert result.details is not None
     assert result.details["validation_reason_code"] == "PYTEST_TEST_FAILURE"
+    assert result.details["failing_command"] == "pytest -q"
+    assert result.details["failing_returncode"] == 1
     assert "fix pass failed" in result.stderr
 
 

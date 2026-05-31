@@ -969,6 +969,8 @@ async def _build_handoff_pr_monitor(
     workspace_id: str,
     workspace: Workspace,
     worktree_path: Path,
+    compose_project: str,
+    compose_file: Path,
     build_failed_log_event: str,
     build_failed_message_prefix: str,
 ) -> _MonitorRunnerProto | None:
@@ -978,7 +980,37 @@ async def _build_handoff_pr_monitor(
     ``None`` (after transitioning to ``failed``) when no monitor can be built.
     """
     monitor: _MonitorRunnerProto | None = self._pr_monitor
+    if monitor is None and self._pr_monitor_factory is None:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"{build_failed_message_prefix}no PR monitor configured",
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+        return None
+
     try:
+        profile = _profile_for_workspace(
+            workspace,
+            worktree_path=worktree_path,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        profile = await _sync_resolved_profile(
+            self,
+            ws=workspace,
+            workspace_id=workspace_id,
+            profile=profile,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        if not await self._run_monitor_handoff_profile_setup(
+            workspace_id=workspace_id,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+        ):
+            return None
         if monitor is None and self._pr_monitor_factory is not None:
             agent = AgentRuntime(workspace.agent)
             defaults = self._defaults_for(agent)
@@ -991,18 +1023,6 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
-            )
-            profile = _profile_for_workspace(
-                workspace,
-                worktree_path=worktree_path,
-                planning_max_iterations_default=(self._config.planning_max_iterations_default),
-            )
-            profile = await _sync_resolved_profile(
-                self,
-                ws=workspace,
-                workspace_id=workspace_id,
-                profile=profile,
-                planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
@@ -1118,6 +1138,8 @@ async def _handoff_sync_release_pr_monitor(
         workspace_id=workspace_id,
         workspace=workspace,
         worktree_path=worktree_path,
+        compose_project=compose_project,
+        compose_file=compose_file,
         build_failed_log_event="executor.sync_release_pr_monitor_build_failed",
         build_failed_message_prefix="release PR monitor handoff failed: ",
     )
@@ -1295,6 +1317,8 @@ async def _handoff_sync_feature_pr_monitor(
         workspace_id=workspace_id,
         workspace=workspace,
         worktree_path=worktree_path,
+        compose_project=compose_project,
+        compose_file=compose_file,
         build_failed_log_event="executor.sync_feature_pr_monitor_build_failed",
         build_failed_message_prefix="adopted PR monitor handoff failed: ",
     )

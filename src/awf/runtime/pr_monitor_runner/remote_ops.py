@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
@@ -186,6 +187,7 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _PRE_PUSH_VALIDATION_FAILED_REASON,
         _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
         _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+        _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
     }:
         return "pre_push_validation_failed"
     if push_result.workflow_scope_required:
