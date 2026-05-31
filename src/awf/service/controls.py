@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.schemas import WorkspaceControlResponse
+from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace
+from awf.db.models import MergeCandidate, Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -28,6 +25,38 @@ from awf.db.repositories.base import (
 )
 from awf.node.cleanup import (
     WorkspaceCleanupResult,
+)
+from awf.runtime.operator_hints import (
+    arm_operator_hint_freeze,
+    build_pending_operator_hint_payload,
+    persist_operator_hint,
+    remonitor_elapsed_settle_head_shas,
+    remonitor_has_elapsed_settle,
+    utcnow,
+)
+from awf.runtime.pr_monitor import OperatorHint
+from awf.service.controls_errors import (
+    ActiveWorkspaceDestroyError,
+    IdempotencyConflictError,
+    VersionConflictError,
+    WorkspaceControlError,
+    WorkspaceNotFoundError,
+    WorkspaceRebaseActiveConflictError,
+    WorkspaceRebaseMissingCandidateError,
+    WorkspaceRebaseMissingPrUrlError,
+    WorkspaceRebaseStateError,
+    WorkspaceRefreshStateError,
+    WorkspaceRemonitorMissingPrUrlError,
+    WorkspaceRemonitorStateError,
+    WorkspaceStackStopError,
+    WorkspaceValidateMissingPrUrlError,
+    WorkspaceValidateStateError,
+)
+from awf.service.controls_types import (
+    CleanerFactory,
+    ProjectStopper,
+    _PreparedOperation,
+    _PreparedOperationKind,
 )
 from awf.service.failure_causality import (
     PRIMARY_FAILURE_KEY,
@@ -50,9 +79,6 @@ from awf.service.workspace_runtime_health import (
     OPERATOR_REFRESH_REASON_CODE,
 )
 
-ProjectStopper = Callable[[str | None], Awaitable[None]]
-CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
-CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
 _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
@@ -84,234 +110,49 @@ _OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
+_REMONITOR_PAST_SETTLE_WARNING_CODE = "REMONITOR_PAST_SETTLE"
+_REMONITOR_PAST_SETTLE_HINT_MESSAGE = (
+    "Workspace is past reviewer-settle window; auto-merge is frozen "
+    "until the operator hint is processed."
+)
+_REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE = (
+    "Workspace is past reviewer-settle window; auto-merge is paused "
+    "until reviewer settle is re-evaluated."
+)
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
 
-class _PreparedOperationKind(StrEnum):
-    exact_replay = "exact_replay"
-    active_coalesce = "active_coalesce"
+def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> datetime:
+    if requested_at is None:
+        raise RuntimeError("operator remonitor requested_at was not initialized")
+    return requested_at
 
 
-@dataclass(frozen=True)
-class _PreparedOperation:
-    workspace: Workspace
-    replay: Operation | None = None
-    kind: _PreparedOperationKind | None = None
-    idempotency_key: str | None = None
-
-
-class WorkspaceCleanerProtocol(Protocol):
-    """Protocol that workspace cleanup backends must satisfy."""
-
-    async def cleanup(  # pragma: no cover - Protocol method declaration only.
-        self,
-        *,
-        workspace_id: str,
-        repo_url: str,
-        companion_worktrees: tuple[tuple[str, str], ...] = (),
-        compose_project_name: str | None = None,
-        compose_file_path: Path | None = None,
-        worktree_host_path: Path | None = None,
-        remove_volumes: bool = True,
-        remove_worktree: bool = True,
-    ) -> CleanupResultLike: ...
-
-
-class WorkspaceControlError(Exception):
-    """Base error for framework adapters to map into HTTP/MCP errors."""
-
-    def __init__(
-        self,
-        *,
-        error_code: str,
-        message: str,
-        detail: dict[str, object] | None = None,
-    ) -> None:
-        self.error_code = error_code
-        self.message = message
-        self.detail = detail
-        super().__init__(message)
-
-
-class WorkspaceNotFoundError(WorkspaceControlError):
-    """Raised when no workspace row matches the requested identifier."""
-
-    def __init__(self, workspace_id: str) -> None:
-        super().__init__(
-            error_code="NOT_FOUND",
-            message=f"No workspace with id {workspace_id}",
+def _remonitor_current_head_sha(
+    workspace: Workspace,
+    candidate: MergeCandidate | None,
+    monitor_state: dict[str, str],
+) -> str | None:
+    candidate_head_sha = (
+        candidate.head_sha if candidate is not None and candidate.head_sha else None
+    )
+    workspace_head_sha = workspace.monitor_last_commit_sha
+    if (
+        candidate is not None
+        and candidate_head_sha is not None
+        and workspace_head_sha
+        and workspace_head_sha != candidate_head_sha
+        and workspace.pr_number is not None
+        and workspace.updated_at > candidate.updated_at
+        and remonitor_has_elapsed_settle(
+            monitor_state,
+            pr_number=workspace.pr_number,
+            head_sha=workspace_head_sha,
         )
-
-
-class ActiveWorkspaceDestroyError(WorkspaceControlError):
-    """Raised when a destroy is attempted on an active workspace without ``force``."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            error_code="WORKSPACE_ACTIVE",
-            message="Active workspaces require force=true before destroy.",
-        )
-
-
-class IdempotencyConflictError(WorkspaceControlError):
-    """Raised when an Idempotency-Key is reused with a different action payload."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            error_code="IDEMPOTENCY_CONFLICT",
-            message="Idempotency-Key previously used with a different action payload.",
-        )
-
-
-class VersionConflictError(WorkspaceControlError):
-    """Raised when the workspace version does not match the ``If-Match`` header."""
-
-    def __init__(self, *, expected_version: int, actual_version: int) -> None:
-        super().__init__(
-            error_code="VERSION_CONFLICT",
-            message="Workspace version does not match If-Match.",
-            detail={
-                "expected_version": expected_version,
-                "actual_version": actual_version,
-            },
-        )
-
-
-class WorkspaceStackStopError(WorkspaceControlError):
-    """Raised when ``docker stop`` or ``docker down`` fails during a control operation."""
-
-    def __init__(
-        self,
-        *,
-        operation: str,
-        returncode: int,
-        stdout: str,
-        stderr: str,
-    ) -> None:
-        self.operation = operation
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        detail = (stderr or stdout).strip() or "<no output>"
-        super().__init__(
-            error_code="STACK_STOP_FAILED",
-            message=f"docker {operation} failed (exit={returncode}): {detail}",
-        )
-
-
-class WorkspaceRemonitorMissingPrUrlError(WorkspaceControlError):
-    """Raised when remonitor is requested for a workspace that has no PR URL."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="WORKSPACE_PR_URL_REQUIRED",
-            message="Workspace remonitor requires an existing PR URL.",
-            detail={"status": workspace.status},
-        )
-
-
-class WorkspaceRemonitorStateError(WorkspaceControlError):
-    """Raised when the workspace status is not eligible for remonitor recovery."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="WORKSPACE_STATE_NOT_REMONITORABLE",
-            message="Workspace is not in a state eligible for remonitor recovery.",
-            detail={
-                "status": workspace.status,
-                "eligible_statuses": [status.value for status in _REMONITOR_ELIGIBLE_STATUSES],
-            },
-        )
-
-
-class WorkspaceRefreshStateError(WorkspaceControlError):
-    """Raised when the workspace status is not eligible for refresh recovery."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="WORKSPACE_STATE_NOT_REFRESHABLE",
-            message="Workspace is not in a state eligible for refresh recovery.",
-            detail={"status": workspace.status},
-        )
-
-
-class WorkspaceValidateStateError(WorkspaceControlError):
-    """Raised when the workspace status is not eligible for validate recovery."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="WORKSPACE_STATE_NOT_VALIDATABLE",
-            message="Workspace is not in a state eligible for validate recovery.",
-            detail={
-                "status": workspace.status,
-                "eligible_statuses": [status.value for status in _VALIDATE_ELIGIBLE_STATUSES],
-            },
-        )
-
-
-class WorkspaceValidateMissingPrUrlError(WorkspaceControlError):
-    """Raised when validate is requested for a workspace that has no PR URL."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="WORKSPACE_PR_URL_REQUIRED",
-            message="Workspace validate requires an existing PR URL.",
-            detail={"status": workspace.status},
-        )
-
-
-class WorkspaceRebaseMissingPrUrlError(WorkspaceControlError):
-    """Raised when rebase is requested for a workspace that has no PR URL."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="WORKSPACE_PR_URL_REQUIRED",
-            message="Workspace rebase requires an existing PR URL.",
-            detail={"status": workspace.status},
-        )
-
-
-class WorkspaceRebaseMissingCandidateError(WorkspaceControlError):
-    """Raised when rebase is requested but no open merge candidate exists."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="MERGE_CANDIDATE_NOT_FOUND",
-            message="Workspace rebase requires an open merge candidate.",
-            detail={"workspace_id": workspace.id, "pr_url": workspace.pr_url},
-        )
-
-
-class WorkspaceRebaseStateError(WorkspaceControlError):
-    """Raised when the workspace status is not eligible for rebase recovery."""
-
-    def __init__(self, workspace: Workspace) -> None:
-        super().__init__(
-            error_code="WORKSPACE_STATE_NOT_REBASEABLE",
-            message="Workspace is not in a state eligible for rebase recovery.",
-            detail={
-                "status": workspace.status,
-                "eligible_statuses": [status.value for status in _REBASE_ELIGIBLE_STATUSES],
-            },
-        )
-
-
-class WorkspaceRebaseActiveConflictError(WorkspaceControlError):
-    """Raised when a conflicting active operation prevents rebase."""
-
-    def __init__(
-        self,
-        operation: Operation,
-        *,
-        error_code: str = "WORKSPACE_REBASE_CONFLICT",
-        message: str = "Workspace already has an active rebase operation.",
-    ) -> None:
-        super().__init__(
-            error_code=error_code,
-            message=message,
-            detail=_operation_conflict_detail(operation),
-        )
+    ):
+        return workspace_head_sha
+    return candidate_head_sha
 
 
 class WorkspaceControlService:
@@ -612,11 +453,70 @@ class WorkspaceControlService:
             payload=operation_payload,
             idempotency_key=prepared.idempotency_key,
         )
+        warnings: list[WorkspaceControlWarningResponse] = []
+        pending_operator_hint: dict[str, object] | None = None
+        monitor_state_changed = False
+        reason_text = (reason or "").strip()
+        monitor_state = dict(workspace.monitor_threads_addressed or {})
+        candidate_repo = MergeCandidateRepository(self._session)
+        candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace_id)
+        current_head_sha = _remonitor_current_head_sha(workspace, candidate, monitor_state)
+        if current_head_sha is None:
+            latest_candidate = await candidate_repo.get_latest_for_workspace_with_merge_inputs(
+                workspace_id
+            )
+            current_head_sha = (
+                latest_candidate.head_sha
+                if latest_candidate is not None and latest_candidate.head_sha
+                else None
+            )
+        settle_head_shas = remonitor_elapsed_settle_head_shas(
+            monitor_state,
+            pr_number=workspace.pr_number,
+            preferred_head_sha=workspace.monitor_last_commit_sha,
+            current_head_sha=current_head_sha,
+        )
+        past_settle = bool(settle_head_shas)
+        requested_at = utcnow() if reason_text or past_settle else None
+        if reason_text:
+            requested_at = _require_operator_remonitor_requested_at(requested_at)
+            hint = OperatorHint(
+                reason=reason_text,
+                operation_id=operation.id,
+                requested_at=requested_at.isoformat(),
+                reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+            )
+            persist_operator_hint(monitor_state, hint)
+            monitor_state_changed = True
+            pending_operator_hint = build_pending_operator_hint_payload(hint)
+        if past_settle and workspace.pr_number is not None:
+            requested_at = _require_operator_remonitor_requested_at(requested_at)
+            for settle_head_sha in settle_head_shas:
+                arm_operator_hint_freeze(
+                    monitor_state,
+                    pr_number=workspace.pr_number,
+                    head_sha=settle_head_sha,
+                    now=requested_at,
+                )
+            warnings.append(
+                WorkspaceControlWarningResponse(
+                    warning_code=_REMONITOR_PAST_SETTLE_WARNING_CODE,
+                    message=(
+                        _REMONITOR_PAST_SETTLE_HINT_MESSAGE
+                        if reason_text
+                        else _REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE
+                    ),
+                )
+            )
+            monitor_state_changed = True
+        if monitor_state_changed:
+            workspace.monitor_threads_addressed = monitor_state
         claims_reset = _claim_reset_snapshot(workspace)
         claims_will_reset = any(value is not None for value in claims_reset.values())
         state_reset = await _reset_failed_workspace_for_remonitor(
             self._session,
             workspace,
+            candidate_head_sha=current_head_sha,
         )
         cancelled_recovery_operations = await _cancel_stale_pr_monitor_recovery_operations(
             operations,
@@ -626,7 +526,7 @@ class WorkspaceControlService:
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        if state_reset is None and claims_will_reset:
+        if state_reset is None and (claims_will_reset or monitor_state_changed):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,
@@ -640,6 +540,10 @@ class WorkspaceControlService:
             event_payload["cancelled_recovery_operations"] = cancelled_recovery_operations
             event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
             event_payload["cancelled_recovery_requested_action"] = OperationType.remonitor.value
+        if pending_operator_hint is not None:
+            event_payload["pending_operator_hint"] = pending_operator_hint
+        if warnings:
+            event_payload["warnings"] = _control_warning_payloads(warnings)
         if state_reset is not None:
             await repo.add_event_with_states(
                 workspace,
@@ -665,6 +569,8 @@ class WorkspaceControlService:
             result["state_reset"] = state_reset
         if cancelled_recovery_operations:
             result["cancelled_recovery_operations"] = cancelled_recovery_operations
+        if warnings:
+            result["warnings"] = _control_warning_payloads(warnings)
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -674,6 +580,7 @@ class WorkspaceControlService:
             workspace=workspace,
             operation=operation,
             message="workspace PR monitor recovery requested",
+            warnings=warnings,
         )
 
     async def request_refresh_workspace(
@@ -1454,6 +1361,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _cleanup_string,
     _communicate,
     _control_response,
+    _control_warning_payloads,
     _docker_process,
     _event_payload,
     _find_active_operation,
@@ -1476,6 +1384,8 @@ from awf.service.controls_helpers import (  # noqa: E402
 )
 
 __all__ = [
+    "ProjectStopper",
+    "CleanerFactory",
     "WorkspaceControlService",
     "WorkspaceControlError",
     "WorkspaceNotFoundError",
@@ -1500,6 +1410,7 @@ __all__ = [
     "_cancel_stale_pr_monitor_recovery_operations",
     "_is_pr_monitor_recovery_operation",
     "_control_response",
+    "_control_warning_payloads",
     "_operator_operation_payload",
     "_operation_payload",
     "_with_secret_lease_result",

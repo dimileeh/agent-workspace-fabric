@@ -30,6 +30,7 @@ _CONTROL_RESPONSE_FIELDS = (
     "operation_status",
     "status",
     "message",
+    "warnings",
 )
 _OPERATION_RESPONSE_FIELDS = (
     "id",
@@ -149,6 +150,7 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
             "operation_status": "succeeded",
             "status": "cancelling",
             "message": "workspace cancellation requested",
+            "warnings": [],
         },
         mcp_tool="awf_cancel_workspace",
         matrix_status="MCP implemented",
@@ -177,6 +179,7 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
             "operation_status": "succeeded",
             "status": "stopping",
             "message": "workspace stop requested",
+            "warnings": [],
         },
         mcp_tool="awf_stop_workspace",
         matrix_status="MCP implemented",
@@ -206,6 +209,7 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
             "operation_status": "succeeded",
             "status": "destroying",
             "message": "workspace destruction requested",
+            "warnings": [],
         },
         mcp_tool="awf_destroy_workspace",
         matrix_status="MCP implemented",

@@ -28,10 +28,12 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
+    _NonCheckReviewerSettleDecision,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_base_fetch_retry_state,
     _gate_requires_validation_recovery,
+    _initial_review_grace_wait_seconds,
     _merge_gate_blocks,
     _merge_rejection_reason,
     _non_check_reviewer_settle_decision,
@@ -59,6 +61,7 @@ async def handle_merge_action(
     state: MonitorState,
     base_branch: str,
     remote_branch: str,
+    remote_push_url: str | None,
     compose_project: str,
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
@@ -113,6 +116,7 @@ async def handle_merge_action(
                     state=state,
                     base_branch=base_branch,
                     remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
@@ -253,6 +257,57 @@ async def handle_merge_action(
         merge_status = status
         queue_blockers_after_lock: list[MergeQueueBlocker] = []
         merge_gate_after_lock: _MergeGateResult | None = None
+        settle_recheck_decision: _NonCheckReviewerSettleDecision | None = None
+        settle_recheck_performed = False
+        initial_grace_recheck_wait_seconds = 0.0
+        operator_state_refreshed = False
+        pre_merge_status_refreshed = False
+
+        async def _refresh_operator_state_for_merge(*, event_name: str) -> bool:
+            nonlocal fresh_action, fresh_status, operator_state_refreshed
+            if fresh_action is not None:
+                return False
+            changed = await self._refresh_operator_state_from_workspace(
+                workspace_id,
+                state,
+            )
+            if not changed:
+                return False
+            operator_state_refreshed = True
+            checked_action = decide(merge_status, state, self._config)
+            if not isinstance(checked_action, Merge):
+                fresh_action = checked_action
+                fresh_status = merge_status
+                _log.info(
+                    event_name,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    original_action="Merge",
+                    fresh_action=type(checked_action).__name__,
+                    head_sha=merge_status.head_sha[:10],
+                )
+            return True
+
+        async def _recheck_non_check_reviewer_settle() -> None:
+            nonlocal settle_recheck_decision, settle_recheck_performed
+            settle_recheck_performed = True
+            checked_settle_decision = _non_check_reviewer_settle_decision(
+                merge_status,
+                state,
+                self._config,
+                pr_number=pr_number,
+                now=time.monotonic(),
+            )
+            await self._record_non_check_reviewer_settle_decision(
+                decision=checked_settle_decision,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                status=merge_status,
+                monitor_log=monitor_log,
+            )
+            if checked_settle_decision.wait_seconds > 0:
+                settle_recheck_decision = checked_settle_decision
+
         async with self._merge_coordinator.serialized_merge(
             repo_url=repo_url,
             base_branch=base_branch,
@@ -351,12 +406,43 @@ async def handle_merge_action(
                         )
                     else:
                         merge_status = checked_status
+                        pre_merge_status_refreshed = True
+
+            await _refresh_operator_state_for_merge(
+                event_name="monitor.merge_operator_hint_recheck_changed_action"
+            )
 
             if (
                 recheck_error is None
                 and recheck_base_error is None
                 and recheck_behind_error is None
                 and fresh_action is None
+            ):
+                initial_grace_recheck_wait_seconds = _initial_review_grace_wait_seconds(
+                    state,
+                    pr_number=pr_number,
+                    now=time.monotonic(),
+                    grace_seconds=self._config.initial_review_grace_period_seconds,
+                    poll_interval_seconds=self._config.poll_interval_seconds,
+                )
+
+            if (
+                recheck_error is None
+                and recheck_base_error is None
+                and recheck_behind_error is None
+                and fresh_action is None
+                and initial_grace_recheck_wait_seconds <= 0
+                and (pre_merge_status_refreshed or operator_state_refreshed)
+            ):
+                await _recheck_non_check_reviewer_settle()
+
+            if (
+                recheck_error is None
+                and recheck_base_error is None
+                and recheck_behind_error is None
+                and fresh_action is None
+                and settle_recheck_decision is None
+                and initial_grace_recheck_wait_seconds <= 0
             ):
                 queue_blockers_after_lock = await self._merge_queue_blockers_for_workspace(
                     workspace_id
@@ -372,86 +458,66 @@ async def handle_merge_action(
                     and merge_gate_after_lock is not None
                     and not _merge_gate_blocks(merge_gate_after_lock)
                 ):
-                    merge_operation = await self._begin_monitor_state_operation(
-                        workspace_id=workspace_id,
-                        action="merge",
-                        requested_action="merge",
-                        reason="Merging PR after all monitor gates passed.",
-                        reason_code="MERGE",
-                        pr_number=pr_number,
-                        status=merge_status,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        monitor_log=monitor_log,
+                    final_operator_state_refreshed = await _refresh_operator_state_for_merge(
+                        event_name="monitor.merge_operator_hint_final_recheck_changed_action"
                     )
-                    await self._record_pr_monitor_audit_event(
-                        workspace_id=workspace_id,
-                        event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
-                        action="merge",
-                        outcome="attempted",
-                        reason_code="MERGE",
-                        pr_number=pr_number,
-                        status=merge_status,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        operation_id=(
-                            merge_operation.operation_id if merge_operation is not None else None
-                        ),
-                        operation_type=OperationType.monitor_state.value,
-                        monitor_log=monitor_log,
+                    needs_settle_recheck = final_operator_state_refreshed or (
+                        pre_merge_status_refreshed and not settle_recheck_performed
                     )
-                    try:
-                        merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
-                    except GitHubClientError as exc:
-                        merge_blocker = exc
-                        await self._finish_monitor_operation(
-                            merge_operation,
-                            status=OperationStatus.failed,
-                            result={
-                                "status": "failed",
-                                "outcome": "github_merge_failed",
-                                "reason_code": "GITHUB_MERGE_FAILED",
-                            },
-                            error_code="GITHUB_MERGE_FAILED",
-                            error_message=str(exc),
+                    if needs_settle_recheck and fresh_action is None:
+                        initial_grace_recheck_wait_seconds = _initial_review_grace_wait_seconds(
+                            state,
+                            pr_number=pr_number,
+                            now=time.monotonic(),
+                            grace_seconds=self._config.initial_review_grace_period_seconds,
+                            poll_interval_seconds=self._config.poll_interval_seconds,
                         )
-                        await self._record_pr_monitor_audit_event(
+                        if initial_grace_recheck_wait_seconds <= 0:
+                            await _recheck_non_check_reviewer_settle()
+                    if (
+                        fresh_action is None
+                        and settle_recheck_decision is None
+                        and initial_grace_recheck_wait_seconds <= 0
+                    ):
+                        last_chance_operator_state_refreshed = (
+                            await _refresh_operator_state_for_merge(
+                                event_name=(
+                                    "monitor.merge_operator_hint_last_chance_changed_action"
+                                )
+                            )
+                        )
+                        if last_chance_operator_state_refreshed and fresh_action is None:
+                            initial_grace_recheck_wait_seconds = _initial_review_grace_wait_seconds(
+                                state,
+                                pr_number=pr_number,
+                                now=time.monotonic(),
+                                grace_seconds=(self._config.initial_review_grace_period_seconds),
+                                poll_interval_seconds=(self._config.poll_interval_seconds),
+                            )
+                            if initial_grace_recheck_wait_seconds <= 0:
+                                await _recheck_non_check_reviewer_settle()
+                    if (
+                        fresh_action is None
+                        and settle_recheck_decision is None
+                        and initial_grace_recheck_wait_seconds <= 0
+                    ):
+                        merge_operation = await self._begin_monitor_state_operation(
                             workspace_id=workspace_id,
-                            event_type=_AUDIT_MERGE_RESULT_EVENT,
                             action="merge",
-                            outcome="failed",
-                            reason_code="GITHUB_MERGE_FAILED",
+                            requested_action="merge",
+                            reason="Merging PR after all monitor gates passed.",
+                            reason_code="MERGE",
                             pr_number=pr_number,
                             status=merge_status,
                             base_branch=base_branch,
                             remote_branch=remote_branch,
-                            operation_id=(
-                                merge_operation.operation_id
-                                if merge_operation is not None
-                                else None
-                            ),
-                            operation_type=OperationType.monitor_state.value,
                             monitor_log=monitor_log,
-                            evidence={
-                                "operation": "merge_pr",
-                                "error_message": str(exc),
-                            },
-                        )
-                    else:
-                        await self._finish_monitor_operation(
-                            merge_operation,
-                            status=OperationStatus.succeeded,
-                            result={
-                                "status": "succeeded",
-                                "outcome": "merged",
-                                "merge_sha": merge_sha,
-                            },
                         )
                         await self._record_pr_monitor_audit_event(
                             workspace_id=workspace_id,
-                            event_type=_AUDIT_MERGE_RESULT_EVENT,
+                            event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
                             action="merge",
-                            outcome="succeeded",
+                            outcome="attempted",
                             reason_code="MERGE",
                             pr_number=pr_number,
                             status=merge_status,
@@ -464,8 +530,128 @@ async def handle_merge_action(
                             ),
                             operation_type=OperationType.monitor_state.value,
                             monitor_log=monitor_log,
-                            evidence={"merge_sha": merge_sha},
                         )
+                        try:
+                            merge_sha = await self._deps.gh.merge_pr(
+                                repo=repo,
+                                pr_number=pr_number,
+                            )
+                        except GitHubClientError as exc:
+                            merge_blocker = exc
+                            await self._finish_monitor_operation(
+                                merge_operation,
+                                status=OperationStatus.failed,
+                                result={
+                                    "status": "failed",
+                                    "outcome": "github_merge_failed",
+                                    "reason_code": "GITHUB_MERGE_FAILED",
+                                },
+                                error_code="GITHUB_MERGE_FAILED",
+                                error_message=str(exc),
+                            )
+                            await self._record_pr_monitor_audit_event(
+                                workspace_id=workspace_id,
+                                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                                action="merge",
+                                outcome="failed",
+                                reason_code="GITHUB_MERGE_FAILED",
+                                pr_number=pr_number,
+                                status=merge_status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                operation_id=(
+                                    merge_operation.operation_id
+                                    if merge_operation is not None
+                                    else None
+                                ),
+                                operation_type=OperationType.monitor_state.value,
+                                monitor_log=monitor_log,
+                                evidence={
+                                    "operation": "merge_pr",
+                                    "error_message": str(exc),
+                                },
+                            )
+                        else:
+                            await self._finish_monitor_operation(
+                                merge_operation,
+                                status=OperationStatus.succeeded,
+                                result={
+                                    "status": "succeeded",
+                                    "outcome": "merged",
+                                    "merge_sha": merge_sha,
+                                },
+                            )
+                            await self._record_pr_monitor_audit_event(
+                                workspace_id=workspace_id,
+                                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                                action="merge",
+                                outcome="succeeded",
+                                reason_code="MERGE",
+                                pr_number=pr_number,
+                                status=merge_status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                operation_id=(
+                                    merge_operation.operation_id
+                                    if merge_operation is not None
+                                    else None
+                                ),
+                                operation_type=OperationType.monitor_state.value,
+                                monitor_log=monitor_log,
+                                evidence={"merge_sha": merge_sha},
+                            )
+
+        if initial_grace_recheck_wait_seconds > 0:
+            _log.info(
+                "monitor.initial_review_grace_waiting",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                wait_seconds=initial_grace_recheck_wait_seconds,
+                grace_seconds=self._config.initial_review_grace_period_seconds,
+                head_sha=merge_status.head_sha[:10],
+            )
+            await self._sleep_with_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="grace_wait",
+                requested_action="merge",
+                reason="Initial review grace period is still active.",
+                reason_code="INITIAL_REVIEW_GRACE",
+                pr_number=pr_number,
+                status=merge_status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                wait_seconds=initial_grace_recheck_wait_seconds,
+                monitor_log=monitor_log,
+                extra_payload={
+                    "grace_seconds": self._config.initial_review_grace_period_seconds,
+                    "req_action": None,
+                    "stale_reason": None,
+                },
+                extra_identity=(None, None),
+            )
+            return False
+
+        if settle_recheck_decision is not None:
+            settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
+                self._config,
+                settle_recheck_decision,
+            )
+            await self._sleep_with_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="reviewer_settle_wait",
+                requested_action="merge",
+                reason="Waiting for configured non-check reviewers to settle.",
+                reason_code="NON_CHECK_REVIEWER_SETTLE",
+                pr_number=pr_number,
+                status=merge_status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                wait_seconds=settle_recheck_decision.wait_seconds,
+                monitor_log=monitor_log,
+                extra_payload=settle_operation_context.extra_payload,
+                extra_identity=settle_operation_context.extra_identity,
+            )
+            return False
 
         if queue_blockers_after_lock:
             await self._wait_for_merge_queue(
@@ -498,6 +684,33 @@ async def handle_merge_action(
             if handled is None:  # pragma: no cover - defensive invariant
                 raise RuntimeError("merge gate blocker was not handled")
             return cast(bool | None, handled)
+
+        if fresh_action is not None:
+            if fresh_status is None:  # pragma: no cover - defensive invariant
+                raise RuntimeError("pre-merge recheck produced an action without status")
+            # Re-enter the dispatcher for refreshed non-merge actions before
+            # converting a simultaneous pre-merge recheck failure into retry or
+            # terminal workspace state. Non-Merge actions do not perform this
+            # pre-merge recheck, so decision oscillation remains bounded by the
+            # outer monitor loop.
+            return cast(
+                bool | None,
+                await self._execute(
+                    action=fresh_action,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=fresh_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                ),
+            )
 
         if recheck_base_error is not None:
             base_fetch_result = await self._wait_after_transient_base_fetch_error(
@@ -545,33 +758,6 @@ async def handle_merge_action(
                 message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[:2000],
             )
             return True
-
-        if fresh_action is not None:
-            if fresh_status is None:  # pragma: no cover - defensive invariant
-                raise RuntimeError("pre-merge recheck produced an action without status")
-            # This re-enters the dispatcher at most one stack frame
-            # deeper: the original action was Merge, and we only
-            # recurse when the refreshed decision is explicitly not
-            # Merge. Non-Merge actions do not perform this pre-merge
-            # recheck, so decision oscillation is handled by the
-            # outer monitor loop rather than recursive growth.
-            return cast(
-                bool | None,
-                await self._execute(
-                    action=fresh_action,
-                    workspace_id=workspace_id,
-                    repo_url=repo_url,
-                    repo=repo,
-                    pr_number=pr_number,
-                    status=fresh_status,
-                    state=state,
-                    base_branch=base_branch,
-                    remote_branch=remote_branch,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    monitor_log=monitor_log,
-                ),
-            )
 
         if merge_blocker is not None:
             if await self._wait_after_transient_github_error(

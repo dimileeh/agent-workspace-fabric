@@ -8,9 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.schemas import WorkspaceControlResponse
+from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.common.config import get_settings
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -102,7 +103,7 @@ async def stop_project_containers(compose_project_name: str | None) -> None:
 
 
 async def _docker_process(*args: str, operation: str) -> asyncio.subprocess.Process:
-    from awf.service.controls import WorkspaceStackStopError
+    from awf.service.controls_errors import WorkspaceStackStopError
 
     try:
         return await asyncio.create_subprocess_exec(
@@ -132,7 +133,7 @@ async def _communicate(
     *,
     operation: str,
 ) -> tuple[str, str]:
-    from awf.service.controls import WorkspaceStackStopError
+    from awf.service.controls_errors import WorkspaceStackStopError
 
     stdout_bytes, stderr_bytes = await proc.communicate()
     stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -161,6 +162,8 @@ def default_cleaner() -> WorkspaceCleaner:
 async def _reset_failed_workspace_for_remonitor(
     session: AsyncSession,
     workspace: Workspace,
+    *,
+    candidate_head_sha: str | None = None,
 ) -> dict[str, object] | None:
     if workspace.status != WorkspaceStatus.failed.value:
         return None
@@ -179,11 +182,14 @@ async def _reset_failed_workspace_for_remonitor(
         candidate_repo = MergeCandidateRepository(session)
         candidate = await candidate_repo.get_by_attempt_id(attempt.id)
         if candidate is not None:
+            reopen_head_sha = (
+                candidate_head_sha or candidate.head_sha or workspace.monitor_last_commit_sha
+            )
             await candidate_repo.create_or_update_open_for_attempt(
                 task=candidate.task,
                 attempt=candidate.attempt,
                 workspace=workspace,
-                head_sha=workspace.monitor_last_commit_sha,
+                head_sha=reopen_head_sha,
                 base_sha=workspace.base_commit,
             )
             candidate_reopened = True
@@ -253,6 +259,7 @@ def _control_response(
     workspace: Workspace,
     operation: Operation,
     message: str,
+    warnings: list[WorkspaceControlWarningResponse] | None = None,
 ) -> WorkspaceControlResponse:
     return WorkspaceControlResponse(
         workspace_id=workspace.id,
@@ -260,7 +267,38 @@ def _control_response(
         operation_status=operation.status,
         status=WorkspaceStatus(workspace.status),
         message=message,
+        warnings=warnings if warnings is not None else _operation_result_warnings(operation),
     )
+
+
+def _operation_result_warnings(operation: Operation) -> list[WorkspaceControlWarningResponse]:
+    result = operation.result
+    if not isinstance(result, dict):
+        return []
+    warnings = result.get("warnings")
+    if not isinstance(warnings, list):
+        return []
+    warning_responses: list[WorkspaceControlWarningResponse] = []
+    for warning in warnings:
+        if not isinstance(warning, Mapping):
+            continue
+        try:
+            warning_responses.append(WorkspaceControlWarningResponse.model_validate(warning))
+        except ValidationError:
+            continue
+    return warning_responses
+
+
+def _control_warning_payloads(
+    warnings: Sequence[WorkspaceControlWarningResponse],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "warning_code": warning.warning_code,
+            "message": warning.message,
+        }
+        for warning in warnings
+    ]
 
 
 def _operator_operation_payload(
