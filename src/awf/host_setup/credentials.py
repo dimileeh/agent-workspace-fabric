@@ -291,7 +291,11 @@ class PlainFileCredentialBackend:
         self._capabilities = capabilities
         self._allow_plain_secrets = allow_plain_secrets
         self._consent = consent
-        self._secrets_dir = Path(secrets_dir) if secrets_dir is not None else _default_secrets_dir()
+        self._secrets_dir = (
+            Path(secrets_dir).resolve()
+            if secrets_dir is not None
+            else _default_secrets_dir().resolve()
+        )
 
     def is_available(self) -> bool:
         """Return whether flag, consent, and a headless-Linux host all hold."""

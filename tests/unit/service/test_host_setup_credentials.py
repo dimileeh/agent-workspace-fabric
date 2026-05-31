@@ -346,6 +346,23 @@ def test_plain_file_backend_defaults_to_awf_secrets_dir() -> None:
 
 
 @pytest.mark.unit
+def test_plain_file_backend_resolves_relative_secrets_dir() -> None:
+    """Verify a relative ``secrets_dir`` is resolved to an absolute path.
+
+    Plain-file refs must be ``plain-file://<abs-path>``; a relative input would
+    otherwise yield a relative ref that breaks if the working directory changes.
+    """
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir="relative/secrets",
+    )
+    assert backend._secrets_dir.is_absolute()
+    assert backend._secrets_dir == Path("relative/secrets").resolve()
+
+
+@pytest.mark.unit
 def test_plain_file_write_failure_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
