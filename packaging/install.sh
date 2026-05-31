@@ -13,8 +13,8 @@
 # stderr (it does not depend on the Python first-run error catalog):
 #
 #   UNSUPPORTED_PLATFORM MISSING_DEPENDENCY MANIFEST_UNAVAILABLE MANIFEST_INVALID
-#   CHANNEL_MISMATCH DOWNLOAD_FAILED CHECKSUM_MISMATCH INSTALL_METHOD_FAILED
-#   AWF_NOT_REACHABLE UNINSTALL_REFUSED_UNMANAGED BAD_USAGE
+#   CHANNEL_MISMATCH VERSION_MISMATCH DOWNLOAD_FAILED CHECKSUM_MISMATCH
+#   INSTALL_METHOD_FAILED AWF_NOT_REACHABLE UNINSTALL_REFUSED_UNMANAGED BAD_USAGE
 #
 # Testability seams (keep fixture tests hermetic, no real release/network):
 #   AWF_INSTALL_MANIFEST   path or file:// URL to a local manifest JSON.
@@ -367,6 +367,25 @@ extract_manifest_channel() {
         | head -n 1
 }
 
+# Extract the manifest's top-level "version" string (jq-free). Like
+# extract_manifest_channel, this relies on the T11 manifest's stable
+# pretty-printed, sorted-key shape: "version" appears once at the top level and
+# on no artifact object. The leading-quote anchor ("version") never matches the
+# unrelated "schema_version" key (which is preceded by an underscore and carries
+# an unquoted integer value), so the first match is the authoritative version.
+extract_manifest_version() {
+    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST_FILE" \
+        | head -n 1
+}
+
+# Extract the manifest's source.tag string (jq-free). "tag" is a quoted key only
+# inside the top-level "source" object (no artifact carries a "tag" key), so the
+# first match is the release tag the manifest attributes itself to.
+extract_manifest_tag() {
+    sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST_FILE" \
+        | head -n 1
+}
+
 # When no explicit --version pins the release, the resolved manifest's channel
 # must match the requested --channel. Version/tag pinning is the trust boundary
 # (RELEASING.md), so a pinned --version selects the manifest directly and the
@@ -383,6 +402,37 @@ verify_channel() {
     [ -n "$MANIFEST_CHANNEL" ] || return 0
     if [ "$MANIFEST_CHANNEL" != "$CHANNEL" ]; then
         fail CHANNEL_MISMATCH "requested channel ${CHANNEL} but the resolved manifest is on the ${MANIFEST_CHANNEL} channel (${MANIFEST_SOURCE}); pass --version <X.Y.Z> to install a specific ${CHANNEL} release"
+    fi
+}
+
+# When --version pins a release, the resolved manifest must actually describe
+# that release. resolve_manifest fetches the manifest from a tag-pinned URL
+# (releases/download/v${VERSION}/...), but that only pins the URL path, not the
+# served bytes: a release asset or mirror (AWF_INSTALL_BASE_URL) that serves a
+# manifest for a *different* tag would otherwise be installed silently, because
+# that manifest's wheel name/url/sha256 are internally consistent — the checksum
+# gate only proves the wheel matches the manifest, not that the manifest matches
+# the pin. Version/tag pinning is the documented trust boundary (RELEASING.md),
+# so cross-check the manifest's own version and source.tag against --version
+# before downloading and refuse a mismatch, so a misattached or stale manifest
+# cannot turn a pinned install into a different release. A manifest that omits
+# these fields (legacy/hand-authored) is not enforced here; parse_manifest still
+# guards the wheel artifact's shape.
+verify_version() {
+    [ -n "$VERSION" ] || return 0
+    # extract_manifest_version/_tag pipe sed into `head -n 1`; as in
+    # verify_channel, head can close the pipe before sed finishes and leave sed
+    # taking SIGPIPE, so under pipefail the pipeline may exit non-zero. `|| true`
+    # degrades that to an empty value, which the guards below treat as "field
+    # absent" rather than letting set -e abort the install with no reason token.
+    local manifest_version manifest_tag
+    manifest_version="$(extract_manifest_version || true)"
+    manifest_tag="$(extract_manifest_tag || true)"
+    if [ -n "$manifest_version" ] && [ "$manifest_version" != "$VERSION" ]; then
+        fail VERSION_MISMATCH "requested version ${VERSION} but the resolved manifest declares version ${manifest_version} (${MANIFEST_SOURCE}); the pinned release asset or mirror is serving a manifest for a different release"
+    fi
+    if [ -n "$manifest_tag" ] && [ "$manifest_tag" != "v${VERSION}" ]; then
+        fail VERSION_MISMATCH "requested version ${VERSION} but the resolved manifest is tagged ${manifest_tag} (${MANIFEST_SOURCE}); the pinned release asset or mirror is serving a manifest for a different release"
     fi
 }
 
@@ -700,6 +750,7 @@ run_install() {
     resolve_manifest
     parse_manifest
     verify_channel
+    verify_version
     say "Resolved manifest: ${MANIFEST_SOURCE}"
 
     plan "download artifact: ${ARTIFACT_URL}"

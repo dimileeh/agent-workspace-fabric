@@ -185,12 +185,16 @@ class InstallerHarness:
         include_sdist: bool = True,
         wheel_url: str | None = None,
         wheel_name: str | None = None,
+        tag: str | None = None,
     ) -> Path:
         """Write a T11-shaped manifest pointing at the fixture wheel.
 
         ``wheel_name`` overrides the artifact's ``name`` field (which the
         installer uses as the download-destination basename) so tests can model
         a malformed/compromised manifest; it defaults to the wheel's basename.
+        ``tag`` overrides the ``source.tag`` field (defaults to ``v{version}``)
+        so tests can model a manifest whose declared release tag disagrees with
+        its version or with the requested ``--version`` pin.
         """
         artifacts = [
             {
@@ -220,7 +224,11 @@ class InstallerHarness:
             "generated_at": "2026-05-29T00:00:00Z",
             "package": "agent-workspace-fabric",
             "schema_version": 1,
-            "source": {"commit": None, "repository": REPOSITORY_URL, "tag": f"v{version}"},
+            "source": {
+                "commit": None,
+                "repository": REPOSITORY_URL,
+                "tag": tag if tag is not None else f"v{version}",
+            },
             "version": version,
         }
         path = self.root / "awf-install-manifest.json"
