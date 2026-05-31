@@ -94,8 +94,8 @@ from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
-    ReleasePrSyncNoOp,
-    prepare_release_pr_sync,
+    count_commits_ahead,
+    find_or_create_release_pr,
     release_pr_body,
     release_pr_title,
 )
@@ -969,6 +969,57 @@ async def _dispatch_non_feature_task_kind(
     return False
 
 
+async def _prepare_handoff_pr_monitor_profile(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Workspace,
+    worktree_path: Path,
+    compose_project: str,
+    compose_file: Path,
+    build_failed_log_event: str,
+    build_failed_message_prefix: str,
+) -> Any | None:
+    """Resolve and run setup for a PR monitor handoff profile."""
+    try:
+        profile = _profile_for_workspace(
+            workspace,
+            worktree_path=worktree_path,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        profile = await _sync_resolved_profile(
+            self,
+            ws=workspace,
+            workspace_id=workspace_id,
+            profile=profile,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        if not await self._run_monitor_handoff_profile_setup(
+            workspace_id=workspace_id,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+        ):
+            return None
+        return profile
+    except Exception as exc:
+        _log.error(
+            build_failed_log_event,
+            workspace_id=workspace_id,
+            redacted_traceback=_redacted_exception_traceback(exc),
+        )
+        safe_exception = redact_audit_text(repr(exc), limit=1900)
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"{build_failed_message_prefix}{safe_exception}"[:2000],
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+        return None
+
+
 async def _build_handoff_pr_monitor(
     self: Any,
     *,
@@ -979,6 +1030,8 @@ async def _build_handoff_pr_monitor(
     compose_file: Path,
     build_failed_log_event: str,
     build_failed_message_prefix: str,
+    profile: Any | None = None,
+    run_profile_setup: bool = True,
 ) -> _MonitorRunnerProto | None:
     """Build the PR monitor for a handoff, marking the workspace failed on error.
 
@@ -997,19 +1050,20 @@ async def _build_handoff_pr_monitor(
         return None
 
     try:
-        profile = _profile_for_workspace(
-            workspace,
-            worktree_path=worktree_path,
-            planning_max_iterations_default=(self._config.planning_max_iterations_default),
-        )
-        profile = await _sync_resolved_profile(
-            self,
-            ws=workspace,
-            workspace_id=workspace_id,
-            profile=profile,
-            planning_max_iterations_default=(self._config.planning_max_iterations_default),
-        )
-        if not await self._run_monitor_handoff_profile_setup(
+        if profile is None:
+            profile = _profile_for_workspace(
+                workspace,
+                worktree_path=worktree_path,
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
+            profile = await _sync_resolved_profile(
+                self,
+                ws=workspace,
+                workspace_id=workspace_id,
+                profile=profile,
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
+        if run_profile_setup and not await self._run_monitor_handoff_profile_setup(
             workspace_id=workspace_id,
             profile=profile,
             compose_project=compose_project,
@@ -1107,11 +1161,66 @@ async def _handoff_sync_release_pr_monitor(
         return
 
     try:
-        outcome = await prepare_release_pr_sync(
+        commits_ahead = await count_commits_ahead(
+            runner=self._runner,
+            cwd=str(worktree_path),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+    except ReleasePrSyncError as exc:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
+            details=exc.detail,
+        )
+        return
+
+    if commits_ahead <= 0:
+        await self._complete_release_pr_sync_no_op(
+            workspace_id=workspace_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+        return
+
+    if self._pr_monitor is None and self._pr_monitor_factory is None:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="release PR monitor handoff failed: no PR monitor configured",
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+        return
+
+    profile = await _prepare_handoff_pr_monitor_profile(
+        self,
+        workspace_id=workspace_id,
+        workspace=workspace,
+        worktree_path=worktree_path,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        build_failed_log_event="executor.sync_release_pr_monitor_build_failed",
+        build_failed_message_prefix="release PR monitor handoff failed: ",
+    )
+    if profile is None:
+        return
+
+    if not await self._recheck_status(
+        workspace_id,
+        expected=WorkspaceStatus.running,
+        action="sync_release_pr_handoff",
+    ):
+        return
+
+    try:
+        metadata, created = await find_or_create_release_pr(
             runner=self._runner,
             gh=GitHubClient(self._runner),
             repo=repo,
-            cwd=str(worktree_path),
             source_branch=source_branch,
             target_branch=target_branch,
             title=release_pr_title(source_branch=source_branch, target_branch=target_branch),
@@ -1137,13 +1246,15 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
-    if isinstance(outcome, ReleasePrSyncNoOp):
-        await self._complete_release_pr_sync_no_op(
-            workspace_id=workspace_id,
-            source_branch=source_branch,
-            target_branch=target_branch,
-        )
-        return
+    _log.info(
+        "release_pr_sync.pr_ready",
+        repo=repo.slug(),
+        source_branch=source_branch,
+        target_branch=target_branch,
+        pr_number=metadata.number,
+        created=created,
+        commits_ahead=commits_ahead,
+    )
 
     monitor = await self._build_handoff_pr_monitor(
         workspace_id=workspace_id,
@@ -1153,11 +1264,12 @@ async def _handoff_sync_release_pr_monitor(
         compose_file=compose_file,
         build_failed_log_event="executor.sync_release_pr_monitor_build_failed",
         build_failed_message_prefix="release PR monitor handoff failed: ",
+        profile=profile,
+        run_profile_setup=False,
     )
     if monitor is None:
         return
 
-    metadata = outcome.metadata
     async with self._session_factory() as session:
         repo_db = WorkspaceRepository(session)
         persisted = await repo_db.get(workspace_id)
@@ -1182,7 +1294,7 @@ async def _handoff_sync_release_pr_monitor(
         persisted.task_policy = _with_release_sync_pr_metadata(
             persisted.task_policy,
             metadata=metadata,
-            created=outcome.created,
+            created=created,
         )
         await repo_db.add_event(
             persisted,
@@ -1197,7 +1309,7 @@ async def _handoff_sync_release_pr_monitor(
                 "base_sha": metadata.base_sha,
                 "source_branch": source_branch,
                 "target_branch": target_branch,
-                "created": outcome.created,
+                "created": created,
                 "source": "release_pr_sync",
             },
         )
@@ -1225,7 +1337,7 @@ async def _handoff_sync_release_pr_monitor(
         "executor.sync_release_pr_handoff_to_monitor",
         workspace_id=workspace_id,
         pr_url=metadata.url,
-        created=outcome.created,
+        created=created,
     )
     if not await self._recheck_status(
         workspace_id,

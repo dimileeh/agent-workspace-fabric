@@ -720,6 +720,56 @@ class TestSyncReleasePrHandoff:
             assert ws.pr_url is None
 
     @pytest.mark.unit
+    async def test_setup_failure_happens_before_release_pr_lookup_or_create(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list --count
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/321\n")  # gh pr create
+        fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=321))  # gh pr view
+
+        setup_result = ValidationResult(
+            commands=[_setup_dependency_command_result(tmp_path, returncode=1)]
+        )
+        validation = _SetupDependencyValidation(setup_result)
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=_release_sync_policy(),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not build when setup fails")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert [c.args[:3] for c in fake.calls] == [
+            ["git", "fetch", "origin"],
+            ["git", "rev-list", "--count"],
+        ]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.pr_url is None
+            assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+
+    @pytest.mark.unit
     async def test_ahead_creates_release_pr_and_enters_monitoring(
         self,
         fake: FakeCommandRunner,
