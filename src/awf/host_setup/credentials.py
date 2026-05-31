@@ -1075,12 +1075,18 @@ def _reject_writable_ancestor(ancestor: Path, *, allow_sticky: bool = True) -> N
     never exists — the default ``~/.awf/secrets`` under a user-owned home is
     unaffected, and an operator simply points ``secrets_dir`` at a non-writable path.
 
-    The sticky bit (``0o1000``) is exempted by default: on a sticky directory (e.g.
-    a root-owned ``/tmp``) only an entry's *owner* may rename or delete it, so a
-    non-owner attacker cannot swap the secrets dir AWF created and owns there —
-    exactly the guarantee a plain world-writable parent lacks. That exemption is
-    sound only for a *trusted, non-attacker-owned* ancestor; pass
-    ``allow_sticky=False`` for an untrusted component that raced into existence
+    The sticky bit (``0o1000``) is exempted only for a *trusted* ancestor — one
+    owned by root or the current (effective) user, e.g. a root-owned ``/tmp``. On a
+    sticky directory rename/delete of an entry is restricted to the entry's owner,
+    the *directory's* owner, and root, so a non-owner attacker cannot swap the
+    secrets dir AWF created and owns under a root-owned sticky parent — exactly the
+    guarantee a plain world-writable parent lacks. But that holds only when the
+    sticky directory itself is not attacker-owned: an operator- or attacker-provided
+    sticky dir owned by another local user (e.g. ``/tmp/attacker`` at ``0o1777``)
+    leaves *its* owner free to rename AWF's entry and redirect the later secret
+    write, so the exemption verifies the ancestor's owner is root or the current user
+    before applying (PRRT_kwDOSJAM6s6F8zey). Pass ``allow_sticky=False`` to drop the
+    exemption entirely for an untrusted component that raced into existence
     mid-create (PRRT_kwDOSJAM6s6F8uMR), where the attacker may *own* the sticky
     directory and so retains the rename/swap right the exemption assumes they lack.
     POSIX-only: the rwx model and rename-permission semantics do not apply off
@@ -1089,12 +1095,24 @@ def _reject_writable_ancestor(ancestor: Path, *, allow_sticky: bool = True) -> N
     """
     if os.name != "posix":
         return
-    mode = ancestor.stat().st_mode
-    # Group- or other-writable (``0o022``) lets any writer rename the entry below it
-    # and plant a redirecting symlink. The sticky bit (``0o1000``) neutralises that
-    # only when the directory is trusted (``allow_sticky``); an attacker-ownable
-    # raced-in component is checked without that exemption.
-    if mode & 0o022 and not (allow_sticky and mode & 0o1000):
+    info = ancestor.stat()
+    mode = info.st_mode
+    if not mode & 0o022:
+        # Not group/other-writable: no non-owner can rename the entry below it.
+        return
+    # Group- or other-writable (``0o022``) lets a writer rename the entry below it and
+    # plant a redirecting symlink. The sticky bit (``0o1000``) neutralises that for a
+    # *non-owner* writer — but only when the directory itself is trusted, i.e. owned by
+    # root or the current (effective) user. Sticky restricts rename/delete of an entry
+    # to the entry's owner, the *directory's* owner, and root; so a sticky directory
+    # owned by another local user (e.g. an operator- or attacker-provided
+    # ``/tmp/attacker`` at mode ``0o1777``) still lets that owner rename AWF's secrets
+    # dir aside and plant a redirecting symlink in the TOCTOU window, defeating the
+    # exemption (PRRT_kwDOSJAM6s6F8zey). Exempt the sticky bit only for a root- or
+    # current-user-owned ancestor; ``allow_sticky=False`` (an attacker-ownable raced-in
+    # component) drops the exemption entirely regardless of owner.
+    sticky_trusted = bool(allow_sticky and mode & 0o1000 and info.st_uid in (0, os.geteuid()))
+    if not sticky_trusted:
         raise PermissionError(
             errno.EPERM,
             "Secrets directory has a group- or world-writable ancestor that could be "

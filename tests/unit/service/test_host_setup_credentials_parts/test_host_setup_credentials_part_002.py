@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -623,6 +624,80 @@ def test_reject_writable_ancestor_skips_non_posix_hosts(
     ancestor.mkdir()
     ancestor.chmod(0o777)  # group/world-writable, non-sticky: fatal on POSIX, ignored off it
     monkeypatch.setattr(credentials.os, "name", "nt")
+
+    credentials._reject_writable_ancestor(ancestor)
+
+
+def _stat_owned_by(ancestor: Path, uid: int) -> object:
+    """Return a ``Path.stat`` replacement reporting ``ancestor`` as owned by ``uid``.
+
+    The actual ``tmp_path`` tree is owned by the test process, so to model an
+    ancestor owned by *another* user (or by root) without privileges we rewrite
+    only the ``st_uid`` field of that one directory's stat result, leaving every
+    other path's stat untouched. ``list(stat_result)`` yields the ten basic
+    sequence fields with ``st_uid`` at index 4, which ``os.stat_result`` rebuilds.
+    """
+    real_stat = Path.stat
+
+    def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        info = real_stat(self, *args, **kwargs)
+        if self == ancestor:
+            fields = list(info)
+            fields[4] = uid  # st_uid
+            return os.stat_result(fields)
+        return info
+
+    return fake_stat
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="sticky-bit ownership semantics are POSIX-specific")
+def test_reject_writable_ancestor_refuses_sticky_dir_owned_by_other_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A sticky world-writable ancestor owned by *another* local user is still refused.
+
+    Regression for PRRT_kwDOSJAM6s6F8zey: the sticky-bit exemption assumes only a
+    *non-owner* attacker. On a sticky directory rename/delete of an entry is
+    restricted to the entry's owner, the *directory's* owner, and root — so when the
+    sticky ancestor itself is owned by another local user (e.g. an operator- or
+    attacker-provided ``/tmp/attacker`` at ``0o1777``), that owner can still rename
+    AWF's secrets dir aside and plant a redirecting symlink before the later secret
+    write, defeating the symlink checks. The exemption must verify the ancestor is
+    root- or current-user-owned first; here it is reported owned by a synthetic third
+    user (neither root nor the current euid), so the default ``allow_sticky=True``
+    must not save it.
+    """
+    ancestor = tmp_path / "attacker"
+    ancestor.mkdir()
+    ancestor.chmod(0o1777)  # world-writable WITH the sticky bit, like /tmp
+    other_uid = os.geteuid() + 1  # neither root (0) nor the current effective user
+    monkeypatch.setattr(Path, "stat", _stat_owned_by(ancestor, other_uid))
+
+    with pytest.raises(PermissionError):
+        credentials._reject_writable_ancestor(ancestor)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="sticky-bit ownership semantics are POSIX-specific")
+def test_reject_writable_ancestor_exempts_root_owned_sticky_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A root-owned sticky world-writable ancestor (the real ``/tmp``) stays exempted.
+
+    Complement to the not-owned refusal (PRRT_kwDOSJAM6s6F8zey): the ownership check
+    must not over-refuse the legitimate case it exists to protect. A sticky directory
+    owned by root restricts rename/delete to the entry owner (AWF) and root, so a
+    non-root local user cannot swap AWF's secrets dir there. Reporting the ancestor as
+    root-owned (robust whether or not the test itself runs as root) must leave the
+    exemption intact — no exception.
+    """
+    ancestor = tmp_path / "tmp"
+    ancestor.mkdir()
+    ancestor.chmod(0o1777)  # world-writable WITH the sticky bit, like /tmp
+    monkeypatch.setattr(Path, "stat", _stat_owned_by(ancestor, 0))
 
     credentials._reject_writable_ancestor(ancestor)
 
