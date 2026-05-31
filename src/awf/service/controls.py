@@ -1244,7 +1244,10 @@ class WorkspaceControlService:
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
                 )
-            if not await _has_terminal_runtime_released_event(self._session, workspace.id):
+            if (
+                workspace.compose_project_name is not None
+                and not await _has_terminal_runtime_released_event(self._session, workspace.id)
+            ):
                 await repo.add_event(
                     workspace,
                     event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
