@@ -40,7 +40,9 @@ class OpenCodeAdapter(AgentAdapter):
         return "ollama"
 
     def _cli_args(self, *, model: str | None) -> list[str]:
-        selected_model = _qualified_model(model or OPENCODE_OLLAMA_CLOUD_MODELS[0])
+        selected_model = _qualified_model(
+            model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
+        )
         script = _opencode_launcher_script(effort=self._default_effort)
         args = [
             "sh",

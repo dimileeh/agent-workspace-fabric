@@ -32,6 +32,29 @@ def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None
     assert "<redacted>" in classification.failure_fingerprint
 
 
+def test_classifies_cursor_auth_failure_and_redacts_secret_fingerprint() -> None:
+    """Cursor auth failures infer the Cursor provider and redact API keys."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr=(
+            "cursor-agent failed: CURSOR_API_KEY=cursor_api_key_secret "
+            "is invalid; please authenticate"
+        ),
+        provider=None,
+        model="sonnet-4-thinking",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "cursor"
+    assert classification.model == "sonnet-4-thinking"
+    assert classification.retryable is True
+    assert "cursor_api_key_secret" not in classification.failure_fingerprint
+    assert "<redacted>" in classification.failure_fingerprint
+
+
 def test_classifies_xai_grok_auth_failure_and_redacts_secret_fingerprint() -> None:
     classification = classify_provider_failure(
         reason_code=None,
@@ -163,8 +186,45 @@ def test_timeout_without_provider_or_model_is_not_recovery_metadata() -> None:
 def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
     assert infer_provider(model="claude-sonnet-4.5", output=None) == "anthropic"
     assert infer_provider(model=None, output="ollama local model is unavailable") == "ollama"
+    assert infer_provider(model=None, output="cursor-agent: unauthorized") == "cursor"
     assert infer_provider(model="grok-build-0.1", output=None) == "xai"
     assert infer_provider(model=None, output="xAI Grok rate limit") == "xai"
+
+
+def test_cursor_default_thinking_model_infers_cursor_without_output() -> None:
+    """Cursor's default model must not be mistaken for Anthropic Sonnet."""
+    assert infer_provider(model="sonnet-4-thinking", output=None) == "cursor"
+
+
+def test_cursor_provider_inference_takes_precedence_over_google_markers() -> None:
+    assert (
+        infer_provider(
+            model=None,
+            output="cursor-agent failed with RESOURCE_EXHAUSTED RetryableQuotaError",
+        )
+        == "cursor"
+    )
+    assert infer_provider(model=None, output="RESOURCE_EXHAUSTED RetryableQuotaError") == "google"
+
+
+def test_cursor_provider_inference_requires_specific_cursor_marker() -> None:
+    """Cursor inference ignores generic cursor words without auth context."""
+    assert infer_provider(model=None, output="cursor pagination failed") is None
+    assert infer_provider(model=None, output="cursor auth failed") == "cursor"
+    assert infer_provider(model=None, output="cursor api key was rejected") == "cursor"
+
+
+def test_generic_auth_prompt_with_cursor_word_is_not_provider_failure() -> None:
+    """Generic auth prompts with cursor text are not Cursor provider failures."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="Please authenticate before using the cursor pagination endpoint.",
+        provider=None,
+        model=None,
+    )
+
+    assert classification is None
 
 
 def test_failure_fingerprint_truncates_long_output_after_redaction() -> None:

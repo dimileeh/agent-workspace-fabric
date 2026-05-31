@@ -87,7 +87,8 @@ async def run_validation_and_fix_cycle(
     base_commit: str,
     expected_branch: str,
     adapter: AgentAdapter,
-    default_model: str | None,
+    run_model: str | None = None,
+    default_model: str | None = None,
     baseline_coverage: ValidationCoverageResult | None,
     planning_validation_handoff: _PlanningValidationHandoff | None,
     recovery: Mapping[str, Any] | None,
@@ -95,6 +96,9 @@ async def run_validation_and_fix_cycle(
     has_known_non_plan_output: bool,
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
 ) -> ExecutionValidationResult:
+    if run_model is None:
+        run_model = default_model
+
     successful_validation_run_id: str | None = None
     successful_validation_workspace_head_sha: str | None = None
 
@@ -350,7 +354,7 @@ async def run_validation_and_fix_cycle(
                         compose_project=compose_project,
                         compose_file=compose_file,
                         worktree_path=worktree_path,
-                        model=default_model,
+                        model=run_model,
                         handoff=conformance_handoff,
                         validation_run_id=validation_run_id,
                     )
@@ -768,7 +772,7 @@ async def run_validation_and_fix_cycle(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=fix_prompt,
-                model=default_model,
+                model=run_model,
                 workspace_id=workspace_id,
             )
             append_command_evidence(

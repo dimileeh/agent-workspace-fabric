@@ -17,6 +17,7 @@ Install:
   - Codex CLI auth in `~/.codex`, or OpenAI auth environment as supported by
     the installed Codex CLI.
   - Claude Code auth in `~/.claude` / `~/.claude.json` or Anthropic env vars.
+  - Cursor CLI auth through `CURSOR_API_KEY`.
   - Gemini auth in `~/.gemini` or Google/Gemini env vars.
   - OpenCode via Ollama auth/state in `~/.config/opencode` and `~/.ollama`.
 
@@ -177,6 +178,7 @@ AWF_HOST_SSH_AUTH_SOCK=<optional Linux SSH_AUTH_SOCK override>
 AWF_GITHUB_TOKEN=<token from gh auth token>
 OPENAI_API_KEY=<optional Codex env auth>
 ANTHROPIC_API_KEY=<optional Claude env auth>
+CURSOR_API_KEY=<optional Cursor env auth>
 GEMINI_API_KEY=<optional Gemini env auth>
 AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 COMPOSE_PROFILES=ollama-bridge
@@ -325,6 +327,7 @@ file contents:
   env auth such as `OPENAI_API_KEY`.
 - Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude`, or `~/.claude.json`.
+- Cursor: `CURSOR_API_KEY`; no host credential directory mount is required.
 - Gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`,
   visible `GOOGLE_APPLICATION_CREDENTIALS`, or `~/.gemini`.
 - OpenCode/Ollama: `~/.config/opencode`, selected small `~/.ollama` auth files,
@@ -343,6 +346,7 @@ Use strict checks before provider-specific work:
 uv run --python 3.12 --extra dev awf service status --format pretty
 uv run --python 3.12 --extra dev awf service status --provider claude_code --format pretty
 uv run --python 3.12 --extra dev awf service status --provider codex --format pretty
+uv run --python 3.12 --extra dev awf service status --provider cursor --format pretty
 curl 'http://localhost:8000/readyz?provider=opencode'
 ```
 
@@ -351,8 +355,9 @@ Default agent models and effort are centralized in
 
 | Agent | Default model | AWF effort |
 | --- | --- | --- |
-| `claude_code` | `claude-opus-4-7` | `xhigh` mapped to Claude Code `max` |
+| `claude_code` | `claude-opus-4-8` | `xhigh` passed through to Claude Code |
 | `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
+| `cursor` | `sonnet-4-thinking` | `xhigh` uses the thinking-capable model variant; no separate Cursor effort flag |
 | `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking |
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
