@@ -104,7 +104,13 @@ def setup_command(
             source_checkout=source_checkout,
         )
     except SetupCheckError as error:
-        _emit_payload(_reason_coded_payload(error.reason_code, str(error), error.details), fmt)
+        if isinstance(error, _ReadinessInteractiveBlockError):
+            # The interactive guard fired after the host checks ran; surface the
+            # readiness warnings alongside the block instead of discarding them.
+            error_payload = _readiness_with_interactive_block(error.readiness_payload, error)
+        else:
+            error_payload = _reason_coded_payload(error.reason_code, str(error), error.details)
+        _emit_payload(error_payload, fmt)
         raise typer.Exit(code=2) from error
     except HostSetupConfigError as error:
         details = _config_error_details(error)
@@ -217,7 +223,7 @@ def _run_setup(
             # Configuring a selected provider needs interactive credential entry,
             # which T04 forwards to provider setup (T07). Under --non-interactive
             # there is no way to collect it, so surface the machine-readable signal.
-            require_interactive(non_interactive, "configure the selected provider(s)")
+            _require_provider_interactive(non_interactive, payload)
         try:
             _persist_safe_config(
                 config,
@@ -234,7 +240,7 @@ def _run_setup(
             # Explicit non-secret consent is now persisted; still surface the
             # interactive-input signal for the provider credential step (T07)
             # that cannot run under --non-interactive.
-            require_interactive(non_interactive, "configure the selected provider(s)")
+            _require_provider_interactive(non_interactive, payload)
 
     return payload
 
@@ -342,6 +348,60 @@ def _readiness_with_config_write_failure(
         issues=(*payload.issues, write_issue),
         details=payload.details,
         next_steps=("Fix the reported blockers above, then re-run awf setup --dry-run.",),
+    )
+
+
+class _ReadinessInteractiveBlockError(SetupCheckError):
+    """Interactive-input block that carries the readiness payload to surface.
+
+    The provider interactive guard fires only after the host checks have run, so
+    this wraps the raised ``SetupCheckError`` with the already-built readiness
+    payload. ``setup_command`` then folds the host-check report into the
+    INTERACTIVE_INPUT_REQUIRED output instead of dropping the warnings (low disk,
+    missing ``gh``, below-floor CPU/memory) the operator ran setup to see.
+    """
+
+    def __init__(self, error: SetupCheckError, readiness_payload: FirstRunPayload) -> None:
+        """Re-wrap an interactive-guard error with the readiness payload."""
+        super().__init__(str(error), reason_code=error.reason_code, details=error.details)
+        self.readiness_payload = readiness_payload
+
+
+def _require_provider_interactive(non_interactive: bool, payload: FirstRunPayload) -> None:
+    """Demand interactive provider input, surfacing host checks on the block.
+
+    When ``--non-interactive`` trips the guard the host checks have already run,
+    so re-raise carrying the readiness payload (see ``_ReadinessInteractiveBlockError``)
+    rather than letting the bare error discard the readiness warnings.
+    """
+    try:
+        require_interactive(non_interactive, "configure the selected provider(s)")
+    except SetupCheckError as error:
+        raise _ReadinessInteractiveBlockError(error, payload) from error
+
+
+def _readiness_with_interactive_block(
+    payload: FirstRunPayload,
+    error: SetupCheckError,
+) -> FirstRunPayload:
+    """Fold an interactive-input block into the readiness payload.
+
+    Mirrors ``_readiness_with_config_write_failure``: the readiness issues and
+    check provenance are preserved and the INTERACTIVE_INPUT_REQUIRED block is
+    appended, so a scripting operator who keys on exit code 2 still sees the host
+    warnings from that run rather than only the reason-coded input-required error.
+    """
+    interactive_issue = first_run_issue_from_reason_code(
+        error.reason_code,
+        severity="blocked",
+        details=error.details,
+    )
+    return first_run_report_payload(
+        command=SETUP_COMMAND,
+        summary=f"{payload.summary} {error}",
+        issues=(*payload.issues, interactive_issue),
+        details=payload.details,
+        next_steps=_reason_coded_next_steps(error.reason_code),
     )
 
 

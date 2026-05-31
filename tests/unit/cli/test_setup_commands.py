@@ -59,6 +59,21 @@ def _docker_blocked(**_kwargs: object) -> list[SetupCheckResult]:
     ]
 
 
+def _gh_warning(**_kwargs: object) -> list[SetupCheckResult]:
+    """An otherwise-ready host carrying a single non-blocking warning."""
+    return [
+        _ok("docker"),
+        _ok("compose"),
+        SetupCheckResult(
+            name="gh",
+            level=SetupCheckLevel.WARNING,
+            summary="GitHub CLI (gh) is not installed.",
+            detail="gh missing.",
+            fix="Install gh.",
+        ),
+    ]
+
+
 @dataclass
 class _Harness:
     writes: list[HostSetupConfig] = field(default_factory=list)
@@ -822,6 +837,35 @@ def test_setup_non_interactive_provider_surfaces_readiness_blockers(
     reason_codes = [issue["reason_code"] for issue in payload["issues"]]
     assert "SETUP_READINESS_FAILED" in reason_codes
     assert "INTERACTIVE_INPUT_REQUIRED" not in reason_codes
+
+
+@pytest.mark.unit
+def test_setup_non_interactive_provider_surfaces_readiness_warnings(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-blocking host warnings survive the interactive guard (exit 2).
+
+    Regression for review comment issue:4585200251: ``--provider X
+    --non-interactive`` on an otherwise-ready host (a ``gh`` warning, low disk,
+    below-floor CPU/memory) tripped the interactive guard and emitted only the
+    INTERACTIVE_INPUT_REQUIRED error, discarding the readiness warnings a
+    scripting operator keying on exit code 2 needs. Both the block and the host
+    warnings (with their check provenance) must now be surfaced together.
+    """
+    monkeypatch.setattr(setup_commands, "run_system_checks", _gh_warning)
+    result = _runner.invoke(
+        app,
+        ["setup", "--provider", "github", "--non-interactive", "--format", "json"],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "INTERACTIVE_INPUT_REQUIRED"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert "INTERACTIVE_INPUT_REQUIRED" in reason_codes
+    assert "SETUP_READINESS_FAILED" in reason_codes
+    # The host-check provenance is surfaced rather than discarded.
+    assert payload["details"]["checks"]
 
 
 # --- Corrupt config defensive handling ------------------------------------
