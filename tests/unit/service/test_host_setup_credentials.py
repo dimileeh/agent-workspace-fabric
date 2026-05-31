@@ -323,7 +323,7 @@ def test_plain_file_writes_secret_with_conservative_permissions(
         ),
     )
 
-    secret_file = secrets_dir / "openai"
+    secret_file = secrets_dir / "openai.default"
     assert ref.backend == "plain_file"
     assert ref.ref == f"plain-file://{secret_file}"
     assert secret_file.read_text(encoding="utf-8") == _FAKE_TOKEN
@@ -340,6 +340,76 @@ def test_plain_file_writes_secret_with_conservative_permissions(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.unit
+def test_plain_file_scopes_secret_file_by_account(tmp_path: Path) -> None:
+    """Verify plain-file storage scopes the secret file/ref by account.
+
+    Without account scoping, two accounts for one provider would share a single
+    ``<provider>`` file and the second write would silently overwrite the first.
+    The ref must encode the account (as the keyring backend already does) so each
+    account keeps a distinct file and a distinct, non-overwriting reference.
+    """
+    secrets_dir = tmp_path / "secrets"
+
+    def _store(account: str, secret: str) -> CredentialRef:
+        return PlainFileCredentialBackend(
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=True,
+            consent=True,
+            secrets_dir=secrets_dir,
+        ).create_ref(
+            CredentialRequest(
+                provider="openai",
+                account=account,
+                secret_source=_secret(secret),
+            )
+        )
+
+    default_ref = _store("default", _FAKE_TOKEN)
+    work_ref = _store("work", _FAKE_GH_TOKEN)
+
+    default_file = secrets_dir / "openai.default"
+    work_file = secrets_dir / "openai.work"
+    assert default_ref.ref == f"plain-file://{default_file}"
+    assert work_ref.ref == f"plain-file://{work_file}"
+    assert default_ref.ref != work_ref.ref
+    # The first account's secret survives the second account's write.
+    assert default_file.read_text(encoding="utf-8") == _FAKE_TOKEN
+    assert work_file.read_text(encoding="utf-8") == _FAKE_GH_TOKEN
+
+
+@pytest.mark.unit
+def test_plain_file_rejects_token_shaped_account(tmp_path: Path) -> None:
+    """Verify a token-shaped account is refused before any plain-file write.
+
+    The account is interpolated into the secret file path for multi-account
+    scoping, so a token-shaped value must be rejected with a secret-free reason
+    code and leave neither the secret file nor the secrets directory behind.
+    """
+    secrets_dir = tmp_path / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(
+                provider="openai",
+                account=_FAKE_GH_TOKEN,
+                secret_source=_secret(_FAKE_TOKEN),
+            )
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {"field": "account"}
+    assert not secrets_dir.exists()
+    assert _FAKE_TOKEN not in str(error.to_dict())
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 
 @pytest.mark.unit

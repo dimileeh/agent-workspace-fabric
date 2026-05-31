@@ -365,7 +365,17 @@ class PlainFileCredentialBackend:
                 },
             )
         provider = _require_safe_identifier(request.provider, field="provider")
-        target = self._secrets_dir / provider
+        account = _require_safe_identifier(request.account, field="account")
+        # Scope the secret file by account, mirroring the keyring backend's
+        # ``service/account`` scoping: without it, two accounts for one provider
+        # share a single ``<provider>`` file and the second write overwrites the
+        # first. ``provider`` and ``account`` are validated to the safe-identifier
+        # alphabet, which excludes ``.``, so a single ``.`` separator keeps the
+        # pair unambiguous and the path one filename deep — preserving the
+        # secrets-dir 0700 guarantee (a per-provider subdir would demote the
+        # secrets dir to an intermediate ``mkdir`` parent that escapes the leaf
+        # create-time mode).
+        target = self._secrets_dir / f"{provider}.{account}"
         # Validate the ref before writing so an over-long path never leaves an
         # orphaned secret file the resulting ref could not be stored against.
         ref = _build_credential_ref("plain_file", f"plain-file://{target}")
