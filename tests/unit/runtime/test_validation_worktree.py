@@ -108,3 +108,30 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command == "git clean"
     assert cleanup.cleanup_stderr == ""
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_verify_check_does_not_report_status_as_cleanup_command(
+    tmp_path: Path,
+) -> None:
+    """If cleanup succeeds but worktree remains dirty, do not label status as the cleanup command."""
+
+    worktree = _init_fake_worktree(tmp_path)
+
+    calls: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        calls.append(tuple(args))
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            if len(calls) == 1:
+                return _CommandResultLike(0, " M tracked.py\n", "")
+            return _CommandResultLike(0, " M tracked.py\n", "")
+        if args[:1] == ["restore"]:
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(run_git=run_git, worktree_path=worktree)
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleanup_command is None
+    assert cleanup.verify_check is not None and not cleanup.verify_check.clean

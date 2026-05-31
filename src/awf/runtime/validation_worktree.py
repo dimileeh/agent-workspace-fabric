@@ -180,7 +180,7 @@ async def cleanup_validation_worktree_side_effects(
             restore_ref=restore_ref,
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             message="AWF validation worktree cleanup completed but the worktree is still dirty.",
-            cleanup_command="git status",
+            cleanup_command=None,
             verify_check=verify,
         )
 
