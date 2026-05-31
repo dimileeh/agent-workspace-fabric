@@ -625,8 +625,8 @@ def test_service_auth_mounts_skip_missing_paths(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_chown_workspace_auth_sources_skips_read_only_mounts() -> None:
-    # Read-only mounts are skipped: no chown is attempted on the source, so a
-    # non-existent path is safe and the call returns without raising.
+    # Read-only mounts must be skipped: no chown is attempted on the source,
+    # so a non-existent path is safe and the call returns without error.
     auth_mounts_mod._chown_workspace_auth_sources(  # noqa: SLF001
         [AuthMount(source="/nonexistent/ro-source", target="/agent/ro", mode="ro")],
         uid=1000,

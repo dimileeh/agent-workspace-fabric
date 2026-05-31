@@ -625,6 +625,18 @@ class TestRender:
         assert parsed["volumes"]["dind_data"]["name"] == "awf-ws_test123-dind_data"
 
     @pytest.mark.unit
+    def test_dind_daemon_uses_configured_dind_image(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(
+            tmp_path,
+            docker_mode="dind",
+            dind_image="ghcr.io/example/dind:buildx",
+        )
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+        assert parsed["services"]["docker"]["image"] == "ghcr.io/example/dind:buildx"
+
+    @pytest.mark.unit
     def test_dind_mode_sets_default_agent_docker_host(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
@@ -835,6 +847,32 @@ class TestRender:
         assert isinstance(env, dict)
         assert env["COMPOSE_PROJECT_NAME"] == "awf_ws_long_flags"
         assert env["COMPOSE_FILE"] == str(compose_file)
+
+    @pytest.mark.unit
+    async def test_ensure_project_up_without_wait_omits_wait_flags(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.ensure_project_up(
+            project_name="awf_ws_resume",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws_resume",
+            wait=False,
+        )
+
+        assert calls
+        assert calls[0] == ("docker", "compose", "up", "-d", "--remove-orphans")
+        assert "--wait" not in calls[0]
 
     @pytest.mark.unit
     async def test_compose_command_times_out_and_kills_hung_process(

@@ -179,6 +179,7 @@ class ComposeStackLauncher:
             agent_runtime_image=self._agent_runtime_image,
             agent_environment=agent_environment,
             docker_mode=profile.docker.mode.value,
+            dind_image=profile.docker.dind_image,
             services=services,
             companions=companions,
             auth_mounts=tuple(auth_mounts),
