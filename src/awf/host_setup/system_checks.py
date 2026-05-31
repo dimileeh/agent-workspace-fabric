@@ -32,7 +32,7 @@ from awf.host_setup.rendering import (
 )
 from awf.host_setup.source_assets import SourceCheckoutError, VerifiedSourceCheckout
 
-_SETUP_COMMAND = "awf setup"
+SETUP_COMMAND = "awf setup"
 _AWF_ENTRY_POINT = "awf"
 _PROBE_TIMEOUT_SECONDS = 5.0
 
@@ -939,7 +939,7 @@ def require_interactive(non_interactive: bool, what: str) -> None:
 def build_setup_readiness_payload(
     results: Sequence[SetupCheckResult],
     *,
-    command: str = _SETUP_COMMAND,
+    command: str = SETUP_COMMAND,
     selected_providers: Sequence[str] = (),
     allow_plain_secrets: bool = False,
     dry_run: bool = False,
@@ -1041,6 +1041,7 @@ __all__ = [
     "MIN_FREE_DISK_BYTES",
     "MIN_MEMORY_BYTES",
     "MIN_USABLE_CPUS",
+    "SETUP_COMMAND",
     "SETUP_PROVIDER_UNKNOWN",
     "SETUP_READINESS_FAILED",
     "CommandResult",

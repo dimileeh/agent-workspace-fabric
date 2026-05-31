@@ -16,6 +16,11 @@ from typing import Any
 import typer
 
 from awf.cli.common import OutputFormat, _emit
+from awf.cli.init_ops import (
+    _resolve_existing_service_env_file,
+    _resolve_service_compose_paths,
+    _resolve_service_runtime_env_files,
+)
 from awf.host_setup.config import (
     HostSetupConfig,
     HostSetupConfigError,
@@ -36,7 +41,7 @@ from awf.host_setup.source_assets import (
     verified_source_from_metadata,
 )
 from awf.host_setup.system_checks import (
-    _SETUP_COMMAND,
+    SETUP_COMMAND,
     SetupCheckError,
     build_setup_readiness_payload,
     normalize_providers,
@@ -225,11 +230,6 @@ def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[s
     from awf.service.config import local_service_environ
 
     if verified_source is None:
-        from awf.cli.init_ops import (
-            _resolve_service_compose_paths,
-            _resolve_service_runtime_env_files,
-        )
-
         compose_file, raw_env_file, _ = _resolve_service_compose_paths()
         default_read_env, _ = _resolve_service_runtime_env_files(
             compose_file,
@@ -237,8 +237,6 @@ def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[s
             paths_verified=True,
         )
         return local_service_environ(env_file=default_read_env)
-
-    from awf.cli.init_ops import _resolve_existing_service_env_file
 
     compose_env_candidate = verified_source.root / "docker" / "compose" / ".env"
     resolved_read_env = _resolve_existing_service_env_file(compose_env_candidate)
@@ -263,7 +261,7 @@ def _readiness_with_config_write_failure(
         details={**error.details, "path": str(error.path)},
     )
     return first_run_report_payload(
-        command=_SETUP_COMMAND,
+        command=SETUP_COMMAND,
         summary=f"{payload.summary} {error.message}",
         issues=(*payload.issues, write_issue),
         details=payload.details,
@@ -313,7 +311,7 @@ def _reason_coded_payload(
     )
     return FirstRunPayload(
         status="blocked",
-        command=_SETUP_COMMAND,
+        command=SETUP_COMMAND,
         summary=summary,
         reason_code=reason_code,
         issues=(issue,),
