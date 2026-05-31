@@ -102,6 +102,8 @@ class _PreparedOperation:
 
 
 class WorkspaceCleanerProtocol(Protocol):
+    """Protocol that workspace cleanup backends must satisfy."""
+
     async def cleanup(  # pragma: no cover - Protocol method declaration only.
         self,
         *,
@@ -133,6 +135,8 @@ class WorkspaceControlError(Exception):
 
 
 class WorkspaceNotFoundError(WorkspaceControlError):
+    """Raised when no workspace row matches the requested identifier."""
+
     def __init__(self, workspace_id: str) -> None:
         super().__init__(
             error_code="NOT_FOUND",
@@ -141,6 +145,8 @@ class WorkspaceNotFoundError(WorkspaceControlError):
 
 
 class ActiveWorkspaceDestroyError(WorkspaceControlError):
+    """Raised when a destroy is attempted on an active workspace without ``force``."""
+
     def __init__(self) -> None:
         super().__init__(
             error_code="WORKSPACE_ACTIVE",
@@ -149,6 +155,8 @@ class ActiveWorkspaceDestroyError(WorkspaceControlError):
 
 
 class IdempotencyConflictError(WorkspaceControlError):
+    """Raised when an Idempotency-Key is reused with a different action payload."""
+
     def __init__(self) -> None:
         super().__init__(
             error_code="IDEMPOTENCY_CONFLICT",
@@ -157,6 +165,8 @@ class IdempotencyConflictError(WorkspaceControlError):
 
 
 class VersionConflictError(WorkspaceControlError):
+    """Raised when the workspace version does not match the ``If-Match`` header."""
+
     def __init__(self, *, expected_version: int, actual_version: int) -> None:
         super().__init__(
             error_code="VERSION_CONFLICT",
@@ -169,6 +179,8 @@ class VersionConflictError(WorkspaceControlError):
 
 
 class WorkspaceStackStopError(WorkspaceControlError):
+    """Raised when ``docker stop`` or ``docker down`` fails during a control operation."""
+
     def __init__(
         self,
         *,
@@ -189,6 +201,8 @@ class WorkspaceStackStopError(WorkspaceControlError):
 
 
 class WorkspaceRemonitorMissingPrUrlError(WorkspaceControlError):
+    """Raised when remonitor is requested for a workspace that has no PR URL."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="WORKSPACE_PR_URL_REQUIRED",
@@ -198,6 +212,8 @@ class WorkspaceRemonitorMissingPrUrlError(WorkspaceControlError):
 
 
 class WorkspaceRemonitorStateError(WorkspaceControlError):
+    """Raised when the workspace status is not eligible for remonitor recovery."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="WORKSPACE_STATE_NOT_REMONITORABLE",
@@ -210,6 +226,8 @@ class WorkspaceRemonitorStateError(WorkspaceControlError):
 
 
 class WorkspaceRefreshStateError(WorkspaceControlError):
+    """Raised when the workspace status is not eligible for refresh recovery."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="WORKSPACE_STATE_NOT_REFRESHABLE",
@@ -219,6 +237,8 @@ class WorkspaceRefreshStateError(WorkspaceControlError):
 
 
 class WorkspaceValidateStateError(WorkspaceControlError):
+    """Raised when the workspace status is not eligible for validate recovery."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="WORKSPACE_STATE_NOT_VALIDATABLE",
@@ -231,6 +251,8 @@ class WorkspaceValidateStateError(WorkspaceControlError):
 
 
 class WorkspaceValidateMissingPrUrlError(WorkspaceControlError):
+    """Raised when validate is requested for a workspace that has no PR URL."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="WORKSPACE_PR_URL_REQUIRED",
@@ -240,6 +262,8 @@ class WorkspaceValidateMissingPrUrlError(WorkspaceControlError):
 
 
 class WorkspaceRebaseMissingPrUrlError(WorkspaceControlError):
+    """Raised when rebase is requested for a workspace that has no PR URL."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="WORKSPACE_PR_URL_REQUIRED",
@@ -249,6 +273,8 @@ class WorkspaceRebaseMissingPrUrlError(WorkspaceControlError):
 
 
 class WorkspaceRebaseMissingCandidateError(WorkspaceControlError):
+    """Raised when rebase is requested but no open merge candidate exists."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="MERGE_CANDIDATE_NOT_FOUND",
@@ -258,6 +284,8 @@ class WorkspaceRebaseMissingCandidateError(WorkspaceControlError):
 
 
 class WorkspaceRebaseStateError(WorkspaceControlError):
+    """Raised when the workspace status is not eligible for rebase recovery."""
+
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
             error_code="WORKSPACE_STATE_NOT_REBASEABLE",
@@ -270,6 +298,8 @@ class WorkspaceRebaseStateError(WorkspaceControlError):
 
 
 class WorkspaceRebaseActiveConflictError(WorkspaceControlError):
+    """Raised when a conflicting active operation prevents rebase."""
+
     def __init__(
         self,
         operation: Operation,
@@ -307,6 +337,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Cancel a running workspace, optionally stopping its Docker stack."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         event_payload = _event_payload(
@@ -427,6 +459,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Stop a workspace's Docker stack and transition it to cancelled."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         event_payload = _event_payload(
@@ -534,6 +568,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Restart PR monitoring for a workspace that lost its monitor claim."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         workspace_for_payload = await self._require_workspace(repo, workspace_id)
@@ -716,6 +752,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Enqueue a validation recovery operation for the workspace."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         payload = _operator_operation_payload(
@@ -793,6 +831,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Enqueue a rebase recovery operation for the workspace."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         base_payload = _operator_operation_payload(
@@ -907,6 +947,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Destroy a workspace, releasing all resources and cleaning up artifacts."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         payload = _operator_operation_payload(

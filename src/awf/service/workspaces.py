@@ -1153,6 +1153,8 @@ def retry_workspace_row(
     *args: Any,
     **kwargs: Any,
 ) -> Any:
+    """Proxy to ``workspaces_retry.retry_workspace_row`` (lazy-imported)."""
+
     return _workspaces_retry_call("retry_workspace_row", *args, **kwargs)
 
 

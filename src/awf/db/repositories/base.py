@@ -153,6 +153,8 @@ _POSTGRES_INTEGER_MAX: Final = 2**31 - 1
 
 @dataclass(frozen=True)
 class OwnedPathOverlap:
+    """Two owned paths that conflict because one contains the other."""
+
     workspace_id: str
     existing_path: str
     requested_path: str
@@ -160,6 +162,8 @@ class OwnedPathOverlap:
 
 @dataclass(frozen=True)
 class OwnedPathConflict:
+    """Alias kept for backwards-compat; prefer ``OwnedPathOverlap``."""
+
     workspace_id: str
     existing_path: str
     requested_path: str
@@ -233,6 +237,8 @@ def host_ports_from_task_policy_companions(
 
 @dataclass(frozen=True)
 class OwnedPathOverlapMatch:
+    """Detailed overlap result with normalization context and match reason."""
+
     left_path: str
     right_path: str
     normalized_left_path: str
@@ -243,6 +249,8 @@ class OwnedPathOverlapMatch:
 
 @dataclass(frozen=True)
 class WorkspaceEventCreate:
+    """Payload for creating a workspace event via ``WorkspaceEventRepository``."""
+
     event_type: str
     reason_code: str | None = None
     payload: dict[str, Any] | None = None
@@ -256,6 +264,8 @@ class _IssuedSecretLease:
 
 @dataclass(frozen=True)
 class QueueDecisionCreate:
+    """Payload for recording a scheduler queue-decision event."""
+
     workspace_id: str
     task_id: str
     attempt_id: str
@@ -294,6 +304,8 @@ class PolicyFindingCreate:
 
 @dataclass(frozen=True)
 class SecretLeaseIssue:
+    """A secret-lease that could not be issued during workspace provisioning."""
+
     secret_name: str
     kind: str
     target: str
@@ -336,6 +348,8 @@ def resolve_session_dialect_name(
     session: AsyncSession,
     dialect_name: str | None,
 ) -> str | None:
+    """Return the SQLAlchemy dialect name, falling back to the session bind."""
+
     if dialect_name is not None:
         return dialect_name
 
@@ -477,6 +491,8 @@ def _as_utc_naive(value: datetime) -> datetime:
 
 
 def empty_resource_reservation_totals() -> dict[str, float | int]:
+    """Return a zeroed-out resource-reservation summary dict."""
+
     return {
         "workspace_count": 0,
         "steady_cpu": 0.0,
@@ -806,6 +822,8 @@ def _releases_resource_reservation(status: WorkspaceStatus) -> bool:
 
 @dataclass(frozen=True)
 class SchedulerOrderExpressions:
+    """Column expressions used to rank workspaces for scheduler ordering."""
+
     class_priority: ColumnElement[Any]
     effective_score: ColumnElement[Any]
 
@@ -877,6 +895,8 @@ def scheduler_order_expressions(
     dialect_name: str | None,
     workspace_entity: Any = Workspace,
 ) -> SchedulerOrderExpressions:
+    """Build the class-priority and effective-score expressions for the scheduler."""
+
     class_priority = _task_class_case(TASK_CLASS_PRIORITIES, workspace_entity=workspace_entity)
     class_bias = _task_class_case(TASK_CLASS_BIASES, workspace_entity=workspace_entity)
     base_priority = _bounded_scheduler_int_expr(
@@ -1372,10 +1392,14 @@ def _host_port_admission_advisory_lock_key(host_port: int) -> int:
 
 
 def owned_paths_overlap(left: str, right: str) -> bool:
+    """Return ``True`` when two repository owned paths overlap."""
+
     return _owned_paths_overlap(left, right)
 
 
 def owned_path_overlap_match(left: str, right: str) -> OwnedPathOverlapMatch | None:
+    """Return a detailed overlap match, or ``None`` if the paths do not overlap."""
+
     return _owned_path_overlap_match(left, right)
 
 

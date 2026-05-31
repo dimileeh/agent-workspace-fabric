@@ -109,6 +109,8 @@ StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 
 
 class SafeResult(Protocol):
+    """Protocol for constructing safe MCP tool result objects."""
+
     def __call__(self, payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult: ...
 
 
@@ -167,6 +169,8 @@ def register_workspace_tools(
     settings_value: Settings,
     disk_check_provider: DiskCheckProvider | None,
 ) -> None:
+    """Register all AWF workspace MCP tools on the given FastMCP server."""
+
     _safe_result = safe_result
 
     @mcp.tool(name="awf_create_workspace")
