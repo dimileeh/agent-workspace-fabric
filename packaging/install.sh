@@ -744,7 +744,15 @@ uv_lists_package() {
     # is not matched as a substring and mistaken for an AWF-managed install.
     # grep -w would not be enough here: the hyphens in $PACKAGE are non-word
     # characters, so a word-boundary match would still accept a *-fabric-* name.
-    uv tool list 2>/dev/null | grep -qE "^${PACKAGE}( |$)" || return 1
+    # Do not use `grep -q` here: under `set -o pipefail` it exits on the first
+    # match and closes the pipe, so when `uv tool list` prints more tools after
+    # the AWF entry the producer takes SIGPIPE and the pipeline exits 141. That
+    # non-zero status would make `|| return 1` report a genuinely uv-managed
+    # install as unmanaged, so --uninstall would refuse it or no-op rather than
+    # remove the managed copy. Redirecting grep's output to /dev/null instead
+    # drains the whole stream so the producer finishes writing and exits 0; only
+    # grep's own match (0) / no-match (1) status then decides the result.
+    uv tool list 2>/dev/null | grep -E "^${PACKAGE}( |$)" >/dev/null || return 1
     return 0
 }
 
@@ -756,7 +764,12 @@ pipx_lists_package() {
     # "package " prefix that `pipx list` emits; the trailing ( |$) mirrors
     # uv_lists_package so a line ending exactly at the name (no version) still
     # matches a genuinely managed install.
-    pipx list 2>/dev/null | grep -qE "(^| )${PACKAGE}( |$)" || return 1
+    # As in uv_lists_package, avoid `grep -q`: under pipefail an early-exiting
+    # grep SIGPIPEs `pipx list` when the AWF entry is not the last line printed,
+    # and the resulting 141 pipeline status would turn a real pipx-managed install
+    # into a false "unmanaged". Draining the stream via >/dev/null keeps the
+    # producer alive to EOF so only grep's match/no-match status decides.
+    pipx list 2>/dev/null | grep -E "(^| )${PACKAGE}( |$)" >/dev/null || return 1
     return 0
 }
 

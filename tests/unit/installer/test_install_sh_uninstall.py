@@ -9,6 +9,24 @@ from tests.unit.installer.conftest import InstallerHarness
 PACKAGE = "agent-workspace-fabric"
 
 
+def _list_output_with_trailing_bulk(prefix: str) -> str:
+    """Return ``prefix`` followed by ~1 MiB of unrelated package manager output.
+
+    ``uv_lists_package``/``pipx_lists_package`` detect a managed install by
+    piping ``uv tool list``/``pipx list`` into ``grep``. The AWF entry sits in
+    ``prefix`` (the first line(s)); the trailing bulk models the many other tools
+    a real manager lists *after* it. With an early-exiting ``grep -q`` the match
+    on the first line closes the pipe, leaving the producer mid-write; under
+    ``set -o pipefail`` it takes SIGPIPE (141) and the pipeline reports the
+    managed install as unmanaged. ~1 MiB comfortably exceeds the 64 KiB pipe
+    buffer plus grep's read block, so the race fires deterministically. None of
+    the filler lines match ``PACKAGE`` as a token, so they never produce a real
+    match — only the trailing-write SIGPIPE matters here.
+    """
+    filler = "".join(f"other-tool-{i} v1.0.0\n" for i in range(50000))
+    return prefix + filler
+
+
 @pytest.mark.unit
 def test_uninstall_managed_uv_install(harness: InstallerHarness) -> None:
     """A uv-managed install is removed via ``uv tool uninstall``."""
@@ -339,6 +357,61 @@ def test_dry_run_uninstall_refuses_unmanaged_binary_with_reason_token(
     joined = "\n".join(harness.calls())
     assert f"uv tool uninstall {PACKAGE}" not in joined
     assert f"pipx uninstall {PACKAGE}" not in joined
+
+
+@pytest.mark.unit
+def test_uninstall_managed_uv_install_with_large_tool_list(
+    harness: InstallerHarness,
+) -> None:
+    """A uv-managed install is detected even when ``uv tool list`` is large.
+
+    Regression for the SIGPIPE-under-pipefail false negative in
+    ``uv_lists_package``: ``uv tool list`` prints the AWF entry first and then
+    many more tools. An early-exiting ``grep -q`` would match the first line,
+    close the pipe, and leave ``uv tool list`` taking SIGPIPE; under ``set -o
+    pipefail`` the pipeline then exits 141 and ``uv_lists_package`` wrongly
+    reports the install as unmanaged — so the uv copy is never removed and the
+    unmanaged-refusal path fires instead. Draining the stream keeps detection
+    correct, so the managed copy is uninstalled.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=_list_output_with_trailing_bulk(f"{PACKAGE} v0.1.0\n- awf\n"))
+    harness.add_pipx(list_output="")
+    # A uv-managed install also links ``awf`` onto PATH; its presence means a
+    # false "unmanaged" detection escalates to UNINSTALL_REFUSED_UNMANAGED, so the
+    # regression fails loudly (non-zero) rather than silently no-opping.
+    harness.add_awf()
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    assert f"uv tool uninstall {PACKAGE}" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_uninstall_managed_pipx_install_with_large_list(
+    harness: InstallerHarness,
+) -> None:
+    """A pipx-managed install is detected even when ``pipx list`` is large.
+
+    The pipx twin of the uv SIGPIPE regression: when the AWF entry is not the
+    last line ``pipx list`` prints, an early-exiting ``grep -q`` SIGPIPEs pipx and
+    the pipefail 141 status would make ``pipx_lists_package`` miss a genuinely
+    managed install. Draining the stream keeps detection correct, so the pipx
+    copy is removed.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output="")
+    harness.add_pipx(list_output=_list_output_with_trailing_bulk(f"package {PACKAGE} 0.1.0\n"))
+    harness.add_awf()
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    joined = "\n".join(harness.calls())
+    assert f"pipx uninstall {PACKAGE}" in joined
+    # uv reported nothing, so only the pipx removal runs.
+    assert f"uv tool uninstall {PACKAGE}" not in joined
 
 
 @pytest.mark.unit
