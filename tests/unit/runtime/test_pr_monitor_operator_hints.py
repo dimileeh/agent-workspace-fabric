@@ -1175,6 +1175,45 @@ async def test_monitor_state_round_trips_pending_operator_hint(
 
 
 @pytest.mark.unit
+async def test_load_state_ignores_processed_pending_operator_hint(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    hint = OperatorHint(
+        reason="fix the stale docs CTA",
+        operation_id="op_hint_processed_before_load",
+        requested_at="2026-05-30T12:00:00+00:00",
+    )
+    processed_key = operator_hint_processed_key("op_hint_processed_before_load")
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint(
+            {processed_key: "processed", "review-thread": "fix_committed"},
+            hint,
+        )
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    workspace = await runner._load_workspace(workspace_id)
+    state = runner._load_state(workspace)
+    action = decide(_ready_status(), state, MonitorConfig(auto_merge=True))
+
+    assert state.pending_operator_hint is None
+    assert OPERATOR_HINT_STATE_KEY not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[processed_key] == "processed"
+    assert state.threads_addressed_ids["review-thread"] == "fix_committed"
+    assert isinstance(action, Merge)
+
+
+@pytest.mark.unit
 async def test_persist_state_preserves_concurrent_processed_operator_hint_marker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

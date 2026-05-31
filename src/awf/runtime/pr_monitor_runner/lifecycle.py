@@ -103,6 +103,11 @@ def _load_state(_self: Any, ws: Workspace) -> MonitorState:
         sync_base_no_progress_count = 0
     pending_operator_hint = operator_hint_from_threads(threads_addressed)
     threads_addressed.pop(OPERATOR_HINT_STATE_KEY, None)
+    if pending_operator_hint is not None and _operator_hint_is_processed(
+        threads_addressed,
+        pending_operator_hint,
+    ):
+        pending_operator_hint = None
     if ws.pr_number is not None:
         threads_addressed = _initial_review_grace_state_for_runtime(
             threads_addressed,
