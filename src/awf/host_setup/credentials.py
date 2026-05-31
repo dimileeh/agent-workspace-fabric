@@ -378,11 +378,16 @@ class PlainFileCredentialBackend:
         self._capabilities = capabilities
         self._allow_plain_secrets = allow_plain_secrets
         self._consent = consent
-        self._secrets_dir = (
-            Path(secrets_dir).resolve()
-            if secrets_dir is not None
-            else _default_secrets_dir().resolve()
-        )
+        raw_secrets_dir = Path(secrets_dir) if secrets_dir is not None else _default_secrets_dir()
+        # Make the path absolute *without* following symlinks. ``Path.resolve``
+        # would canonicalise a pre-planted ``~/.awf/secrets -> /attacker`` symlink
+        # into its target here, stripping the very information
+        # ``_mkdir_secure``'s ``is_symlink`` guard needs to refuse a redirected
+        # secrets dir. ``Path.absolute`` only prepends the cwd (so a relative
+        # ``secrets_dir`` still yields an absolute ``plain-file://`` ref) and never
+        # traverses a link, preserving the un-followed path for the write-time
+        # symlink check.
+        self._secrets_dir = raw_secrets_dir.absolute()
 
     def is_available(self) -> bool:
         """Return whether flag, consent, and a headless-Linux host all hold."""
@@ -836,7 +841,22 @@ def _mkdir_secure(directory: Path) -> None:
     (provider names/structure) until a later chmod lands. The trailing
     best-effort chmod still tightens the leaf for the ``exist_ok`` case, where
     ``mkdir`` leaves an already-present looser directory untouched.
+
+    Symlinks are refused, never followed: a pre-planted ``~/.awf/secrets ->
+    /attacker`` (or a symlinked ancestor the secrets dir would be created under)
+    would otherwise redirect both the hardening chmod and every subsequent secret
+    write into an attacker-controlled target. The ``exists``/``is_dir`` probes
+    below all follow symlinks, so the file-level ``O_EXCL`` in
+    ``_write_secret_file`` — which only protects the temp inode, not the directory
+    it lands in — would not catch it. ``is_symlink`` (``lstat``) is the
+    non-following check that does.
     """
+    # Refuse a symlinked leaf up front so it is rejected whether its target
+    # exists (``exists()``/``is_dir()`` would follow it) or dangles (``mkdir``
+    # on a dangling-symlink leaf would otherwise raise a confusing
+    # ``FileExistsError``). ``lstat``-based, so it never traverses the link.
+    if directory.is_symlink():
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(directory))
     missing: list[Path] = []
     probe = directory
     while not probe.exists():
@@ -845,6 +865,13 @@ def _mkdir_secure(directory: Path) -> None:
         if parent == probe:  # reached the filesystem root; defensive.
             break
         probe = parent
+    # ``probe`` is now the nearest pre-existing ancestor the new directories
+    # would be created under. If it is a symlink, an attacker redirected an
+    # ancestor of the secrets dir; refuse rather than plant the 0700 tree (and
+    # the secrets) inside the link target. ``exists()`` above followed the link
+    # to decide the chain, so this ``lstat`` check is what actually catches it.
+    if probe.is_symlink():
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(probe))
     for path in reversed(missing):
         path.mkdir(mode=0o700, exist_ok=True)
         _chmod_best_effort(path, 0o700)

@@ -796,10 +796,13 @@ def test_plain_file_backend_defaults_to_awf_secrets_dir() -> None:
 
 @pytest.mark.unit
 def test_plain_file_backend_resolves_relative_secrets_dir() -> None:
-    """Verify a relative ``secrets_dir`` is resolved to an absolute path.
+    """Verify a relative ``secrets_dir`` is made absolute without following links.
 
     Plain-file refs must be ``plain-file://<abs-path>``; a relative input would
     otherwise yield a relative ref that breaks if the working directory changes.
+    The absolutisation must *not* follow symlinks (``Path.absolute``, not
+    ``Path.resolve``) so a symlinked secrets dir is preserved for the write-time
+    ``_mkdir_secure`` symlink guard rather than silently canonicalised away.
     """
     backend = PlainFileCredentialBackend(
         capabilities=_HEADLESS_LINUX,
@@ -808,7 +811,7 @@ def test_plain_file_backend_resolves_relative_secrets_dir() -> None:
         secrets_dir="relative/secrets",
     )
     assert backend._secrets_dir.is_absolute()
-    assert backend._secrets_dir == Path("relative/secrets").resolve()
+    assert backend._secrets_dir == Path("relative/secrets").absolute()
 
 
 @pytest.mark.unit
