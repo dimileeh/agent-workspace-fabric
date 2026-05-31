@@ -9,7 +9,7 @@ The prompt identified three remaining conformance gaps against the plan
 |---|-----|--------|
 | 1 | Missing regression test: nothing-to-commit + orphan-history → branch gets reattached (plan test #4) | **Fixed** |
 | 2 | `plans/ISSUE_327_VALIDATION.md` not written | **Fixed** (this document) |
-| 3 | `_is_nothing_to_commit` uses single pattern `r"nothing to commit"` instead of planned three-pattern regex | **Fixed** |
+| 3 | `_is_nothing_to_commit` uses single pattern `r"nothing to commit"` instead of planned two-pattern regex | **Fixed** |
 
 ## Changes made
 
@@ -24,18 +24,21 @@ _NOTHING_TO_COMMIT_PATTERN = re.compile(r"nothing to commit", re.IGNORECASE)
 To:
 ```python
 _NOTHING_TO_COMMIT_PATTERN = re.compile(
-    r"nothing to commit|working tree clean|no changes added",
+    r"nothing to commit|working tree clean",
     re.IGNORECASE,
 )
 ```
 
-This matches the plan's specification exactly. While git reliably emits
-"nothing to commit" in this scenario, the broader patterns cover edge-case
-git versions and alternative output formats as the plan intended.
+Note: `no changes added` was intentionally excluded — git emits
+"no changes added to commit but untracked files present" when tracked
+files are modified but unstaged, which is NOT a self-committed clean-tree
+scenario and should remain classified as a real error.
 
 **Test update** (`test_executor_post_agent_commit_classifier.py`): Added
-parametrized test cases for "working tree clean" and "no changes added"
-to the `test_is_nothing_to_commit_detects_benign_clean_tree` test.
+parametrized test cases for "working tree clean" to the
+`test_is_nothing_to_commit_detects_benign_clean_tree` test.
+The `test_is_nothing_to_commit_rejects_real_errors` test explicitly
+confirms that `no changes added` is correctly rejected.
 
 ### 2. Added orphan-history regression test
 
