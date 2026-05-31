@@ -379,7 +379,8 @@ class WorkspaceControlService:
             )
         _cancel_final_status = workspace.status
         if (
-            workspace.compose_project_name is not None
+            stop_stack
+            and workspace.compose_project_name is not None
             and not await has_terminal_runtime_released_event(self._session, workspace.id)
         ):
             await repo.add_event(
@@ -390,7 +391,7 @@ class WorkspaceControlService:
                     "compose_project_name": workspace.compose_project_name,
                     "workspace_status": _cancel_final_status,
                     "cleanup": {
-                        "stack_stopped": stop_stack,
+                        "stack_stopped": True,
                         "source": "cancel_workspace",
                     },
                 },
