@@ -144,6 +144,8 @@ class _WorkspaceCreateIdempotencyConflictError(Exception):
 
 
 class _WorkspaceCreateIdempotencyReplayKeyCache:
+    """Thread-safe LRU cache for workspace-create idempotency replay keys."""
+
     def __init__(self, *, max_entries: int | None = None):
         if max_entries is not None and max_entries < 1:
             raise ValueError("max_entries must be greater than 0")
@@ -158,6 +160,7 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         idempotency_key: str,
         api_version: str,
     ) -> bool:
+        """Return True if the cached key matches the current payload hash."""
         payload_hash = _workspace_create_request_hash(
             payload,
             api_version=api_version,
@@ -181,18 +184,21 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         idempotency_key: str,
         api_version: str,
     ) -> None:
+        """Store the payload hash for the given idempotency key."""
         self.remember_hash(
             idempotency_key=idempotency_key,
             request_hash=_workspace_create_request_hash(payload, api_version=api_version),
         )
 
     def remember_hash(self, *, idempotency_key: str, request_hash: str | None) -> None:
+        """Store a pre-computed hash (or ``None`` conflict sentinel) for *idempotency_key*."""
         with self._lock:
             self._entries[idempotency_key] = request_hash
             self._entries.move_to_end(idempotency_key)
             self._trim()
 
     def _trim(self) -> None:
+        """Evict oldest entries beyond *max_entries*."""
         if self._max_entries is None:
             return
         while len(self._entries) > self._max_entries:
@@ -202,12 +208,14 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
 def _new_workspace_create_idempotency_replay_key_cache() -> (
     _WorkspaceCreateIdempotencyReplayKeyCache
 ):
+    """Factory for a new replay key cache with the configured max entries."""
     return _WorkspaceCreateIdempotencyReplayKeyCache(
         max_entries=_WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES
     )
 
 
 def _current_request(request: Request) -> Request:
+    """FastAPI dependency that returns the current request unchanged."""
     return request
 
 
@@ -389,6 +397,7 @@ async def _workspace_create_replay_response(
     idempotency_key: str,
     settings: Settings | None = None,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
+    """Attempt to replay a previously-accepted workspace creation from the DB."""
     await repo.acquire_idempotency_key_lock(idempotency_key)
     existing = await repo.get_by_idempotency_key(idempotency_key)
     if existing is None:
@@ -413,6 +422,7 @@ async def _workspace_create_durable_replay_response(
     idempotency_key: str,
     settings: Settings | None = None,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
+    """Replay from DB and update the in-memory cache, storing a conflict sentinel on mismatch."""
     replay = await _workspace_create_replay_response(
         repo,
         payload,
@@ -436,6 +446,7 @@ async def _workspace_admission_disk_check(
     request: Request | object | None,
     settings: Settings,
 ) -> DiskCheck:
+    """Run a pre-admission disk-space check using the app-state provider or defaults."""
     state = request_app_state(request)
     provider = cast(
         DiskCheckProvider | None,
@@ -453,6 +464,7 @@ async def _workspace_admission_disk_check(
 def _workspace_create_rate_limited_response(
     decision: RequestAdmissionDecision,
 ) -> JSONResponse:
+    """Build a 429 JSON response for workspace-create rate limiting."""
     retry_after = decision.metadata.get("retry_after_seconds", 1)
     return JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -466,6 +478,7 @@ def _workspace_create_rate_limited_response(
 
 
 def _workspace_create_idempotency_conflict_response() -> JSONResponse:
+    """Build a 409 JSON response for idempotency-key payload mismatch."""
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content=ErrorResponse(
@@ -479,6 +492,7 @@ def _workspace_create_idempotency_conflict_response() -> JSONResponse:
 
 
 def _workspace_create_idempotency_replay_unavailable_response() -> JSONResponse:
+    """Build a 409 JSON response when a replay key is recognized but the original record is gone."""
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content=ErrorResponse(
@@ -493,6 +507,7 @@ def _workspace_create_idempotency_replay_unavailable_response() -> JSONResponse:
 
 
 def _insufficient_disk_response(disk_check: DiskCheck) -> JSONResponse:
+    """Build a 503 JSON response for insufficient disk space."""
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content=ErrorResponse(
@@ -504,6 +519,7 @@ def _insufficient_disk_response(disk_check: DiskCheck) -> JSONResponse:
 
 
 def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
+    """Map a ``WorkspaceRetryError`` subclass to the appropriate HTTP error response."""
     if isinstance(exc, WorkspaceRetryNotFoundError):
         status_code = status.HTTP_404_NOT_FOUND
     elif isinstance(exc, WorkspaceRetryNotAllowedError):
@@ -523,6 +539,7 @@ def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
 def _provider_readiness_blocked_response(
     exc: WorkspaceProviderReadinessBlockedError,
 ) -> JSONResponse:
+    """Build a 409 JSON response for a provider-readiness blocked error."""
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content=ErrorResponse(
@@ -741,6 +758,7 @@ async def _get_workspace_response(
     workspace_id: str,
     session: AsyncSession,
 ) -> WorkspaceResponse:
+    """Fetch a workspace by ID and build the API response, raising 404 if not found."""
     repo = WorkspaceRepository(session)
     ws = await repo.get_with_secret_leases(workspace_id)
     if ws is None:
@@ -764,6 +782,7 @@ def _workspace_response_with_egress_audit(
     response: WorkspaceResponse,
     egress_audit: dict[str, Any] | None,
 ) -> WorkspaceResponse:
+    """Attach a validated egress audit record to a workspace response, if present."""
     if egress_audit is None:
         return response
     try:
@@ -778,6 +797,8 @@ async def _retry_optional_egress_audit_lookup(
     workspace_id: str,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> dict[str, Any] | None:
+    """Retry egress-audit lookup up to two attempts, returning ``None`` on failure."""
+
     async def _lookup(session: AsyncSession) -> dict[str, Any] | None:
         audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
         return _egress_audit_response(audit_record) if audit_record is not None else None
@@ -843,6 +864,7 @@ async def _list_workspace_responses(
     repo_url: str | None = None,
     limit: int = 50,
 ) -> list[WorkspaceResponse]:
+    """List workspaces matching filters and return API response objects."""
     repo = WorkspaceRepository(session)
     rows = await repo.list(
         status=workspace_status,
@@ -862,6 +884,7 @@ def _accepted(
     warnings: list[WorkspaceWarningResponse] | None = None,
     provider_readiness_preflight: dict[str, object] | None = None,
 ) -> WorkspaceAcceptedResponse:
+    """Build the standard 202-accepted response for a newly created workspace."""
     return WorkspaceAcceptedResponse(
         workspace_id=ws_id,
         status=WorkspaceStatus(status_value),
@@ -894,6 +917,7 @@ def _workspace_create_request_hash(
     *,
     api_version: str,
 ) -> str:
+    """Deterministic SHA-256 hash of the serialized create request for idempotency comparison."""
     normalized = {
         "api_version": api_version,
         "payload": payload.model_dump(mode="json", by_alias=True),
@@ -910,6 +934,7 @@ def _workspace_create_request_hash(
 def _workspace_create_idempotency_replay_key_cache(
     request: Request | object | None,
 ) -> _WorkspaceCreateIdempotencyReplayKeyCache:
+    """Return the per-app replay-key cache, lazily creating and attaching it to ``app.state``."""
     state = request_app_state(request)
     if state is None:
         if isinstance(request, Request):
@@ -931,6 +956,7 @@ def _workspace_create_idempotency_replay_key_cache(
 def _direct_workspace_create_idempotency_replay_key_cache(
     request: Request | object | None,
 ) -> _WorkspaceCreateIdempotencyReplayKeyCache:
+    """Return a replay-key cache for direct (non-Starlette) callers or test objects."""
     if request is None:
         return _new_workspace_create_idempotency_replay_key_cache()
 

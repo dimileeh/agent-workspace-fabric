@@ -186,6 +186,7 @@ class Provisioner:
         return self._git.get_worktree_path(workspace_id)
 
     async def _provision_claimed_workspace(self, workspace_id: str, ws: Workspace) -> None:
+        """Execute the full provisioning pipeline for an already-claimed workspace."""
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.provisioning,
@@ -564,6 +565,7 @@ class Provisioner:
         companions: tuple[WorkspaceCompanionSpec, ...],
         default_base_branch: str,
     ) -> tuple[MaterializedCompanionService, ...]:
+        """Create worktrees for each companion service and return materialized descriptors."""
         materialized: list[MaterializedCompanionService] = []
         for companion in companions:
             companion_id = companion_worktree_id(workspace_id, companion.name)
@@ -743,6 +745,7 @@ class Provisioner:
         egress_decision: EgressDecision,
         destination_category: str,
     ) -> bool:
+        """Record an egress audit only if the workspace is still in provisioning."""
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -782,6 +785,7 @@ class Provisioner:
         egress_decision: EgressDecision,
         destination_category: str,
     ) -> None:
+        """Persist an egress audit record for the workspace's network policy decision."""
         attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
         await EgressAuditRepository(session).create(
             workspace_id=workspace_id,
@@ -798,6 +802,7 @@ class Provisioner:
         workspace_id: str,
         profile: WorkspaceProfile,
     ) -> None:
+        """Issue secret leases declared in the workspace profile."""
         if not profile.secrets:
             return
         try:
@@ -833,6 +838,7 @@ class Provisioner:
         action: str,
         reason_code: str,
     ) -> bool:
+        """Return True if the workspace is still in the expected status, False otherwise."""
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -1044,6 +1050,7 @@ class Provisioner:
         expected: WorkspaceStatus,
         reason_code: str,
     ) -> None:
+        """Log and record an event when an action is skipped due to a stale workspace status."""
         _log.info(
             "provisioner.skip_stale_status",
             workspace_id=ws.id,
@@ -1070,6 +1077,7 @@ async def _reconcile_active_reservation_for_profile(
     node_id: str,
     profile: WorkspaceProfile,
 ) -> None:
+    """Update the active resource reservation to match the resolved profile."""
     reservation = await ResourceReservationRepository(session).active_for_workspace(workspace_id)
     if reservation is None:
         return
@@ -1082,6 +1090,7 @@ def _stack_secret_lease_mount_metadata(
     workspace_id: str,
     stack_paths: ComposeProjectPaths,
 ) -> dict[str, Any]:
+    """Build secret-lease mount-metadata payload for the workspace event log."""
     plan_metadata = stack_paths.secret_lease_mount_metadata
     metadata: dict[str, Any] = {
         "schema": str(plan_metadata.get("schema", "secret_lease_mount_metadata.v1")),
@@ -1112,6 +1121,7 @@ def _stack_companion_env_secret_event_payload(
     workspace_id: str,
     stack_paths: ComposeProjectPaths,
 ) -> dict[str, Any] | None:
+    """Build companion env-secret metadata payload, or None if no companion secrets exist."""
     plan_metadata = stack_paths.secret_lease_mount_metadata
     companion_keys = (
         "companion_env_secret_count",
@@ -1139,6 +1149,7 @@ def _provision_local_branch_name(
     workspace_id: str,
     branch_prefix: str,
 ) -> str:
+    """Return the local branch name for a workspace's provisioning worktree."""
     if ws.task_kind == "sync_feature_pr":
         return f"feature-sync/{workspace_id}"
     if ws.task_kind == "sync_release_pr":
@@ -1147,6 +1158,7 @@ def _provision_local_branch_name(
 
 
 def _provision_checkout_base_branch(ws: Workspace) -> str:
+    """Return the base branch a provisioning worktree should check out."""
     return (
         _sync_feature_pr_pull_head_ref(ws)
         or _sync_feature_pr_head_ref(ws)
@@ -1156,6 +1168,7 @@ def _provision_checkout_base_branch(ws: Workspace) -> str:
 
 
 def _provision_remote_push_branch(ws: Workspace) -> str | None:
+    """Return the remote push branch for sync tasks, or None for normal workspaces."""
     return _sync_feature_pr_head_ref(ws) or _release_sync_source_branch(ws) or ws.remote_push_branch
 
 
@@ -1171,6 +1184,7 @@ def _release_sync_source_branch(ws: Workspace) -> str | None:
 
 
 def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:
+    """Return the head ref of an adopted sync-feature-PR, or None."""
     adoption = _sync_feature_pr_adoption(ws)
     if adoption is None:
         return None
@@ -1182,6 +1196,7 @@ def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:
 
 
 def _sync_feature_pr_pull_head_ref(ws: Workspace) -> str | None:
+    """Return the pull head ref (refs/pull/N/head) for a sync-feature-PR, or None."""
     pr_number = _sync_feature_pr_pr_number(ws)
     if pr_number is None:
         return None
@@ -1189,6 +1204,7 @@ def _sync_feature_pr_pull_head_ref(ws: Workspace) -> str | None:
 
 
 def _sync_feature_pr_pr_number(ws: Workspace) -> int | None:
+    """Return the PR number for a sync-feature-PR workspace, or None."""
     if ws.task_kind != "sync_feature_pr":
         return None
     pr_number = _positive_int(getattr(ws, "pr_number", None))
@@ -1201,6 +1217,7 @@ def _sync_feature_pr_pr_number(ws: Workspace) -> int | None:
 
 
 def _sync_feature_pr_adoption(ws: Workspace) -> dict[str, Any] | None:
+    """Return the pr_adoption dict from task policy for a sync-feature-PR workspace."""
     if ws.task_kind != "sync_feature_pr":
         return None
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
@@ -1209,6 +1226,7 @@ def _sync_feature_pr_adoption(ws: Workspace) -> dict[str, Any] | None:
 
 
 def _positive_int(value: object) -> int | None:
+    """Coerce a value to a positive int, returning None for invalid inputs."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -1222,6 +1240,7 @@ def _positive_int(value: object) -> int | None:
 
 
 def _egress_plan_decision(mode: ProfileEgressMode) -> EgressDecision:
+    """Map a profile egress mode to an egress audit decision."""
     if mode == ProfileEgressMode.open:
         return EgressDecision.allow
     if mode == ProfileEgressMode.offline:
@@ -1230,6 +1249,7 @@ def _egress_plan_decision(mode: ProfileEgressMode) -> EgressDecision:
 
 
 def _egress_plan_destination_category(mode: ProfileEgressMode) -> str:
+    """Map a profile egress mode to an egress audit destination category."""
     if mode == ProfileEgressMode.open:
         return "public_internet"
     if mode == ProfileEgressMode.offline:

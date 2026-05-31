@@ -303,6 +303,7 @@ class WorkspaceCreateHostPortConflictError(Exception):
         host_port: int,
         conflicting_workspace_id: str,
     ) -> None:
+        """Initialise with the conflicting host port and the workspace that holds it."""
         self.host_port = host_port
         self.conflicting_workspace_id = conflicting_workspace_id
         self.message = (
@@ -327,6 +328,7 @@ class WorkspaceRetrySourceRuntimeNotReleasedError(WorkspaceRetryError):
         self,
         source_workspace_id: str,
     ) -> None:
+        """Initialise when the source workspace runtime has not been released."""
         self.source_workspace_id = source_workspace_id
         self.message = (
             f"Source workspace {source_workspace_id} runtime has not been "
@@ -1164,78 +1166,97 @@ def retry_workspace_row(
 
 
 def _retry_task_policy(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._retry_task_policy`` (lazy-imported)."""
     return _workspaces_retry_call("_retry_task_policy", *args, **kwargs)
 
 
 def _planning_scope_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._planning_scope_recovery_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_planning_scope_recovery_payload", *args, **kwargs)
 
 
 def _conformance_salvage_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._conformance_salvage_recovery_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_conformance_salvage_recovery_payload", *args, **kwargs)
 
 
 def _agent_timeout_salvage_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._agent_timeout_salvage_recovery_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_agent_timeout_salvage_recovery_payload", *args, **kwargs)
 
 
 def _retry_task_for_source(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._retry_task_for_source`` (lazy-imported)."""
     return _workspaces_retry_call("_retry_task_for_source", *args, **kwargs)
 
 
 def _latest_failed_state_event(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._latest_failed_state_event`` (lazy-imported)."""
     return _workspaces_retry_call("_latest_failed_state_event", *args, **kwargs)
 
 
 def _compact_conformance_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_conformance_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_conformance_payload", *args, **kwargs)
 
 
 def _compact_planning_scope_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_planning_scope_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_planning_scope_payload", *args, **kwargs)
 
 
 def _compact_string_list(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_string_list`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_string_list", *args, **kwargs)
 
 
 def _compact_fallback_model(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_fallback_model`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_fallback_model", *args, **kwargs)
 
 
 def _compact_salvage_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_salvage_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_salvage_payload", *args, **kwargs)
 
 
 def _payload_str(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._payload_str`` (lazy-imported)."""
     return _workspaces_retry_call("_payload_str", *args, **kwargs)
 
 
 def _is_plan_conformance_unsatisfied(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._is_plan_conformance_unsatisfied`` (lazy-imported)."""
     return _workspaces_retry_call("_is_plan_conformance_unsatisfied", *args, **kwargs)
 
 
 def _agent_timeout_retry_context(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._agent_timeout_retry_context`` (lazy-imported)."""
     return _workspaces_retry_call("_agent_timeout_retry_context", *args, **kwargs)
 
 
 def _conformance_retry_context(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._conformance_retry_context`` (lazy-imported)."""
     return _workspaces_retry_call("_conformance_retry_context", *args, **kwargs)
 
 
 def _retry_evidence_gaps(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._retry_evidence_gaps`` (lazy-imported)."""
     return _workspaces_retry_call("_retry_evidence_gaps", *args, **kwargs)
 
 
 def _optional_retry_evidence_str(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._optional_retry_evidence_str`` (lazy-imported)."""
     return _workspaces_retry_call("_optional_retry_evidence_str", *args, **kwargs)
 
 
 def _planning_scope_retry_context(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._planning_scope_retry_context`` (lazy-imported)."""
     return _workspaces_retry_call("_planning_scope_retry_context", *args, **kwargs)
 
 
 def _approved_planning_scope_fallback_model(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._approved_planning_scope_fallback_model`` (lazy-imported)."""
     return _workspaces_retry_call(
         "_approved_planning_scope_fallback_model",
         *args,

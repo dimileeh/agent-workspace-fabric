@@ -60,6 +60,7 @@ from awf.service.secret_leases import (
 
 
 async def _maybe_expire_due_secret_leases(self: Any) -> None:
+    """Periodically expire due secret leases, respecting the scan interval."""
     now = monotonic()
     if now < self._next_secret_lease_expiration_scan_at:
         return
@@ -88,6 +89,7 @@ async def _maybe_expire_due_secret_leases(self: Any) -> None:
 
 
 async def _expire_due_secret_leases(self: Any) -> None:
+    """Expire due secret leases and log the count of leases expired."""
     async with session_scope(self._session_factory) as session:
         expired = await SecretLeaseService(session).expire_due_secret_leases()
         expired_count = len(expired)
@@ -103,6 +105,7 @@ async def _expire_due_secret_leases(self: Any) -> None:
 
 
 async def _maybe_release_terminal_runtime(self: Any) -> None:
+    """Periodically release terminal-runtime resources for stopped workspaces."""
     now = monotonic()
     if now < self._next_terminal_runtime_release_scan_at:
         return
@@ -132,6 +135,7 @@ async def _maybe_release_terminal_runtime(self: Any) -> None:
 
 
 async def _release_terminal_runtime_resources(self: Any) -> None:
+    """Run the terminal-runtime cleaner for all eligible candidates, raising on first failure."""
     if self._runtime_cleaner is None:
         return
     candidates = await self._list_terminal_runtime_candidates(
@@ -179,6 +183,7 @@ async def _list_terminal_runtime_candidates(
     *,
     limit: int | None = None,
 ) -> list[_TerminalRuntimeCandidate]:
+    """Return workspaces in terminal-release statuses that have not yet been effectively released."""
     if limit is not None and limit <= 0:
         return []
     terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
@@ -290,6 +295,7 @@ async def _release_terminal_runtime_for_candidate(
     self: Any,
     candidate: _TerminalRuntimeCandidate,
 ) -> None:
+    """Clean up a single terminal workspace's runtime and record the outcome event."""
     if self._runtime_cleaner is None:
         return
     try:
@@ -433,6 +439,7 @@ async def _record_terminal_runtime_release_failed(
     cleanup: WorkspaceCleanupResult | None,
     message: str,
 ) -> None:
+    """Record a ``workspace.terminal_runtime_release_failed`` event and bump the retry marker."""
     payload: dict[str, Any] = {
         "compose_project_name": candidate.compose_project_name,
         "workspace_status": candidate.status.value,
@@ -535,6 +542,7 @@ async def _has_terminal_runtime_release_event(
     session: AsyncSession,
     workspace_id: str,
 ) -> bool:
+    """Return True if the workspace already has a ``terminal_runtime_released`` event."""
     _ = self
     return await has_terminal_runtime_released_event(session, workspace_id)
 
@@ -544,6 +552,7 @@ async def _has_terminal_runtime_release_failure_event(
     session: AsyncSession,
     workspace_id: str,
 ) -> bool:
+    """Return True if the workspace already has a ``terminal_runtime_release_failed`` event."""
     _ = self
     stmt = (
         select(WorkspaceEvent.id)

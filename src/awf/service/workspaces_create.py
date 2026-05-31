@@ -82,6 +82,7 @@ class _ProfileNotProvided:
     """
 
     def __repr__(self) -> str:
+        """Return the sentinel's identifying string representation."""
         return "PROFILE_NOT_PROVIDED"
 
 

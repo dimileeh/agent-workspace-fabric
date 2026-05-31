@@ -111,7 +111,9 @@ StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 class SafeResult(Protocol):
     """Protocol for constructing safe MCP tool result objects."""
 
-    def __call__(self, payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult: ...
+    def __call__(self, payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+        """Build a safe MCP tool result from a payload dict."""
+        ...
 
 
 DiskCheckProvider = Callable[[Settings], DiskCheck | Awaitable[DiskCheck]]
