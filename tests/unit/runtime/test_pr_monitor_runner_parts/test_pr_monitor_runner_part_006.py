@@ -119,12 +119,12 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
 
 
 @pytest.mark.unit
-async def test_address_comments_workflow_scope_push_failure_terminates_monitor(
+async def test_address_comments_workflow_scope_push_failure_requeues_monitor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify comment repair surfaces workflow-scope push failures to operators."""
+    """Verify workflow-scope comment repair failures keep monitoring alive."""
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
@@ -183,15 +183,9 @@ async def test_address_comments_workflow_scope_push_failure_terminates_monitor(
         monitor_log=None,
     )
 
-    assert terminal is True
-    assert terminations == [
-        (
-            workspace_id,
-            push_result.error_message,
-            "GITHUB_WORKFLOW_SCOPE_REQUIRED",
-        )
-    ]
-    assert state.iter_count == 0
+    assert terminal is False
+    assert terminations == []
+    assert state.iter_count == 1
 
 
 @pytest.mark.unit
