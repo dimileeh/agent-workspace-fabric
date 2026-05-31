@@ -340,7 +340,7 @@ def _readiness_with_config_write_failure(
         summary=f"{payload.summary} {error.message}",
         issues=(*payload.issues, write_issue),
         details=payload.details,
-        next_steps=("Fix the reported blockers above, then re-run awf setup.",),
+        next_steps=("Fix the reported blockers above, then re-run awf setup --dry-run.",),
     )
 
 

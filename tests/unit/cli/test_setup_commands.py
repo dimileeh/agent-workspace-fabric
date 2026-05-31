@@ -916,6 +916,39 @@ def test_setup_write_failure_preserves_readiness_report_json(
 
 
 @pytest.mark.unit
+def test_setup_write_failure_next_steps_keep_dry_run_guidance(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify the config-write failure path steers operators to re-run --dry-run.
+
+    Regression for issue:4585200251: every blocked readiness path tells the
+    operator to ``re-run awf setup --dry-run`` (so they re-verify the host
+    without re-attempting the write), but the config-write failure path used to
+    omit ``--dry-run`` and steer them toward a bare ``awf setup`` that would
+    retry the failing write. The folded write-failure guidance must stay
+    consistent with the canonical blocked-host guidance.
+    """
+    monkeypatch.setattr(setup_commands, "run_system_checks", _docker_blocked)
+
+    def raise_write_failed(_config: HostSetupConfig, **_kw: object) -> None:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_WRITE_FAILED",
+            message="Unable to write host setup config.",
+            path=Path("/tmp/.awf/config.yml"),
+            details={"error_type": "PermissionError"},
+        )
+
+    monkeypatch.setattr(setup_commands, "write_host_setup_config", raise_write_failed)
+    result = _runner.invoke(app, ["setup", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["next_steps"] == [
+        "Fix the reported blockers above, then re-run awf setup --dry-run.",
+    ]
+
+
+@pytest.mark.unit
 def test_setup_write_failure_preserves_field_path(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
