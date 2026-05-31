@@ -90,12 +90,14 @@ HOST_PORT_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     *ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     WorkspaceStatus.destroying.value,
 )
+"""Workspace statuses whose host ports should be checked for collision."""
 HOST_PORT_TERMINAL_RELEASE_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.failed.value,
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.completed.value,
     WorkspaceStatus.destroyed.value,
 )
+"""Terminal statuses that indicate a workspace's host ports are released."""
 ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = ACTIVE_OWNED_PATH_OVERLAP_STATUSES
 ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.completed.value,
@@ -1384,6 +1386,7 @@ def _workspace_idempotency_advisory_lock_key(key: str) -> int:
 
 
 def _host_port_admission_advisory_lock_key(host_port: int) -> int:
+    """Return a stable int64 key for a PostgreSQL advisory lock scoped to *host_port*."""
     digest = hashlib.sha256(f"awf:host-port-admission\x00{host_port}".encode()).digest()
     unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
     if unsigned >= 1 << 63:
