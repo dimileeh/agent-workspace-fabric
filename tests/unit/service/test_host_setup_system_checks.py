@@ -295,7 +295,12 @@ def test_check_shell_path_resolves_symlinked_entries(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_check_shell_path_derives_script_dir_from_executable(tmp_path: Path) -> None:
-    """Verify the script dir defaults to the executable's parent when omitted."""
+    """Verify the script dir falls back to the interpreter parent when no entry point.
+
+    When ``which`` cannot locate the ``awf`` entry point (e.g. running from
+    source via ``python -m awf``), the check falls back to the interpreter's
+    parent directory.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     executable = bin_dir / "python"
@@ -304,9 +309,38 @@ def test_check_shell_path_derives_script_dir_from_executable(tmp_path: Path) -> 
         executable=str(executable),
         path_value=str(bin_dir),
         shell="/bin/zsh",
+        which=lambda _name: None,
     )
     assert result.level is SetupCheckLevel.OK
     assert result.data["script_dir"] == str(bin_dir.resolve())
+
+
+@pytest.mark.unit
+def test_check_shell_path_prefers_entry_point_over_interpreter(tmp_path: Path) -> None:
+    """Verify the script dir comes from the awf entry point, not the interpreter.
+
+    Regression for the ``uv tool install awf`` case: the interpreter lives in an
+    isolated tool venv whose parent is *not* on PATH, while the ``awf`` console
+    script sits in a separate directory that *is* on PATH. Inferring the script
+    directory from the interpreter would emit a false "not on PATH" warning even
+    though ``awf`` is reachable.
+    """
+    tool_venv_bin = tmp_path / "uv" / "tools" / "awf" / "bin"
+    tool_venv_bin.mkdir(parents=True)
+    interpreter = tool_venv_bin / "python"
+    interpreter.touch()
+    entry_bin = tmp_path / "local" / "bin"
+    entry_bin.mkdir(parents=True)
+    entry_point = entry_bin / "awf"
+    entry_point.touch()
+    result = check_shell_path(
+        executable=str(interpreter),
+        path_value=str(entry_bin),  # only the entry-point dir is on PATH
+        shell="/bin/zsh",
+        which=lambda _name: str(entry_point),
+    )
+    assert result.level is SetupCheckLevel.OK
+    assert result.data["script_dir"] == str(entry_bin.resolve())
 
 
 @pytest.mark.unit

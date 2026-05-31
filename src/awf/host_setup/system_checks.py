@@ -33,6 +33,7 @@ from awf.host_setup.rendering import (
 from awf.host_setup.source_assets import SourceCheckoutError, VerifiedSourceCheckout
 
 _SETUP_COMMAND = "awf setup"
+_AWF_ENTRY_POINT = "awf"
 _PROBE_TIMEOUT_SECONDS = 5.0
 
 MINIMUM_PYTHON: tuple[int, int] = (3, 12)
@@ -504,19 +505,39 @@ def _resolve_path(value: Path) -> Path:
         return value
 
 
+def _resolve_awf_script_dir(*, executable: str, which: WhichFn) -> Path:
+    """Locate the directory holding the ``awf`` entry-point script.
+
+    Prefer the real entry-point location reported by ``which`` over inferring it
+    from the interpreter path. For a ``uv tool install awf`` deployment the
+    interpreter lives in an isolated tool venv (e.g.
+    ``~/.local/share/uv/tools/awf/bin/python``) while the ``awf`` console script
+    is placed in a separate directory on PATH (e.g. ``~/.local/bin``). Inferring
+    the directory from the interpreter would then report a false "not on PATH"
+    warning even though ``awf`` is reachable. When the entry point cannot be
+    located (e.g. running from source via ``python -m awf``) we fall back to the
+    interpreter's parent directory.
+    """
+    entry_point = which(_AWF_ENTRY_POINT)
+    if entry_point is not None:
+        return _resolve_path(Path(entry_point)).parent
+    return _resolve_path(Path(executable)).parent
+
+
 def check_shell_path(
     *,
     script_dir: Path | None = None,
     path_value: str | None = None,
     shell: str | None = None,
     executable: str | None = None,
+    which: WhichFn = shutil.which,
 ) -> SetupCheckResult:
     """Check the AWF script directory is reachable on PATH (advisory)."""
     resolved_executable = executable if executable is not None else sys.executable
     if script_dir is not None:
         resolved_script_dir = _resolve_path(script_dir)
     else:
-        resolved_script_dir = _resolve_path(Path(resolved_executable)).parent
+        resolved_script_dir = _resolve_awf_script_dir(executable=resolved_executable, which=which)
     path_text = os.environ.get("PATH", "") if path_value is None else path_value
     shell_text = os.environ.get("SHELL", "") if shell is None else shell
     entries = [entry for entry in path_text.split(os.pathsep) if entry]
