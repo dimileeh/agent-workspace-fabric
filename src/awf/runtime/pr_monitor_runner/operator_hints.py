@@ -151,10 +151,10 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_needs_human(state, reason)
         return cast(_GitPushResult, push_result)
     if not push_result.pushed:
-        mark_operator_hint_needs_human(
-            state,
-            "operator hint repair did not produce a pushed fix commit",
-        )
+        # A fixed verdict can reflect non-code PR work (for example posting an
+        # allowed reply) where there is no commit to publish. A successful no-op
+        # push still means the operator hint was handled.
+        mark_operator_hint_processed(state)
         return cast(_GitPushResult, push_result)
 
     pushed_head_sha = await self._rev_parse_head(worktree_path)

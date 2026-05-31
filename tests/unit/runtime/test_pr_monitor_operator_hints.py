@@ -674,6 +674,81 @@ async def test_operator_hint_non_pushed_terminal_status_is_persisted_before_retu
 
 
 @pytest.mark.unit
+async def test_operator_hint_noop_processed_status_is_persisted_before_return(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint only required review-thread bookkeeping",
+        operation_id="op_noop_processed_persisted",
+        requested_at="2026-05-31T04:55:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
+        await session.commit()
+
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _processed_noop_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        state_arg = kwargs["state"]
+        assert isinstance(state_arg, MonitorState)
+        operator_hints.mark_operator_hint_processed(state_arg)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _processed_noop_operator_hint_cycle)
+
+    handled = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert handled is False
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+        operation = (
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == workspace_id,
+                        Operation.type == OperationType.comment_repair.value,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    assert persisted is not None
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert monitor_state[operator_hint_processed_key("op_noop_processed_persisted")] == "processed"
+    assert operation.result["outcome"] == "operator_hint_processed"
+    assert operation.result["pushed"] is False
+
+
+@pytest.mark.unit
 async def test_operator_hint_repair_records_agent_failed_verdict_as_agent_failed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -734,6 +809,92 @@ async def test_operator_hint_repair_records_agent_failed_verdict_as_agent_failed
         status="agent_failed",
         status_reason="adapter crashed",
     )
+
+
+@pytest.mark.unit
+async def test_operator_hint_repair_marks_successful_noop_push_as_processed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="reply to the relevant unresolved review thread without code changes",
+        operation_id="op_noop_processed_hint",
+        requested_at="2026-05-31T04:40:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    validated_calls: list[dict[str, object]] = []
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fixed_without_commit(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(
+            verdict="fix_committed",
+            reason="operator hint handled without a code change",
+        )
+
+    async def _no_protected_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated_noop_push(**kwargs: object) -> _GitPushResult:
+        validated_calls.append(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=False,
+            returncode=0,
+            stderr="Everything up-to-date",
+        )
+
+    async def _unexpected_head_lookup(_worktree_path: Path) -> str:
+        pytest.fail("no-op operator hint repairs should not refresh pushed HEAD")
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_without_commit)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_protected_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated_noop_push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _unexpected_head_lookup)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_noop_processed",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_noop_processed",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert validated_calls
+    assert state.pending_operator_hint is None
+    assert (
+        state.threads_addressed_ids[operator_hint_processed_key("op_noop_processed_hint")]
+        == "processed"
+    )
+    assert state.last_push_sha is None
 
 
 @pytest.mark.unit
