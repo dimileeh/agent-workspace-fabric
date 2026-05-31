@@ -59,7 +59,11 @@ from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunch
 from awf.profiles.compose import profile_services
 from awf.profiles.models import EgressMode as ProfileEgressMode
 from awf.profiles.models import WorkspaceProfile
-from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
+from awf.profiles.resolver import (
+    ProfileResolution,
+    ProfileResolutionError,
+    resolve_workspace_profile,
+)
 from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
     SecretLeaseService,
@@ -283,6 +287,7 @@ class Provisioner:
                     await self._check_auto_resolved_profile_host_ports(
                         workspace_id=workspace_id,
                         profile=profile,
+                        profile_resolution=profile_resolution,
                         excluding_workspace_id=workspace_id,
                     )
                 try:
@@ -844,6 +849,7 @@ class Provisioner:
         *,
         workspace_id: str,
         profile: WorkspaceProfile,
+        profile_resolution: ProfileResolution | None = None,
         excluding_workspace_id: str | None = None,
     ) -> None:
         """Check auto-resolved profile service ports for admission after provision-time resolution.
@@ -853,6 +859,12 @@ class Provisioner:
         the repo-local profile) is not available until provisioning.  This method
         closes that gap by re-checking host ports after the profile has been
         resolved inside the provisioner.
+
+        To close the TOCTOU window between the conflict check and the later
+        pre-launch commit, this method publishes the workspace's
+        ``resolved_profile`` and ``compose_project_name`` inside the same
+        transaction (and therefore under the same advisory lock) so that
+        concurrent provisioners can see the claim before the lock is released.
 
         Raises :class:`WorkspaceCreateHostPortConflictError` on conflict so the
         caller can mark the workspace as failed.
@@ -879,6 +891,14 @@ class Provisioner:
                     host_port=conflicts[0].host_port,
                     conflicting_workspace_id=conflicts[0].workspace_id,
                 )
+            ws = await repo.get(workspace_id)
+            if ws is not None:
+                if ws.compose_project_name is None:
+                    ws.compose_project_name = f"awf_{workspace_id}"
+                if profile_resolution is not None and ws.resolved_profile is None:
+                    ws.resolved_profile = profile_resolution.profile.model_dump(
+                        mode="json", by_alias=True
+                    )
             await session.commit()
 
     async def _recheck_before_launch(self, workspace_id: str) -> bool:
