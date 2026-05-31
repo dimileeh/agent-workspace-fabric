@@ -12,6 +12,7 @@ PACKAGE = "agent-workspace-fabric"
 @pytest.mark.unit
 def test_uninstall_managed_uv_install(harness: InstallerHarness) -> None:
     """A uv-managed install is removed via ``uv tool uninstall``."""
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
 
     result = harness.run(["--uninstall"])
@@ -23,6 +24,7 @@ def test_uninstall_managed_uv_install(harness: InstallerHarness) -> None:
 @pytest.mark.unit
 def test_uninstall_managed_pipx_install(harness: InstallerHarness) -> None:
     """A pipx-managed install is removed via ``pipx uninstall``."""
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output="")
     harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
 
@@ -42,6 +44,7 @@ def test_uninstall_managed_pipx_install(harness: InstallerHarness) -> None:
 @pytest.mark.unit
 def test_uninstall_refuses_unmanaged_executable(harness: InstallerHarness) -> None:
     """An unmanaged awf on PATH is refused and never deleted."""
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output="")  # uv reports no managed package
     harness.add_pipx(list_output="")
     unmanaged = harness.add_awf()  # plain executable on PATH, not managed
@@ -58,6 +61,7 @@ def test_uninstall_refuses_unmanaged_executable(harness: InstallerHarness) -> No
 @pytest.mark.unit
 def test_uninstall_with_nothing_installed_is_a_noop(harness: InstallerHarness) -> None:
     """With no managed package and no awf on PATH, uninstall is a clean no-op."""
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output="")
     harness.add_pipx(list_output="")
 
@@ -75,6 +79,7 @@ def test_uninstall_ignores_uv_substring_fork(harness: InstallerHarness) -> None:
     """A similarly-named uv tool must not match PACKAGE as a substring."""
     # Only forks are present; the real package is NOT managed by uv. A substring
     # match would wrongly run ``uv tool uninstall agent-workspace-fabric``.
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output="my-agent-workspace-fabric-fork v0.1.0\n- awf\n")
     harness.add_pipx(list_output="")
 
@@ -87,6 +92,7 @@ def test_uninstall_ignores_uv_substring_fork(harness: InstallerHarness) -> None:
 @pytest.mark.unit
 def test_uninstall_ignores_pipx_substring_fork(harness: InstallerHarness) -> None:
     """A similarly-named pipx package must not match PACKAGE as a substring."""
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output="")
     harness.add_pipx(list_output="package my-agent-workspace-fabric-fork 0.1.0\n")
 
@@ -101,6 +107,7 @@ def test_dry_run_uninstall_previews_uv_removal_without_mutation(
     harness: InstallerHarness,
 ) -> None:
     """``--dry-run --uninstall`` plans the uv removal but never invokes it."""
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
 
     result = harness.run(["--dry-run", "--uninstall"])
@@ -117,6 +124,7 @@ def test_dry_run_uninstall_previews_pipx_removal_without_mutation(
     harness: InstallerHarness,
 ) -> None:
     """``--dry-run --uninstall`` plans the pipx removal but never invokes it."""
+    harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output="")  # uv reports no managed package
     harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
 
@@ -129,6 +137,34 @@ def test_dry_run_uninstall_previews_pipx_removal_without_mutation(
     assert f"uv tool uninstall {PACKAGE}" not in joined
     # The plan reflects the discovered manager (pipx), not the install default.
     assert f"pipx uninstall {PACKAGE}" in result.stdout
+
+
+@pytest.mark.unit
+def test_dry_run_uninstall_refuses_unmanaged_binary_with_reason_token(
+    harness: InstallerHarness,
+) -> None:
+    """``--dry-run --uninstall`` still refuses an unmanaged binary non-zero.
+
+    Dry-run suppresses mutations (the uv/pipx removal commands), but the
+    unmanaged-install refusal is a policy check, not a mutation: when neither
+    uv nor pipx owns the package and a plain ``awf`` is on PATH, there is
+    nothing to preview removing, so ``UNINSTALL_REFUSED_UNMANAGED`` fires and
+    the binary is left untouched even under ``--dry-run``.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output="")  # uv reports no managed package
+    harness.add_pipx(list_output="")  # pipx reports no managed package
+    unmanaged = harness.add_awf()  # plain executable on PATH, not managed
+
+    result = harness.run(["--dry-run", "--uninstall"])
+
+    assert result.returncode != 0
+    assert "UNINSTALL_REFUSED_UNMANAGED" in result.stderr
+    # The refusal must not delete the binary, and dry-run must not run a removal.
+    assert unmanaged.exists()
+    joined = "\n".join(harness.calls())
+    assert f"uv tool uninstall {PACKAGE}" not in joined
+    assert f"pipx uninstall {PACKAGE}" not in joined
 
 
 @pytest.mark.unit
