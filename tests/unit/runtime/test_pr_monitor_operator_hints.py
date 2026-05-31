@@ -1224,6 +1224,13 @@ async def test_persist_state_preserves_concurrent_processed_operator_hint_marker
 
     assert persisted is not None
     monitor_state = persisted.monitor_threads_addressed
+    assert stale_state.pending_operator_hint is None
+    assert (
+        stale_state.threads_addressed_ids[
+            operator_hint_processed_key("op_hint_processed_elsewhere")
+        ]
+        == "processed"
+    )
     assert OPERATOR_HINT_STATE_KEY not in monitor_state
     assert monitor_state[operator_hint_processed_key("op_hint_processed_elsewhere")] == "processed"
     assert monitor_state["review-thread"] == "fix_committed"

@@ -147,6 +147,23 @@ def _operator_hint_is_processed(
     )
 
 
+def _clear_processed_operator_hint_from_state(
+    state: MonitorState,
+    *,
+    db_threads_addressed: dict[str, str],
+) -> bool:
+    state_hint = state.pending_operator_hint
+    if state_hint is None or state_hint.operation_id is None:
+        return False
+    processed_key = operator_hint_processed_key(state_hint.operation_id)
+    if db_threads_addressed.get(processed_key) == "processed":
+        state.mark_addressed(processed_key, "processed")
+    if not _operator_hint_is_processed(state.threads_addressed_ids, state_hint):
+        return False
+    state.pending_operator_hint = None
+    return True
+
+
 def _merge_concurrent_operator_hint(
     threads_addressed: dict[str, str],
     *,
@@ -187,14 +204,11 @@ async def _refresh_operator_state_from_workspace(
         pr_number = ws.pr_number
 
     changed = False
-    state_hint = state.pending_operator_hint
-    if state_hint is not None and state_hint.operation_id is not None:
-        processed_key = operator_hint_processed_key(state_hint.operation_id)
-        if db_threads_addressed.get(processed_key) == "processed":
-            state.mark_addressed(processed_key, "processed")
-        if _operator_hint_is_processed(state.threads_addressed_ids, state_hint):
-            state.pending_operator_hint = None
-            changed = True
+    if _clear_processed_operator_hint_from_state(
+        state,
+        db_threads_addressed=db_threads_addressed,
+    ):
+        changed = True
 
     db_hint = operator_hint_from_threads(db_threads_addressed)
     if db_hint is not None and not (
@@ -340,6 +354,10 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
         now_monotonic = time.monotonic()
         now_wall = datetime.now(UTC)
         db_threads_addressed = dict(ws.monitor_threads_addressed or {})
+        _clear_processed_operator_hint_from_state(
+            state,
+            db_threads_addressed=db_threads_addressed,
+        )
         threads_addressed = dict(state.threads_addressed_ids)
         newly_marked_thread_ids = state.changed_thread_ids()
         if ws.pr_number is not None:
