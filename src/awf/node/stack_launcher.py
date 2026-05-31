@@ -23,7 +23,7 @@ from awf.node.compose_manager import (
     ComposeOperationError,
     ComposeProjectPaths,
     WorkspaceComposeSpec,
-    _compose_up_capture_timeout_seconds,
+    compose_up_capture_timeout_seconds,
 )
 from awf.node.egress_policy import local_egress_plan
 from awf.node.git_manager import WorktreeLayout
@@ -161,7 +161,7 @@ class ComposeStackLauncher:
         )
         companions = await self._build_companion_services(
             request.companions,
-            capture_timeout_seconds=_compose_up_capture_timeout_seconds(
+            capture_timeout_seconds=compose_up_capture_timeout_seconds(
                 compose_up_timeout_seconds, wait=True
             ),
         )
