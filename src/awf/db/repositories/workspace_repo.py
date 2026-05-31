@@ -452,11 +452,15 @@ class WorkspaceRepository:
 
         lock_key_fn = _host_port_admission_advisory_lock_key
         seen_keys: set[int] = set()
+        distinct_keys: list[int] = []
         for hp in dict.fromkeys(host_ports):
             lock_key = lock_key_fn(hp)
             if lock_key in seen_keys:
                 continue
             seen_keys.add(lock_key)
+            distinct_keys.append(lock_key)
+        distinct_keys.sort()
+        for lock_key in distinct_keys:
             await self._session.execute(
                 text("SELECT pg_advisory_xact_lock(:lock_key)"),
                 {"lock_key": lock_key},
