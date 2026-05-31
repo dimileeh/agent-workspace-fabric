@@ -641,6 +641,18 @@ async def test_operator_hint_non_pushed_terminal_status_is_persisted_before_retu
     assert handled is False
     async with factory() as session:
         persisted = await WorkspaceRepository(session).get(workspace_id)
+        operation = (
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == workspace_id,
+                        Operation.type == OperationType.comment_repair.value,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
 
     assert persisted is not None
     monitor_state = dict(persisted.monitor_threads_addressed)
@@ -653,6 +665,12 @@ async def test_operator_hint_non_pushed_terminal_status_is_persisted_before_retu
         "status": terminal_status,
         "status_reason": status_reason,
     }
+    expected_outcome = (
+        "operator_hint_needs_human"
+        if terminal_status == "needs_human"
+        else "operator_hint_agent_failed"
+    )
+    assert operation.result["outcome"] == expected_outcome
 
 
 @pytest.mark.unit
