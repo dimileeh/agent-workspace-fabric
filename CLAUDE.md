@@ -54,6 +54,10 @@ npm --prefix apps/console run test:browser     # Playwright browser smoke
 Pre-commit hooks (`awf-ruff-check`, `awf-ruff-format-check`, `awf-mypy`) run these **without
 auto-fixing** — fix manually, then re-run or `pre-commit run --all-files`.
 
+**Console design system:** read `apps/console/DESIGN.md` before any console UI work. It is the
+source of truth for typography (IBM Plex), the semantic color tokens, status glyphs, density, and
+the Status/Diagnosis/Action layout. Do not hardcode palette values or convey status by color alone.
+
 **Running the control plane locally** (Postgres + one-shot Alembic `migrate` + API + worker, all
 in Docker Compose):
 

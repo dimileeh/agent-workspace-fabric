@@ -6,8 +6,11 @@ import { createContext,useContext } from "react";
 import { omitUndefined } from "@/lib/api-payload";
 import {
 bytes,
+statusGlyph,
 statusTone,
-toneClass
+toneClass,
+toneTextClass,
+type StatusTone
 } from "@/lib/format";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
@@ -270,24 +273,46 @@ export function Panel({
   title,
   icon,
   action,
+  stale = false,
+  staleLabel = "stale",
   children,
 }: {
   title: string;
   icon: React.ReactNode;
   action?: React.ReactNode;
+  stale?: boolean;
+  staleLabel?: string;
   children: React.ReactNode;
 }) {
   const variant = useContext(PanelContext);
   const isGhost = variant === "ghost";
 
   return (
-    <section className={`min-w-0 w-full max-w-full ${isGhost ? "" : "rounded-md border border-[var(--border)] bg-white"}`}>
-      <div className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 border-slate-100 ${isGhost ? "px-1 py-2" : "px-3 py-2 border-b"}`}>
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
+    <section
+      data-awf-stale={stale ? "true" : undefined}
+      className={`min-w-0 w-full max-w-full ${isGhost ? "" : "rounded-[var(--radius-panel)] border border-line bg-surface"}`}
+    >
+      <div
+        className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 ${
+          isGhost ? "px-1 py-2" : "border-b border-line px-3 py-2"
+        }`}
+      >
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-fg">
           {icon}
           {title}
         </h2>
-        {action}
+        <div className="flex min-w-0 items-center gap-2">
+          {stale ? (
+            <span
+              title="Data may be stale — last refresh failed or stream disconnected"
+              className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 text-[10px] font-medium text-attention-text"
+            >
+              <span aria-hidden>⚠</span>
+              {staleLabel}
+            </span>
+          ) : null}
+          {action}
+        </div>
       </div>
       <div className={`min-w-0 ${isGhost ? "py-3" : "p-3"}`}>{children}</div>
     </section>
@@ -296,22 +321,68 @@ export function Panel({
 
 export function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="min-w-0 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-      <div className="text-[11px] font-medium text-slate-500">{label}</div>
-      <div className={`${mono ? "mono" : ""} truncate text-sm text-slate-950`}>{value}</div>
+    <div className="min-w-0 rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2">
+      <div className="label-caps">{label}</div>
+      <div className={`${mono ? "mono" : "tnum"} truncate text-sm text-fg`}>{value}</div>
     </div>
   );
 }
 
+// Status as color + glyph + label (never color alone). Keeps the `Badge` name
+// so existing call sites are unchanged; the rendered status text stays a
+// distinct node so text-based selectors still match exactly.
 export function Badge({ value }: { value: string }) {
+  const tone = statusTone(value);
   return (
     <span
-      className={`inline-flex h-6 shrink-0 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
-        statusTone(value),
+      className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-[var(--radius-control)] border px-2 text-[11px] font-medium ${toneClass(
+        tone,
       )}`}
     >
-      {value}
+      <span aria-hidden className="text-[10px] leading-none">
+        {statusGlyph(value)}
+      </span>
+      <span>{value}</span>
     </span>
+  );
+}
+
+export function StatusDot({ status, label }: { status: string; label?: string }) {
+  const tone = statusTone(status);
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span aria-hidden className={`text-[11px] leading-none ${toneTextClass(tone)}`}>
+        {statusGlyph(status)}
+      </span>
+      {label ? <span className="truncate">{label}</span> : null}
+    </span>
+  );
+}
+
+// Single-glance KPI for the Status layer: a big tabular value with optional
+// tone color and a contextual hint.
+export function KpiStat({
+  label,
+  value,
+  tone,
+  suffix,
+  hint,
+}: {
+  label: string;
+  value: string | number;
+  tone?: StatusTone;
+  suffix?: string;
+  hint?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-[var(--radius-panel)] border border-line bg-surface px-3 py-2">
+      <div className="label-caps truncate">{label}</div>
+      <div className={`kpi-value mt-0.5 truncate ${tone ? toneTextClass(tone) : "text-fg"}`}>
+        {value}
+        {suffix ? <span className="ml-0.5 text-sm font-normal text-fg-faint">{suffix}</span> : null}
+      </div>
+      {hint ? <div className="mt-0.5 truncate text-[11px] text-fg-muted">{hint}</div> : null}
+    </div>
   );
 }
 
@@ -466,6 +537,23 @@ export function formatPercent(value: number): string {
     return "0%";
   }
   return `${value.toFixed(1)}%`;
+}
+
+// Single fleet-capacity headline: the worst utilization across peak CPU, peak
+// memory, and execution concurrency, clamped to 0-100.
+export function capacityUtilizationPct(saturation: ResourceSaturationSummary): number {
+  let pct = 0;
+  const dims = [saturation.allocated_capacity.peak_cpu, saturation.allocated_capacity.peak_memory_gb];
+  for (const dimension of dims) {
+    if (dimension.limit && dimension.limit > 0) {
+      pct = Math.max(pct, (dimension.reserved / dimension.limit) * 100);
+    }
+  }
+  const execution = saturation.concurrency.execution;
+  if (execution.limit > 0) {
+    pct = Math.max(pct, (execution.in_use / execution.limit) * 100);
+  }
+  return Math.min(100, Math.max(0, Math.round(pct)));
 }
 
 export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {

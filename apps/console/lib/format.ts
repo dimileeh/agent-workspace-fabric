@@ -306,7 +306,9 @@ function formatLogStamp(value: string): string {
   }).format(date);
 }
 
-export function statusTone(status: string): "neutral" | "info" | "good" | "warn" | "bad" {
+export type StatusTone = "neutral" | "info" | "good" | "warn" | "bad";
+
+export function statusTone(status: string): StatusTone {
   if (status === "completed" || status === "succeeded" || status === "healthy") {
     return "good";
   }
@@ -324,32 +326,64 @@ export function statusTone(status: string): "neutral" | "info" | "good" | "warn"
   return "neutral";
 }
 
-export function toneClass(tone: ReturnType<typeof statusTone>): string {
-  switch (tone) {
-    case "good":
-      return "border-emerald-200 bg-emerald-50 text-emerald-800";
-    case "warn":
-      return "border-amber-200 bg-amber-50 text-amber-800";
-    case "bad":
-      return "border-red-200 bg-red-50 text-red-800";
-    case "info":
-      return "border-blue-200 bg-blue-50 text-blue-800";
+// Status colors are explicit CSS classes (see globals.css `.tone-*`), not
+// Tailwind utilities — Tailwind does not reliably scan class names composed in
+// this file, so utility strings here would silently fail to generate.
+export function toneClass(tone: StatusTone): string {
+  return `tone-${tone}`;
+}
+
+export function toneFillClass(tone: StatusTone): string {
+  return `tone-fill-${tone}`;
+}
+
+export function toneTextClass(tone: StatusTone): string {
+  return `tone-text-${tone}`;
+}
+
+// Glyph paired with every status badge/dot so state is never conveyed by color
+// alone (ISA-101 / WCAG). Shape + label + color together.
+export function statusGlyph(status: string): string {
+  switch (status) {
+    case "completed":
+    case "succeeded":
+    case "healthy":
+      return "✓";
+    case "failed":
+    case "error":
+    case "dead":
+    case "destroyed":
+      return "✕";
+    case "cancelled":
+      return "⊘";
+    case "destroying":
+      return "◌";
+    case "monitoring_pr":
+      return "◆";
+    case "running":
+    case "validating":
+    case "pushing":
+      return "●";
+    case "requested":
+    case "provisioning":
+    case "ready":
+      return "◷";
     default:
-      return "border-slate-200 bg-slate-50 text-slate-700";
+      return "•";
   }
 }
 
-export function toneFillClass(tone: ReturnType<typeof statusTone>): string {
+export function toneGlyph(tone: StatusTone): string {
   switch (tone) {
     case "good":
-      return "bg-emerald-500";
+      return "✓";
     case "warn":
-      return "bg-amber-500";
+      return "⚠";
     case "bad":
-      return "bg-red-500";
+      return "✕";
     case "info":
-      return "bg-blue-500";
+      return "●";
     default:
-      return "bg-slate-400";
+      return "•";
   }
 }

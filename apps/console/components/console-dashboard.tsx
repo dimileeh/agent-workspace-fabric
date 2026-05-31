@@ -12,7 +12,7 @@ useTransition,
 } from "react";
 import { WorkspaceInspector } from "./workspace-inspector";
 
-import { fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
+import { compactDuration,fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
 DEFAULT_OPERATOR_PREFERENCES,
@@ -52,7 +52,7 @@ RuntimePanel,
 terminalLifecycleSourceStage,
 } from "./console-dashboard-capacity";
 import { LogsPanel,MultiWorkspaceLogsFullscreen } from "./console-dashboard-logs";
-import { TaskDetailsModal,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar,WorkspaceSummary } from "./console-dashboard-overview";
+import { type FleetKpi,FleetHealthStrip,SectionNav,TaskDetailsModal,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar,WorkspaceSummary } from "./console-dashboard-overview";
 import { FailureAnalysisPanel,SecretsLeasesPanel,SecurityEgressPanel } from "./console-dashboard-security";
 import {
 type DetailState,
@@ -68,6 +68,7 @@ PanelContext,
 apiGet,
 apiPost,
 applyOperatorPreferenceAttributes,
+capacityUtilizationPct,
 compareLogEntries,
 compareWorkspaceDates,
 emptyDetail,
@@ -794,6 +795,62 @@ const searchParams = useSearchParams();
     [overview, taskDetailsWorkspaceId],
   );
 
+  const fleetKpis = useMemo<FleetKpi[]>(() => {
+    const counts = resourceSaturation?.workspace_counts;
+    const capacity = resourceSaturation ? capacityUtilizationPct(resourceSaturation) : null;
+    const queued = resourceSaturation?.capacity_queue.queued_workspace_count ?? 0;
+    const oldestWait = resourceSaturation?.capacity_queue.oldest_wait_seconds ?? null;
+    // Windowed reliability counts (default 24h) — actionable, unlike the
+    // ever-growing cumulative failed total.
+    const windowHours = workspaceSummary?.since_hours ?? 24;
+    const windowHint = `last ${windowHours}h`;
+    const completed = workspaceSummary?.completed_count;
+    const cancelled = workspaceSummary?.cancelled_count;
+    const failed = workspaceSummary?.failed_count;
+    return [
+      { id: "active", label: "Active", value: counts?.active_total ?? 0 },
+      { id: "running", label: "Running", value: counts?.running ?? 0, tone: "info" },
+      { id: "monitoring_pr", label: "Monitoring PR", value: counts?.monitoring_pr ?? 0, tone: "info" },
+      {
+        id: "queued",
+        label: "Queued",
+        value: queued,
+        tone: queued > 0 ? "warn" : undefined,
+        hint: oldestWait != null ? `oldest ${compactDuration(oldestWait)}` : "awaiting capacity",
+      },
+      {
+        id: "completed",
+        label: "Completed",
+        value: completed ?? "—",
+        tone: completed != null ? "good" : undefined,
+        hint: windowHint,
+      },
+      {
+        id: "cancelled",
+        label: "Cancelled",
+        value: cancelled ?? "—",
+        tone: cancelled ? "warn" : undefined,
+        hint: windowHint,
+      },
+      {
+        id: "failed",
+        label: "Failed",
+        value: failed ?? "—",
+        tone: failed ? "bad" : undefined,
+        hint: windowHint,
+      },
+      {
+        id: "capacity",
+        label: "Capacity",
+        value: capacity ?? "—",
+        suffix: capacity != null ? "%" : undefined,
+        tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : "info") : undefined,
+      },
+    ];
+  }, [resourceSaturation, workspaceSummary]);
+
+  const dataStale = apiState === "error";
+
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
@@ -814,8 +871,14 @@ const searchParams = useSearchParams();
         isPending={isPending}
       />
 
+      <FleetHealthStrip kpis={fleetKpis} />
+      <SectionNav />
+
       <div className="grid min-h-[calc(100vh-57px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
-        <aside className="min-w-0 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0">
+        <aside
+          id="awf-workspaces"
+          className="min-w-0 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0"
+        >
           <WorkspaceFilters
             statusFilters={statusFilters}
             agentFilters={agentFilters}
@@ -856,19 +919,25 @@ const searchParams = useSearchParams();
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            <ResourceCapacityPanel
-              saturation={resourceSaturation}
-              error={resourceError}
-              workspaceSummary={workspaceSummary}
-              workspaceSummaryError={workspaceSummaryError}
-            />
-            <MergeQueuePanel
-              items={mergeQueue}
-              hasMore={mergeQueueHasMore}
-              status={mergeQueueStatus}
-              error={mergeQueueError}
-            />
-            <div className="2xl:col-span-2">
+            <div id="awf-capacity" className="min-w-0 scroll-mt-4">
+              <ResourceCapacityPanel
+                saturation={resourceSaturation}
+                error={resourceError}
+                stale={dataStale}
+                workspaceSummary={workspaceSummary}
+                workspaceSummaryError={workspaceSummaryError}
+              />
+            </div>
+            <div id="awf-merge-queue" className="min-w-0 scroll-mt-4">
+              <MergeQueuePanel
+                items={mergeQueue}
+                hasMore={mergeQueueHasMore}
+                status={mergeQueueStatus}
+                error={mergeQueueError}
+                stale={dataStale}
+              />
+            </div>
+            <div id="awf-failures" className="scroll-mt-4 2xl:col-span-2">
               <FailureAnalysisPanel
                 summary={failureSummary}
                 status={failureSummaryStatus}

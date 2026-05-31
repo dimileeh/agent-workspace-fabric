@@ -1,9 +1,24 @@
 import type { Metadata, Viewport } from "next";
+import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import {
   DEFAULT_OPERATOR_PREFERENCES,
   OPERATOR_PREFERENCES_STORAGE_KEY,
 } from "@/lib/operator-preferences";
 import "./globals.css";
+
+const plexSans = IBM_Plex_Sans({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-plex-sans",
+  display: "swap",
+});
+
+const plexMono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-plex-mono",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "AWF Console",
@@ -55,6 +70,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      className={`${plexSans.variable} ${plexMono.variable}`}
       data-awf-theme={DEFAULT_OPERATOR_PREFERENCES.theme}
       data-awf-theme-mode={DEFAULT_OPERATOR_PREFERENCES.theme}
       data-awf-contrast={DEFAULT_OPERATOR_PREFERENCES.contrast}
