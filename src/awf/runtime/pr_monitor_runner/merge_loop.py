@@ -33,6 +33,7 @@ from awf.runtime.pr_monitor_runner.gates import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_base_fetch_retry_state,
     _gate_requires_validation_recovery,
+    _initial_review_grace_wait_seconds,
     _merge_gate_blocks,
     _merge_rejection_reason,
     _non_check_reviewer_settle_decision,
@@ -257,6 +258,7 @@ async def handle_merge_action(
         queue_blockers_after_lock: list[MergeQueueBlocker] = []
         merge_gate_after_lock: _MergeGateResult | None = None
         settle_recheck_decision: _NonCheckReviewerSettleDecision | None = None
+        initial_grace_recheck_wait_seconds = 0.0
         async with self._merge_coordinator.serialized_merge(
             repo_url=repo_url,
             base_branch=base_branch,
@@ -356,10 +358,12 @@ async def handle_merge_action(
                     else:
                         merge_status = checked_status
 
+            operator_state_refreshed = False
             if fresh_action is None and await self._refresh_operator_state_from_workspace(
                 workspace_id,
                 state,
             ):
+                operator_state_refreshed = True
                 checked_action = decide(merge_status, state, self._config)
                 if not isinstance(checked_action, Merge):
                     fresh_action = checked_action
@@ -372,23 +376,45 @@ async def handle_merge_action(
                         fresh_action=type(checked_action).__name__,
                         head_sha=merge_status.head_sha[:10],
                     )
-                else:
-                    checked_settle_decision = _non_check_reviewer_settle_decision(
-                        merge_status,
-                        state,
-                        self._config,
-                        pr_number=pr_number,
-                        now=time.monotonic(),
-                    )
-                    await self._record_non_check_reviewer_settle_decision(
-                        decision=checked_settle_decision,
-                        workspace_id=workspace_id,
-                        pr_number=pr_number,
-                        status=merge_status,
-                        monitor_log=monitor_log,
-                    )
-                    if checked_settle_decision.wait_seconds > 0:
-                        settle_recheck_decision = checked_settle_decision
+
+            if (
+                recheck_error is None
+                and recheck_base_error is None
+                and recheck_behind_error is None
+                and fresh_action is None
+            ):
+                initial_grace_recheck_wait_seconds = _initial_review_grace_wait_seconds(
+                    state,
+                    pr_number=pr_number,
+                    now=time.monotonic(),
+                    grace_seconds=self._config.initial_review_grace_period_seconds,
+                    poll_interval_seconds=self._config.poll_interval_seconds,
+                )
+
+            if (
+                recheck_error is None
+                and recheck_base_error is None
+                and recheck_behind_error is None
+                and fresh_action is None
+                and initial_grace_recheck_wait_seconds <= 0
+                and operator_state_refreshed
+            ):
+                checked_settle_decision = _non_check_reviewer_settle_decision(
+                    merge_status,
+                    state,
+                    self._config,
+                    pr_number=pr_number,
+                    now=time.monotonic(),
+                )
+                await self._record_non_check_reviewer_settle_decision(
+                    decision=checked_settle_decision,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    monitor_log=monitor_log,
+                )
+                if checked_settle_decision.wait_seconds > 0:
+                    settle_recheck_decision = checked_settle_decision
 
             if (
                 recheck_error is None
@@ -396,6 +422,7 @@ async def handle_merge_action(
                 and recheck_behind_error is None
                 and fresh_action is None
                 and settle_recheck_decision is None
+                and initial_grace_recheck_wait_seconds <= 0
             ):
                 queue_blockers_after_lock = await self._merge_queue_blockers_for_workspace(
                     workspace_id
@@ -505,6 +532,36 @@ async def handle_merge_action(
                             monitor_log=monitor_log,
                             evidence={"merge_sha": merge_sha},
                         )
+
+        if initial_grace_recheck_wait_seconds > 0:
+            _log.info(
+                "monitor.initial_review_grace_waiting",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                wait_seconds=initial_grace_recheck_wait_seconds,
+                grace_seconds=self._config.initial_review_grace_period_seconds,
+                head_sha=merge_status.head_sha[:10],
+            )
+            await self._sleep_with_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="grace_wait",
+                requested_action="merge",
+                reason="Initial review grace period is still active.",
+                reason_code="INITIAL_REVIEW_GRACE",
+                pr_number=pr_number,
+                status=merge_status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                wait_seconds=initial_grace_recheck_wait_seconds,
+                monitor_log=monitor_log,
+                extra_payload={
+                    "grace_seconds": self._config.initial_review_grace_period_seconds,
+                    "req_action": None,
+                    "stale_reason": None,
+                },
+                extra_identity=(None, None),
+            )
+            return False
 
         if settle_recheck_decision is not None:
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
