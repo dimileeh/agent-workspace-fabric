@@ -128,3 +128,70 @@ def test_no_path_advice_when_awf_already_on_path(harness: InstallerHarness) -> N
     assert "config.fish" not in advice
     assert "export PATH=" not in advice
     assert "fish_add_path" not in advice
+
+
+@pytest.mark.unit
+def test_no_path_advice_when_awf_on_path_despite_trailing_slash_bindir(
+    harness: InstallerHarness,
+) -> None:
+    """A trailing slash on the resolved bin dir must not trigger false advice.
+
+    ``default_bin_dir`` echoes ``--install-dir`` (and, in the default flow, the
+    raw ``uv tool dir --bin`` / ``pipx environment`` output) verbatim, so a value
+    with a trailing slash makes ``verify_awf`` build ``<dir>//awf`` while
+    ``command -v awf`` reports the canonical single-slash ``<dir>/awf``. Without
+    normalisation those strings never match, ``on_path`` stays 0, and PATH advice
+    is printed even though awf is already reachable. Stripping the trailing slash
+    once, right after the dir is resolved, closes the gap.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    # awf lands in the stub bin dir, which the harness puts first on PATH, so
+    # `command -v awf` resolves to the canonical <bin_dir>/awf. Pointing
+    # --install-dir at that same directory *with a trailing slash* reproduces the
+    # mismatch the reviewer flagged.
+    harness.add_awf()  # placed in harness.bin_dir, already on PATH
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(
+        ["--install-dir", f"{harness.bin_dir}/", "--shell", "zsh"],
+        manifest=manifest,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # awf is reachable, so no remediation advice of any flavour should appear.
+    advice = result.stdout + result.stderr
+    assert ".zshrc" not in advice
+    assert "export PATH=" not in advice
+
+
+@pytest.mark.unit
+def test_path_advice_omits_trailing_slash_from_export_line(
+    harness: InstallerHarness,
+) -> None:
+    """Trailing-slash install dirs still yield a canonical export line.
+
+    When awf lands off PATH the advice embeds the bin dir in ``export PATH=...``.
+    A trailing slash on ``--install-dir`` would otherwise surface as
+    ``export PATH="<dir>/:$PATH"``; the dir is normalised before the advice line
+    is built so the suggested command stays copy-pasteable and slash-clean.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    install_dir = harness.root / "off-path-bin"
+    install_dir.mkdir()
+    harness.add_awf(directory=install_dir)  # off PATH
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(
+        ["--install-dir", f"{install_dir}/", "--shell", "zsh"],
+        manifest=manifest,
+    )
+
+    assert result.returncode == 0, result.stderr
+    advice = result.stdout + result.stderr
+    # Advice is emitted (off PATH) but the export path has no trailing slash.
+    assert f'export PATH="{install_dir}:$PATH"' in advice
+    assert f"{install_dir}/:" not in advice

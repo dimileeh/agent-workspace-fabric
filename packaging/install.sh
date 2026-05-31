@@ -650,6 +650,10 @@ print_path_advice() {
     # advice itself.
     local bindir="${1:-}" shell rc line login_rc="" candidate
     [ -n "$bindir" ] || bindir="$(default_bin_dir)"
+    # Strip a trailing slash so the suggested `export PATH=` line never embeds a
+    # double slash (e.g. ".../bin/:$PATH") when --install-dir or a uv/pipx bin
+    # dir carries one; keeps the advice copy-pasteable and matches verify_awf.
+    bindir="${bindir%/}"
     shell="$(detect_shell)"
     case "$shell" in
         fish)
@@ -695,6 +699,12 @@ print_path_advice() {
 verify_awf() {
     local resolved="" on_path=0 bindir
     bindir="$(default_bin_dir)"
+    # Normalise away any trailing slash before composing "${bindir}/awf": a value
+    # like ".../bin/" would otherwise build ".../bin//awf", which `command -v awf`
+    # never reports (it returns the canonical single-slash form), so the on_path
+    # string compare below would spuriously fail and print PATH advice even when
+    # awf is already reachable.
+    bindir="${bindir%/}"
     if [ -x "${bindir}/awf" ]; then
         # Prefer the binary at the directory we just installed into (INSTALL_DIR
         # when given, else uv's resolved tool bin dir, falling back to
