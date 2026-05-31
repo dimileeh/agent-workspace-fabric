@@ -1196,7 +1196,7 @@ class WorkspaceControlService:
                     reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                     payload={
                         "compose_project_name": workspace.compose_project_name,
-                        "workspace_status": WorkspaceStatus.destroyed.value,
+                        "workspace_status": workspace.status,
                         "cleanup": cleanup_payload,
                     },
                 )
