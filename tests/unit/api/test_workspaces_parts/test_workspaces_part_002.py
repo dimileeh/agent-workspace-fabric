@@ -706,9 +706,10 @@ class TestCreateWorkspacePart001:
         assert first.status_code == 202
         _assert_workspace_rate_limited(rejected)
         assert lock_keys == [first_key, second_key]
-        assert lookup_keys == [first_key, second_key]
+        assert lookup_keys == [first_key, first_key, second_key]
         assert calls[:3] == ["check", f"lock:{first_key}", f"lookup:{first_key}"]
-        assert calls[3:6] == ["check", f"lock:{second_key}", f"lookup:{second_key}"]
+        assert calls[3] == f"lookup:{first_key}"
+        assert calls[4:7] == ["check", f"lock:{second_key}", f"lookup:{second_key}"]
         assert probe_keys == []
         assert list_calls == 0
 
@@ -998,7 +999,7 @@ class TestCreateWorkspacePart001:
         assert replay.status_code == 202
         assert replay.json()["workspace_id"] == first.json()["workspace_id"]
         assert lock_keys == [idempotency_key, idempotency_key]
-        assert lookup_keys == [idempotency_key, idempotency_key]
+        assert lookup_keys == [idempotency_key, idempotency_key, idempotency_key]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
