@@ -107,7 +107,7 @@ async def _run_monitor_handoff_profile_setup(
         from_status=WorkspaceStatus.running,
         failure_reason=_failure_reason_for_phase(first_fail),
         message=(
-            f"profile setup failed: {first_fail.command}"
+            f"profile setup failed: {redact_audit_text(first_fail.command)}"
             if first_fail is not None
             else "profile setup failed"
         )[:2000],
