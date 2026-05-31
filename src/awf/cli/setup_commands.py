@@ -28,6 +28,8 @@ from awf.host_setup.config import (
     write_host_setup_config,
 )
 from awf.host_setup.rendering import (
+    INTERACTIVE_INPUT_REQUIRED,
+    SETUP_PROVIDER_UNKNOWN,
     FirstRunPayload,
     first_run_issue_from_reason_code,
     first_run_report_payload,
@@ -378,7 +380,16 @@ def _reason_coded_payload(
     summary: str,
     details: dict[str, Any],
 ) -> FirstRunPayload:
-    """Build a single-issue blocked payload for a reason-coded setup failure."""
+    """Build a single-issue blocked payload for a reason-coded setup failure.
+
+    The readiness happy/blocked paths always populate top-level ``next_steps``
+    (see ``_readiness_next_steps``), so mirror that here: derive machine-readable
+    guidance from ``reason_code`` rather than leaving these error exits with a
+    silent empty ``next_steps``. An operator (or calling script) hitting
+    SETUP_PROVIDER_UNKNOWN, INTERACTIVE_INPUT_REQUIRED, or a host-setup config
+    failure then gets a concrete pointer to the accepted provider names / how to
+    rerun, not just the per-issue remediation text.
+    """
     issue = first_run_issue_from_reason_code(
         reason_code,
         severity="blocked",
@@ -390,4 +401,20 @@ def _reason_coded_payload(
         summary=summary,
         reason_code=reason_code,
         issues=(issue,),
+        next_steps=_reason_coded_next_steps(reason_code),
     )
+
+
+def _reason_coded_next_steps(reason_code: str) -> tuple[str, ...]:
+    """Return operator next-step guidance for a reason-coded setup failure."""
+    if reason_code == SETUP_PROVIDER_UNKNOWN:
+        return (
+            "Re-run awf setup with a supported --provider; the accepted names are "
+            "listed under known_providers in the issue details.",
+        )
+    if reason_code == INTERACTIVE_INPUT_REQUIRED:
+        return (
+            "Re-run without --non-interactive to supply the required input, or pass "
+            "--dry-run for a read-only readiness check.",
+        )
+    return ("Fix the reported issue above, then re-run awf setup --dry-run.",)

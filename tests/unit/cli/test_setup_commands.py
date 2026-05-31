@@ -419,6 +419,43 @@ def test_setup_unknown_provider_rejected_without_fallback(
     assert called["checks"] is False
 
 
+@pytest.mark.unit
+def test_setup_unknown_provider_payload_carries_next_steps(harness: _Harness) -> None:
+    """Verify the SETUP_PROVIDER_UNKNOWN error payload carries next-step guidance.
+
+    Regression for review comment issue:4585200251: the reason-coded error exits
+    built by ``_reason_coded_payload`` left top-level ``next_steps`` empty, unlike
+    the happy path, so a script hitting an unknown provider got no machine-readable
+    pointer to the accepted provider names recorded in the issue details.
+    """
+    result = _runner.invoke(app, ["setup", "--provider", "bogus", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "SETUP_PROVIDER_UNKNOWN"
+    assert payload["next_steps"]
+
+
+@pytest.mark.unit
+def test_setup_interactive_required_payload_carries_next_steps(harness: _Harness) -> None:
+    """Verify the INTERACTIVE_INPUT_REQUIRED error payload carries next-step guidance.
+
+    Regression for review comment issue:4585200251: a scripted
+    ``--provider X --non-interactive`` run that trips the interactive guard now
+    receives a top-level pointer to re-run without ``--non-interactive`` (or with
+    ``--dry-run``) instead of the silent empty ``next_steps`` it returned before.
+    """
+    result = _runner.invoke(
+        app,
+        ["setup", "--provider", "github", "--non-interactive", "--format", "json"],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "INTERACTIVE_INPUT_REQUIRED"
+    assert payload["next_steps"]
+
+
 # --- Plain-secret consent / A3 -------------------------------------------
 
 
@@ -810,6 +847,33 @@ def test_setup_corrupt_config_blocks(harness: _Harness, monkeypatch: pytest.Monk
     # The config file path operators must fix is preserved in the issue details
     # rather than dropped (it lives on the error's ``path``, not ``details``).
     assert payload["issues"][0]["details"]["path"] == "/tmp/.awf/config.yml"
+
+
+@pytest.mark.unit
+def test_setup_config_error_payload_carries_next_steps(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a HostSetupConfigError payload carries next-step guidance.
+
+    Regression for review comment issue:4585200251: config-error exits flow
+    through ``_reason_coded_payload`` too, so they must surface the same
+    machine-readable ``next_steps`` the happy path always provides.
+    """
+
+    def raise_corrupt(**_kw: object) -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message="Host setup config is corrupt or unsupported.",
+            path=Path("/tmp/.awf/config.yml"),
+        )
+
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", raise_corrupt)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "HOST_SETUP_CONFIG_CORRUPT"
+    assert payload["next_steps"]
 
 
 @pytest.mark.unit
