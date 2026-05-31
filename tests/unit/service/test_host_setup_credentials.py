@@ -82,18 +82,22 @@ class FakeKeyringModule:
         backend: object | None = None,
         raise_on_get: bool = False,
         raise_on_set: bool = False,
+        get_error: BaseException | None = None,
         set_error: BaseException | None = None,
     ) -> None:
         """Configure a fake keyring backend without touching any real keychain."""
         self._backend: object = _UsableBackend() if backend is None else backend
         self._raise_on_get = raise_on_get
         self._raise_on_set = raise_on_set
+        self._get_error = get_error
         self._set_error = set_error
         self.errors = _FakeKeyringErrors
         self.set_calls: list[tuple[str, str, str]] = []
 
     def get_keyring(self) -> object:
         """Return the configured backend or raise like a missing keychain."""
+        if self._get_error is not None:
+            raise self._get_error
         if self._raise_on_get:
             raise _FakeKeyringError("no usable keyring backend")
         return self._backend
@@ -883,12 +887,6 @@ def test_env_ref_backend_is_always_available() -> None:
 
 
 @pytest.mark.unit
-def test_keyring_runtime_errors_empty_without_errors_namespace() -> None:
-    """Verify modules without an errors namespace catch no keyring errors."""
-    assert credentials._keyring_runtime_errors(object()) == ()
-
-
-@pytest.mark.unit
 def test_keyring_unavailable_when_module_lacks_get_keyring() -> None:
     """Verify a module without ``get_keyring`` is treated as unavailable."""
 
@@ -902,6 +900,40 @@ def test_keyring_unavailable_when_module_lacks_get_keyring() -> None:
 
     backend = KeyringCredentialBackend(keyring_module=_NoGetKeyringModule())
     assert backend.is_available() is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "get_error",
+    [
+        OSError("DBus session unavailable"),
+        RuntimeError("partially-configured keychain stack"),
+    ],
+)
+def test_keyring_availability_swallows_non_keyring_get_errors(
+    get_error: BaseException,
+) -> None:
+    """Verify a non-``KeyringError`` from ``get_keyring`` degrades to unavailable.
+
+    On headless Linux a partially-configured D-Bus stack can make
+    ``get_keyring()`` raise ``OSError``/``RuntimeError`` (or a ``DBusException``)
+    rather than a ``KeyringError`` subclass. Availability detection must treat
+    these as "no usable backend" so credential selection falls back to env-ref,
+    never propagate and crash on exactly the hosts this fallback is meant to serve.
+    """
+    keyring_backend = KeyringCredentialBackend(
+        keyring_module=FakeKeyringModule(get_error=get_error)
+    )
+    assert keyring_backend.is_available() is False
+
+    selected = select_credential_backend(
+        preferred=None,
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=False,
+        plain_file_consent=False,
+        keyring_backend=keyring_backend,
+    )
+    assert selected.kind == "env_ref"
 
 
 @pytest.mark.unit

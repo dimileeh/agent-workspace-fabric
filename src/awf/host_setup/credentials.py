@@ -425,15 +425,6 @@ def _import_keyring_module() -> KeyringModule | None:
     return cast("KeyringModule", module)
 
 
-def _keyring_runtime_errors(module: object) -> tuple[type[BaseException], ...]:
-    """Return the keyring error types to catch, if the module exposes them."""
-    errors = getattr(module, "errors", None)
-    keyring_error = getattr(errors, "KeyringError", None)
-    if isinstance(keyring_error, type) and issubclass(keyring_error, BaseException):
-        return (keyring_error,)
-    return ()
-
-
 def _keyring_module_has_usable_backend(module: KeyringModule) -> bool:
     """Return whether the module resolves to a non no-op keyring backend."""
     get_keyring = getattr(module, "get_keyring", None)
@@ -441,7 +432,15 @@ def _keyring_module_has_usable_backend(module: KeyringModule) -> bool:
         return False
     try:
         backend = get_keyring()
-    except _keyring_runtime_errors(module):
+    except Exception:
+        # Resolving the keyring backend touches an unbounded third-party surface
+        # (SecretService/DBus, KWallet, ...). Besides ``keyring.errors.KeyringError``
+        # it can raise standard exceptions such as ``OSError`` (DBus unavailable)
+        # or a bare ``RuntimeError``/``DBusException`` from a half-configured stack
+        # on headless Linux. Treat any such failure as "no usable backend" so
+        # selection degrades to env-ref instead of crashing on exactly the hosts
+        # this fallback serves; ``BaseException`` (KeyboardInterrupt, SystemExit,
+        # CancelledError) still propagates. Mirrors ``create_ref``'s write-path guard.
         return False
     if backend is None:
         return False
