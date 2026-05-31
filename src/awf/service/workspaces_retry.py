@@ -272,6 +272,10 @@ async def retry_workspace_row(
     host_ports.extend(
         workspaces.host_ports_from_resolved_profile(source.resolved_profile),
     )
+    if await _source_runtime_not_yet_released(session, source):
+        raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
+            source_workspace_id=source.id,
+        )
     if host_ports:
         await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
@@ -283,10 +287,6 @@ async def retry_workspace_row(
             raise workspaces.WorkspaceCreateHostPortConflictError(
                 host_port=conflicts[0].host_port,
                 conflicting_workspace_id=conflicts[0].workspace_id,
-            )
-        if await _source_runtime_not_yet_released(session, source):
-            raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
-                source_workspace_id=source.id,
             )
 
     retried = await repo.create(

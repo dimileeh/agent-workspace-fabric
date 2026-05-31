@@ -1719,14 +1719,15 @@ async def test_retry_allows_when_source_compose_project_name_is_none(
 
 
 @pytest.mark.unit
-async def test_retry_allows_retried_when_no_host_ports_even_without_runtime_release(
+async def test_retry_rejects_when_no_host_ports_but_source_compose_stack_running(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
     """A source workspace with compose_project_name set but no host ports
-    (no companions, no resolved-profile ports) should not raise
-    WorkspaceRetrySourceRuntimeNotReleasedError — the runtime-release
-    guard is meaningful only when host ports need protection."""
+    (no companions, no resolved-profile ports) must still raise
+    WorkspaceRetrySourceRuntimeNotReleasedError — the compose stack may
+    still be running, and retrying would create container-name, network,
+    and volume conflicts at docker compose up time."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
 
@@ -1751,12 +1752,12 @@ async def test_retry_allows_retried_when_no_host_ports_even_without_runtime_rele
         await session.commit()
 
     async with factory() as session:
-        retried = await retry_workspace_row(
-            session,
-            source.id,
-            settings=settings,
-            provider_readiness_override=True,
-            provider_readiness_override_reason="no-host-ports runtime guard test",
-            provider_environ={},
-        )
-        assert retried is not None
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="no-host-ports runtime guard test",
+                provider_environ={},
+            )
