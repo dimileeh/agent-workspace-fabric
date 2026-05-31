@@ -857,12 +857,14 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # SyncBase. Hint repair commits need to push, and a stale PR head would
     # reject those pushes non-fast-forward and re-enter the same hint cycle.
     if state.pending_operator_hint is not None:
-        if state.pending_operator_hint.status == "pending":
-            return AddressOperatorHint(hint=state.pending_operator_hint)
+        hint = state.pending_operator_hint
+        if hint.status == "pending":
+            return AddressOperatorHint(hint=hint)
+        reason_suffix = f" Reason: {hint.status_reason}" if hint.status_reason else ""
         return NotifyHuman(
             message=(
                 "An operator remonitor hint still requires human attention before "
-                "this PR can merge."
+                f"this PR can merge.{reason_suffix}"
             )
         )
 

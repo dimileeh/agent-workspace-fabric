@@ -327,6 +327,7 @@ class TestOperatorHints:
         assert isinstance(action, NotifyHuman)
         assert action.message is not None
         assert "operator remonitor hint" in action.message
+        assert "agent could not produce a fix commit" in action.message
 
 
 class TestAddressComments:
