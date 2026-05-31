@@ -38,6 +38,7 @@ from awf.db.enums import (
 from awf.db.models import (
     MergeCandidate,
     Operation,
+    ResourceReservation,
     TaskAttempt,
     Workspace,
     WorkspaceEvent,
@@ -568,8 +569,11 @@ class WorkspaceRepository:
         stack was launched never bound a host port, so it does not
         block port reuse even without a release event.
 
-        When *node_id* is provided, only workspaces on that node (or
-        with a null ``node_id``, meaning unplaced/local) are considered.
+        When *node_id* is provided, only workspaces on that node are
+        considered.  For claimed workspaces, ``Workspace.node_id`` is used
+        directly.  For unclaimed (queued) workspaces where
+        ``Workspace.node_id`` is still null, the planned node from the
+        latest active ``ResourceReservation`` row is consulted instead.
         Host ports are Docker host ports and are scoped to the worker
         node, so a workspace on node A binding port 8080 must not block
         a create on node B that also wants 8080.
@@ -613,7 +617,17 @@ class WorkspaceRepository:
         )
 
         if node_id is not None:
-            stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+            active_reservation_node = (
+                select(ResourceReservation.node_id)
+                .where(ResourceReservation.workspace_id == Workspace.id)
+                .where(ResourceReservation.released_at.is_(None))
+                .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+                .limit(1)
+                .correlate(Workspace)
+                .scalar_subquery()
+            )
+            effective_node = func.coalesce(Workspace.node_id, active_reservation_node)
+            stmt = stmt.where(effective_node == node_id)
 
         if excluding_workspace_id is not None:
             stmt = stmt.where(Workspace.id != excluding_workspace_id)

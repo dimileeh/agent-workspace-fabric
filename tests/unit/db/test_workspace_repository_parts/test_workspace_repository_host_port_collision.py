@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from tests.postgres import postgres_test_session
 
 _H2 = "git@github.com:example/hostport.git"
@@ -103,6 +108,79 @@ class TestFindHostPortConflicts:
             excluding_workspace_id=None,
         )
         assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_queued_workspace_not_cross_node_port_holder(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A queued workspace with a reservation for node A must not block node B.
+
+        When a workspace is still requested/queued, ``Workspace.node_id`` is
+        NULL — the worker claim fills it later.  But the planned node is
+        already recorded in ``ResourceReservation.node_id`` at create time.
+        Treating ``Workspace.node_id IS NULL`` as matching all nodes would
+        incorrectly report HOST_PORT_CONFLICT on node B for a workspace that
+        is actually destined for node A, because Docker host ports are
+        node-local.
+        """
+        repo = WorkspaceRepository(session)
+        ws_a = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.requested,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        task = await TaskRepository(session).create_or_get(
+            repo_url=ws_a.repo_url,
+            base_branch=ws_a.branch_base,
+            title=ws_a.task_title,
+            prompt=ws_a.task_prompt,
+            external_id=None,
+            idempotency_key=f"hostport-cross-node:{ws_a.id}",
+            task_class=ws_a.task_class,
+            owned_paths=list(ws_a.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=ws_a,
+        )
+        await ResourceReservationRepository(session).create(
+            workspace_id=ws_a.id,
+            attempt_id=attempt.id,
+            node_id="node-a",
+            steady_cpu=1.0,
+            steady_memory_gb=1.0,
+            peak_cpu=2.0,
+            peak_memory_gb=2.0,
+            disk_mb=512,
+            phase="active",
+        )
+        await session.commit()
+
+        conflicts_b = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+            node_id="node-b",
+        )
+        assert conflicts_b == []
+
+        conflicts_a = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+            node_id="node-a",
+        )
+        assert len(conflicts_a) == 1
+        assert conflicts_a[0].host_port == 8080
+        assert conflicts_a[0].workspace_id == ws_a.id
 
     @pytest.mark.asyncio
     async def test_terminal_workspace_with_runtime_released_not_blocking(
