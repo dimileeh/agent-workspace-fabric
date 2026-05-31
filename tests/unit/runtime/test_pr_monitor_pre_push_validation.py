@@ -830,12 +830,14 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
     runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
     fix_called = False
 
-    async def _assert_clean_before_fix(_runner: object, **_kwargs: object) -> bool:
+    async def _assert_clean_before_fix(
+        _runner: object, **_kwargs: object
+    ) -> tuple[bool, str | None]:
         """Assert validation did cleanup worktree state before starting a fix pass."""
         nonlocal fix_called
         fix_called = True
         assert cmd.calls[-1].args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]
-        return False
+        return False, None
 
     monkeypatch.setattr(
         pre_push_validation,
