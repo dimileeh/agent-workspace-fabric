@@ -1210,6 +1210,92 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
 
 
 @pytest.mark.unit
+async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_without_terminating(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed locally")
+    workspace_id = await seed_monitoring_workspace(factory)
+    thread = ReviewThread(
+        thread_id="T_workflow_scope",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow needs the reviewed fix",
+        author="reviewer",
+    )
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(threads=(thread,)),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.iter_count == 1
+    assert state.threads_addressed_ids["T_workflow_scope"] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:T_workflow_scope"]
+    assert ".github/workflows/publish.yml" in reason
+    assert "`workflow` scope" in reason
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    comment_operation = next(
+        operation for operation in operations if operation.type == "comment_repair"
+    )
+    assert comment_operation.status == OperationStatus.failed.value
+    assert comment_operation.error_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "comment_repair_push"
+    assert push_events[0].payload["outcome"] == "failed"
+    assert push_events[0].payload["operation_id"] == comment_operation.id
+    assert push_events[0].payload["operation_type"] == "comment_repair"
+    assert push_events[0].payload["evidence"]["reason_code"] == ("GITHUB_WORKFLOW_SCOPE_REQUIRED")
+    assert resolution_events == []
+
+
+@pytest.mark.unit
 async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_reason(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

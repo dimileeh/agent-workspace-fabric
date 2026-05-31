@@ -71,7 +71,7 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope push rejections map to terminal push results."""
+    """Verify workflow-scope push rejections keep caller-specific terminal policy."""
     cmd = FakeCommandRunner()
     stderr = (
         "remote: refusing to allow a Personal Access Token to create or update workflow "
@@ -100,6 +100,8 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     assert result.error_message is not None
     assert ".github/workflows/publish.yml" in result.error_message
     assert "`workflow` scope" in result.error_message
+    assert result.workflow_scope_required is True
+    assert result.terminal_monitor_failure is False
     assert len(cmd.calls) == 1
 
 

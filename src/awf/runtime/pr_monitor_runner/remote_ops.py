@@ -106,7 +106,6 @@ class _GitPushResult:
         """Return whether the push failure should end monitor recovery."""
         return self.failed and (
             self.protected_scope_blocked
-            or self.workflow_scope_required
             or self.reason_code
             in {
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
