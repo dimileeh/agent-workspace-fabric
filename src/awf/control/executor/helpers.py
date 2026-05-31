@@ -580,6 +580,23 @@ def _agent_defaults_for_workspace(
     return AgentDefaults(model=model, effort=effort)
 
 
+def _provider_recovery_default_model_for_monitor_handoff(
+    *,
+    adapter: AgentAdapter,
+    defaults: AgentDefaults | None,
+) -> str | None:
+    """Return the default model metadata to hand to a PR monitor factory.
+
+    Non-Cursor runtimes keep the configured runtime default so explicit task
+    model failures can still fall back to that default. Cursor's portable
+    effort policy can intentionally select no model for lower effort, so its
+    provider recovery metadata must follow the adapter-selected implicit model.
+    """
+    if adapter.name is AgentRuntime.cursor:
+        return adapter.provider_recovery_default_model
+    return defaults.model if defaults is not None else None
+
+
 def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
     phase = getattr(first_fail, "phase", None)
     reason_code = getattr(first_fail, "reason_code", None)

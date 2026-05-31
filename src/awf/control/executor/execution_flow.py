@@ -51,6 +51,7 @@ from awf.control.executor.helpers import (
     _failure_reason_for_phase,
     _failure_salvage_payload,
     _profile_for_workspace,
+    _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -1191,7 +1192,10 @@ async def execute(
                         profile=profile,
                         workspace=persisted,
                         provider_recovery_default_model=(
-                            defaults.model if defaults is not None else None
+                            _provider_recovery_default_model_for_monitor_handoff(
+                                adapter=adapter,
+                                defaults=defaults,
+                            )
                         ),
                     )
                 if _monitor is not None:
@@ -1403,7 +1407,12 @@ async def execute(
                 adapter=adapter,
                 profile=profile,
                 workspace=persisted,
-                provider_recovery_default_model=(defaults.model if defaults is not None else None),
+                provider_recovery_default_model=(
+                    _provider_recovery_default_model_for_monitor_handoff(
+                        adapter=adapter,
+                        defaults=defaults,
+                    )
+                ),
             )
 
         if monitor is not None:

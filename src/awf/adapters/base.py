@@ -166,6 +166,11 @@ class AgentAdapter(ABC):
         """Return the default model for this adapter."""
         return self._default_model
 
+    @property
+    def provider_recovery_default_model(self) -> str | None:
+        """Return the implicit model identity provider recovery should attribute."""
+        return self._selected_model_for_run(model=None)
+
     @abstractmethod
     def get_provider(self, model: str | None) -> str:
         """Return the canonical provider identifier for a model."""

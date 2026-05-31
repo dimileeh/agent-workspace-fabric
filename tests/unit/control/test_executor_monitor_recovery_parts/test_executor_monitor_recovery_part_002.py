@@ -611,6 +611,67 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
 
 
 @pytest.mark.unit
+async def test_recovery_skip_push_cursor_lower_effort_handoff_uses_implicit_runtime_model(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Cursor lower effort must not hand the monitor a thinking model default."""
+    captured: list[dict[str, object]] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            del workspace_id, compose_project, compose_file
+
+    def _monitor_factory(
+        adapter: Any,
+        *_args: Any,
+        provider_recovery_default_model: str | None = None,
+        **_kwargs: Any,
+    ) -> _FakeMonitor:
+        captured.append(
+            {
+                "agent": adapter.name.value,
+                "adapter_args": adapter._cli_args(model=None),
+                "provider_recovery_default_model": provider_recovery_default_model,
+            }
+        )
+        return _FakeMonitor()
+
+    executor = _make_executor(
+        fake=fake, factory=factory, tmp_path=tmp_path, pr_monitor_factory=_monitor_factory
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, pr_url="https://github.com/x/y/pull/1"
+    )
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.agent = AgentRuntime.cursor.value
+        ws.task_policy = {"agent_effort": "medium"}
+        await s.commit()
+
+    _queue_validation_head(fake, head="d" * 40)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert captured == [
+        {
+            "agent": "cursor",
+            "adapter_args": [
+                "cursor-agent",
+                "-p",
+                "--force",
+                "--output-format",
+                "text",
+            ],
+            "provider_recovery_default_model": None,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_sync_feature_pr_recovery_runs_validation_before_monitor_handoff(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
