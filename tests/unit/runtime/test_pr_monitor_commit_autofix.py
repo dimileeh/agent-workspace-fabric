@@ -172,6 +172,37 @@ async def test_monitor_precommit_autofix_retry_does_not_restage_staged_only_repa
 
 
 @pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_restages_modified_rename_destination(
+    tmp_path: Path,
+) -> None:
+    old_path = "src/awf/old_name.py"
+    new_path = "src/awf/new_name.py"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f"RM {old_path} -> {new_path}\n")
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0)
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(new_path),
+        ),
+        operation_dirty_paths=(old_path, new_path),
+    )
+
+    assert retry is not None
+    retry_result, restaged_paths = retry
+    assert retry_result.ok
+    assert restaged_paths == (new_path,)
+    assert runner.calls[1].args[-3:] == ["add", "--", new_path]
+
+
+@pytest.mark.unit
 async def test_monitor_precommit_autofix_retry_returns_none_when_restage_fails(
     tmp_path: Path,
 ) -> None:

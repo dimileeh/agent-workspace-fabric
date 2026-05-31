@@ -26,14 +26,13 @@ def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
         if not line:
             continue
         if line.startswith("?? ") or (len(line) >= 4 and line[2] == " " and line[1] != " "):
+            status = line[:2]
             path = line[3:]
         else:
             continue
-        if " -> " in path:
-            old_path, new_path = path.split(" -> ", 1)
-            paths.extend([old_path, new_path])
-        else:
-            paths.append(path)
+        if status[0] in {"R", "C"} and " -> " in path:
+            _old_path, path = path.split(" -> ", 1)
+        paths.append(path)
     return list(dict.fromkeys(paths))
 
 
