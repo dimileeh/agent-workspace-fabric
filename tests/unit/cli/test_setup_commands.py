@@ -560,6 +560,89 @@ def test_setup_invalid_source_checkout_skips_default_discovery_probes(
     assert SETUP_READINESS_FAILED not in reason_codes
 
 
+@pytest.mark.unit
+def test_setup_source_checkout_failure_persists_plain_secret_consent(
+    harness: _Harness, tmp_path: Path
+) -> None:
+    """Verify explicit --allow-plain-secrets survives a source-checkout failure.
+
+    Regression for review comment issue:4585200251: a non-dry-run
+    ``--source-checkout <bad> --allow-plain-secrets`` run blocks on the invalid
+    checkout, yet the explicit, non-secret plain-file consent must still be
+    persisted -- mirroring how a host-check blocker persists it -- so an operator
+    need not re-pass ``--allow-plain-secrets`` after fixing the checkout path. The
+    failed checkout itself is never recorded.
+    """
+    bad_root = tmp_path / "not-awf"
+    bad_root.mkdir()
+    result = _runner.invoke(
+        app,
+        [
+            "setup",
+            "--source-checkout",
+            str(bad_root),
+            "--allow-plain-secrets",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert SOURCE_CHECKOUT_INVALID in reason_codes
+    written = harness.writes[-1]
+    assert written.consent.plain_file_secrets is True
+    # The invalid checkout is never persisted, and its consent flag stays false.
+    assert written.source_checkout is None
+    assert written.consent.source_checkout_assets is False
+
+
+@pytest.mark.unit
+def test_setup_source_checkout_failure_folds_consent_write_failure(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify a consent-write failure on the blocked source path is folded, not raised.
+
+    Companion to the consent-persistence regression: when persisting the explicit
+    ``--allow-plain-secrets`` consent fails on the blocked source-checkout early
+    return, the write failure must surface alongside the source-checkout blocker
+    rather than replacing it or raising a traceback.
+    """
+
+    def raise_write_failed(_config: HostSetupConfig, **_kw: object) -> None:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_WRITE_FAILED",
+            message="Unable to write host setup config.",
+            path=Path("/tmp/.awf/config.yml"),
+            details={"error_type": "PermissionError"},
+        )
+
+    monkeypatch.setattr(setup_commands, "write_host_setup_config", raise_write_failed)
+    bad_root = tmp_path / "not-awf"
+    bad_root.mkdir()
+    result = _runner.invoke(
+        app,
+        [
+            "setup",
+            "--source-checkout",
+            str(bad_root),
+            "--allow-plain-secrets",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert SOURCE_CHECKOUT_INVALID in reason_codes
+    assert "HOST_SETUP_CONFIG_WRITE_FAILED" in reason_codes
+    assert "Traceback" not in result.stdout
+
+
 # --- Dry-run no mutation / A1 --------------------------------------------
 
 

@@ -129,13 +129,35 @@ def _run_setup(
     # the source-checkout resolver documents it avoids. The "no selection at all"
     # case (``source_error`` ``None``) still falls through to default discovery.
     if source_error is not None:
-        return build_setup_readiness_payload(
+        blocked_payload = build_setup_readiness_payload(
             (),
             selected_providers=selected_providers,
             allow_plain_secrets=allow_plain_secrets,
             dry_run=dry_run,
             source_checkout_error=source_error,
         )
+        if dry_run:
+            return blocked_payload
+        # The host-check path persists safe consent even when the readiness
+        # status is blocked (e.g. missing Docker reaches the non-dry-run write
+        # below), so an explicit, non-secret ``--allow-plain-secrets`` consent
+        # must survive this blocked source-checkout early return too. Otherwise
+        # an operator who passed ``--source-checkout <bad> --allow-plain-secrets``
+        # would silently lose the plain-file consent and have to re-pass it after
+        # fixing the checkout path -- the same silent consent loss the provider
+        # interactive guard already guards against. The failed/stale checkout is
+        # never persisted (``explicit_source`` is ``None`` on a resolution error,
+        # so only the consent flag is recorded; any existing persisted metadata is
+        # preserved untouched).
+        try:
+            _persist_safe_config(
+                config,
+                source_checkout=None,
+                allow_plain_secrets=allow_plain_secrets,
+            )
+        except HostSetupConfigError as error:
+            return _readiness_with_config_write_failure(blocked_payload, error)
+        return blocked_payload
 
     # Probe the port/disk ``awf start`` will actually use. The documented
     # local-service flow keeps ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` in
