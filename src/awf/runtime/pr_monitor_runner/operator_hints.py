@@ -85,7 +85,9 @@ async def _run_operator_hint_cycle(
             ),
         )
     except _MonitorPolicyBlockedError as exc:
-        return _GitPushResult(pushed=False, failed=True, returncode=1, stderr=str(exc))
+        reason = str(exc) or "monitor policy blocked the operator hint repair"
+        mark_operator_hint_needs_human(state, reason)
+        return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
         return _GitPushResult(
             pushed=False,

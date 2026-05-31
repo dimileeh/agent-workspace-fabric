@@ -38,7 +38,11 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
-from awf.runtime.pr_monitor_runner.types import BaseFetchError, ProtectedScopeDiffError
+from awf.runtime.pr_monitor_runner.types import (
+    BaseFetchError,
+    ProtectedScopeDiffError,
+    _MonitorPolicyBlockedError,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -250,6 +254,72 @@ async def test_operator_hint_repair_converts_protected_scope_diff_error_to_push_
     assert captured["remote_branch"] == "awf/ws_operator_hint_scope"
     assert isinstance(captured["exc"], ProtectedScopeDiffError)
     assert state.pending_operator_hint == hint
+
+
+@pytest.mark.unit
+async def test_operator_hint_repair_marks_policy_block_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair would edit a protected workflow",
+        operation_id="op_policy_blocked_hint",
+        requested_at="2026-05-31T01:20:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _policy_blocked(**_kwargs: object) -> VerdictResult:
+        raise _MonitorPolicyBlockedError("monitor policy blocked the operator hint repair")
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _policy_blocked)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_policy_blocked",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_policy_blocked",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert result.returncode == 1
+    assert result.stderr == "monitor policy blocked the operator hint repair"
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="needs_human",
+        status_reason="monitor policy blocked the operator hint repair",
+    )
 
 
 @pytest.mark.unit
