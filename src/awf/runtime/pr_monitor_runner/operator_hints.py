@@ -15,6 +15,7 @@ from awf.runtime.operator_hints import (
 )
 from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -136,6 +137,11 @@ async def _run_operator_hint_cycle(
         )
     )
     if push_result.failed:
+        if push_result.reason_code == _PROTECTED_SCOPE_PUSH_BLOCKED_REASON:
+            reason = (
+                push_result.stderr or ""
+            ).strip() or "protected-scope policy blocked the operator hint repair push"
+            mark_operator_hint_needs_human(state, reason)
         return cast(_GitPushResult, push_result)
     if not push_result.pushed:
         mark_operator_hint_needs_human(
