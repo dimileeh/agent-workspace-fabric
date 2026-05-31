@@ -27,16 +27,14 @@ def _monitor_precommit_autofix_repair_paths(commit_result: CommandResult) -> tup
         return ()
 
     classification = _classify_post_agent_commit_failure(commit_result)
-    deterministic_repair_files: tuple[str, ...] = ()
-    if classification.repair_strategy == "deterministic":
-        deterministic_repair_files = (
-            *classification.normalizer_repair_files,
-            *classification.format_repair_files,
-        )
+    if classification.repair_strategy != "deterministic":
+        return ()
+
     return tuple(
         dict.fromkeys(
             (
-                *deterministic_repair_files,
+                *classification.normalizer_repair_files,
+                *classification.format_repair_files,
                 *classification.autofix_repair_files,
             )
         )
