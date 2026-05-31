@@ -6,7 +6,10 @@ locally is reusable by every workspace via an ``image:`` reference -- no
 registry is required. This builder derives a deterministic tag per
 ``(companion name, commit sha)``, builds it once (deduping concurrent dispatch
 waves by sharing a single in-flight build task per tag), and skips the build
-when the tag already exists.
+when the tag already exists. The tag also folds in a digest of the resolved
+build inputs (``build_context`` and ``dockerfile``), so two workspaces that
+request the same companion name at the same commit but with different build
+definitions never collide on a tag and reuse the wrong image.
 
 Coordination is in-process only: the single-node local Core runs one worker, so
 sharing one :class:`asyncio.Task` per tag is sufficient. The shared task is
@@ -20,6 +23,7 @@ is intentionally out of scope here.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 
 from awf.common.logging import get_logger
@@ -34,13 +38,43 @@ _log = get_logger(__name__)
 
 _TAG_NAME_SANITIZE = re.compile(r"[^a-z0-9_.-]+")
 _SHORT_SHA_LENGTH = 12
+_BUILD_DIGEST_LENGTH = 12
 
 
-def companion_image_tag(name: str, commit_sha: str) -> str:
-    """Return the deterministic local image tag for a companion build."""
+def _companion_build_inputs_digest(build_context: str, dockerfile: str) -> str:
+    """Return a short, stable digest of the repo-relative companion build inputs.
+
+    A NUL separator keeps the digest unambiguous (e.g. ``("a", "b/c")`` and
+    ``("a/b", "c")`` cannot collide).
+    """
+    payload = "\0".join((build_context, dockerfile)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:_BUILD_DIGEST_LENGTH]
+
+
+def companion_image_tag(
+    name: str,
+    commit_sha: str,
+    *,
+    build_context: str,
+    dockerfile: str,
+) -> str:
+    """Return the deterministic local image tag for a companion build.
+
+    The tag folds a digest of the build inputs (``build_context`` and
+    ``dockerfile``) into the tag portion, so two workspaces that request the same
+    companion ``name`` at the same ``commit_sha`` but with different build
+    definitions resolve to distinct tags. Without this, the second launch would
+    see the first build's tag via :meth:`ComposeManager.companion_image_exists`
+    and reuse an image built from a different ``build:`` definition.
+
+    Callers must pass the *repo-relative* build inputs (not the per-worktree
+    absolute build context) so the tag stays stable across workspaces and the
+    cross-workspace cache still hits for identical build definitions.
+    """
     safe_name = _TAG_NAME_SANITIZE.sub("-", name.strip().lower()).strip("-._") or "companion"
     short_sha = commit_sha.strip().lower()[:_SHORT_SHA_LENGTH]
-    return f"awf-companion-{safe_name}:{short_sha}"
+    build_digest = _companion_build_inputs_digest(build_context, dockerfile)
+    return f"awf-companion-{safe_name}:{short_sha}-{build_digest}"
 
 
 def companion_image_prune_command(retention_hours: int) -> list[str]:
@@ -78,9 +112,18 @@ class CompanionImageBuilder:
         commit_sha: str,
         build_context: str,
         dockerfile: str,
+        relative_build_context: str,
         capture_timeout_seconds: float,
     ) -> str | None:
         """Return a ready-to-reference image tag, building it once if needed.
+
+        ``build_context`` is the resolved (per-worktree absolute) path handed to
+        ``docker build``; ``relative_build_context`` is the repo-relative build
+        context from the companion spec. The cache key is derived from the
+        repo-relative build inputs (``relative_build_context`` and the already
+        worktree-stable ``dockerfile``) rather than the absolute path, so a build
+        definition that varies ``build_context`` or ``dockerfile`` gets its own
+        tag while identical definitions still reuse one image across workspaces.
 
         ``capture_timeout_seconds`` is the build's subprocess budget; callers pass
         the same effective compose-up cap the inline ``docker compose up`` build
@@ -101,7 +144,12 @@ class CompanionImageBuilder:
         """
         if not commit_sha.strip():
             return None
-        tag = companion_image_tag(name, commit_sha)
+        tag = companion_image_tag(
+            name,
+            commit_sha,
+            build_context=relative_build_context,
+            dockerfile=dockerfile,
+        )
         # No ``await`` between get and set, so registering the shared task is
         # atomic on the event loop: a concurrent wave for the same tag awaits the
         # one task and builds once.

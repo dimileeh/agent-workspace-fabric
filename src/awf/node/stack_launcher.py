@@ -251,6 +251,7 @@ class ComposeStackLauncher:
                     commit_sha=companion.commit_sha,
                     build_context=service.build_context,
                     dockerfile=service.dockerfile,
+                    relative_build_context=companion.spec.build_context,
                     capture_timeout_seconds=capture_timeout_seconds,
                 )
                 if tag is not None:

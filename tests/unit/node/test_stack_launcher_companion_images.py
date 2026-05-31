@@ -31,6 +31,7 @@ class _RecordingBuilder:
         commit_sha: str,
         build_context: str,
         dockerfile: str,
+        relative_build_context: str,
         capture_timeout_seconds: float,
     ) -> str | None:
         self.calls.append(
@@ -39,6 +40,7 @@ class _RecordingBuilder:
                 "commit_sha": commit_sha,
                 "build_context": build_context,
                 "dockerfile": dockerfile,
+                "relative_build_context": relative_build_context,
                 "capture_timeout_seconds": capture_timeout_seconds,
             }
         )
@@ -83,6 +85,9 @@ async def test_prebuilt_tag_is_applied_as_image(tmp_path: Path) -> None:
     assert builder.calls[0]["commit_sha"] == "abc123def456"
     assert builder.calls[0]["build_context"] == str((tmp_path / "backend").resolve())
     assert builder.calls[0]["dockerfile"] == "Dockerfile"
+    # The repo-relative spec build context drives the cache key (the absolute
+    # build_context above is per-worktree and would break cross-workspace reuse).
+    assert builder.calls[0]["relative_build_context"] == "."
     assert builder.calls[0]["capture_timeout_seconds"] == 660.0
 
 
@@ -121,10 +126,12 @@ async def test_companion_prebuilds_run_concurrently(tmp_path: Path) -> None:
             commit_sha: str,
             build_context: str,
             dockerfile: str,
+            relative_build_context: str,
             capture_timeout_seconds: float,
         ) -> str | None:
             nonlocal entered
-            del commit_sha, build_context, dockerfile, capture_timeout_seconds
+            del commit_sha, build_context, dockerfile, relative_build_context
+            del capture_timeout_seconds
             self.calls.append(name)
             entered += 1
             if entered == 2:

@@ -61,9 +61,10 @@ class _RecordingCompanionImageBuilder:
         commit_sha: str,
         build_context: str,
         dockerfile: str,
+        relative_build_context: str,
         capture_timeout_seconds: float,
     ) -> str | None:
-        del name, commit_sha, build_context, dockerfile
+        del name, commit_sha, build_context, dockerfile, relative_build_context
         self.capture_timeouts.append(capture_timeout_seconds)
         return None  # fall back to build:, leaving the rest of launch() unchanged
 

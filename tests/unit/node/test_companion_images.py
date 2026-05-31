@@ -26,11 +26,12 @@ class _FakeCompose:
         self.build_error = build_error
         self.exists_calls: list[str] = []
         self.build_calls: list[dict[str, object]] = []
+        self._built_tags: set[str] = set()
 
     async def companion_image_exists(self, tag: str) -> bool:
         await asyncio.sleep(0)  # yield so concurrent callers can interleave
         self.exists_calls.append(tag)
-        return self.exists_result
+        return self.exists_result or tag in self._built_tags
 
     async def build_companion_image(
         self,
@@ -53,18 +54,57 @@ class _FakeCompose:
         )
         if self.build_error is not None:
             raise self.build_error
-        self.exists_result = True  # a successful build makes the tag present
+        self._built_tags.add(tag)  # a successful build makes that exact tag present
 
 
 @pytest.mark.unit
 def test_companion_image_tag_sanitizes_name_and_truncates_sha() -> None:
-    tag = companion_image_tag("Aira Agent/Backend", "ABCDEF0123456789deadbeef")
-    assert tag == "awf-companion-aira-agent-backend:abcdef012345"
+    tag = companion_image_tag(
+        "Aira Agent/Backend",
+        "ABCDEF0123456789deadbeef",
+        build_context=".",
+        dockerfile="Dockerfile",
+    )
+    # The repo name and sha are preserved; a build-inputs digest is appended so
+    # differing build definitions never share a tag (see the collision test).
+    repo, _, image_tag = tag.partition(":")
+    assert repo == "awf-companion-aira-agent-backend"
+    sha, _, digest = image_tag.partition("-")
+    assert sha == "abcdef012345"
+    assert digest and all(char in "0123456789abcdef" for char in digest)
 
 
 @pytest.mark.unit
 def test_companion_image_tag_falls_back_when_name_sanitizes_empty() -> None:
-    assert companion_image_tag("///", "abc123").startswith("awf-companion-companion:")
+    tag = companion_image_tag("///", "abc123", build_context=".", dockerfile="Dockerfile")
+    assert tag.startswith("awf-companion-companion:")
+
+
+@pytest.mark.unit
+def test_companion_image_tag_varies_with_build_inputs() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F5072: the cache key must fold in the build
+    # inputs. Two companions sharing a name and commit but differing in
+    # build_context or dockerfile must resolve to distinct tags so the cache
+    # never serves an image built from a different build definition; identical
+    # build inputs must still resolve to the same tag so cross-workspace reuse
+    # (issue #298) keeps working.
+    base = companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
+    )
+    same = companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
+    )
+    other_context = companion_image_tag(
+        "backend", "abc123def456", build_context="services/api", dockerfile="Dockerfile"
+    )
+    other_dockerfile = companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="Dockerfile.dev"
+    )
+
+    assert base == same
+    assert base != other_context
+    assert base != other_dockerfile
+    assert other_context != other_dockerfile
 
 
 @pytest.mark.unit
@@ -86,10 +126,13 @@ async def test_ensure_reuses_existing_image_without_building() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=660.0,
     )
 
-    assert tag == companion_image_tag("backend", "abc123def456")
+    assert tag == companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
+    )
     assert compose.build_calls == []
 
 
@@ -103,10 +146,13 @@ async def test_ensure_builds_with_managed_labels_when_missing() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="sub/Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=660.0,
     )
 
-    assert tag == companion_image_tag("backend", "abc123def456")
+    assert tag == companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="sub/Dockerfile"
+    )
     assert len(compose.build_calls) == 1
     call = compose.build_calls[0]
     assert call["build_context"] == "/ctx"
@@ -127,6 +173,7 @@ async def test_ensure_skips_caching_without_commit_sha() -> None:
         commit_sha="   ",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=660.0,
     )
 
@@ -153,6 +200,7 @@ async def test_ensure_falls_back_to_none_on_build_failure() -> None:
         commit_sha="abc123",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=660.0,
     )
 
@@ -172,13 +220,16 @@ async def test_ensure_deduplicates_concurrent_builds_for_same_tag() -> None:
                 commit_sha="abc123def456",
                 build_context="/ctx",
                 dockerfile="Dockerfile",
+                relative_build_context=".",
                 capture_timeout_seconds=660.0,
             )
             for _ in range(4)
         )
     )
 
-    expected = companion_image_tag("backend", "abc123def456")
+    expected = companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
+    )
     assert results == [expected, expected, expected, expected]
     assert len(compose.build_calls) == 1  # the per-tag lock collapses the wave
 
@@ -196,6 +247,7 @@ async def test_ensure_forwards_capture_timeout_to_build() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=1860.0,
     )
 
@@ -226,6 +278,7 @@ async def test_ensure_shares_one_build_across_a_failing_concurrent_wave() -> Non
                 commit_sha="abc123def456",
                 build_context="/ctx",
                 dockerfile="Dockerfile",
+                relative_build_context=".",
                 capture_timeout_seconds=660.0,
             )
             for _ in range(4)
@@ -257,6 +310,7 @@ async def test_ensure_retries_build_after_a_failed_wave() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=660.0,
     )
     second = await builder.ensure(
@@ -264,6 +318,7 @@ async def test_ensure_retries_build_after_a_failed_wave() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=660.0,
     )
 
@@ -285,8 +340,71 @@ async def test_ensure_does_not_retain_finished_build_tasks() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        relative_build_context=".",
         capture_timeout_seconds=660.0,
     )
     await asyncio.sleep(0)  # let the done-callback drop the finished task
 
     assert builder._builds == {}  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_ensure_does_not_reuse_image_across_differing_build_inputs() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F5072: two workspaces requesting the same
+    # companion name at the same commit but with different build inputs must not
+    # share a tag. Otherwise the second launch would see the first build's tag
+    # via companion_image_exists() and run the wrong image. The resolved
+    # build_context is a per-worktree absolute path, so the cache key keys on the
+    # repo-relative build inputs (relative_build_context + dockerfile) instead.
+    compose = _FakeCompose(exists=False)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    first = await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ws-a/worktree",
+        dockerfile="Dockerfile",
+        relative_build_context=".",
+        capture_timeout_seconds=660.0,
+    )
+    second = await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ws-b/worktree",
+        dockerfile="Dockerfile.dev",
+        relative_build_context=".",
+        capture_timeout_seconds=660.0,
+    )
+
+    assert first is not None and second is not None
+    assert first != second  # distinct tags despite identical name + commit
+    assert len(compose.build_calls) == 2  # the second built its own image
+
+
+@pytest.mark.unit
+async def test_ensure_reuses_image_across_workspaces_for_identical_build_inputs() -> None:
+    # The cross-workspace cache (issue #298) must still hit: identical
+    # repo-relative build inputs at the same commit resolve to the same tag even
+    # though each workspace resolves build_context to a different absolute path.
+    compose = _FakeCompose(exists=False)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    first = await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ws-a/worktree",
+        dockerfile="Dockerfile",
+        relative_build_context=".",
+        capture_timeout_seconds=660.0,
+    )
+    second = await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ws-b/worktree",
+        dockerfile="Dockerfile",
+        relative_build_context=".",
+        capture_timeout_seconds=660.0,
+    )
+
+    assert first == second  # same tag -> reused across workspaces
+    assert len(compose.build_calls) == 1  # the second reused the first build
