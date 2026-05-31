@@ -46,6 +46,66 @@ def test_monitor_precommit_autofix_keeps_deterministic_hook_repair_paths() -> No
     )
 
 
+def _deterministic_autofix_stderr(*paths: str) -> str:
+    return (
+        "fix end of files................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n" + "".join(f"Fixing {path}\n" for path in paths)
+    )
+
+
+@pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_returns_none_when_status_fails(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "src/awf/fixed.py"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="fatal: status failed")
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(fixed_path,),
+    )
+
+    assert retry is None
+    assert len(runner.calls) == 1
+    assert runner.calls[0].args[-2:] == ["status", "--porcelain"]
+
+
+@pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_returns_none_when_worktree_is_clean(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "src/awf/fixed.py"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(fixed_path,),
+    )
+
+    assert retry is None
+    assert len(runner.calls) == 1
+
+
 @pytest.mark.unit
 async def test_monitor_precommit_autofix_retry_allows_unaffected_staged_paths(
     tmp_path: Path,
@@ -77,6 +137,33 @@ async def test_monitor_precommit_autofix_retry_allows_unaffected_staged_paths(
     retry_result, restaged_paths = retry
     assert retry_result.ok
     assert restaged_paths == (fixed_path,)
+    assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
+
+
+@pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_returns_none_when_restage_fails(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "src/awf/fixed.py"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    runner.queue_result(returncode=128, stderr="fatal: add failed")
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(fixed_path,),
+    )
+
+    assert retry is None
+    assert len(runner.calls) == 2
     assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
 
 
