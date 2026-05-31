@@ -495,11 +495,18 @@ def check_local_capacity(
             fix="Verify the host environment exposes CPU information.",
             data=data,
         )
+    if memory is not None:
+        detail = "Host-local CPU and memory estimates are at or above the recommended floor."
+    else:
+        detail = (
+            "Host-local CPU estimate is at or above the recommended floor, "
+            "but memory capacity could not be determined."
+        )
     return SetupCheckResult(
         name="local_capacity",
         level=SetupCheckLevel.OK,
         summary="Local CPU/memory capacity looks adequate for AWF workspaces.",
-        detail="Host-local CPU and memory estimates are at or above the recommended floor.",
+        detail=detail,
         data=data,
     )
 

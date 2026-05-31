@@ -288,6 +288,7 @@ def test_check_local_capacity_ok_and_starved() -> None:
         total_memory_bytes=lambda: 16 * 1024**3,
     )
     assert ok.level is SetupCheckLevel.OK
+    assert ok.detail == "Host-local CPU and memory estimates are at or above the recommended floor."
     assert starved.level is SetupCheckLevel.WARNING
     assert starved.data["cpus"] == 1
 
@@ -533,6 +534,10 @@ def test_check_local_capacity_ok_when_memory_unknown() -> None:
     )
     assert result.level is SetupCheckLevel.OK
     assert "memory_bytes" not in result.data
+    # The detail must not claim the memory estimate is at/above the floor when
+    # memory could not be determined (e.g. Windows where os.sysconf is missing).
+    assert "memory capacity could not be determined" in result.detail
+    assert "CPU and memory estimates are at or above" not in result.detail
 
 
 @pytest.mark.unit
