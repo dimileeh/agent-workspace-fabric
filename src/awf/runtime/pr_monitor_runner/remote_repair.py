@@ -50,6 +50,9 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.comments import (
     _git_worktree_command,
 )
+from awf.runtime.pr_monitor_runner.commit_autofix import (
+    _retry_monitor_precommit_autofix_commit_once,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
@@ -316,12 +319,41 @@ async def _commit_dirty_worktree(
             raise _MonitorAgentRuntimeOwnershipRepairFailedError(
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
             )
-        _log.warning(
-            "monitor.dirty_commit_failed",
+        retry = await _retry_monitor_precommit_autofix_commit_once(
+            runner=self._deps.runner,
             workspace_id=workspace_id,
-            stderr=commit.stderr[:400],
+            worktree_path=worktree_path,
+            message=message,
+            commit_result=commit,
+            operation_dirty_paths=changed_paths,
         )
-        return False
+        if retry is None:
+            _log.warning(
+                "monitor.dirty_commit_failed",
+                workspace_id=workspace_id,
+                stderr=commit.stderr[:400],
+            )
+            return False
+
+        retry_commit, restaged_paths = retry
+        if not retry_commit.ok:
+            _log.warning(
+                "monitor.dirty_commit_autofix_retry_failed",
+                workspace_id=workspace_id,
+                restaged_paths=list(restaged_paths),
+                stderr=retry_commit.stderr[:400],
+            )
+            _log.warning(
+                "monitor.dirty_commit_failed",
+                workspace_id=workspace_id,
+                stderr=commit.stderr[:400],
+            )
+            return False
+        _log.info(
+            "monitor.dirty_commit_autofix_retry_succeeded",
+            workspace_id=workspace_id,
+            restaged_paths=list(restaged_paths),
+        )
     _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
 
     if not await repair_agent_runtime_ownership(

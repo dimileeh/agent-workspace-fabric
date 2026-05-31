@@ -653,6 +653,285 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
 
 
 @pytest.mark.unit
+async def test_commit_dirty_worktree_restages_precommit_autofix_and_retries_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    fixed_path = "tests/unit/service/test_workspace_host_port_conflict.py"
+    hook_stderr = (
+        "fix end of files................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        f"Fixing {fixed_path}\n"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0)  # initial git add -A
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=1, stderr=hook_stderr)
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0)  # bounded restage of the autofixed path
+    cmd.queue_result(returncode=0)  # retry git commit
+    cmd.queue_result(returncode=0, stdout="")  # next pass guard sees clean worktree
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    repair_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        repair_reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: dirty",
+    )
+    guard_result = await runner._pre_existing_dirty_repair_worktree_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_type="comment_repair",
+    )
+
+    assert result is True
+    assert guard_result is None
+    assert [call.args[-3:] for call in cmd.calls if call.args[-3:-2] == ["commit"]] == [
+        ["commit", "-m", "fix: dirty"],
+        ["commit", "-m", "fix: dirty"],
+    ]
+    assert any(call.args[-3:] == ["add", "--", fixed_path] for call in cmd.calls)
+    assert repair_reasons == [
+        "dirty_worktree_pre_commit",
+        "dirty_worktree_post_commit_failed",
+        "dirty_worktree_post_commit_succeeded",
+    ]
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_autofix_retry_still_fails_returns_false(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    fixed_path = "src/awf/example.py"
+    hook_stderr = (
+        "trim trailing whitespace........................................Failed\n"
+        "- hook id: trailing-whitespace\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        f"Fixing {fixed_path}\n"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=1, stderr=hook_stderr)
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1, stderr="pre-commit failed again\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, reason, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: dirty",
+    )
+
+    assert result is False
+    assert [call.args[-3:] for call in cmd.calls if call.args[-3:-2] == ["commit"]] == [
+        ["commit", "-m", "fix: dirty"],
+        ["commit", "-m", "fix: dirty"],
+    ]
+    assert sum(1 for call in cmd.calls if call.args[-3:] == ["add", "--", fixed_path]) == 1
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_does_not_retry_unowned_autofix_dirty_paths(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    fixed_path = "src/awf/example.py"
+    unowned_path = "docs/unowned.md"
+    hook_stderr = (
+        "fix end of files................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        f"Fixing {fixed_path}\n"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=1, stderr=hook_stderr)
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n M {unowned_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {unowned_path}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, reason, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: dirty",
+    )
+    guard_result = await runner._pre_existing_dirty_repair_worktree_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_type="comment_repair",
+    )
+
+    assert result is False
+    assert guard_result is not None
+    assert guard_result.reason_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    assert guard_result.details["paths"] == [unowned_path]
+    assert [call.args[-3:] for call in cmd.calls if call.args[-3:-2] == ["commit"]] == [
+        ["commit", "-m", "fix: dirty"],
+    ]
+    assert not any(call.args[-3:] == ["add", "--", fixed_path] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_does_not_retry_unknown_autofix_hook(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    fixed_path = "src/awf/example.py"
+    hook_stderr = (
+        "custom hook.....................................................Failed\n"
+        "- hook id: custom-semantic-hook\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        f"Fixing {fixed_path}\n"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=1, stderr=hook_stderr)
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, reason, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: dirty",
+    )
+    guard_result = await runner._pre_existing_dirty_repair_worktree_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_type="comment_repair",
+    )
+
+    assert result is False
+    assert guard_result is not None
+    assert guard_result.reason_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    assert guard_result.details["paths"] == [fixed_path]
+    assert [call.args[-3:] for call in cmd.calls if call.args[-3:-2] == ["commit"]] == [
+        ["commit", "-m", "fix: dirty"],
+    ]
+    assert not any(call.args[-3:] == ["add", "--", fixed_path] for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_commit_dirty_worktree_logs_commit_stderr_when_failed_commit_repair_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
