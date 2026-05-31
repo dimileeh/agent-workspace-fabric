@@ -94,6 +94,7 @@ async def _run_fix_cycle(
     threads_to_resolve: list[str] = []
     publish_dependent_ids: list[str] = []
     workflow_scope_publish_dependent_ids: list[str] = []
+    workflow_scope_resolution_dependent_ids: list[str] = []
     # Last settle-poll status; used after the loop to skip resolving threads that
     # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
     status: PRStatus | None = None
@@ -124,6 +125,11 @@ async def _run_fix_cycle(
         ]
         workflow_scope_publish_dependent_ids[:] = [
             queued_id for queued_id in workflow_scope_publish_dependent_ids if queued_id != item_id
+        ]
+        workflow_scope_resolution_dependent_ids[:] = [
+            queued_id
+            for queued_id in workflow_scope_resolution_dependent_ids
+            if queued_id != item_id
         ]
         threads_to_resolve[:] = [
             queued_id for queued_id in threads_to_resolve if queued_id != item_id
@@ -226,6 +232,8 @@ async def _run_fix_cycle(
                 publish_dependent_ids.append(t.thread_id)
                 if verdict == "fix_committed":
                     workflow_scope_publish_dependent_ids.append(t.thread_id)
+                elif verdict == "false_positive":
+                    workflow_scope_resolution_dependent_ids.append(t.thread_id)
         for c in reviews:
             try:
                 verdict_result = await self._address_review_comment_result(
@@ -375,6 +383,7 @@ async def _run_fix_cycle(
             _requeue_workflow_scope_publish_dependent_items(
                 state,
                 workflow_scope_publish_dependent_ids,
+                resolution_dependent_ids=workflow_scope_resolution_dependent_ids,
                 reason=push_result.error_message or _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
             )
         else:
@@ -551,17 +560,23 @@ def _requeue_workflow_scope_publish_dependent_items(
     state: MonitorState,
     item_ids: list[str],
     *,
+    resolution_dependent_ids: list[str],
     reason: str,
 ) -> None:
-    """Mark publish-dependent fixes as human-blocked after workflow-scope failure.
+    """Mark blocked fixes and requeue inline states needing GitHub resolution.
 
     GitHub rejects workflow-file pushes before the local commits reach the PR,
     and retrying the same repair cannot succeed until an operator provides a
-    token with ``workflow`` scope. Preserve push-independent verdicts such as
-    inline ``defer`` and ``false_positive``; convert only committed fixes whose
-    publication was blocked so the standard human-notification path can surface
-    the exact permission reason and later iterations do not re-run the agent.
+    token with ``workflow`` scope. Convert committed fixes whose publication was
+    blocked so the standard human-notification path can surface the exact
+    permission reason. Clear inline false-positive state that still depends on a
+    later GraphQL ``resolve_thread`` call, while preserving captured defers and
+    durable review-level false-positive resolutions.
     """
+    publish_blocked_ids = set(item_ids)
+    for item_id in dict.fromkeys(resolution_dependent_ids):
+        if item_id not in publish_blocked_ids:
+            _clear_addressed_state_by_id(state, item_id)
     result = VerdictResult(verdict="needs_human", reason=reason)
     for item_id in dict.fromkeys(item_ids):
         state.mark_addressed(item_id, "needs_human")

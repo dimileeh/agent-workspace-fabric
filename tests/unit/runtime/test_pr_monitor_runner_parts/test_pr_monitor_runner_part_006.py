@@ -653,11 +653,11 @@ async def test_workflow_scope_push_failure_marks_fix_committed_thread_needs_huma
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_preserves_push_independent_thread_state(
+async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope failures preserve false-positive inline verdicts."""
+    """Verify workflow-scope failures requeue inline verdicts needing resolution."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: reviewer misread the diff")
@@ -714,8 +714,8 @@ async def test_workflow_scope_push_failure_preserves_push_independent_thread_sta
         "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
         "with workflow push permission, then rerun the monitor repair."
     )
-    assert state.threads_addressed_ids["T_false_positive"] == "false_positive"
-    assert "__review_thread_body_hash__:T_false_positive" in state.threads_addressed_ids
+    assert "T_false_positive" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_false_positive" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["T_workflow"] == "needs_human"
     assert "__review_thread_body_hash__:T_workflow" in state.threads_addressed_ids
@@ -729,11 +729,9 @@ async def test_workflow_scope_push_failure_preserves_push_independent_thread_sta
         MonitorConfig(),
     )
 
-    assert isinstance(action, NotifyHuman)
-    assert (
-        _notify_human_reason(_status(inline=(false_positive_thread, workflow_thread)), state)
-        == expected_reason
-    )
+    assert isinstance(action, AddressComments)
+    assert action.threads == (false_positive_thread,)
+    assert action.review_comments == ()
 
 
 @pytest.mark.unit
@@ -1031,13 +1029,12 @@ def test_workflow_scope_requeue_marks_publish_dependent_fixes_needs_human() -> N
     _requeue_workflow_scope_publish_dependent_items(
         state,
         ["T_workflow", "issue:fixed"],
+        resolution_dependent_ids=["T_false_positive"],
         reason=expected_reason,
     )
 
-    assert state.threads_addressed_ids["T_false_positive"] == "false_positive"
-    assert state.threads_addressed_ids["__review_thread_body_hash__:T_false_positive"] == (
-        "fp-hash"
-    )
+    assert "T_false_positive" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_false_positive" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["T_defer"] == "defer"
     assert state.threads_addressed_ids["__review_thread_body_hash__:T_defer"] == "defer-hash"
