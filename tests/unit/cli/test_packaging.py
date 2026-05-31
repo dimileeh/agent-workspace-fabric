@@ -72,6 +72,18 @@ def test_wheel_includes_bootstrap_assets_without_secret_env_files() -> None:
     assert "/docker/compose/.env" in set(sdist.get("exclude", []))
 
 
+def test_sdist_includes_installer_release_metadata() -> None:
+    """The sdist ships the checked-in installer/release metadata (T11/T12 lanes)."""
+    pyproject_path = REPO_ROOT / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        data = tomllib.load(f)
+
+    sdist_includes = set(data["tool"]["hatch"]["build"]["targets"]["sdist"].get("include", []))
+    assert "/packaging/install.sh" in sdist_includes
+    assert "/scripts/generate_install_manifest.py" in sdist_includes
+    assert "/RELEASING.md" in sdist_includes
+
+
 def test_control_plane_dockerfile_copies_forced_bootstrap_assets_before_uv_sync() -> None:
     """The service image build must include Hatch forced-includes before uv sync."""
     pyproject_path = REPO_ROOT / "pyproject.toml"
