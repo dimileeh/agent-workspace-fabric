@@ -91,6 +91,24 @@ def _unquote_porcelain_path(path: str) -> str:
     return bytes(raw).decode("utf-8", "surrogateescape")
 
 
+def _first_output_line(stdout: str | None) -> str:
+    """Return the first status-free output line from a git command."""
+    if not stdout:
+        return ""
+    return stdout.splitlines()[0].strip()
+
+
+def _resolve_head_sha(result: CommandResult, *, ref: str) -> tuple[str | None, str]:
+    """Extract a resolved revision SHA from a git rev-parse output."""
+    sha = _first_output_line(result.stdout)
+    if not sha:
+        return (
+            None,
+            f"Could not resolve HEAD for `{ref}` from git rev-parse output.",
+        )
+    return sha, ""
+
+
 def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
     """Extract changed paths from ``git status --porcelain`` output."""
     paths: list[str] = []
@@ -237,8 +255,77 @@ async def cleanup_validation_worktree_side_effects(
     restore_ref: str = "HEAD",
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
-    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree_path)
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree_path,
+    )
     if check.clean:
+        if restore_ref != "HEAD":
+            restore_target = await run_git(["rev-parse", restore_ref])
+            if not restore_target.ok:
+                return ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                    message=("Could not verify validation worktree HEAD with `git rev-parse`."),
+                    cleanup_stderr=(restore_target.stderr or "")[:1000],
+                )
+
+            restore_ref_sha, target_message = _resolve_head_sha(
+                restore_target,
+                ref=restore_ref,
+            )
+            if restore_ref_sha is None:
+                return ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                    message=f"Could not verify validation worktree HEAD: {target_message}",
+                )
+
+            current_head = await run_git(["rev-parse", "HEAD"])
+            if not current_head.ok:
+                return ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                    message=(
+                        "Could not verify validation worktree HEAD after cleanup "
+                        "with `git rev-parse`."
+                    ),
+                    cleanup_stderr=(current_head.stderr or "")[:1000],
+                )
+
+            current_head_sha, current_message = _resolve_head_sha(
+                current_head,
+                ref="HEAD",
+            )
+            if current_head_sha is None:
+                return ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                    message=(
+                        "Could not verify validation worktree HEAD after cleanup: "
+                        f"{current_message}"
+                    ),
+                )
+            if current_head_sha != restore_ref_sha:
+                return ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation changed HEAD during execution. "
+                        f"Expected {restore_ref_sha[:8]}, found {current_head_sha[:8]}."
+                    ),
+                    cleanup_command="git rev-parse",
+                )
         return ValidationWorktreeCleanup(cleaned=False, check=check, restore_ref=restore_ref)
     if check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
         return ValidationWorktreeCleanup(
