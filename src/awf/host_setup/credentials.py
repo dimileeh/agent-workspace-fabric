@@ -14,6 +14,7 @@ setup/provider CLI flows (T04/T07), not here.
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
 import platform
@@ -847,6 +848,15 @@ def _mkdir_secure(directory: Path) -> None:
     for path in reversed(missing):
         path.mkdir(mode=0o700, exist_ok=True)
         _chmod_best_effort(path, 0o700)
+    # A ``directory`` that already existed as a regular file (or a symlink to
+    # one) never enters the creation loop above — ``probe.exists()`` is true on
+    # the first iteration, so ``missing`` stays empty. Without this guard the
+    # final hardening chmod would re-permission that unrelated file to 0o700
+    # before the later secret-file ``os.open`` fails with ``NotADirectoryError``,
+    # silently mutating e.g. a ``~/.awf/secrets`` accidentally created as a file.
+    # Refuse a non-directory here so a doomed plain-file setup leaves it alone.
+    if not directory.is_dir():
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(directory))
     _chmod_best_effort(directory, 0o700)
 
 

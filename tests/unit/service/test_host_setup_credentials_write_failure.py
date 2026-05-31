@@ -7,6 +7,8 @@ orphan a temp file in the 0700 secrets directory.
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -41,3 +43,32 @@ def test_write_secret_file_wraps_non_oserror_and_cleans_up(tmp_path: Path) -> No
     # Neither the target nor an orphaned ".tmp" file may survive the failure.
     leftover = [p for p in tmp_path.rglob("*") if p.is_file()]
     assert leftover == []
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="chmod hardening only runs on POSIX")
+def test_write_secret_file_refuses_non_directory_secrets_dir(tmp_path: Path) -> None:
+    """A ``secrets_dir`` that is a regular file is refused without being chmod'd.
+
+    ``_mkdir_secure`` only walks/creates *missing* ancestors, so when the
+    configured secrets dir already exists as a regular file (e.g. a
+    ``~/.awf/secrets`` accidentally created as a file) the creation loop is
+    skipped. The function must fail before applying the 0o700 directory
+    hardening chmod — otherwise a doomed plain-file setup silently
+    re-permissions an unrelated existing file before the secret-file open fails.
+    """
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.write_text("pre-existing unrelated file")
+    secrets_dir.chmod(0o644)
+    before_mode = stat.S_IMODE(secrets_dir.stat().st_mode)
+    target = secrets_dir / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The failed setup must not have re-permissioned the unrelated file...
+    after_mode = stat.S_IMODE(secrets_dir.stat().st_mode)
+    assert after_mode == before_mode == 0o644
+    # ...nor touched its contents.
+    assert secrets_dir.read_text() == "pre-existing unrelated file"
