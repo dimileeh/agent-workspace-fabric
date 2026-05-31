@@ -363,3 +363,52 @@ def test_setup_corrupt_config_blocks(harness: _Harness, monkeypatch: pytest.Monk
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["reason_code"] == "HOST_SETUP_CONFIG_CORRUPT"
+    # The config file path operators must fix is preserved in the issue details
+    # rather than dropped (it lives on the error's ``path``, not ``details``).
+    assert payload["issues"][0]["details"]["path"] == "/tmp/.awf/config.yml"
+
+
+@pytest.mark.unit
+def test_setup_write_failure_blocks_includes_path(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a failed config write surfaces its path alongside existing details."""
+
+    def raise_write_failed(_config: HostSetupConfig, **_kw: object) -> None:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_WRITE_FAILED",
+            message="Failed to write host setup config.",
+            path=Path("/tmp/.awf/config.yml"),
+            details={"error_type": "PermissionError"},
+        )
+
+    monkeypatch.setattr(setup_commands, "write_host_setup_config", raise_write_failed)
+    result = _runner.invoke(app, ["setup", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "HOST_SETUP_CONFIG_WRITE_FAILED"
+    details = payload["issues"][0]["details"]
+    assert details["path"] == "/tmp/.awf/config.yml"
+    # The merged path must not clobber pre-existing diagnostic details.
+    assert details["error_type"] == "PermissionError"
+
+
+@pytest.mark.unit
+def test_setup_config_error_pretty_includes_path(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify pretty output also reports the config path operators need to fix."""
+
+    def raise_corrupt(**_kw: object) -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message="Host setup config is corrupt or unsupported.",
+            path=Path("/tmp/.awf/config.yml"),
+        )
+
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", raise_corrupt)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "pretty"])
+
+    assert result.exit_code == 1
+    assert "path: /tmp/.awf/config.yml" in result.stderr

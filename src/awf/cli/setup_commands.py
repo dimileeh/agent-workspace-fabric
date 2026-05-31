@@ -82,7 +82,11 @@ def setup_command(
         _emit_payload(_reason_coded_payload(error.reason_code, str(error), error.details), fmt)
         raise typer.Exit(code=2) from error
     except HostSetupConfigError as error:
-        _emit_payload(_reason_coded_payload(error.reason_code, error.message, error.details), fmt)
+        # Merge the config file path operators need to fix the failure; it lives
+        # on error.path, not in error.details, so it would otherwise be dropped
+        # from both JSON and pretty output.
+        details = {**error.details, "path": str(error.path)}
+        _emit_payload(_reason_coded_payload(error.reason_code, error.message, details), fmt)
         raise typer.Exit(code=1) from error
 
     _emit_payload(payload, fmt)
