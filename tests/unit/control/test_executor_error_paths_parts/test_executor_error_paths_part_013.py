@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -11,6 +12,10 @@ from awf.common.commands import FakeCommandRunner
 from awf.control.executor.constants import PR_MONITOR_SETUP_FAILED_REASON_CODE
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+)
 from awf.runtime.validation import SETUP_DEPENDENCY_NETWORK_FAILURE, ValidationResult
 from tests.unit.control.executor_paths import _test_worktrees_root
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
@@ -24,6 +29,18 @@ from tests.unit.control.test_executor_error_paths_parts.test_executor_error_path
 )
 
 _IMPORTED_FIXTURES = (factory, fake)
+
+
+@pytest.fixture(autouse=True)
+def _allow_monitor_handoff_runtime_ownership_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _repair_agent_runtime_ownership(**_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "awf.control.executor.monitor_handoff_setup.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+        raising=False,
+    )
 
 
 class _ExplodingSetupValidation:
@@ -42,7 +59,154 @@ class _ExplodingSetupValidation:
         return ValidationResult()
 
 
+class _EventRecordingValidation(_RecordingValidation):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **kwargs: Any,
+    ) -> ValidationResult:
+        if phase_names == ("setup", "pre_agent"):
+            self._events.append("setup")
+        return await super().run_profile_phases(phase_names=phase_names, **kwargs)
+
+
 class TestExecutorMonitorHandoffSetup:
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_repairs_runtime_ownership_before_setup(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events: list[str] = []
+        validation = _EventRecordingValidation(events)
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        async def _repair_agent_runtime_ownership(
+            *,
+            logger: Any,
+            workspace_id: str,
+            worktree_path: Path,
+            reason: str,
+            event_name: str,
+            reason_code: str,
+        ) -> bool:
+            assert logger is not None
+            assert workspace_id == ws_id
+            assert worktree_path == _test_worktrees_root(factory) / ws_id
+            assert reason == "profile_setup"
+            assert event_name == EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME
+            assert reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+            events.append("repair")
+            return True
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+                events.append("monitor")
+
+        monkeypatch.setattr(
+            "awf.control.executor.monitor_handoff_setup.repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+            raising=False,
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert events == ["repair", "setup", "monitor"]
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_runtime_ownership_failure_blocks_setup(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events: list[str] = []
+        validation = _EventRecordingValidation(events)
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        async def _repair_agent_runtime_ownership(**_kwargs: Any) -> bool:
+            events.append("repair")
+            return False
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+                events.append("monitor")
+
+        monkeypatch.setattr(
+            "awf.control.executor.monitor_handoff_setup.repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+            raising=False,
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert events == ["repair"]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert (
+                ws.failure_message == "agent runtime ownership repair failed before profile setup"
+            )
+            assert ws.events[-1].reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_runs_profile_setup_before_monitor(
         self,

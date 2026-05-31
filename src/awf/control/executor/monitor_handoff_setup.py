@@ -15,6 +15,11 @@ from awf.control.executor.logging_ops import (
     _setup_dependency_network_failure_details,
 )
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 
 _log = get_logger(__name__)
 
@@ -30,6 +35,22 @@ async def _run_monitor_handoff_profile_setup(
 ) -> bool:
     """Run profile setup before handing an adopted/release PR to the monitor."""
     try:
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="profile_setup",
+            event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        ):
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message="agent runtime ownership repair failed before profile setup",
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            )
+            return False
         setup_result = await self._validation.run_profile_phases(
             workspace_id=workspace_id,
             compose_project=compose_project,
