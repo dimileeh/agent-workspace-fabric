@@ -485,7 +485,8 @@ async def _git_push_result(
             stderr=r.stderr,
         )
 
-    workflow_scope_block = _workflow_scope_push_block(r.stderr or r.stdout)
+    push_output = _combined_git_output(r.stderr, r.stdout)
+    workflow_scope_block = _workflow_scope_push_block(push_output)
     if workflow_scope_block.blocked:
         message = workflow_scope_block.message
         paths = workflow_scope_block.paths
@@ -508,6 +509,7 @@ async def _git_push_result(
             },
         )
 
+    _log_unmatched_workflow_file_push_output(push_output)
     stderr_lower = (r.stderr or "").lower()
     is_rejection = (
         "[rejected]" in stderr_lower
@@ -577,6 +579,25 @@ async def _git_push_result(
         stdout=r.stdout,
         stderr=r.stderr,
         recovered_by_resync=True,
+    )
+
+
+def _combined_git_output(*outputs: str | None) -> str:
+    return "\n".join(output for output in outputs if output)
+
+
+def _log_unmatched_workflow_file_push_output(output: str) -> None:
+    paths = tuple(
+        dict.fromkeys(
+            match.group(0).rstrip(".,;:") for match in _WORKFLOW_FILE_PATH_RE.finditer(output)
+        )
+    )
+    if not paths:
+        return
+    _log.warning(
+        "monitor.push_failed_unmatched_workflow_file_context",
+        paths=list(paths),
+        output=redact_audit_text(output, limit=400),
     )
 
 

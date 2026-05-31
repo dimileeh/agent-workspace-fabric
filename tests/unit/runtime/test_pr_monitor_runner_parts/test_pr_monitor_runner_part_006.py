@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -116,6 +117,75 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     assert result.workflow_scope_required is True
     assert result.terminal_monitor_failure is False
     assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_git_push_result_detects_workflow_scope_rejection_across_streams(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify workflow-scope rejection detection scans stderr and stdout."""
+    cmd = FakeCommandRunner()
+    stdout = (
+        "remote: refusing to allow a Personal Access Token to create or update workflow "
+        "`.github/workflows/publish.yml` without `workflow` scope\n"
+        " ! [remote rejected] HEAD -> awf/ws (protected branch hook declined)"
+    )
+    cmd.queue_result(returncode=1, stdout=stdout, stderr="remote: pre-receive hook failed\n")
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    result = await runner._git_push_result(
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert result.workflow_scope_required is True
+    assert ".github/workflows/publish.yml" in (result.error_message or "")
+    assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_git_push_result_logs_unmatched_workflow_file_push_output(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify workflow-file push misses are observable before generic handling."""
+    cmd = FakeCommandRunner()
+    stderr = "remote: repository rules rejected .github/workflows/publish.yml\n"
+    cmd.queue_result(returncode=1, stderr=stderr)
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await runner._git_push_result(
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    assert result.reason_code == "GIT_PUSH_FAILED"
+    assert any(
+        entry["event"] == "monitor.push_failed_unmatched_workflow_file_context"
+        and ".github/workflows/publish.yml" in entry["output"]
+        for entry in captured
+    )
 
 
 @pytest.mark.unit
