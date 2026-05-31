@@ -646,6 +646,7 @@ def _non_check_reviewer_settle_decision(
             state,
             config,
             pr_number=pr_number,
+            now=now,
             now_wall=now_wall or datetime.now(UTC),
             configured_reviewers=configured_reviewers,
             missing_reviewers=missing_reviewers,
@@ -722,6 +723,7 @@ def _non_check_reviewer_activity_settle_decision(
     config: MonitorConfig,
     *,
     pr_number: int,
+    now: float,
     now_wall: datetime,
     configured_reviewers: tuple[str, ...],
     missing_reviewers: tuple[str, ...],
@@ -743,6 +745,82 @@ def _non_check_reviewer_activity_settle_decision(
         head_sha=status.head_sha,
         activity_signature=signature,
     )
+    started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+        activity_signature=signature,
+    )
+    freeze_elapsed_seconds = _non_check_reviewer_activity_freeze_elapsed_seconds(
+        state,
+        started_key=started_key,
+        now=now,
+        now_wall=now_dt,
+    )
+    if freeze_elapsed_seconds is not None:
+        remaining_seconds = max(
+            config.non_check_reviewer_settle_seconds - freeze_elapsed_seconds,
+            0.0,
+        )
+        freeze_started_wall = now_dt - timedelta(seconds=freeze_elapsed_seconds)
+        quiet_until = freeze_started_wall + timedelta(
+            seconds=config.non_check_reviewer_settle_seconds
+        )
+        if remaining_seconds <= 0:
+            if state.threads_addressed_ids.get(done_key) == "elapsed":
+                return _NonCheckReviewerSettleDecision(
+                    action="already_elapsed",
+                    configured_reviewers=configured_reviewers,
+                    missing_reviewers=missing_reviewers,
+                    visible_reviewers=visible_reviewers,
+                    elapsed_seconds=freeze_elapsed_seconds,
+                    remaining_seconds=0.0,
+                    activity_anchor_at=anchor_at,
+                    activity_anchor_source=status.quiet_period_anchor_source,
+                    quiet_until=quiet_until,
+                    latest_external_review_activity_at=(status.latest_external_review_activity_at),
+                    latest_external_review_activity_source=(
+                        status.latest_external_review_activity_source
+                    ),
+                    activity_signature=signature,
+                )
+            state.mark_addressed(done_key, "elapsed")
+            return _NonCheckReviewerSettleDecision(
+                action="elapsed",
+                configured_reviewers=configured_reviewers,
+                missing_reviewers=missing_reviewers,
+                visible_reviewers=visible_reviewers,
+                elapsed_seconds=freeze_elapsed_seconds,
+                remaining_seconds=0.0,
+                activity_anchor_at=anchor_at,
+                activity_anchor_source=status.quiet_period_anchor_source,
+                quiet_until=quiet_until,
+                latest_external_review_activity_at=status.latest_external_review_activity_at,
+                latest_external_review_activity_source=(
+                    status.latest_external_review_activity_source
+                ),
+                activity_signature=signature,
+                state_changed=True,
+            )
+        wait_seconds = (
+            remaining_seconds
+            if config.poll_interval_seconds <= 0
+            else min(config.poll_interval_seconds, remaining_seconds)
+        )
+        return _NonCheckReviewerSettleDecision(
+            action="waiting",
+            wait_seconds=wait_seconds,
+            configured_reviewers=configured_reviewers,
+            missing_reviewers=missing_reviewers,
+            visible_reviewers=visible_reviewers,
+            elapsed_seconds=freeze_elapsed_seconds,
+            remaining_seconds=remaining_seconds,
+            activity_anchor_at=anchor_at,
+            activity_anchor_source=status.quiet_period_anchor_source,
+            quiet_until=quiet_until,
+            latest_external_review_activity_at=status.latest_external_review_activity_at,
+            latest_external_review_activity_source=status.latest_external_review_activity_source,
+            activity_signature=signature,
+        )
     if state.threads_addressed_ids.get(done_key) == "elapsed":
         return _NonCheckReviewerSettleDecision(
             action="already_elapsed",
@@ -781,11 +859,6 @@ def _non_check_reviewer_activity_settle_decision(
         if config.poll_interval_seconds <= 0
         else min(config.poll_interval_seconds, remaining_seconds)
     )
-    started_key = _non_check_reviewer_settle_started_key(
-        pr_number=pr_number,
-        head_sha=status.head_sha,
-        activity_signature=signature,
-    )
     state_changed = state.threads_addressed_ids.get(started_key) != "activity_wait"
     if state_changed:
         state.mark_addressed(started_key, "activity_wait")
@@ -805,6 +878,27 @@ def _non_check_reviewer_activity_settle_decision(
         activity_signature=signature,
         state_changed=state_changed,
     )
+
+
+def _non_check_reviewer_activity_freeze_elapsed_seconds(
+    state: MonitorState,
+    *,
+    started_key: str,
+    now: float,
+    now_wall: datetime,
+) -> float | None:
+    """Return elapsed seconds for a remonitor-armed activity freeze marker."""
+    started_raw = state.threads_addressed_ids.get(started_key)
+    started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+    if started_wall_seconds is not None:
+        return max(now_wall.timestamp() - started_wall_seconds, 0.0)
+    if started_raw is None or started_raw == "activity_wait":
+        return None
+    try:
+        started_monotonic = float(started_raw)
+    except (TypeError, ValueError):
+        return None
+    return max(now - started_monotonic, 0.0)
 
 
 def _non_check_reviewer_activity_signature(status: PRStatus, *, anchor_at: datetime) -> str:

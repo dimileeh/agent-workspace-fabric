@@ -158,16 +158,33 @@ def arm_operator_hint_freeze(
         pr_number=pr_number,
         head_sha=head_sha,
     )
+    settle_done_activity_prefix = f"{settle_done_key}:"
     settle_started_key = _non_check_reviewer_settle_started_key(
         pr_number=pr_number,
         head_sha=head_sha,
     )
-    for key in list(threads_addressed):
-        if key == settle_done_key or key.startswith(f"{settle_done_key}:"):
+    settle_started_activity_signatures: list[str] = []
+    for key, value in list(threads_addressed.items()):
+        if key == settle_done_key or key.startswith(settle_done_activity_prefix):
+            if key.startswith(settle_done_activity_prefix) and value == "elapsed":
+                activity_signature = key.removeprefix(settle_done_activity_prefix)
+                if (
+                    activity_signature
+                    and activity_signature not in settle_started_activity_signatures
+                ):
+                    settle_started_activity_signatures.append(activity_signature)
             threads_addressed.pop(key, None)
         if key == settle_started_key or key.startswith(f"{settle_started_key}:"):
             threads_addressed.pop(key, None)
     threads_addressed[settle_started_key] = started_at
+    for activity_signature in settle_started_activity_signatures:
+        threads_addressed[
+            _non_check_reviewer_settle_started_key(
+                pr_number=pr_number,
+                head_sha=head_sha,
+                activity_signature=activity_signature,
+            )
+        ] = started_at
 
 
 def build_pending_operator_hint_payload(hint: OperatorHint) -> dict[str, object]:

@@ -16,6 +16,7 @@ from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository
 from awf.db.session import make_session_factory
+from awf.runtime.operator_hints import arm_operator_hint_freeze
 from awf.runtime.pr_monitor import (
     CheckState,
     CheckTiming,
@@ -33,6 +34,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_done_key,
     _non_check_reviewer_settle_skip_visible_key,
     _non_check_reviewer_settle_started_key,
+    _non_check_reviewer_settle_state_for_runtime,
     _non_check_reviewer_settle_wait_operation_context,
     _normalize_non_check_reviewer_logins,
 )
@@ -421,6 +423,60 @@ def test_new_activity_on_same_head_invalidates_prior_elapsed_watermark() -> None
     assert restarted.action == "started"
     assert restarted.wait_seconds == 60
     assert restarted.remaining_seconds == 840
+
+
+@pytest.mark.unit
+def test_remonitor_freeze_rearms_activity_anchored_elapsed_settle() -> None:
+    anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
+    remonitored_at = anchor + timedelta(seconds=901)
+    status = _ready_status(
+        quiet_period_anchor_at=anchor,
+        quiet_period_anchor_source="review_thread_comment",
+        latest_external_review_activity_at=anchor,
+        latest_external_review_activity_source="review_thread_comment",
+    )
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    elapsed = _non_check_reviewer_settle_decision(
+        status,
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+        now_wall=remonitored_at,
+    )
+    arm_operator_hint_freeze(
+        state.threads_addressed_ids,
+        pr_number=93,
+        head_sha="head-a",
+        now=remonitored_at,
+    )
+    _non_check_reviewer_settle_state_for_runtime(
+        state.threads_addressed_ids,
+        pr_number=93,
+        now_monotonic=1000.0,
+        now_wall_seconds=remonitored_at.timestamp(),
+    )
+    rechecked = _non_check_reviewer_settle_decision(
+        status,
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+        now_wall=remonitored_at,
+    )
+
+    assert elapsed.action == "elapsed"
+    assert rechecked.action == "waiting"
+    assert rechecked.wait_seconds == 60
+    assert rechecked.elapsed_seconds == 0
+    assert rechecked.remaining_seconds == 900
 
 
 @pytest.mark.unit
