@@ -1716,3 +1716,48 @@ async def test_retry_allows_when_source_compose_project_name_is_none(
             provider_environ={},
         )
         assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_rejects_runtime_not_released_even_when_no_host_ports(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A source workspace with compose_project_name set but no host ports
+    (no companions, no resolved-profile ports) must still raise
+    WorkspaceRetrySourceRuntimeNotReleasedError when no
+    terminal_runtime_released event exists.  The runtime-release guard
+    must not be gated on the presence of host ports."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        ws.failure_reason = "compose_up_failure"
+        ws.failure_message = "compose up failed"
+        ws.compose_project_name = "awf_stuck_stack"
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="no-host-ports runtime guard test",
+                provider_environ={},
+            )

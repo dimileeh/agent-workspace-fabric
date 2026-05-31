@@ -295,10 +295,10 @@ async def retry_workspace_row(
                 host_port=conflicts[0].host_port,
                 conflicting_workspace_id=conflicts[0].workspace_id,
             )
-        if await _source_runtime_not_yet_released(session, source):
-            raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
-                source_workspace_id=source.id,
-            )
+    if await _source_runtime_not_yet_released(session, source):
+        raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
+            source_workspace_id=source.id,
+        )
 
     retried = await repo.create(
         repo_url=source.repo_url,
