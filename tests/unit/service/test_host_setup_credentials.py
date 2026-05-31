@@ -81,11 +81,13 @@ class FakeKeyringModule:
         backend: object | None = None,
         raise_on_get: bool = False,
         raise_on_set: bool = False,
+        set_error: BaseException | None = None,
     ) -> None:
         """Configure a fake keyring backend without touching any real keychain."""
         self._backend: object = _UsableBackend() if backend is None else backend
         self._raise_on_get = raise_on_get
         self._raise_on_set = raise_on_set
+        self._set_error = set_error
         self.errors = _FakeKeyringErrors
         self.set_calls: list[tuple[str, str, str]] = []
 
@@ -96,7 +98,9 @@ class FakeKeyringModule:
         return self._backend
 
     def set_password(self, service: str, username: str, password: str) -> None:
-        """Record a stored secret or raise like a locked keychain."""
+        """Record a stored secret or raise like a locked/broken keychain."""
+        if self._set_error is not None:
+            raise self._set_error
         if self._raise_on_set:
             raise _FakeKeyringError("keychain locked")
         self.set_calls.append((service, username, password))
@@ -706,6 +710,36 @@ def test_keyring_set_password_failure_is_reason_coded() -> None:
 
     error = exc_info.value
     assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "set_error",
+    [
+        OSError("DBus session unavailable"),
+        RuntimeError("partially-configured keychain stack"),
+    ],
+)
+def test_keyring_non_keyring_error_is_reason_coded(set_error: BaseException) -> None:
+    """Verify non-``KeyringError`` write failures are translated, not propagated.
+
+    Real keyring backends can raise standard exceptions that do not inherit from
+    ``KeyringError`` (``OSError`` when DBus is unavailable, a bare ``RuntimeError``
+    from a partially-configured stack). These must surface as a reason-coded
+    ``CredentialError`` with the original type preserved, never crash the caller,
+    and never leak the secret.
+    """
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule(set_error=set_error))
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "keyring", "error_type": type(set_error).__name__}
+    assert error.__cause__ is set_error
     assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 

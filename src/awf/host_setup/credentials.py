@@ -232,10 +232,17 @@ class KeyringCredentialBackend:
         account = _require_safe_identifier(request.account, field="account")
         secret = _pull_secret(request)
         service = f"{self._service_prefix}/{provider}"
-        keyring_errors = _keyring_runtime_errors(module)
         try:
             module.set_password(service, account, secret)
-        except keyring_errors as exc:
+        except Exception as exc:
+            # The resolved keyring backend is an unbounded third-party surface
+            # (SecretService/DBus, macOS Keychain, KWallet, ...): besides
+            # ``keyring.errors.KeyringError`` it can raise standard exceptions
+            # such as ``OSError`` (DBus unavailable) or a bare ``RuntimeError``
+            # from a half-configured stack. Translate every non-fatal failure
+            # into a reason-coded ``CredentialError`` so callers degrade to
+            # env-ref instead of crashing; ``BaseException`` (KeyboardInterrupt,
+            # SystemExit, CancelledError) still propagates.
             raise CredentialError(
                 reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
                 message="The keyring backend rejected the credential write.",
