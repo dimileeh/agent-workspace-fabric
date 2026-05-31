@@ -1688,6 +1688,115 @@ def test_run_system_checks_falls_back_to_postgres_default_when_override_absent(
         assert captured["postgres_port"] == system_checks.DEFAULT_POSTGRES_HOST_PORT, repr(blank)
 
 
+# --- API/Postgres host port collision ------------------------------------
+
+
+@pytest.mark.unit
+def test_check_host_port_conflict_blocks_when_ports_equal() -> None:
+    """A shared API/Postgres host port is a hard blocker carrying both ports.
+
+    The local-service Compose stack publishes the API on every interface
+    (``${AWF_API_HOST_PORT:-8000}:8000`` -> ``0.0.0.0``) and Postgres on loopback
+    (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``). ``check_ports`` and
+    ``check_postgres_port`` bind and release each port independently, so both pass
+    in isolation when the two resolve to the same value, yet ``awf start`` asks
+    Docker to reserve both at once and a wildcard 0.0.0.0 reservation conflicts
+    with a 127.0.0.1 reservation on the same port. The cross-check must block.
+    """
+    result = system_checks.check_host_port_conflict(5433, 5433)
+
+    assert result is not None
+    assert result.name == "port_conflict"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["api_port"] == 5433
+    assert result.data["postgres_port"] == 5433
+    assert "5433" in result.summary
+    assert result.fix is not None
+    assert "AWF_API_HOST_PORT" in result.fix
+    assert "AWF_POSTGRES_HOST_PORT" in result.fix
+
+
+@pytest.mark.unit
+def test_check_host_port_conflict_passes_when_ports_differ() -> None:
+    """Distinct API/Postgres host ports add no readiness line (the common case)."""
+    assert system_checks.check_host_port_conflict(8000, 5433) is None
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_when_api_and_postgres_host_ports_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both single-port probes pass yet the cross-check blocks on a shared port.
+
+    Setting ``AWF_API_HOST_PORT`` to the default Postgres port (5433) makes both
+    services publish the same host port, which ``awf start`` cannot reserve. The
+    per-port probes each report FREE in isolation, so only the cross-check catches
+    the collision; ``run_system_checks`` must surface it as a blocker.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"AWF_API_HOST_PORT": "5433"},
+    )
+
+    conflict = next(result for result in results if result.name == "port_conflict")
+    assert conflict.level is SetupCheckLevel.BLOCKED
+    assert conflict.data["api_port"] == 5433
+    assert conflict.data["postgres_port"] == 5433
+    # The cross-check is additive: the standalone port probes still run.
+    assert any(result.name == "ports" for result in results)
+    assert any(result.name == "postgres_port" for result in results)
+    # It sits with the other port checks, before disk.
+    names = [result.name for result in results]
+    assert names.index("port_conflict") == names.index("postgres_port") + 1
+    assert names.index("port_conflict") < names.index("disk")
+
+
+@pytest.mark.unit
+def test_run_system_checks_omits_port_conflict_when_ports_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct API/Postgres host ports add no ``port_conflict`` result."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={},
+    )
+
+    assert all(result.name != "port_conflict" for result in results)
+
+
+@pytest.mark.unit
+def test_run_system_checks_skips_port_conflict_when_an_override_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid port override blocks on its own; the cross-check is skipped.
+
+    When ``AWF_API_HOST_PORT`` cannot be parsed there is no resolved API port to
+    compare against Postgres, so the collision cross-check must not run (and must
+    not crash) -- the override blocker already wedges readiness, and the operator
+    must fix the malformed value before any collision is meaningful.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"AWF_API_HOST_PORT": "abc", "AWF_POSTGRES_HOST_PORT": "5433"},
+    )
+
+    assert all(result.name != "port_conflict" for result in results)
+    ports = next(result for result in results if result.name == "ports")
+    assert ports.level is SetupCheckLevel.BLOCKED
+
+
 def _patch_probes_capture_disk_path(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, object],

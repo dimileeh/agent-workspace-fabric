@@ -981,6 +981,44 @@ def check_postgres_host_port_override(raw: str) -> SetupCheckResult:
     )
 
 
+def check_host_port_conflict(api_port: int, postgres_port: int) -> SetupCheckResult | None:
+    """Block when the API and Postgres host ports resolve to the same value.
+
+    The local-service Compose stack publishes the API on every interface
+    (``${AWF_API_HOST_PORT:-8000}:8000`` -> ``0.0.0.0``) and Postgres on loopback
+    (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``). :func:`check_ports` and
+    :func:`check_postgres_port` each bind *and release* their port before the
+    other runs, so when both resolve to the same value each still reports the port
+    free -- neither holds it while the other probes. ``awf start`` instead asks
+    Docker to reserve both host ports at once, and a wildcard ``0.0.0.0``
+    reservation always conflicts with a ``127.0.0.1`` reservation on the same
+    port, so Docker refuses to publish both and start fails.
+
+    Returns ``None`` when the two ports differ (the common case -- no extra
+    readiness line is emitted) and a BLOCKED result when they collide, closing the
+    dry-run-passes / start-fails gap the independent single-port probes leave open.
+    """
+    if api_port != postgres_port:
+        return None
+    return SetupCheckResult(
+        name="port_conflict",
+        level=SetupCheckLevel.BLOCKED,
+        summary=f"API and Postgres host ports both resolve to {api_port}.",
+        detail=(
+            f"The local-service Compose stack publishes the API on 0.0.0.0:{api_port} "
+            "(${AWF_API_HOST_PORT:-8000}:8000) and Postgres on "
+            f"127.0.0.1:{postgres_port} (127.0.0.1:${{AWF_POSTGRES_HOST_PORT:-5433}}:5432). The "
+            "host-port probes bind and release each port independently, so both pass in "
+            "isolation, but awf start asks Docker to reserve both host ports at once and a "
+            "wildcard 0.0.0.0 reservation conflicts with a 127.0.0.1 reservation on the same "
+            "port, so Docker refuses to publish both and start fails."
+        ),
+        fix="Set AWF_API_HOST_PORT and AWF_POSTGRES_HOST_PORT to different ports (the defaults "
+        "are 8000 and 5433), then re-run awf setup --dry-run.",
+        data={"api_port": api_port, "postgres_port": postgres_port, "conflict": True},
+    )
+
+
 def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
     """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unusable.
 
@@ -1139,17 +1177,29 @@ def run_system_checks(
     than a duplicate compose failure for the same root cause.
     """
     invalid_api_host_port = _invalid_api_host_port_override(port=port, environ=environ)
+    resolved_port: int | None = None
     if invalid_api_host_port is not None:
         ports_check = check_api_host_port_override(invalid_api_host_port)
     else:
         resolved_port = _resolve_api_host_port(port=port, environ=environ)
         ports_check = check_ports(resolved_port)
     invalid_postgres_host_port = _invalid_postgres_host_port_override(environ=environ)
+    resolved_postgres_port: int | None = None
     if invalid_postgres_host_port is not None:
         postgres_port_check = check_postgres_host_port_override(invalid_postgres_host_port)
     else:
         resolved_postgres_port = _resolve_postgres_host_port(environ=environ)
         postgres_port_check = check_postgres_port(resolved_postgres_port)
+    # Cross-check the two resolved host ports: each single-port probe binds and
+    # releases independently, so a same-port collision passes both yet still
+    # breaks awf start (Docker cannot reserve 0.0.0.0 and 127.0.0.1 on one port).
+    # Skip when either override is invalid -- the override blocker already fires
+    # and there is no resolved port to compare.
+    port_conflict_check = (
+        check_host_port_conflict(resolved_port, resolved_postgres_port)
+        if resolved_port is not None and resolved_postgres_port is not None
+        else None
+    )
     invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
     if invalid_work_dir is not None:
         disk_check = check_host_work_dir_override(invalid_work_dir)
@@ -1173,6 +1223,7 @@ def run_system_checks(
         check_python_runtime(),
         ports_check,
         postgres_port_check,
+        *([port_conflict_check] if port_conflict_check is not None else []),
         disk_check,
         check_shell_path(),
         check_local_capacity(),
@@ -1358,6 +1409,7 @@ __all__ = [
     "check_docker",
     "check_gh",
     "check_git",
+    "check_host_port_conflict",
     "check_host_work_dir_override",
     "check_local_capacity",
     "check_ports",
