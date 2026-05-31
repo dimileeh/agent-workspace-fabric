@@ -102,9 +102,18 @@ class TestFindHostPortConflicts:
         assert conflicts == []
 
     @pytest.mark.asyncio
-    async def test_terminal_workspace_not_blocking(self, session: AsyncSession) -> None:
+    async def test_terminal_workspace_with_runtime_released_not_blocking(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A completed workspace whose runtime has been released does not block host ports.
+
+        Once the terminal-runtime release sweep records a
+        ``workspace.terminal_runtime_released`` event, the compose stack
+        is gone and the host port is free for reuse.
+        """
         repo = WorkspaceRepository(session)
-        await _make_workspace(
+        ws = await _make_workspace(
             session,
             repo,
             status=WorkspaceStatus.completed,
@@ -118,6 +127,12 @@ class TestFindHostPortConflicts:
                 ]
             },
         )
+        await repo.add_event(
+            ws,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+        )
+        await session.commit()
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[8080],
             excluding_workspace_id=None,
@@ -227,22 +242,23 @@ class TestFindHostPortConflicts:
         assert conflicts == []
 
     @pytest.mark.asyncio
-    async def test_truly_terminal_statuses_excluded(self, session: AsyncSession) -> None:
-        """Only truly stack-free statuses are excluded from port conflict detection.
+    async def test_terminal_statuses_with_runtime_released_excluded(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Terminal workspaces whose runtime has been released are excluded from port conflict detection.
 
-        ``failed`` and ``cancelled`` workspaces retain their compose stacks for
-        operator inspection until cleanup/destroy releases the containers, so
-        they must still participate in host-port conflict detection.
+        Once ``workspace.terminal_runtime_released`` is recorded, the
+        compose stack is gone and the host port is free.  This applies to
+        ``completed`` and ``destroyed`` workspaces alike.
         """
         repo = WorkspaceRepository(session)
         terminal_statuses = [
             WorkspaceStatus.completed,
-            # destroying is NOT terminal for port conflicts — containers
-            # may still hold host ports until cleanup finishes.
             WorkspaceStatus.destroyed,
         ]
         for status in terminal_statuses:
-            await _make_workspace(
+            ws = await _make_workspace(
                 session,
                 repo,
                 status=status,
@@ -256,6 +272,12 @@ class TestFindHostPortConflicts:
                     ]
                 },
             )
+            await repo.add_event(
+                ws,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+            )
+        await session.commit()
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[8080],
             excluding_workspace_id=None,
@@ -267,7 +289,7 @@ class TestFindHostPortConflicts:
         self,
         session: AsyncSession,
     ) -> None:
-        """A failed workspace retains its compose stack and blocks host ports.
+        """A failed workspace whose runtime has not been released blocks host ports.
 
         When a workspace fails after its compose stack has started, it transitions
         to ``failed`` without tearing the stack down. Because its containers may
@@ -313,6 +335,141 @@ class TestFindHostPortConflicts:
             session,
             repo,
             status=WorkspaceStatus.cancelled,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == ws.id
+
+    @pytest.mark.asyncio
+    async def test_completed_workspace_without_release_blocks_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A completed workspace whose runtime has not been released blocks host ports.
+
+        A ``completed`` workspace may still have a running compose stack
+        until the terminal-runtime release sweep tears it down.  Without
+        a ``workspace.terminal_runtime_released`` event, the host port is
+        still in use and must block new workspaces.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.completed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == ws.id
+
+    @pytest.mark.asyncio
+    async def test_failed_workspace_with_runtime_released_not_blocking(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A failed workspace whose runtime has been released does not block host ports.
+
+        After the terminal-runtime release sweep tears down the compose stack
+        and records ``workspace.terminal_runtime_released``, the host port is
+        free for reuse even though the workspace status remains ``failed``.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+        )
+        await session.commit()
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_workspace_with_runtime_released_not_blocking(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A cancelled workspace whose runtime has been released does not block host ports."""
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.cancelled,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+        )
+        await session.commit()
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_destroyed_workspace_without_release_blocks_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A destroyed workspace whose runtime has not been released blocks host ports."""
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.destroyed,
             task_policy={
                 "companions": [
                     {

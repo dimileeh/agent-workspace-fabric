@@ -46,6 +46,7 @@ from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     HOST_PORT_CONFLICT_STATUSES,
+    HOST_PORT_TERMINAL_RELEASE_STATUSES,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
@@ -512,10 +513,17 @@ class WorkspaceRepository:
     ) -> builtins.list[HostPortConflict]:
         """Find active workspaces whose companions or profile services claim any of the given host ports.
 
-        A port conflict exists when a non-terminal workspace's companion
-        or profile service ``ports`` list includes
-        ``[container_port, host_port]`` where ``host_port`` appears in
-        *host_ports*.
+        A port conflict exists when a workspace's companion or profile
+        service ``ports`` list includes ``[container_port, host_port]``
+        where ``host_port`` appears in *host_ports*.
+
+        Active and destroying workspaces always conflict because their
+        compose stacks are still running.  Terminal workspaces (failed,
+        cancelled, completed, destroyed) conflict only when their
+        runtime has not been released yet — i.e. no
+        ``workspace.terminal_runtime_released`` event exists for that
+        workspace.  Once the terminal-runtime release sweep records the
+        event, the compose stack is gone and the host port is free.
 
         NOTE: A small TOCTOU window exists between this SELECT and the
         subsequent INSERT.  The caller must handle the resulting 409
@@ -524,9 +532,23 @@ class WorkspaceRepository:
         if not host_ports:
             return []
 
+        _terminal_runtime_released_event = "workspace.terminal_runtime_released"
+        terminal_runtime_released_exists = (
+            select(WorkspaceEvent.id)
+            .where(WorkspaceEvent.workspace_id == Workspace.id)
+            .where(WorkspaceEvent.event_type == _terminal_runtime_released_event)
+            .exists()
+        )
+
         host_ports_set = set(host_ports)
         stmt = select(Workspace.id, Workspace.task_policy, Workspace.resolved_profile).where(
-            Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES)
+            or_(
+                Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES),
+                and_(
+                    Workspace.status.in_(HOST_PORT_TERMINAL_RELEASE_STATUSES),
+                    ~terminal_runtime_released_exists,
+                ),
+            )
         )
 
         if excluding_workspace_id is not None:
