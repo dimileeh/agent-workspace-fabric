@@ -1037,6 +1037,18 @@ def _mkdir_secure(directory: Path) -> None:
     # only ever lands in a directory AWF created 0o700 or one already locked down —
     # never in (nor after mutating) a shared directory AWF does not own.
     _reject_group_or_world_accessible_dir(directory)
+    # Owner-private *mode* bits do not pin *who* owns the leaf. Run unprivileged a
+    # 0o700 dir owned by another user is unusable anyway (the later write fails
+    # ``EACCES``), but AWF's containers run as root, and root bypasses the permission
+    # bits: it will write the credential file into a 0o700 secrets dir owned by another
+    # local user, whose owner then controls the entries within and can delete or replace
+    # the ``plain-file://`` target after setup so the stored ref no longer points to
+    # AWF-controlled storage (PRRT_kwDOSJAM6s6F83VO). Require the leaf be owned by root
+    # or the current (effective) user — the same trusted-ownership bar
+    # ``_reject_writable_ancestor`` enforces on every pre-existing ancestor
+    # (PRRT_kwDOSJAM6s6F83VM); a leaf AWF created this call is effective-user-owned and
+    # so passes unchanged.
+    _reject_untrusted_owner_dir(directory)
 
 
 def _reject_group_or_world_accessible_dir(directory: Path) -> None:
@@ -1056,6 +1068,38 @@ def _reject_group_or_world_accessible_dir(directory: Path) -> None:
         raise PermissionError(
             errno.EPERM,
             "Secrets directory is group- or world-accessible and could not be hardened to 0700.",
+            str(directory),
+        )
+
+
+def _reject_untrusted_owner_dir(directory: Path) -> None:
+    """Refuse a leaf secrets dir owned by anyone but root or the effective user, on POSIX.
+
+    ``_reject_group_or_world_accessible_dir`` confirms the leaf is owner-private
+    (0o700), but mode bits alone do not pin *who* owns it. Run unprivileged that
+    suffices — writing into a 0o700 directory owned by another user fails ``EACCES``,
+    so AWF can only ever reuse one it owns — but AWF's containers run as root, and root
+    bypasses the permission bits: it will write the credential file into a 0o700 secrets
+    dir owned by another local user. That owner controls the entries within their own
+    directory, so after setup they can delete or replace the ``plain-file://`` target
+    (for example with a file or symlink they control), leaving the stored credential ref
+    pointing at storage AWF no longer controls (PRRT_kwDOSJAM6s6F83VO). A pre-existing
+    leaf must therefore be owned by root or the current (effective) user — the same
+    trusted-ownership bar ``_reject_writable_ancestor`` already enforces on every
+    pre-existing *ancestor* (PRRT_kwDOSJAM6s6F83VM). A leaf AWF created this call is owned
+    by the effective user and so passes unchanged. ``directory`` has been confirmed a
+    real (non-symlink) directory by the guards in ``_mkdir_secure``, so ``stat`` reflects
+    the directory itself rather than a redirected link target. POSIX-only: the ownership
+    and permission-bypass semantics do not apply off POSIX, where ``_chmod_best_effort``
+    is itself a no-op (and ``os.geteuid`` may be absent), so the check is skipped.
+    """
+    if os.name != "posix":
+        return
+    if directory.stat().st_uid not in (0, os.geteuid()):
+        raise PermissionError(
+            errno.EPERM,
+            "Secrets directory is owned by another local user who could replace the "
+            "stored credential file after setup.",
             str(directory),
         )
 

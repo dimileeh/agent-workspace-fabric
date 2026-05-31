@@ -524,6 +524,65 @@ def test_write_secret_file_refuses_chmodable_preexisting_shared_dir(tmp_path: Pa
     assert "tok-value" not in str(excinfo.value)
 
 
+def _stat_owned_by(target: Path, uid: int) -> object:
+    """Return a ``Path.stat`` replacement reporting ``target`` as owned by ``uid``.
+
+    The ``tmp_path`` tree is owned by the test process, so to model a secrets dir
+    owned by *another* user without privileges we rewrite only the ``st_uid`` field of
+    that one directory's stat result, leaving every other path's stat untouched.
+    ``list(stat_result)`` yields the ten basic sequence fields with ``st_uid`` at
+    index 4, which ``os.stat_result`` rebuilds.
+    """
+    real_stat = Path.stat
+
+    def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        info = real_stat(self, *args, **kwargs)
+        if self == target:
+            fields = list(info)
+            fields[4] = uid  # st_uid
+            return os.stat_result(fields)
+        return info
+
+    return fake_stat
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(
+    os.name != "posix", reason="ownership/permission-bypass semantics are POSIX-specific"
+)
+def test_write_secret_file_refuses_preexisting_leaf_owned_by_other_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing 0o700 secrets dir owned by *another* local user is refused end-to-end.
+
+    Regression for PRRT_kwDOSJAM6s6F83VO: when ``secrets_dir`` points at an existing
+    owner-private (0o700) directory owned by another local user and AWF runs elevated
+    (root), the mode-only leaf check accepts it and root — bypassing the permission
+    bits — writes the credential file inside. That owner controls the entries within
+    their own directory, so after setup they can delete or replace the ``plain-file://``
+    target with a file or symlink they control, and the stored credential ref no longer
+    points to AWF-controlled secret storage. ``_mkdir_secure`` must reject a leaf owned
+    by anyone but root or the effective user *before* any secret is written, leaving the
+    unrelated directory untouched. The synthetic ``st_uid`` rewrite models the foreign
+    owner without needing a second real uid.
+    """
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir(mode=0o700)  # owner-private: passes the mode-only leaf check
+    other_uid = os.geteuid() + 1  # neither root (0) nor the current effective user
+    monkeypatch.setattr(Path, "stat", _stat_owned_by(secrets_dir, other_uid))
+    target = secrets_dir / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # We fail closed before the write: no secret in the foreign-owned dir, left untouched.
+    assert not target.exists()
+    assert list(secrets_dir.iterdir()) == []
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
+    assert "tok-value" not in str(excinfo.value)
+
+
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 def test_write_secret_file_refuses_writable_ancestor_of_secrets_dir(tmp_path: Path) -> None:

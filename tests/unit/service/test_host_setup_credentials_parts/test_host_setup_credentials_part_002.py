@@ -730,6 +730,91 @@ def test_reject_writable_ancestor_exempts_root_owned_sticky_dir(
     credentials._reject_writable_ancestor(ancestor)
 
 
+@pytest.mark.unit
+@pytest.mark.skipif(
+    os.name != "posix", reason="ownership/permission-bypass semantics are POSIX-specific"
+)
+def test_reject_untrusted_owner_dir_refuses_leaf_owned_by_other_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pre-existing owner-private (0o700) leaf owned by *another* local user is refused.
+
+    Regression for PRRT_kwDOSJAM6s6F83VO: the leaf secrets dir is accepted on its
+    *mode* alone (``_reject_group_or_world_accessible_dir``), but owner-private bits do
+    not pin who owns it. AWF's containers run as root, and root bypasses the permission
+    bits — it will write the credential file into a 0o700 secrets dir owned by another
+    local user, whose owner then controls the entries within and can delete or replace
+    the ``plain-file://`` target after setup so the stored ref no longer points to
+    AWF-controlled storage. The leaf must be owned by root or the current euid; here it
+    is reported owned by a synthetic third user (neither root nor the current euid),
+    which the pre-fix mode-only check wrongly treated as safe.
+    """
+    leaf = tmp_path / "secrets"
+    leaf.mkdir(mode=0o700)  # owner-private: passes the mode-only leaf check
+    other_uid = os.geteuid() + 1  # neither root (0) nor the current effective user
+    monkeypatch.setattr(Path, "stat", _stat_owned_by(leaf, other_uid))
+
+    with pytest.raises(PermissionError):
+        credentials._reject_untrusted_owner_dir(leaf)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="ownership semantics are POSIX-specific")
+def test_reject_untrusted_owner_dir_accepts_root_owned_leaf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A root-owned leaf secrets dir is accepted, not over-refused.
+
+    Complement to the not-owned refusal (PRRT_kwDOSJAM6s6F83VO): the ownership check
+    must not reject the legitimate case where an operator pre-creates the secrets dir
+    as root. Reporting the leaf as root-owned (robust whether or not the test itself
+    runs as root) must leave it accepted — no exception.
+    """
+    leaf = tmp_path / "secrets"
+    leaf.mkdir(mode=0o700)
+    monkeypatch.setattr(Path, "stat", _stat_owned_by(leaf, 0))
+
+    credentials._reject_untrusted_owner_dir(leaf)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="ownership semantics are POSIX-specific")
+def test_reject_untrusted_owner_dir_accepts_current_user_leaf(tmp_path: Path) -> None:
+    """A leaf owned by the current effective user (the common reuse case) is accepted.
+
+    The default ``~/.awf/secrets`` and any leaf AWF created this call are owned by the
+    effective user; the ownership guard must let them through untouched, so the common
+    reuse path is unaffected by the not-owned refusal above.
+    """
+    leaf = tmp_path / "secrets"
+    leaf.mkdir(mode=0o700)  # owned by the test process == current euid
+
+    credentials._reject_untrusted_owner_dir(leaf)
+
+
+@pytest.mark.unit
+def test_reject_untrusted_owner_dir_skips_non_posix_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the leaf-ownership guard is a no-op on non-POSIX hosts.
+
+    The ownership/permission-bypass model the guard enforces is POSIX-specific
+    (``_chmod_best_effort`` is itself a no-op off POSIX, and ``os.geteuid`` may not
+    exist), so the guard must return before consulting ``st_uid``: a leaf reported
+    owned by another user — fatal on POSIX — is accepted off it.
+    """
+    leaf = tmp_path / "secrets"
+    leaf.mkdir(mode=0o700)
+    foreign_uid = os.geteuid() + 1  # fatal on POSIX, must be ignored off it
+    monkeypatch.setattr(Path, "stat", _stat_owned_by(leaf, foreign_uid))
+    monkeypatch.setattr(credentials.os, "name", "nt")
+
+    credentials._reject_untrusted_owner_dir(leaf)
+
+
 # --------------------------------------------------------------------------- #
 # 12. Credential refs stay within the ProviderConfig storage cap.
 # --------------------------------------------------------------------------- #
