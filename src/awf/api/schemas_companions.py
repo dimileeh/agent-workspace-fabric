@@ -30,7 +30,7 @@ _NAMED_VOLUME_SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _YAML_UNSAFE_COMPANION_PATH_PATTERN = re.compile(r'["\\\x00-\x1f\x7f-\x9f]')
 _ENVIRONMENT_SCHEMA: dict[str, Any] = {
     "propertyNames": {
-        "maxLength": 256,
+        "maxLength": ENV_KEY_MAX_LENGTH,
         "minLength": 1,
         "pattern": _ENVIRONMENT_KEY_PATTERN_TEXT,
     },
@@ -43,7 +43,7 @@ _ENVIRONMENT_SCHEMA: dict[str, Any] = {
 }
 _ENVIRONMENT_SECRETS_SCHEMA: dict[str, Any] = {
     "propertyNames": {
-        "maxLength": 256,
+        "maxLength": ENV_KEY_MAX_LENGTH,
         "minLength": 1,
         "pattern": _ENVIRONMENT_KEY_PATTERN_TEXT,
     },
