@@ -790,7 +790,11 @@ def _write_secret_file(target: Path, secret: str) -> None:
         # unlikely, but ``O_EXCL`` is cheap defence-in-depth for a secrets write.
         # A pre-existing temp path then raises ``FileExistsError`` (an ``OSError``),
         # cleaned up and reason-coded by the outer handler below.
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_EXCL, 0o600)
+        # ``O_TRUNC`` is intentionally omitted: ``O_EXCL | O_CREAT`` already
+        # guarantees a freshly created (and therefore empty) inode, so truncation
+        # would be a no-op. Keeping the flag set minimal lets every flag explain
+        # why it is present.
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         # ``os.fdopen`` takes ownership of ``fd`` only once it returns; if it
         # raises (e.g. an invalid mode or an implementation-level error) the raw
         # descriptor would leak. CPython closes it internally on an ``os.fdopen``
