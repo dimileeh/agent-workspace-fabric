@@ -901,7 +901,14 @@ async def _mark_failed_from_monitor_handoff_setup_failure(
     }
     if setup_failure.details is not None:
         mark_failed_kwargs["details"] = setup_failure.details
-    await self._mark_failed(**mark_failed_kwargs)
+    try:
+        await self._mark_failed(**mark_failed_kwargs)
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_setup_failure_mark_failed_failed",
+            workspace_id=workspace_id,
+            setup_failure_reason_code=setup_failure.reason_code,
+        )
 
 
 async def _build_handoff_pr_monitor(
@@ -1061,6 +1068,8 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
+    # Profile setup installs/repairs the monitor toolchain; source/target
+    # divergence can still change while it runs, so re-count before PR adoption.
     try:
         commits_ahead = await count_commits_ahead(
             runner=self._runner,

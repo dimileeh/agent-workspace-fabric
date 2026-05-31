@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.control.executor import monitor_handoff as monitor_handoff_module
 from awf.control.executor.constants import (
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
@@ -880,6 +881,58 @@ class TestExecutorMonitorHandoffSetup:
         fallback_failure = mark_failed_calls[1]
         assert fallback_failure["reason_code"] == PR_MONITOR_SETUP_FAILED_REASON_CODE
         assert "details" not in fallback_failure
+
+    @pytest.mark.unit
+    async def test_mark_failed_from_monitor_handoff_setup_failure_swallows_mark_failed_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mark_failed_calls: list[dict[str, Any]] = []
+        log_events: list[tuple[str, dict[str, Any]]] = []
+
+        class _Logger:
+            def exception(self, event: str, **kwargs: Any) -> None:
+                log_events.append((event, kwargs))
+
+        class _Executor:
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+                raise RuntimeError("workspace failure state unavailable")
+
+        monkeypatch.setattr(monitor_handoff_module, "_log", _Logger())
+
+        setup_failure = _MonitorHandoffSetupFailureError(
+            failure_reason=FailureReason.service_startup_failure,
+            message="profile setup failed: uv sync --extra dev",
+            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            details={"phase": "setup"},
+        )
+
+        await monitor_handoff_module._mark_failed_from_monitor_handoff_setup_failure(
+            _Executor(),
+            workspace_id="ws-final-fail",
+            setup_failure=setup_failure,
+        )
+
+        assert mark_failed_calls == [
+            {
+                "workspace_id": "ws-final-fail",
+                "from_status": WorkspaceStatus.running,
+                "failure_reason": FailureReason.service_startup_failure,
+                "message": "profile setup failed: uv sync --extra dev",
+                "reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
+                "details": {"phase": "setup"},
+            }
+        ]
+        assert log_events == [
+            (
+                "executor.monitor_handoff_setup_failure_mark_failed_failed",
+                {
+                    "workspace_id": "ws-final-fail",
+                    "setup_failure_reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
+                },
+            )
+        ]
 
     @pytest.mark.unit
     async def test_handoff_setup_cleanup_failure_marks_infrastructure_failure(
