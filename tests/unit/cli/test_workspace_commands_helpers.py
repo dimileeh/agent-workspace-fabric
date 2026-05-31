@@ -181,6 +181,7 @@ def test_workspace_create_builds_minimal_development_payload(
 
     assert captured["method"] == "POST"
     assert captured["path"] == "/v1/workspaces"
+    assert captured["headers"] == {}
     assert captured["json"] == {
         "repo": {
             "url": "git@example.com:repo/app.git",

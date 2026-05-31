@@ -35,7 +35,10 @@ def merge_companion_env(
         Each must have a ``name`` key.
     env_from:
         List of (companion_name, file_path) pairs from --companion-env-from.
-        file_path is already expanded.
+        file_path is already expanded. When multiple entries target the same
+        companion, earlier entries take precedence over later ones (first
+        file wins); explicit ``--companion-json`` values always win over all
+        files.
     env_exclude:
         List of (companion_name, excluded_keys) pairs from
         --companion-env-exclude.
