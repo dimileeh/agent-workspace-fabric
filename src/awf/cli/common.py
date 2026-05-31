@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -219,14 +220,18 @@ async def _run_companion_image_prune(retention_hours: int) -> dict[str, object]:
     from awf.node.companion_images import companion_image_prune_command
 
     command = companion_image_prune_command(retention_hours)
-    try:
-        result = subprocess.run(
+
+    def _run_prune() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
             timeout=120,
         )
+
+    try:
+        result = await asyncio.to_thread(_run_prune)
     except subprocess.TimeoutExpired:
         return {
             "status": "failed",

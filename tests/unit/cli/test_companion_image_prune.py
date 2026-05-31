@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 
 import pytest
 
@@ -33,6 +34,26 @@ async def test_prune_success_reports_reclaimed_output(monkeypatch: pytest.Monkey
     assert result["output"] == "Total reclaimed space: 2GB"
     assert captured["cmd"][:3] == ["docker", "image", "prune"]
     assert "until=168h" in captured["cmd"]
+
+
+@pytest.mark.unit
+async def test_prune_runs_subprocess_off_the_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The blocking ``subprocess.run`` must be offloaded so it cannot freeze the loop."""
+    event_loop_thread = threading.get_ident()
+    observed: dict[str, int] = {}
+
+    def _run(*_a: object, **_k: object) -> _Result:
+        observed["thread"] = threading.get_ident()
+        return _Result(0, stdout="Total reclaimed space: 0B\n")
+
+    monkeypatch.setattr(cli_common.subprocess, "run", _run)
+
+    result = await cli_common._run_companion_image_prune(24)
+
+    assert result["status"] == "succeeded"
+    assert observed["thread"] != event_loop_thread
 
 
 @pytest.mark.unit
