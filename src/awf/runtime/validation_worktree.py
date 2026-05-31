@@ -368,6 +368,9 @@ async def cleanup_validation_worktree_side_effects(
         run_git=run_git,
         worktree_path=worktree_path,
     )
+    if check.skipped:
+        return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
+
     if check.clean:
         if restore_ref is not None:
             head_check = await _verify_head_unchanged(restore_ref=restore_ref)
