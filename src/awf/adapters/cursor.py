@@ -22,17 +22,22 @@ CURSOR_DEFAULT_THINKING_MODEL = "sonnet-4-thinking"
 
 @register_adapter
 class CursorAdapter(AgentAdapter):
+    """Run Cursor's headless CLI inside an AWF workspace container."""
+
     runtime = AgentRuntime.cursor
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the AWF runtime enum for Cursor workspaces."""
         return AgentRuntime.cursor
 
     def get_provider(self, model: str | None) -> str:
+        """Report Cursor as the provider regardless of selected model."""
         del model
         return "cursor"
 
     def _cli_args(self, *, model: str | None) -> list[str]:
+        """Build the cursor-agent print-mode command arguments."""
         selected_model = _cursor_model_for_effort(model=model, effort=self._default_effort)
         args = ["cursor-agent", "-p", "--force"]
         if selected_model:

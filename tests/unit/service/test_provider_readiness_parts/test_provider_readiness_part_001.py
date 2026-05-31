@@ -332,6 +332,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
 def test_selected_cursor_preflight_requires_env_key_and_runtime_cli(
     tmp_path: Path,
 ) -> None:
+    """Cursor selected preflight requires both API-key auth and cursor-agent."""
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
         agent="cursor",
@@ -356,6 +357,7 @@ def test_selected_cursor_preflight_requires_env_key_and_runtime_cli(
 
 @pytest.mark.unit
 def test_selected_cursor_preflight_blocks_missing_env_key(tmp_path: Path) -> None:
+    """Cursor selected preflight blocks launch when API-key auth is absent."""
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
         agent="cursor",
@@ -377,9 +379,11 @@ def test_selected_cursor_preflight_blocks_missing_env_key(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_selected_cursor_preflight_blocks_missing_runtime_cli(tmp_path: Path) -> None:
+    """Cursor selected preflight blocks launch when cursor-agent is missing."""
     secret = "cursor_missing_cli_secret"
 
     def _run(args: list[str], **kwargs: object) -> Any:
+        """Simulate a missing cursor-agent executable."""
         assert args[-1] == "command -v cursor-agent"
         assert kwargs["env"]["CURSOR_API_KEY"] == secret
         return _completed(returncode=1, stderr=f"cursor-agent missing with {secret}")
@@ -404,10 +408,12 @@ def test_selected_cursor_preflight_blocks_missing_runtime_cli(tmp_path: Path) ->
 
 @pytest.mark.unit
 def test_provider_readiness_cursor_env_auth_requires_runtime_cli(tmp_path: Path) -> None:
+    """Strict Cursor readiness reports a CLI probe failure after auth succeeds."""
     secret = "cursor_provider_readiness_secret"
     calls: list[list[str]] = []
 
     def _run(args: list[str], **kwargs: object) -> Any:
+        """Record the Cursor runtime probe and return a missing CLI result."""
         calls.append(args)
         assert args[-1] == "command -v cursor-agent"
         assert kwargs["env"]["CURSOR_API_KEY"] == secret
@@ -1084,6 +1090,7 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
     subprocess_calls: list[list[str]] = []
 
     def _run(args: list[str], **kwargs: object) -> Any:
+        """Return successful auth and runtime probes for all providers."""
         subprocess_calls.append(args)
         if args == ["gh", "auth", "status", "--hostname", "github.com"]:
             assert github_secret not in args
@@ -1336,6 +1343,7 @@ def test_provider_readiness_existing_file_providers_report_credential_scope(
 def test_provider_readiness_env_fallbacks_report_security_warnings(
     tmp_path: Path,
 ) -> None:
+    """Environment fallback auth reports static-token security warnings."""
     env = {
         "AWF_GITHUB_TOKEN": "ghp_env_fallback_secret",
         "OPENAI_API_KEY": "sk-proj-codex-fallback-secret",

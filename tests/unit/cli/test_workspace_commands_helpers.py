@@ -214,6 +214,7 @@ def test_workspace_create_accepts_cursor_agent(
     captured: dict[str, object] = {}
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        """Capture the Cursor create request for assertion."""
         captured["method"] = method
         captured["path"] = path
         captured.update(kwargs)
@@ -552,6 +553,7 @@ def test_workspace_adopt_pr_accepts_cursor_agent(
     captured: dict[str, object] = {}
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        """Capture the Cursor adopt-pr request for assertion."""
         captured["method"] = method
         captured["path"] = path
         captured.update(kwargs)

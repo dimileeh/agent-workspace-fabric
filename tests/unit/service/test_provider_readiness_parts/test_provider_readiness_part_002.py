@@ -280,10 +280,11 @@ def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
+    """Cursor env auth appears as a static service-env token."""
     payload = collect_agent_readiness(
         _settings(tmp_path),
         environ={"CURSOR_API_KEY": "cursor_env_secret"},
-        run_subprocess=_unexpected_subprocess,
+        run_subprocess=_runtime_cli_ok("cursor-agent"),
     )
 
     cursor = payload["providers"]["cursor"]
@@ -298,6 +299,7 @@ def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_provider_readiness_cursor_missing_env_fails_when_strict(tmp_path: Path) -> None:
+    """Strict Cursor readiness fails when no Cursor auth signal exists."""
     payload = collect_agent_readiness(
         _settings(tmp_path),
         environ={},

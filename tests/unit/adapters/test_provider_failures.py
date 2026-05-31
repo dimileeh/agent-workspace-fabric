@@ -33,6 +33,7 @@ def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None
 
 
 def test_classifies_cursor_auth_failure_and_redacts_secret_fingerprint() -> None:
+    """Cursor auth failures infer the Cursor provider and redact API keys."""
     classification = classify_provider_failure(
         reason_code=None,
         stdout="",
@@ -153,12 +154,14 @@ def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
 
 
 def test_cursor_provider_inference_requires_specific_cursor_marker() -> None:
+    """Cursor inference ignores generic cursor words without auth context."""
     assert infer_provider(model=None, output="cursor pagination failed") is None
     assert infer_provider(model=None, output="cursor auth failed") == "cursor"
     assert infer_provider(model=None, output="cursor api key was rejected") == "cursor"
 
 
 def test_generic_auth_prompt_with_cursor_word_is_not_provider_failure() -> None:
+    """Generic auth prompts with cursor text are not Cursor provider failures."""
     classification = classify_provider_failure(
         reason_code=None,
         stdout="",

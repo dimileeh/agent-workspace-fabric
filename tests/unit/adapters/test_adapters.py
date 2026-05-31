@@ -964,12 +964,14 @@ class TestCursorAdapter:
 
     @pytest.mark.unit
     def test_reports_cursor_provider(self) -> None:
+        """Cursor reports its own provider for model attribution."""
         adapter = CursorAdapter(runner=FakeCommandRunner())
 
         assert adapter.get_provider("sonnet-4-thinking") == "cursor"
 
     @pytest.mark.unit
     async def test_produces_correct_default_cli_invocation(self) -> None:
+        """The default Cursor run uses print mode, force, and text output."""
         runner = FakeCommandRunner()
         adapter = CursorAdapter(
             runner=runner,
@@ -1000,6 +1002,7 @@ class TestCursorAdapter:
 
     @pytest.mark.unit
     async def test_model_override_is_passed_without_prompt_argv(self) -> None:
+        """Explicit models are passed while prompts remain stdin-only."""
         runner = FakeCommandRunner()
         adapter = CursorAdapter(
             runner=runner,
@@ -1030,6 +1033,7 @@ class TestCursorAdapter:
 
     @pytest.mark.unit
     async def test_no_model_omits_model_flag_but_keeps_force_and_text_output(self) -> None:
+        """Cursor omits -m when no model or effort-derived model is selected."""
         runner = FakeCommandRunner()
         adapter = CursorAdapter(runner=runner)
 
@@ -1052,6 +1056,7 @@ class TestCursorAdapter:
 
     @pytest.mark.unit
     def test_effort_mapping_uses_documented_models_not_extra_flags(self) -> None:
+        """Effort mapping selects models instead of undocumented Cursor flags."""
         assert _cursor_model_for_effort(model="gpt-5", effort="xhigh") == "gpt-5"
         assert _cursor_model_for_effort(model="sonnet-4", effort="high") == "sonnet-4"
         assert _cursor_model_for_effort(model=None, effort=None) is None
@@ -1098,6 +1103,7 @@ async def test_all_adapters_keep_oversized_prompts_out_of_argv(
 
 @pytest.mark.unit
 def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
+    """Adapter CLI arg builders keep prompt payloads out of signatures."""
     for adapter_cls in (
         ClaudeCodeAdapter,
         CodexAdapter,
@@ -1139,6 +1145,7 @@ class TestRegistry:
 
     @pytest.mark.unit
     def test_all_adapters_registered(self) -> None:
+        """Every supported runtime resolves through the central registry."""
         runner = FakeCommandRunner()
 
         codex = get_adapter(AgentRuntime.codex, runner=runner)

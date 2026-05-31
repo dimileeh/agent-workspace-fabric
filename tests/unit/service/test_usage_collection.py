@@ -628,6 +628,7 @@ async def test_unsupported_provider_records_reason_without_running_ccusage(
 async def test_cursor_records_unsupported_source_until_ccusage_adds_cursor(
     tmp_path: Path,
 ) -> None:
+    """Cursor usage records unsupported ccusage source snapshots."""
     runner = FakeCommandRunner()
     collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
     ctx = await collector.start(

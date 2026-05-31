@@ -1066,6 +1066,7 @@ def _check_cursor(
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    """Check whether Cursor API-key auth is visible to the service."""
     signal = _first_present_env(environ, _CURSOR_ENV_KEYS)
     if signal is not None:
         return _provider_result(
@@ -1107,6 +1108,7 @@ def _check_cursor_readiness(
     run_subprocess: SubprocessRun,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    """Combine Cursor env auth with the runtime CLI availability probe."""
     cursor_result = _check_cursor(environ=environ, strict=strict, secrets=secrets)
     if cursor_result.get("ok") is not True:
         return cursor_result
@@ -1158,6 +1160,7 @@ def _check_cursor_readiness(
 
 
 def _runtime_cli_probe_payload(probe: Mapping[str, Any]) -> dict[str, str]:
+    """Return the public string fields from a runtime CLI probe result."""
     return {
         key: value
         for key in ("status", "reason_code", "message", "detail")
