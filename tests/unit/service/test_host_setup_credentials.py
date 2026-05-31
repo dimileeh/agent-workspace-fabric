@@ -460,9 +460,10 @@ def test_plain_file_fsyncs_secret_before_atomic_rename(
     sync_state: dict[str, bool] = {}
 
     def _recording_fsync(fd: int) -> None:
-        """Record that the temp file is synced while the target is still absent."""
-        sync_state["called"] = True
-        sync_state["target_absent_at_sync"] = not target.exists()
+        """Record the temp *file* sync, ignoring the post-rename directory sync."""
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            sync_state["called"] = True
+            sync_state["target_absent_at_sync"] = not target.exists()
         real_fsync(fd)
 
     monkeypatch.setattr(credentials.os, "fsync", _recording_fsync)
@@ -476,6 +477,47 @@ def test_plain_file_fsyncs_secret_before_atomic_rename(
 
     assert sync_state.get("called") is True
     assert sync_state.get("target_absent_at_sync") is True
+    assert target.read_text(encoding="utf-8") == _FAKE_TOKEN
+
+
+@pytest.mark.unit
+def test_plain_file_fsyncs_directory_after_atomic_rename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the secrets directory is fsynced after the atomic rename.
+
+    Fsyncing the temp file makes the secret's *data* durable, but the rename
+    that publishes ``target`` only mutates the parent directory entry. On a
+    filesystem mounted ``data=writeback`` a crash after the rename but before the
+    directory journal flushes can roll the rename back, leaving the freshly
+    minted ``plain-file://`` ref pointing at a path that reverted or vanished.
+    Sync the directory after the rename so the rename itself is durable, and
+    prove a directory fd is synced while the target is already in place.
+    """
+    secrets_dir = tmp_path / "secrets"
+    target = secrets_dir / "openai.default"
+    real_fsync = os.fsync
+    dir_sync_state: dict[str, bool] = {}
+
+    def _recording_fsync(fd: int) -> None:
+        """Record whether a *directory* fd is synced and the target's presence."""
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            dir_sync_state["dir_synced"] = True
+            dir_sync_state["target_present_at_dir_sync"] = target.exists()
+        real_fsync(fd)
+
+    monkeypatch.setattr(credentials.os, "fsync", _recording_fsync)
+
+    PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    ).create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    assert dir_sync_state.get("dir_synced") is True
+    assert dir_sync_state.get("target_present_at_dir_sync") is True
     assert target.read_text(encoding="utf-8") == _FAKE_TOKEN
 
 

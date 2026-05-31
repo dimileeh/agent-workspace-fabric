@@ -546,6 +546,31 @@ def test_chmod_best_effort_skips_non_posix_hosts(
     credentials._chmod_best_effort(target, 0o600)
 
 
+@pytest.mark.unit
+def test_fsync_dir_best_effort_skips_non_posix_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the directory-fsync helper is a no-op on non-POSIX hosts.
+
+    Directory fsync is POSIX-only — ``os.open`` on a directory fails on Windows —
+    so the helper must return before touching the filesystem off POSIX rather
+    than raising and tearing down a write whose data is already durable.
+    """
+    monkeypatch.setattr(credentials.os, "name", "nt")
+
+    def _fail_open(*args: object, **kwargs: object) -> int:
+        raise AssertionError("os.open must not be called on non-POSIX hosts")
+
+    def _fail_fsync(fd: int) -> None:
+        raise AssertionError("os.fsync must not be called on non-POSIX hosts")
+
+    monkeypatch.setattr(credentials.os, "open", _fail_open)
+    monkeypatch.setattr(credentials.os, "fsync", _fail_fsync)
+
+    credentials._fsync_dir_best_effort(tmp_path)
+
+
 # --------------------------------------------------------------------------- #
 # 12. Credential refs stay within the ProviderConfig storage cap.
 # --------------------------------------------------------------------------- #

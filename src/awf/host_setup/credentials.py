@@ -761,6 +761,15 @@ def _write_secret_file(target: Path, secret: str) -> None:
         _chmod_best_effort(tmp_path, 0o600)
         tmp_path.replace(target)
         _chmod_best_effort(target, 0o600)
+        # The fsync above made the secret *bytes* durable, but the rename only
+        # mutates the parent directory entry. On a filesystem mounted
+        # ``data=writeback`` a crash after the rename but before the directory
+        # journal flushes can roll the rename back, leaving the freshly minted
+        # ``plain-file://`` ref pointing at a path that reverted or vanished.
+        # Fsync the directory so the rename itself is durable. Best-effort: the
+        # write already succeeded, so a dir-sync failure must not be reported as
+        # a write failure (which would discard a credential that is on disk).
+        _fsync_dir_best_effort(secrets_dir)
     except OSError as exc:
         if tmp_path is not None:
             with suppress(OSError):
@@ -809,6 +818,25 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
         return
     with suppress(OSError):
         path.chmod(mode)
+
+
+def _fsync_dir_best_effort(directory: Path) -> None:
+    """Fsync ``directory`` so a contained rename's directory entry is durable.
+
+    Directory fsync is POSIX-only (on Windows ``os.open`` on a directory fails),
+    so it is a no-op off POSIX. It is also best-effort even on POSIX: the secret
+    file has already been written and renamed into place by the time this runs,
+    so a sync failure here is a durability-hardening miss, not a write failure —
+    surfacing it would wrongly discard a credential that is already on disk.
+    """
+    if os.name != "posix":
+        return
+    with suppress(OSError):
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 __all__ = [
