@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
 )
+from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome, _GitPushResult
 from awf.runtime.validation_types import (
     ValidationCommandResult,
@@ -376,6 +377,69 @@ async def test_pre_push_validation_toolchain_missing_bypasses_fix_pass(
     assert result.details["failing_returncode"] == 127
     runs = await _validation_runs(factory, workspace_id)
     assert runs[-1].reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_collects_failed_commands_once_for_reason_codes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-code decisions should share one failed-command traversal."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'7' * 40}\n")
+    validation = _FakeValidation(
+        _validation_result(
+            tmp_path,
+            ok=False,
+            command="ruff check .",
+            returncode=127,
+            reason_code="COMMAND_FAILED",
+            artifact_name="single_scan_ruff_missing",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=0,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    original_failed_commands = pre_push_validation_module._failed_pre_push_commands
+    failed_command_calls = 0
+
+    def _count_failed_commands(
+        result: ValidationResult,
+    ) -> tuple[ValidationCommandResult, ...]:
+        nonlocal failed_command_calls
+        failed_command_calls += 1
+        return original_failed_commands(result)
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_failed_pre_push_commands",
+        _count_failed_commands,
+    )
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert result.validation_reason_code == "COMMAND_FAILED"
+    assert failed_command_calls == 1
 
 
 @pytest.mark.unit

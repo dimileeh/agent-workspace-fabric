@@ -74,8 +74,15 @@ def _failed_pre_push_commands(result: ValidationResult) -> tuple[ValidationComma
 
 def _first_real_pre_push_failure(result: ValidationResult) -> ValidationCommandResult | None:
     """Return the first non-127 failure, giving real lint/test failures precedence."""
+    return _first_real_pre_push_failure_from_failures(_failed_pre_push_commands(result))
+
+
+def _first_real_pre_push_failure_from_failures(
+    failures: tuple[ValidationCommandResult, ...],
+) -> ValidationCommandResult | None:
+    """Return the first non-127 failure from an already collected failure tuple."""
     return next(
-        (failure for failure in _failed_pre_push_commands(result) if failure.returncode != 127),
+        (failure for failure in failures if failure.returncode != 127),
         None,
     )
 
@@ -88,7 +95,13 @@ def _pure_toolchain_missing_failure(
     Mixed results are treated as genuine validation failures so a real lint/test
     failure is not hidden behind an earlier missing-tool diagnostic.
     """
-    failures = _failed_pre_push_commands(result)
+    return _pure_toolchain_missing_failure_from_failures(_failed_pre_push_commands(result))
+
+
+def _pure_toolchain_missing_failure_from_failures(
+    failures: tuple[ValidationCommandResult, ...],
+) -> ValidationCommandResult | None:
+    """Return the first 127 failure only when the collected failures are all 127."""
     if not failures:
         return None
     if any(failure.returncode != 127 for failure in failures):
@@ -98,19 +111,32 @@ def _pure_toolchain_missing_failure(
 
 def _preferred_pre_push_failure(result: ValidationResult) -> ValidationCommandResult | None:
     """Return the failure that should drive diagnostics and repair prompts."""
-    real_failure = _first_real_pre_push_failure(result)
+    return _preferred_pre_push_failure_from_failures(
+        result,
+        _failed_pre_push_commands(result),
+    )
+
+
+def _preferred_pre_push_failure_from_failures(
+    result: ValidationResult,
+    failures: tuple[ValidationCommandResult, ...],
+) -> ValidationCommandResult | None:
+    """Return the preferred failure using an already collected failure tuple."""
+    real_failure = _first_real_pre_push_failure_from_failures(failures)
     if real_failure is not None:
         return real_failure
-    toolchain_failure = _pure_toolchain_missing_failure(result)
+    toolchain_failure = _pure_toolchain_missing_failure_from_failures(failures)
     if toolchain_failure is not None:
         return toolchain_failure
     return result.first_failure
 
 
-def _pre_push_validation_reason_code(result: ValidationResult) -> str:
-    """Return the underlying validation reason, honoring mixed-failure precedence."""
+def _pre_push_validation_reason_code_for_preferred_failure(
+    result: ValidationResult,
+    preferred_failure: ValidationCommandResult | None,
+) -> str:
+    """Return the validation reason for an already selected preferred failure."""
     validation_reason_code = _validation_run_reason_code(result)
-    preferred_failure = _preferred_pre_push_failure(result)
     if preferred_failure is None:
         return validation_reason_code
     coverage_command = result.coverage.command_result if result.coverage is not None else None
@@ -121,6 +147,14 @@ def _pre_push_validation_reason_code(result: ValidationResult) -> str:
     ):
         return validation_reason_code
     return preferred_failure.reason_code
+
+
+def _pre_push_validation_reason_code(result: ValidationResult) -> str:
+    """Return the underlying validation reason, honoring mixed-failure precedence."""
+    return _pre_push_validation_reason_code_for_preferred_failure(
+        result,
+        _preferred_pre_push_failure(result),
+    )
 
 
 @dataclass(frozen=True)
@@ -514,9 +548,20 @@ async def _run_pre_push_validation(
             message=message,
         )
 
-    validation_reason_code = _pre_push_validation_reason_code(result)
+    failed_commands = () if result.all_passed else _failed_pre_push_commands(result)
     toolchain_missing_failure = (
-        None if result.all_passed else _pure_toolchain_missing_failure(result)
+        None
+        if result.all_passed
+        else _pure_toolchain_missing_failure_from_failures(failed_commands)
+    )
+    preferred_failure = (
+        None
+        if result.all_passed
+        else _preferred_pre_push_failure_from_failures(result, failed_commands)
+    )
+    validation_reason_code = _pre_push_validation_reason_code_for_preferred_failure(
+        result,
+        preferred_failure,
     )
     pre_push_reason_code = (
         "VALIDATION_OK"
