@@ -167,7 +167,8 @@ RUN set -eux; \
       exit 1; \
     fi; \
     if [ "$cursor_path" != "/usr/local/bin/cursor-agent" ]; then \
-      ln -sf "$cursor_path" /usr/local/bin/cursor-agent; \
+      cp "$cursor_path" /usr/local/bin/cursor-agent; \
+      chmod +x /usr/local/bin/cursor-agent; \
     fi; \
     command -v cursor-agent; \
     test -x /usr/local/bin/cursor-agent; \

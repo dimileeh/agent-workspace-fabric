@@ -102,7 +102,9 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "opencode-ai@${OPENCODE_VERSION}" in dockerfile
     assert "cursor-agent" in dockerfile
     assert "curl https://cursor.com/install -fsS | bash" in dockerfile
-    assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
+    assert 'cp "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
+    assert "chmod +x /usr/local/bin/cursor-agent" in dockerfile
+    assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
     assert "test -x /usr/local/bin/cursor-agent" in dockerfile
     assert "npm install -g cursor-agent" not in dockerfile
     assert "codex --version" in dockerfile
