@@ -40,6 +40,12 @@ Python callables introduced by this PR.
    check, and targeted unit tests for the touched files.
 4. Record validation evidence in the matching validation document.
 
+## Follow-up
+
+Later PR review-repair commits added one more workflow-scope regression test
+after the first docstring pass. Re-run the same diff-scoped docstring audit and
+add the missing behavior-neutral test docstring without changing assertions.
+
 ## Verification Commands
 
 - Diff-scoped `ruff --select D` audit over changed Python files intersected

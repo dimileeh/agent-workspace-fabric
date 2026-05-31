@@ -1214,6 +1214,7 @@ async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_w
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify workflow-scope comment repair failures mark review items needs-human."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed locally")
