@@ -657,7 +657,6 @@ def provider_for_agent_model(agent: str, model: str | None) -> str | None:
         return inferred
     return {
         "codex": "openai",
-        "cursor": "cursor",
         "gemini": "google",
         "claude_code": "anthropic",
         "opencode": "opencode",
