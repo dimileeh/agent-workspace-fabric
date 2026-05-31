@@ -831,6 +831,7 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
     fix_called = False
 
     async def _assert_clean_before_fix(_runner: object, **_kwargs: object) -> bool:
+        """Assert validation did cleanup worktree state before starting a fix pass."""
         nonlocal fix_called
         fix_called = True
         assert cmd.calls[-1].args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]
@@ -883,6 +884,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     )
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Simulate a validation-fix commit failure."""
         return False
 
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
@@ -945,6 +947,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     )
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Simulate a validation-fix commit failure."""
         raise RuntimeError("commit path failed")
 
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
@@ -1012,9 +1015,11 @@ async def test_pre_push_validation_fix_pass_rollback_failure_is_bubbled_as_pre_p
     )
 
     async def _rollback_failed(*_args: object, **_kwargs: object) -> bool:
+        """Simulate a rollback failure in fix-pass cleanup."""
         return False
 
     async def _commit_failed(**_kwargs: object) -> bool:
+        """Simulate a repair commit failure exception path."""
         return False
 
     monkeypatch.setattr(
@@ -1541,6 +1546,7 @@ async def test_ci_repair_owned_path_lookup_failure_stops_before_agent(
         return ("start", None)
 
     def _broken_session_factory() -> object:
+        """Raise a session factory error to exercise early repair failure."""
         raise TypeError("session factory unavailable")
 
     async def _unexpected_commit(**_kwargs: object) -> bool:

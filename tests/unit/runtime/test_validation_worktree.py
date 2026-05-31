@@ -40,6 +40,7 @@ async def test_check_validation_worktree_clean_handles_none_stdout_as_clean(tmp_
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command returning no output."""
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, None, "")
         raise AssertionError(f"unexpected git command: {args!r}")
@@ -58,6 +59,7 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command reporting an untracked file."""
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, "?? untracked.py\n", None)
         raise AssertionError(f"unexpected git command: {args!r}")
@@ -86,6 +88,7 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate restore failure after a dirty tracked file is reported."""
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, " M tracked.py\n", "")
         if args[:1] == ["restore"]:
@@ -109,6 +112,7 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate clean failure while removing untracked artifacts."""
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, "?? untracked.py\n", "")
         if args[:1] == ["clean"]:
@@ -134,6 +138,7 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
     calls: list[tuple[str, ...]] = []
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Track status/restore calls while verification still reports dirt."""
         calls.append(tuple(args))
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             if len(calls) == 1:
@@ -161,6 +166,7 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
     calls: list[tuple[str, ...]] = []
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status failure on the post-cleanup verification step."""
         calls.append(tuple(args))
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             if len(calls) == 1:
@@ -196,6 +202,7 @@ async def test_cleanup_validation_worktree_rejects_invalid_head_output(
     restore_ref = "deadbeef01"
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Return malformed HEAD output during restore-reference checks."""
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
@@ -226,6 +233,7 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
     calls: list[tuple[str, ...]] = []
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Return commands representing a moved HEAD without cleanup side effects."""
         calls.append(tuple(args))
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, "", None)
@@ -256,6 +264,7 @@ async def test_cleanup_validation_worktree_rejects_clean_state_with_default_head
     calls: list[tuple[str, ...]] = []
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a clean tree with no captured restore ref."""
         calls.append(tuple(args))
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, "", None)
@@ -284,6 +293,7 @@ async def test_cleanup_validation_worktree_detects_head_change_after_dirty_clean
     calls: list[tuple[str, ...]] = []
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a full cleanup flow that still changes HEAD."""
         calls.append(tuple(args))
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             if len(calls) == 1:
