@@ -100,11 +100,10 @@ async def _source_runtime_not_yet_released(
     at dispatch with a 409.
     """
     source_status = WorkspaceStatus(source.status)
-    if source_status in HOST_PORT_TERMINAL_RELEASE_STATUSES:
-        if source.compose_project_name is None:
-            return False
-        return not await has_terminal_runtime_released_event(session, source.id)
-    if source_status == WorkspaceStatus.destroying:
+    if (
+        source_status in HOST_PORT_TERMINAL_RELEASE_STATUSES
+        or source_status == WorkspaceStatus.destroying
+    ):
         if source.compose_project_name is None:
             return False
         return not await has_terminal_runtime_released_event(session, source.id)
