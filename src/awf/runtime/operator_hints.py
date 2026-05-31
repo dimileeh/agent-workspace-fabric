@@ -132,8 +132,9 @@ def remonitor_elapsed_settle_head_shas(
     *,
     pr_number: int | None,
     preferred_head_sha: str | None,
+    current_head_sha: str | None = None,
 ) -> tuple[str, ...]:
-    """Return PR head SHAs with elapsed reviewer-settle state for remonitor."""
+    """Return PR head SHAs that need reviewer-settle freeze for remonitor."""
     if pr_number is None:
         return ()
     head_shas: list[str] = []
@@ -153,6 +154,8 @@ def remonitor_elapsed_settle_head_shas(
         head_sha = key.removeprefix(done_prefix).split(":", 1)[0]
         if head_sha and head_sha not in head_shas:
             head_shas.append(head_sha)
+    if head_shas and current_head_sha and current_head_sha not in head_shas:
+        head_shas.append(current_head_sha)
     return tuple(head_shas)
 
 

@@ -560,10 +560,14 @@ class WorkspaceControlService:
         monitor_state_changed = False
         reason_text = (reason or "").strip()
         monitor_state = dict(workspace.monitor_threads_addressed or {})
+        candidate_repo = MergeCandidateRepository(self._session)
+        candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace_id)
+        current_head_sha = candidate.head_sha if candidate is not None else None
         settle_head_shas = remonitor_elapsed_settle_head_shas(
             monitor_state,
             pr_number=workspace.pr_number,
             preferred_head_sha=workspace.monitor_last_commit_sha,
+            current_head_sha=current_head_sha,
         )
         past_settle = bool(settle_head_shas)
         requested_at = utcnow() if reason_text or past_settle else None
