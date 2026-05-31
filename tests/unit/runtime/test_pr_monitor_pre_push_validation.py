@@ -634,11 +634,11 @@ async def test_pre_push_validation_runs_profile_coverage_before_push(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_cleans_tracked_side_effect_before_push(
+async def test_pre_push_validation_tracked_side_effect_after_validation_fails_cleanup(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Validation-generated tracked dirt should be restored before push."""
+    """Validation-generated tracked dirt should fail pre-push validation cleanup."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -653,7 +653,6 @@ async def test_pre_push_validation_cleans_tracked_side_effect_before_push(
     )  # validation side effect
     cmd.queue_result(returncode=0)  # restore tracked side effect
     cmd.queue_result(returncode=0, stdout="")  # clean after cleanup
-    cmd.queue_result(returncode=0, stdout="", stderr="")  # git push
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -671,13 +670,17 @@ async def test_pre_push_validation_cleans_tracked_side_effect_before_push(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert result.failed is False
-    assert result.pushed is True
+    assert result.failed is True
+    assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert result.pushed is False
+    assert result.details is not None
+    assert result.details["paths"] == ["apps/console/next-env.d.ts"]
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(
         f"restore --source {local_head} --staged --worktree -- apps/console/next-env.d.ts" in call
         for call in joined_calls
     )
+    assert not any("push" in call for call in joined_calls)
 
 
 @pytest.mark.unit

@@ -566,13 +566,13 @@ class TestValidationSideEffectCleanup:
     """Exercise cleanup behavior for validation side-effects."""
 
     @pytest.mark.unit
-    async def test_executor_cleans_validation_side_effect_before_pr_push(
+    async def test_executor_tracked_validation_side_effect_causes_cleanup_failure(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Executor should restore tracked side effects before attempting push."""
+        """Tracked validation side effects should fail cleanup and stop the run."""
         validation = _ValidationSideEffectRunner(
             artifacts_dir=tmp_path / "artifacts",
             results=[True],
@@ -592,15 +592,17 @@ class TestValidationSideEffectCleanup:
         fake.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
         fake.queue_result(returncode=0)  # restore tracked side effect
         fake.queue_result(returncode=0, stdout="")  # clean after cleanup
-        _queue_push_and_pr(fake)
 
         await executor.execute(ws_id)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_url == "https://github.com/x/y/pull/1"
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "VALIDATION_WORKTREE_CLEANUP_FAILED" in ws.failure_message
+            assert "apps/console/next-env.d.ts" in ws.failure_message
         joined_calls = [" ".join(call.args) for call in fake.calls]
         restore_index = next(
             index
@@ -608,8 +610,7 @@ class TestValidationSideEffectCleanup:
             if "restore --source deadbeef01 --staged --worktree -- apps/console/next-env.d.ts"
             in call
         )
-        push_index = next(index for index, call in enumerate(joined_calls) if "push" in call)
-        assert restore_index < push_index
+        assert "git push" not in " ".join(joined_calls[restore_index + 1 :])
 
     @pytest.mark.unit
     async def test_executor_cleanup_failure_fails_validation_before_push(

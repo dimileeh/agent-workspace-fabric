@@ -322,6 +322,51 @@ async def test_cleanup_validation_worktree_detects_head_change_after_dirty_clean
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_failure(
+    tmp_path: Path,
+) -> None:
+    """Tracked-file mutations that are restored after validation must fail cleanup."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    calls: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a validation side effect that is restored before reporting success."""
+        calls.append(tuple(args))
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            if len(calls) == 1:
+                return _CommandResultLike(0, " M tracked.py\n", None)
+            return _CommandResultLike(0, "", None)
+        if args == [
+            "restore",
+            "--source",
+            restore_ref,
+            "--staged",
+            "--worktree",
+            "--",
+            "tracked.py",
+        ]:
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleaned is False
+    assert "AWF validation modified tracked files" in cleanup.message
+    assert cleanup.verify_check is not None
+    assert cleanup.verify_check.clean
+
+
+@pytest.mark.unit
 def test_validation_worktree_cleanup_failure_message_prefers_verify_paths() -> None:
     """Human-readable cleanup failures should report remaining dirty paths when verification runs."""
     cleanup = ValidationWorktreeCleanup(
