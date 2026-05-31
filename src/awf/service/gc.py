@@ -1146,8 +1146,13 @@ def _gc_result(
             status="dry_run",
             reason_code=CLEANUP_DRY_RUN,
         )
-    has_errors = bool(delete_errors) or any(
-        v.get("error") is not None for v in res_releases.values()
+    companion_prune_failed = (
+        companion_image_prune is not None and companion_image_prune.get("status") == "failed"
+    )
+    has_errors = (
+        bool(delete_errors)
+        or any(v.get("error") is not None for v in res_releases.values())
+        or companion_prune_failed
     )
     status: WorkspaceCleanupExecutionStatus = "partial" if has_errors else "succeeded"
     return WorkspaceGCResult(

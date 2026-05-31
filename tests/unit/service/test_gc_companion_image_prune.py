@@ -53,6 +53,40 @@ async def test_execute_invokes_companion_image_prune_and_reports_result(
 
 
 @pytest.mark.unit
+async def test_execute_marks_gc_partial_when_companion_prune_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A failed companion prune marks the overall GC result as partial.
+
+    Regression for PRRT_kwDOSJAM6s6F6Ge4: when ``docker image prune`` is
+    unavailable or times out the prune report says ``failed`` but the GC
+    status used to stay ``succeeded`` (CLI exit 0), hiding the failure from
+    automation. The prune failure must contribute to the GC error calculation.
+    """
+
+    async def _prune() -> dict[str, object]:
+        return {
+            "status": "failed",
+            "reason_code": "COMPANION_IMAGE_PRUNE_FAILED",
+            "error": "docker image prune timed out after 120s",
+        }
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        execute=True,
+        companion_image_prune=_prune,
+    )
+
+    assert result.status == "partial"
+    payload = result.to_dict()
+    assert payload["status"] == "partial"
+    assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    assert payload["companion_image_prune"]["status"] == "failed"
+
+
+@pytest.mark.unit
 async def test_execute_without_prune_callback_omits_report_key(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
