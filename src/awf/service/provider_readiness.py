@@ -1444,63 +1444,6 @@ def _credential_source(
     }
 
 
-def _security_warning(
-    reason: str,
-    message: str,
-    *,
-    severity: str = "warning",
-) -> dict[str, str]:
-    return {"reason": reason, "message": message, "severity": severity}
-
-
-def _redacted_warning(warning: Mapping[str, str], secrets: frozenset[str]) -> dict[str, str]:
-    return {
-        "reason": _redact(str(warning.get("reason", "UNKNOWN")), secrets),
-        "message": _redact(str(warning.get("message", "")), secrets),
-        "severity": _redact(str(warning.get("severity", "warning")), secrets),
-    }
-
-
-def _static_env_warnings(
-    *,
-    provider_label: str,
-    signals: Iterable[str],
-) -> list[dict[str, str]]:
-    return [
-        _security_warning(
-            "STATIC_TOKEN_FALLBACK",
-            f"{provider_label} auth is supplied by static service environment variable {signal}.",
-        )
-        for signal in signals
-    ]
-
-
-def _primary_credential_scope(sources: Iterable[Mapping[str, str]]) -> str:
-    scopes = [str(source.get("credential_scope", "")) for source in sources]
-    for preferred in (
-        "isolated_workspace",
-        "read_only_host_path",
-        "docker_host_control",
-        "static_env_token",
-    ):
-        if preferred in scopes:
-            return preferred
-    return "not_observed"
-
-
-def _primary_isolation(sources: Iterable[Mapping[str, str]]) -> str:
-    isolations = [str(source.get("isolation", "")) for source in sources]
-    for preferred in (
-        "per_workspace_copy",
-        "read_only_bind",
-        "host_daemon",
-        "service_env",
-    ):
-        if preferred in isolations:
-            return preferred
-    return "none"
-
-
 from awf.service.provider_readiness_helpers import (  # noqa: E402
     _codex_file_sources,
     _docker_registry_sources,
@@ -1512,13 +1455,18 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _ollama_tags_urls,
     _ollama_version_urls,
     _ordered_names,
+    _primary_credential_scope,
+    _primary_isolation,
     _probe_ollama,
     _probe_ollama_model,
     _redact,
     _redact_with_redaction_parts,
+    _redacted_warning,
     _run_subprocess,
     _secret_values,
     _security_summary,
+    _security_warning,
+    _static_env_warnings,
     _truncate,
 )
 
