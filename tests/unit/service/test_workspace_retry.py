@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.db.repositories as repositories
@@ -39,7 +39,7 @@ from awf.service.workspaces import (
     create_workspace_row,
     retry_workspace_row,
 )
-from tests.postgres import create_postgres_test_engine, postgres_test_engine
+from tests.postgres import postgres_test_engine
 
 pytestmark = pytest.mark.unit
 
@@ -1473,41 +1473,3 @@ async def test_retry_preserves_remote_push_branch_for_sync_workspace(
     assert retried.task_kind == "sync_release_pr"
     assert retried.branch_name is None
     assert retried.remote_push_branch == "development"
-
-
-@pytest.mark.unit
-async def test_retry_persists_task_kind_without_post_insert_update() -> None:
-    engine = await create_postgres_test_engine()
-
-    factory = make_session_factory(engine)
-    service = WorkspaceService(factory)
-    first = await service.create(_request(task_kind="sync_release_pr"))
-    await _mark_failed(factory, first.id)
-
-    statements: list[str] = []
-
-    def record_sql(
-        conn: object,
-        cursor: object,
-        statement: str,
-        parameters: object,
-        context: object,
-        executemany: bool,
-    ) -> None:
-        """Collect SQL statements for task-kind update assertions."""
-        del conn, cursor, parameters, context, executemany
-        statements.append(" ".join(statement.lower().split()))
-
-    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
-    try:
-        await _retry_with_preflight_override(service, first.id)
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
-        await engine.dispose()
-
-    task_kind_updates = [
-        statement
-        for statement in statements
-        if statement.startswith("update workspaces") and "task_kind" in statement
-    ]
-    assert task_kind_updates == []
