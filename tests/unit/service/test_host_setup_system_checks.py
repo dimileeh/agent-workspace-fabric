@@ -358,6 +358,11 @@ def test_check_local_capacity_reports_cpu_and_memory_issues_together() -> None:
     assert result.level is SetupCheckLevel.WARNING
     assert "usable CPU(s) is below the recommended" in result.detail
     assert "bytes of memory is below the recommended" in result.detail
+    # The summary is the first line an operator reads at a glance: when both
+    # CPU and memory are starved it must name both, not just CPUs.
+    assert result.summary == (
+        "Detected fewer CPUs and less memory than recommended for AWF workspaces."
+    )
 
 
 # --- run_system_checks wiring --------------------------------------------

@@ -575,11 +575,16 @@ def check_local_capacity(
         issues.append("os.cpu_count() returned no value; capacity could not be estimated")
 
     if issues:
-        summary = (
-            "Detected fewer CPUs than recommended for AWF workspaces."
-            if low_cpu or unknown_cpu
-            else "Detected less memory than recommended for AWF workspaces."
-        )
+        # Name every starved dimension in the summary, not just the first the
+        # old ternary short-circuited on: the summary is the one line that
+        # drives an operator's triage at a glance, so dropping memory when both
+        # CPU and memory are low understates the problem.
+        if low_cpu and low_memory:
+            summary = "Detected fewer CPUs and less memory than recommended for AWF workspaces."
+        elif low_cpu or unknown_cpu:
+            summary = "Detected fewer CPUs than recommended for AWF workspaces."
+        else:
+            summary = "Detected less memory than recommended for AWF workspaces."
         # Point operators at host CPU introspection only when an unknown CPU
         # count is the sole issue; otherwise the generic provisioning hint
         # covers the (possibly combined) low-capacity case.
