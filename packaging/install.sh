@@ -654,7 +654,11 @@ print_path_advice() {
     case "$shell" in
         fish)
             rc="${HOME}/.config/fish/config.fish"
-            line="fish_add_path ${bindir}"
+            # Quote the dir: fish_add_path word-splits its arguments, so an
+            # unquoted bindir containing whitespace (e.g. ".../Application
+            # Support/awf/bin") would be pasted as several paths and never make
+            # awf reachable. Match the quoting the zsh/bash lines already use.
+            line="fish_add_path \"${bindir}\""
             ;;
         zsh)
             rc="${HOME}/.zshrc"

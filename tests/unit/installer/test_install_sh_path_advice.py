@@ -80,6 +80,35 @@ def test_bash_path_advice_includes_login_profile_when_present(
 
 
 @pytest.mark.unit
+def test_fish_path_advice_quotes_bindir_with_spaces(harness: InstallerHarness) -> None:
+    """Fish advice quotes a bindir containing whitespace so it stays one path.
+
+    fish's ``fish_add_path`` is word-splitting like any fish command, so an
+    unquoted ``fish_add_path /Users/me/Library/Application Support/awf/bin``
+    pasted by the user would register three separate paths and never make awf
+    reachable. zsh/bash already wrap the dir in double quotes; the fish line must
+    quote it too so a spaced --install-dir survives copy-paste as a single path.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    install_dir = harness.root / "bin install"  # whitespace in the path
+    install_dir.mkdir()
+    harness.add_awf(directory=install_dir)
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(
+        ["--install-dir", str(install_dir), "--shell", "fish"],
+        manifest=manifest,
+    )
+
+    assert result.returncode == 0, result.stderr
+    advice = result.stdout + result.stderr
+    # The emitted line must quote the directory so copy-paste keeps it one arg.
+    assert f'fish_add_path "{install_dir}"' in advice
+
+
+@pytest.mark.unit
 def test_no_path_advice_when_awf_already_on_path(harness: InstallerHarness) -> None:
     """When awf resolves on PATH, no PATH remediation advice is emitted."""
     harness.add_uname("Linux", "x86_64")
