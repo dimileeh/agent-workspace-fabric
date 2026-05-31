@@ -8,11 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import (
-    Iterable,
-    Mapping,
-    Sequence,
-)
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import (
     UTC,
@@ -25,10 +21,6 @@ from typing import Any
 from awf.common.github_client import (
     GitHubClientError,
 )
-from awf.control.protected_file_diffs import (
-    changed_paths_from_name_status_z as _parse_name_status_z,
-)
-from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
     OperationStatus,
@@ -42,6 +34,30 @@ from awf.db.models import (
 from awf.db.repositories import (
     WorkspaceRepository,
     pr_feedback_body_hash,
+)
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_done_key as _initial_review_grace_done_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_started_key as _initial_review_grace_started_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_wall_started_value as _initial_review_grace_wall_started_value,
+)
+from awf.runtime.monitor_state_keys import (
+    _initial_review_grace_wall_started_value_from_datetime as _initial_review_grace_wall_started_value_from_datetime,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_done_key as _non_check_reviewer_settle_done_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_freeze_key as _non_check_reviewer_settle_freeze_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_started_key as _non_check_reviewer_settle_started_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _non_check_reviewer_settle_started_prefix as _non_check_reviewer_settle_started_prefix,
 )
 from awf.runtime.pr_monitor import (
     CheckFailure,
@@ -92,10 +108,46 @@ from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
     _NonCheckReviewerSettleWaitOperationContext,
 )
-from awf.runtime.pr_monitor_runner.types import (
-    BaseFetchError,
-    ProtectedScopeDiffError,
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _changed_paths_from_name_only_z as _changed_paths_from_name_only_z,
 )
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _changed_paths_from_name_status_z as _changed_paths_from_name_status_z,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _changed_paths_from_porcelain as _changed_paths_from_porcelain,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _changed_paths_from_porcelain_z as _changed_paths_from_porcelain_z,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _quality_gate_violation_paths as _quality_gate_violation_paths,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _read_worktree_text as _read_worktree_text,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _supply_chain_policy_blocked_message as _supply_chain_policy_blocked_message,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _untracked_paths_from_porcelain as _untracked_paths_from_porcelain,
+)
+from awf.runtime.pr_monitor_runner.path_helpers import (
+    _untracked_paths_from_porcelain_z as _untracked_paths_from_porcelain_z,
+)
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _target_reconcile_failure_payload as _target_reconcile_failure_payload,
+)
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _target_reconcile_log_fields as _target_reconcile_log_fields,
+)
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _target_reconcile_payload as _target_reconcile_payload,
+)
+from awf.runtime.pr_monitor_runner.target_reconcile import (
+    _truncate_target_reconcile_failure_payload as _truncate_target_reconcile_failure_payload,
+)
+from awf.runtime.pr_monitor_runner.types import BaseFetchError
 
 
 async def _record_ignored_monitor_terminal_callback(
@@ -559,42 +611,6 @@ def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
 
 def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
     return f"__awf_merge_queue_wait__:{head_sha}:{blocker_candidate_id}"
-
-
-def _non_check_reviewer_settle_started_key(
-    *,
-    pr_number: int,
-    head_sha: str,
-    activity_signature: str | None = None,
-) -> str:
-    """Build state key for a non-check reviewer settle start marker."""
-    key = f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
-    if activity_signature is not None:
-        return f"{key}:{activity_signature}"
-    return key
-
-
-def _non_check_reviewer_settle_started_prefix(*, pr_number: int) -> str:
-    """Build namespace prefix for non-check reviewer settle state keys."""
-    return f"__awf_non_check_reviewer_settle_started__:{pr_number}:"
-
-
-def _non_check_reviewer_settle_done_key(
-    *,
-    pr_number: int,
-    head_sha: str,
-    activity_signature: str | None = None,
-) -> str:
-    """Build state key for a completed non-check reviewer settle window."""
-    key = f"__awf_non_check_reviewer_settle_done__:{pr_number}:{head_sha}"
-    if activity_signature is not None:
-        return f"{key}:{activity_signature}"
-    return key
-
-
-def _non_check_reviewer_settle_freeze_key(*, pr_number: int, head_sha: str) -> str:
-    """Build state key for a remonitor-armed head settle freeze."""
-    return f"__awf_non_check_reviewer_settle_freeze__:{pr_number}:{head_sha}"
 
 
 def _non_check_reviewer_settle_skip_visible_key(*, pr_number: int, head_sha: str) -> str:
@@ -1198,25 +1214,6 @@ def _operation_observed_at(operation: Operation) -> datetime:
     )
 
 
-def _initial_review_grace_started_key(pr_number: int) -> str:
-    return f"__awf_initial_review_grace_started__:{pr_number}"
-
-
-def _initial_review_grace_done_key(pr_number: int) -> str:
-    return f"__awf_initial_review_grace_done__:{pr_number}"
-
-
-def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
-    return f"{started_wall_seconds:.6f}"
-
-
-def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime) -> str:
-    started_dt = started_at
-    if started_dt.tzinfo is None:
-        started_dt = started_dt.replace(tzinfo=UTC)
-    return _initial_review_grace_wall_started_value(started_dt.timestamp())
-
-
 def _initial_review_grace_wall_seconds(raw: object) -> float | None:
     if not isinstance(raw, (str, bytes, bytearray, int, float)):
         return None
@@ -1453,192 +1450,3 @@ def _pending_review_feedback_count(status: PRStatus, state: MonitorState) -> int
         if _agent_can_triage_review_comment(comment)
         and _review_comment_needs_attention(state, comment)
     )
-
-
-def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
-    """Extract changed paths from ``git status --porcelain`` output."""
-    paths: list[str] = []
-    for line in status_stdout.splitlines():
-        if not line:
-            continue
-        if line.startswith("?? ") or (len(line) >= 4 and line[2] == " "):
-            path = line[3:]
-        else:
-            continue
-        if " -> " in path:
-            old_path, new_path = path.split(" -> ", 1)
-            paths.extend([old_path, new_path])
-        else:
-            paths.append(path)
-    return list(dict.fromkeys(paths))
-
-
-def _porcelain_z_records(status_stdout: str) -> list[tuple[str, str, str | None]]:
-    records = status_stdout.split("\0")
-    if records and records[-1] == "":
-        records = records[:-1]
-    parsed: list[tuple[str, str, str | None]] = []
-    i = 0
-    while i < len(records):
-        record = records[i]
-        i += 1
-        if len(record) < 4 or record[2] != " ":
-            continue
-        status = record[:2]
-        path = record[3:]
-        original_path: str | None = None
-        if (status[:1] in {"R", "C"} or status[1:2] in {"R", "C"}) and i < len(records):
-            original_path = records[i]
-            i += 1
-        parsed.append((status, path, original_path))
-    return parsed
-
-
-def _changed_paths_from_porcelain_z(status_stdout: str) -> list[str]:
-    """Extract changed paths from ``git status --porcelain -z`` output."""
-    paths: list[str] = []
-    for status, path, original_path in _porcelain_z_records(status_stdout):
-        if status == "!!":
-            continue
-        if original_path:
-            paths.extend([original_path, path])
-        else:
-            paths.append(path)
-    return list(dict.fromkeys(paths))
-
-
-def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
-    """Extract changed paths from ``git diff --name-status -z`` output."""
-    try:
-        return _parse_name_status_z(diff_stdout)
-    except ValueError as exc:
-        raise ProtectedScopeDiffError(str(exc)) from exc
-
-
-def _changed_paths_from_name_only_z(diff_stdout: str) -> tuple[str, ...]:
-    """Extract changed paths from ``git diff --name-only -z`` output."""
-    parts = diff_stdout.split("\0")
-    if parts and parts[-1] == "":
-        parts = parts[:-1]
-    if any(part == "" for part in parts):
-        raise ProtectedScopeDiffError("empty path in `--name-only -z` output")
-    return tuple(dict.fromkeys(parts))
-
-
-def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:
-    return list(dict.fromkeys(violation.path for violation in violations))
-
-
-def _read_worktree_text(path: Path, *, display_path: str | None = None) -> str:
-    label = display_path or str(path)
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ProtectedScopeDiffError(
-            f"Could not read protected worktree file {label!r} as UTF-8 for classification"
-        ) from exc
-    except OSError as exc:
-        raise ProtectedScopeDiffError(
-            f"Could not read protected worktree file {label!r} for classification: {exc}"
-        ) from exc
-
-
-def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
-    """Extract untracked paths from ``git status --porcelain`` output."""
-    paths: list[str] = []
-    for line in status_stdout.splitlines():
-        if not line.startswith("?? "):
-            continue
-        paths.append(line[3:])
-    return list(dict.fromkeys(paths))
-
-
-def _untracked_paths_from_porcelain_z(status_stdout: str) -> list[str]:
-    """Extract untracked paths from ``git status --porcelain -z`` output."""
-    return list(
-        dict.fromkeys(
-            path
-            for status, path, _original_path in _porcelain_z_records(status_stdout)
-            if status == "??"
-        )
-    )
-
-
-def _supply_chain_policy_blocked_message(reason_codes: Iterable[str]) -> str:
-    codes = list(dict.fromkeys(reason_codes))
-    suffix = f": {', '.join(codes)}" if codes else "."
-    return f"Supply-chain policy blocked PR monitor publication{suffix}"
-
-
-def _target_reconcile_payload(result: object) -> dict[str, object]:
-    if isinstance(result, dict):
-        return dict(result)
-    to_dict = getattr(result, "to_dict", None)
-    if callable(to_dict):
-        payload = to_dict()
-        if isinstance(payload, dict):
-            return dict(payload)
-    return {"result": str(result)}
-
-
-def _target_reconcile_log_fields(payload: Mapping[str, object]) -> dict[str, object]:
-    fields = dict(payload)
-    fields.setdefault("resolver_results", [])
-    fields.setdefault("commit_sha", None)
-    fields.setdefault("pushed", False)
-    fields.setdefault("changed_paths", [])
-    fields.setdefault("dry_run", None)
-    fields.setdefault("commit_allowed", None)
-    fields.setdefault("policy_reason_code", None)
-    return fields
-
-
-def _target_reconcile_failure_payload(
-    exc: Exception,
-    *,
-    error_limit: int,
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "status": "failed",
-        "reason_code": "TARGET_BRANCH_RECONCILE_FAILED",
-        "error": str(exc)[:error_limit],
-        "error_type": type(exc).__name__,
-        "resolver_results": [],
-        "commit_sha": None,
-        "pushed": False,
-        "changed_paths": [],
-        "dry_run": None,
-        "commit_allowed": None,
-        "policy_reason_code": None,
-    }
-
-    operation = getattr(exc, "operation", None)
-    if isinstance(operation, str):
-        payload["operation"] = operation
-    result = getattr(exc, "result", None)
-    returncode = getattr(result, "returncode", None)
-    if isinstance(returncode, int):
-        payload["returncode"] = returncode
-    reason_code = getattr(result, "reason_code", None)
-    if isinstance(reason_code, str):
-        payload["command_reason_code"] = reason_code
-    stderr = getattr(result, "stderr", None)
-    if isinstance(stderr, str) and stderr:
-        payload["stderr"] = stderr[:error_limit]
-    stdout = getattr(result, "stdout", None)
-    if isinstance(stdout, str) and stdout:
-        payload["stdout"] = stdout[:error_limit]
-    return payload
-
-
-def _truncate_target_reconcile_failure_payload(
-    payload: Mapping[str, object],
-    *,
-    error_limit: int,
-) -> dict[str, object]:
-    truncated = dict(payload)
-    for key in ("error", "stderr", "stdout"):
-        value = truncated.get(key)
-        if isinstance(value, str):
-            truncated[key] = value[:error_limit]
-    return truncated

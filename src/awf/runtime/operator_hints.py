@@ -6,8 +6,7 @@ import json
 from datetime import UTC, datetime
 from typing import Literal, cast
 
-from awf.runtime.pr_monitor import MonitorState, OperatorHint
-from awf.runtime.pr_monitor_runner.helpers import (
+from awf.runtime.monitor_state_keys import (
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
     _initial_review_grace_wall_started_value_from_datetime,
@@ -15,6 +14,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_freeze_key,
     _non_check_reviewer_settle_started_key,
 )
+from awf.runtime.pr_monitor import MonitorState, OperatorHint
 
 OPERATOR_HINT_STATE_KEY = "__awf_pending_operator_hint__"
 OPERATOR_HINT_PROCESSED_KEY_PREFIX = "__awf_operator_hint_processed__:"

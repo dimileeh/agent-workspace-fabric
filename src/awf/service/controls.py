@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +29,12 @@ from awf.runtime.operator_hints import (
     utcnow,
 )
 from awf.runtime.pr_monitor import OperatorHint
+from awf.service.controls_types import (
+    CleanerFactory,
+    ProjectStopper,
+    _PreparedOperation,
+    _PreparedOperationKind,
+)
 from awf.service.failure_causality import (
     PRIMARY_FAILURE_KEY,
     SECONDARY_FAILURE_KEY,
@@ -53,9 +56,6 @@ from awf.service.workspace_runtime_health import (
     OPERATOR_REFRESH_REASON_CODE,
 )
 
-ProjectStopper = Callable[[str | None], Awaitable[None]]
-CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
-CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
 _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
@@ -104,34 +104,6 @@ def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> d
     if requested_at is None:
         raise RuntimeError("operator remonitor requested_at was not initialized")
     return requested_at
-
-
-class _PreparedOperationKind(StrEnum):
-    exact_replay = "exact_replay"
-    active_coalesce = "active_coalesce"
-
-
-@dataclass(frozen=True)
-class _PreparedOperation:
-    workspace: Workspace
-    replay: Operation | None = None
-    kind: _PreparedOperationKind | None = None
-    idempotency_key: str | None = None
-
-
-class WorkspaceCleanerProtocol(Protocol):
-    async def cleanup(  # pragma: no cover - Protocol method declaration only.
-        self,
-        *,
-        workspace_id: str,
-        repo_url: str,
-        companion_worktrees: tuple[tuple[str, str], ...] = (),
-        compose_project_name: str | None = None,
-        compose_file_path: Path | None = None,
-        worktree_host_path: Path | None = None,
-        remove_volumes: bool = True,
-        remove_worktree: bool = True,
-    ) -> CleanupResultLike: ...
 
 
 class WorkspaceControlError(Exception):
@@ -1460,6 +1432,8 @@ from awf.service.controls_helpers import (  # noqa: E402
 )
 
 __all__ = [
+    "ProjectStopper",
+    "CleanerFactory",
     "WorkspaceControlService",
     "WorkspaceControlError",
     "WorkspaceNotFoundError",
