@@ -861,7 +861,9 @@ def _mkdir_secure(directory: Path) -> None:
     symlinks, so the file-level ``O_EXCL`` in ``_write_secret_file`` — which only
     protects the temp inode, not the directory it lands in — would not catch it.
     ``is_symlink`` (``lstat``) is the non-following check that does, applied to
-    every ancestor up to the nearest pre-existing real directory.
+    every ancestor up to the filesystem root (not merely the nearest pre-existing
+    one, which would miss a symlinked grandparent above an already-created
+    descendant).
     """
     # Refuse a symlinked leaf up front so it is rejected whether its target
     # exists (``exists()``/``is_dir()`` would follow it) or dangles (``mkdir``
@@ -869,23 +871,29 @@ def _mkdir_secure(directory: Path) -> None:
     # ``FileExistsError``). ``lstat``-based, so it never traverses the link.
     if directory.is_symlink():
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(directory))
-    # Walk the ancestor chain up to the nearest pre-existing real directory,
-    # refusing any symlink along the way and recording the not-yet-existing
-    # levels to create. Walking the *existing* chain — not just the parent of
-    # the nearest missing ancestor — is what closes the ``exists`` path: when the
-    # configured secrets dir already exists, the creation loop runs zero
-    # iterations, so a symlinked ancestor (e.g. ``~/.awf -> /attacker`` with a
-    # pre-created ``~/.awf/secrets``) would otherwise never be ``lstat``-checked
-    # and the hardening chmod plus every secret write would land under the link
-    # target. The leaf is never treated as its own anchor — ``directory.exists()``
-    # follows the link, so a real directory reached *through* a symlinked ancestor
-    # must not short-circuit the walk before that ancestor is inspected.
+    # Walk the ancestor chain all the way to the filesystem root, refusing any
+    # symlink along the way and recording the not-yet-existing levels to create.
+    # The walk must *not* stop at the nearest pre-existing ancestor: ``is_symlink``
+    # (``lstat``) only inspects the *final* component of the path it is handed, so a
+    # symlinked ancestor is caught only once the walk reaches it as that final
+    # component. A symlinked grandparent above an existing descendant — e.g.
+    # ``/tmp/awf -> /tmp/attacker`` with ``/tmp/attacker/profile/secrets`` planted so
+    # the whole configured ``/tmp/awf/profile/secrets`` tree already "exists" through
+    # the link — is otherwise skipped: probing ``/tmp/awf/profile`` finds
+    # ``is_symlink()`` false (the link is an intermediate component there) and
+    # ``exists()`` true, so a break-on-existing walk returns before ever
+    # ``lstat``-ing ``/tmp/awf`` itself, and the hardening chmod plus every secret
+    # write then follow the link into the attacker tree. Continuing past existing
+    # descendants makes each ancestor in turn the final component of an
+    # ``is_symlink`` check, so a redirect anywhere in the chain is refused.
     #
-    # The walk stops at the first pre-existing real directory, so legitimately
-    # symlinked levels *above* the managed tree (e.g. a ``/var -> /private/var``
-    # holding a temp secrets dir) are traversed rather than refused — matching
-    # the create path, which likewise anchors on the nearest pre-existing
-    # ancestor instead of refusing every symlink up to the filesystem root.
+    # This deliberately refuses *any* symlinked ancestor, including legitimately
+    # symlinked system levels (e.g. ``/var -> /private/var`` above a temp secrets
+    # dir): an attacker-planted redirect and a benign OS symlink are structurally
+    # indistinguishable by path inspection alone (same shape: a symlinked ancestor
+    # with real descendants), so the secrets write fails closed and the operator
+    # points ``secrets_dir`` at an un-symlinked path. The default ``~/.awf/secrets``
+    # under a real home directory is unaffected.
     missing: list[Path] = []
     if not directory.exists():
         missing.append(directory)
@@ -896,11 +904,14 @@ def _mkdir_secure(directory: Path) -> None:
         # catches an attacker-redirected ancestor of the secrets dir.
         if probe.is_symlink():
             raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(probe))
-        if probe.exists():
-            break  # nearest pre-existing real-directory anchor; the tree below is ours.
-        missing.append(probe)
+        if not probe.exists():
+            # A not-yet-existing level the create loop will mkdir + harden below.
+            # Existence is monotonic up the chain, so every level recorded here is
+            # contiguous with the leaf; pre-existing ancestors are left untouched
+            # (merely symlink-checked) and never enter ``missing``.
+            missing.append(probe)
         parent = probe.parent
-        if parent == probe:  # reached the filesystem root; defensive.
+        if parent == probe:  # reached the filesystem root.
             break
         probe = parent
     for path in reversed(missing):

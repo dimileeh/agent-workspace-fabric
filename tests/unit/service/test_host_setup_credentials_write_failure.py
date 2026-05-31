@@ -178,6 +178,47 @@ def test_write_secret_file_refuses_preexisting_dir_under_symlinked_ancestor(
 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+def test_write_secret_file_refuses_preexisting_dir_under_symlinked_grandparent(
+    tmp_path: Path,
+) -> None:
+    """A pre-created secrets dir below a *non-immediate* symlinked ancestor is refused.
+
+    Regression for PRRT_kwDOSJAM6s6F8HOj: the earlier guard walked the existing
+    ancestor chain but stopped at the *nearest* pre-existing directory, found via
+    ``exists()`` which follows symlinks. ``is_symlink()`` (``lstat``) only inspects
+    the final component of the path it is handed, so a symlinked *grandparent*
+    above an existing descendant is never caught: with ``<tmp>/awf -> <tmp>/attacker``
+    and the whole tree pre-created at ``<tmp>/attacker/profile/secrets``, probing
+    ``<tmp>/awf/profile`` finds ``is_symlink()`` false (the link is an intermediate
+    component there) and ``exists()`` true, so the walk broke before ever
+    ``lstat``-ing ``<tmp>/awf`` itself. The hardening chmod and every secret write
+    then followed the link into the attacker tree. The walk must continue checking
+    ancestors past an existing descendant, all the way to the filesystem root.
+    """
+    attacker_dir = tmp_path / "attacker"
+    # Pre-create the full managed tree *inside* the link target so every component
+    # of the configured path "exists" only by traversing the symlinked grandparent
+    # — the exists-path the nearest-ancestor walk stopped short of inspecting.
+    planted_secrets = attacker_dir / "profile" / "secrets"
+    planted_secrets.mkdir(parents=True)
+    planted_secrets.chmod(0o755)
+    grandparent_link = tmp_path / "awf"
+    grandparent_link.symlink_to(attacker_dir)
+    target = grandparent_link / "profile" / "secrets" / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The secret never landed in the pre-existing dir under the link target...
+    assert list(planted_secrets.iterdir()) == []
+    # ...and its permissions were not hardened to 0o700 through the link.
+    assert stat.S_IMODE(planted_secrets.stat().st_mode) == 0o755
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 def test_write_secret_file_rejects_symlink_racing_into_mkdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
