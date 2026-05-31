@@ -88,7 +88,7 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
 
 
 async def _source_runtime_not_yet_released(
-    repo: WorkspaceRepository,
+    session: AsyncSession,
     source: Workspace,
 ) -> bool:
     """Return True if the source workspace is in a terminal status but its
@@ -111,7 +111,7 @@ async def _source_runtime_not_yet_released(
         )
         .limit(1)
     )
-    return (await repo._session.execute(stmt)).scalar_one_or_none() is None
+    return (await session.execute(stmt)).scalar_one_or_none() is None
 
 
 async def retry_workspace_row(
@@ -295,7 +295,7 @@ async def retry_workspace_row(
                 host_port=conflicts[0].host_port,
                 conflicting_workspace_id=conflicts[0].workspace_id,
             )
-        if await _source_runtime_not_yet_released(repo, source):
+        if await _source_runtime_not_yet_released(session, source):
             raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
                 source_workspace_id=source.id,
             )
