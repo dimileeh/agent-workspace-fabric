@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from awf.cli import setup_commands
 from awf.cli.main import app
 from awf.host_setup.config import HostSetupConfig, HostSetupConfigError
-from awf.host_setup.rendering import SETUP_READINESS_FAILED
+from awf.host_setup.rendering import SETUP_READINESS_FAILED, START_COMPOSE_ASSETS_MISSING
 from awf.host_setup.source_assets import (
     SOURCE_CHECKOUT_INVALID,
     SOURCE_CHECKOUT_MARKERS,
@@ -313,6 +313,59 @@ def test_setup_no_checkout_probes_bootstrap_asset_root_env(
     environ = captured["environ"]
     assert isinstance(environ, dict)
     assert environ["AWF_API_HOST_PORT"] == "9100"
+
+
+@pytest.mark.unit
+def test_setup_no_checkout_missing_bootstrap_assets_blocks(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default discovery with no resolvable bootstrap assets blocks like ``awf start``.
+
+    Regression for PRRT_kwDOSJAM6s6F-MZF: outside a source checkout and without
+    bundled bootstrap assets, ``get_bootstrap_asset_root()`` is ``None`` and
+    ``awf start`` later fails in ``run_service_bootstrap`` with
+    SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND (START_COMPOSE_ASSETS_MISSING). ``awf
+    setup`` must surface the same blocker instead of reporting a ready host and
+    telling the operator to run a start that cannot resolve its compose/runtime
+    assets.
+    """
+    import awf.service.bootstrap as bootstrap_mod
+
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert START_COMPOSE_ASSETS_MISSING in reason_codes
+
+
+@pytest.mark.unit
+def test_setup_source_checkout_skips_bootstrap_assets_blocker(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A verified source checkout never trips the default-discovery assets blocker.
+
+    The bootstrap-assets readiness blocker only guards the default-discovery path:
+    a selected ``--source-checkout`` already pins a valid asset root that ``awf
+    start`` reuses, so setup must not block on a ``None``
+    ``get_bootstrap_asset_root()`` that only applies when no checkout is selected.
+    """
+    import awf.service.bootstrap as bootstrap_mod
+
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    root = _make_source_checkout(tmp_path / "awf")
+    result = _runner.invoke(
+        app,
+        ["setup", "--dry-run", "--source-checkout", str(root), "--format", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    reason_codes = [issue["reason_code"] for issue in payload.get("issues", [])]
+    assert START_COMPOSE_ASSETS_MISSING not in reason_codes
 
 
 @pytest.mark.unit

@@ -19,6 +19,7 @@ from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
+    START_COMPOSE_ASSETS_MISSING,
     render_first_run_json,
     render_first_run_pretty,
 )
@@ -208,6 +209,36 @@ def test_build_payload_source_checkout_error_is_blocked_issue() -> None:
     )
     assert source_issue.details["missing_markers"] == ["pyproject.toml", "uv.lock"]
     assert source_issue.details["path_status"] == "missing"
+
+
+@pytest.mark.unit
+def test_build_payload_bootstrap_assets_missing_is_blocked_issue() -> None:
+    """Verify a missing default-discovery bootstrap asset root adds a blocker.
+
+    When ``awf setup`` runs the default-discovery path outside a source checkout
+    and without bundled bootstrap assets, ``awf start`` would later fail in
+    ``run_service_bootstrap`` with SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND
+    (mapped to START_COMPOSE_ASSETS_MISSING). Setup must surface the same blocker
+    rather than report a ready host that ``awf start`` cannot bootstrap.
+    """
+    payload = build_setup_readiness_payload(
+        [_ok("docker")],
+        bootstrap_assets_missing=True,
+    )
+    assert payload.status == "blocked"
+    issue = next(
+        issue for issue in payload.issues if issue.reason_code == START_COMPOSE_ASSETS_MISSING
+    )
+    assert issue.severity == "blocked"
+    assert issue.details["check"] == "bootstrap_assets"
+
+
+@pytest.mark.unit
+def test_build_payload_bootstrap_assets_present_adds_no_blocker() -> None:
+    """Verify the default ``bootstrap_assets_missing=False`` adds no blocker."""
+    payload = build_setup_readiness_payload([_ok("docker")])
+    reason_codes = [issue.reason_code for issue in payload.issues]
+    assert START_COMPOSE_ASSETS_MISSING not in reason_codes
 
 
 @pytest.mark.unit

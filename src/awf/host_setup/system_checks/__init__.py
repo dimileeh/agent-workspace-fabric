@@ -32,6 +32,7 @@ from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
+    START_COMPOSE_ASSETS_MISSING,
     FirstRunIssue,
     FirstRunPayload,
     FirstRunSeverity,
@@ -356,11 +357,14 @@ def build_setup_readiness_payload(
     dry_run: bool = False,
     source_checkout: VerifiedSourceCheckout | None = None,
     source_checkout_error: SourceCheckoutError | None = None,
+    bootstrap_assets_missing: bool = False,
 ) -> FirstRunPayload:
     """Aggregate check results into a rendered first-run readiness payload."""
     issues: list[FirstRunIssue] = []
     if source_checkout_error is not None:
         issues.append(_source_checkout_issue(source_checkout_error))
+    if bootstrap_assets_missing:
+        issues.append(_bootstrap_assets_missing_issue())
     for result in results:
         issue = _readiness_issue(result)
         if issue is not None:
@@ -409,6 +413,24 @@ def _readiness_issue(result: SetupCheckResult) -> FirstRunIssue | None:
         cause=result.detail,
         fix=result.fix,
         docs_link=result.docs_link,
+    )
+
+
+def _bootstrap_assets_missing_issue() -> FirstRunIssue:
+    """Map missing default-discovery bootstrap assets to a blocked first-run issue.
+
+    Surfaces the same failure ``awf start`` hits from ``run_service_bootstrap``
+    when no asset root resolves (``SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND`` ->
+    ``START_COMPOSE_ASSETS_MISSING``), so setup never reports a ready host that
+    ``awf start`` cannot bootstrap. The caller (``awf setup``) owns the
+    ``get_bootstrap_asset_root()`` probe that decides when this fires; only the
+    default-discovery path can reach it, since a verified source checkout already
+    pins a valid asset root.
+    """
+    return first_run_issue_from_reason_code(
+        START_COMPOSE_ASSETS_MISSING,
+        severity="blocked",
+        details={"check": "bootstrap_assets"},
     )
 
 

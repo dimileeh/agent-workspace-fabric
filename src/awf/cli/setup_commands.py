@@ -196,6 +196,7 @@ def _run_setup(
         dry_run=dry_run,
         source_checkout=probe_source,
         source_checkout_error=source_error,
+        bootstrap_assets_missing=_default_discovery_bootstrap_assets_missing(probe_source),
     )
 
     if not dry_run:
@@ -323,6 +324,29 @@ def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[s
     resolved_read_env = resolve_existing_service_env_file(compose_env_candidate)
     read_env_file = resolved_read_env if resolved_read_env.exists() else None
     return local_service_environ(env_file=read_env_file)
+
+
+def _default_discovery_bootstrap_assets_missing(
+    probe_source: VerifiedSourceCheckout | None,
+) -> bool:
+    """Return whether default-discovery setup would leave ``awf start`` unable to bootstrap.
+
+    Only the default-discovery path (no ``--source-checkout`` and no persisted
+    source metadata, so ``probe_source`` is ``None``) can reach ``awf start``'s
+    ``run_service_bootstrap`` with no resolvable asset root: its
+    ``_resolve_bootstrap_assets`` then raises SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND
+    (``awf start`` maps it to START_COMPOSE_ASSETS_MISSING). A verified source
+    checkout — selected via ``--source-checkout`` or revalidated from persisted
+    metadata — already pins a valid asset root that ``awf start`` reuses, so it
+    never trips this. Mirror that exact ``get_bootstrap_asset_root()`` probe here
+    so setup blocks instead of reporting a ready host and telling the operator to
+    run a start that cannot resolve its compose/runtime assets.
+    """
+    if probe_source is not None:
+        return False
+    from awf.service.bootstrap import get_bootstrap_asset_root
+
+    return get_bootstrap_asset_root() is None
 
 
 def _readiness_with_config_write_failure(
