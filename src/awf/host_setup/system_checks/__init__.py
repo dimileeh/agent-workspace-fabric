@@ -52,6 +52,19 @@ from awf.host_setup.system_checks.checks_core import (
     check_python_runtime,
     check_shell_path,
 )
+
+# The three submodule imports below pull a handful of ``_``-prefixed internal
+# helpers (the ``_invalid_*`` / ``_resolve_*`` / ``_env_*`` override probes, the
+# ``_ollama_bridge_profile_enabled`` gate, and the ``_docker_probe_*``
+# daemon-targeting helpers) alongside the public ``check_*`` functions. Those
+# private helpers are imported *only* for ``run_system_checks`` below, which needs
+# the resolved values and the invalid-override-vs-fallback decision to pick the
+# right ``check_*`` variant and to cross-check the resolved ports -- state the
+# public ``check_*`` surface does not expose. Importing them directly keeps that
+# orchestration in one place; the cross-submodule boundary is intentional and a
+# rename in a submodule fails loudly here at import time rather than silently at a
+# call site. They are deliberately absent from ``__all__`` so they stay
+# package-internal and ``check_*`` remains the only public probe surface.
 from awf.host_setup.system_checks.checks_host import (
     _invalid_auth_mount_home_fallback,
     _invalid_host_home_override,
