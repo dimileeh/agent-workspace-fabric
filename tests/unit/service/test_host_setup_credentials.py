@@ -364,6 +364,43 @@ def test_store_keyring_token_shaped_provider_is_not_masked_by_env_ref() -> None:
 
 
 @pytest.mark.unit
+def test_store_keyring_rejects_overlong_provider_before_write() -> None:
+    """Verify an over-long identifier is rejected before any keychain write.
+
+    ``_require_safe_identifier`` bounds the alphabet but must also bound the
+    length: an unbounded provider/account is interpolated into the keychain
+    service name (and, for the plain-file backend, the secret filename), so a
+    huge value could mint a temp filename past the POSIX 255-byte limit and
+    surface as a misleading ``CREDENTIAL_BACKEND_UNAVAILABLE``. Reject it up
+    front with ``CREDENTIAL_REF_INVALID`` and a secret-free ``max_length``
+    detail, before the keychain is ever touched.
+    """
+    module = FakeKeyringModule()
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        store_provider_credential(
+            CredentialRequest(
+                provider="a" * 300,
+                secret_source=_secret(_FAKE_GH_TOKEN),
+            ),
+            preferred=None,
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+            keyring_backend=keyring_backend,
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {
+        "field": "provider",
+        "max_length": credentials._MAX_IDENTIFIER_LENGTH,
+    }
+    assert module.set_calls == []
+
+
+@pytest.mark.unit
 def test_store_keyring_missing_secret_is_not_masked_by_env_ref() -> None:
     """Verify a usable keyring's missing-secret fault is not masked by the env-ref offer.
 
@@ -720,6 +757,47 @@ def test_plain_file_rejects_token_shaped_account(tmp_path: Path) -> None:
     assert not secrets_dir.exists()
     assert _FAKE_TOKEN not in str(error.to_dict())
     assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["provider", "account"])
+def test_plain_file_rejects_overlong_identifier(field: str, tmp_path: Path) -> None:
+    """Verify an over-long identifier is rejected before any plain-file side-effect.
+
+    The plain-file backend derives a temp filename
+    ``.{provider}.{account}.{16 hex}.tmp`` from the two identifiers, so an
+    unbounded one could overflow the POSIX 255-byte filename limit. Without an
+    explicit ceiling, that ``ENAMETOOLONG`` would only surface from
+    ``_write_secret_file`` as a misleading ``CREDENTIAL_BACKEND_UNAVAILABLE``
+    after the secrets dir is created. The length bound must reject it up front
+    with ``CREDENTIAL_REF_INVALID`` and leave no secrets directory behind.
+    """
+    secrets_dir = tmp_path / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    overlong = "a" * 300
+    request = (
+        CredentialRequest(provider=overlong, secret_source=_secret(_FAKE_TOKEN))
+        if field == "provider"
+        else CredentialRequest(
+            provider="openai", account=overlong, secret_source=_secret(_FAKE_TOKEN)
+        )
+    )
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(request)
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {
+        "field": field,
+        "max_length": credentials._MAX_IDENTIFIER_LENGTH,
+    }
+    assert not secrets_dir.exists()
 
 
 @pytest.mark.unit

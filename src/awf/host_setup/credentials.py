@@ -68,6 +68,15 @@ MAX_CREDENTIAL_REF_LENGTH = 512
 # ``GH_TOKEN``); provider/account identifiers stay filesystem- and ref-safe.
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# Bound identifier length, not just its alphabet. The plain-file backend mints a
+# temp filename ``.{provider}.{account}.{16 hex}.tmp`` from two identifiers, so an
+# unbounded one could overflow the POSIX 255-byte ``NAME_MAX`` and surface only as
+# a misleading ``CREDENTIAL_BACKEND_UNAVAILABLE`` (the ``ENAMETOOLONG`` caught by
+# ``_write_secret_file``) after the secrets dir is created. The 23-byte temp
+# scaffolding (leading ``.`` + ``.`` separator + ``.`` + 16 hex + ``.tmp``) plus
+# two identifiers must stay under 255, i.e. each identifier ``<= 116``; 96 leaves
+# headroom and is already far longer than any real provider/account slug.
+_MAX_IDENTIFIER_LENGTH = 96
 # Reuse the shared token recognizer so token-shaped inputs are redacted the same
 # way as everywhere else in AWF. Case-insensitive on purpose: *diagnostic
 # redaction* over-redacts case-variant shapes (e.g. ``SK-PROJ-...``) that a real
@@ -764,7 +773,18 @@ def _require_safe_identifier(value: str, *, field: str) -> str:
     plain-file path before ``CredentialRef`` rejects the resulting ref. Refuse it
     up front with the same secret-free reason code env var names use, so the token
     never reaches a storage path and the failure stays reason-coded.
+
+    The length is bounded first (before the regex checks) so an arbitrarily long
+    value is rejected cheaply and, for the plain-file backend, before the derived
+    temp filename can overflow the POSIX ``NAME_MAX`` and downgrade a clear
+    input-validation error to a misleading backend-unavailable signal.
     """
+    if len(value) > _MAX_IDENTIFIER_LENGTH:
+        raise CredentialError(
+            reason_code=CREDENTIAL_REF_INVALID,
+            message=f"Credential {field} identifier exceeds the maximum length.",
+            details={"field": field, "max_length": _MAX_IDENTIFIER_LENGTH},
+        )
     if _TOKEN_SHAPE_RE.search(value) is not None:
         raise CredentialError(
             reason_code=CREDENTIAL_REF_INVALID,
