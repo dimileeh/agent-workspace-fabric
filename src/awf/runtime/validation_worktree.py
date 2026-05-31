@@ -102,9 +102,10 @@ async def check_validation_worktree_clean(
             command_stderr=stderr,
         )
 
-    paths = tuple(_changed_paths_from_porcelain(status.stdout))
-    untracked_paths = tuple(_untracked_paths_from_porcelain(status.stdout))
-    if not paths:
+    status_stdout = status.stdout or ""
+    paths = tuple(_changed_paths_from_porcelain(status_stdout))
+    untracked_paths = tuple(_untracked_paths_from_porcelain(status_stdout))
+    if not paths and not untracked_paths:
         return ValidationWorktreeCheck(clean=True)
     return ValidationWorktreeCheck(
         clean=False,

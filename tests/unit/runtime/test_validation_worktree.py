@@ -8,21 +8,59 @@ from pathlib import Path
 import pytest
 
 from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     cleanup_validation_worktree_side_effects,
+    check_validation_worktree_clean,
 )
 
 
 @dataclass
 class _CommandResultLike:
     returncode: int
-    stdout: str
+    stdout: str | None
     stderr: str | None
     reason_code: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.returncode == 0
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_handles_none_stdout_as_clean(tmp_path: Path) -> None:
+    """A git status result with ``None`` stdout should behave as a clean worktree."""
+
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return _CommandResultLike(0, None, "")
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is True
+    assert check.reason_code is None
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(tmp_path: Path) -> None:
+    """Untracked files are pre-existing dirt and should be rejected by the guard."""
+
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return _CommandResultLike(0, "?? untracked.py\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.paths == ("untracked.py",)
+    assert check.untracked_paths == ("untracked.py",)
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:
