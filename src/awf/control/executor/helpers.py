@@ -508,14 +508,6 @@ def _failure_salvage_payload(
     return payload
 
 
-def _agent_model_for_workspace(
-    ws: Workspace,
-    defaults: AgentDefaults | None,
-) -> str | None:
-    model, _ = _agent_identity_model_and_effort(ws, defaults)
-    return model
-
-
 def _agent_identity_model_and_effort(
     ws: Workspace,
     defaults: AgentDefaults | None,
