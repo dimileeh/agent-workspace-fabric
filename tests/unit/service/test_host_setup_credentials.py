@@ -217,6 +217,89 @@ def test_store_logs_keyring_degradation_to_env_ref(preferred: str | None) -> Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("preferred", "expected_logs"),
+    [("keyring", 1), (None, 0)],
+)
+def test_select_logs_keyring_degradation_only_for_explicit_request(
+    preferred: str | None,
+    expected_logs: int,
+) -> None:
+    """Verify select-time keyring→env_ref degradation logs only for explicit keyring.
+
+    When the cheap ``is_available()`` probe rejects keyring up front,
+    ``select_credential_backend`` falls back to env_ref. A caller who explicitly
+    passed ``preferred="keyring"`` would otherwise observe the degradation only as
+    a changed ``CredentialRef.backend``, so emit the same secret-free
+    ``host_setup.credential_backend_degraded`` warning the write-time path emits —
+    making the select-time and write-time routes symmetric in observability.
+    ``preferred=None`` is the documented safe default (headless-Linux-no-keychain →
+    env-ref offer), not a degradation from an explicit request, so it stays silent
+    to avoid a warning on every default selection.
+    """
+    keyring_backend = KeyringCredentialBackend(
+        keyring_module=FakeKeyringModule(backend=_FailBackend())
+    )
+    assert keyring_backend.is_available() is False
+
+    with structlog.testing.capture_logs() as captured:
+        selected = select_credential_backend(
+            preferred=preferred,
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+            keyring_backend=keyring_backend,
+        )
+
+    assert selected.kind == "env_ref"
+    degraded = [e for e in captured if e["event"] == "host_setup.credential_backend_degraded"]
+    assert len(degraded) == expected_logs
+    if expected_logs:
+        entry = degraded[0]
+        assert entry["log_level"] == "warning"
+        assert entry["requested_backend"] == "keyring"
+        assert entry["effective_backend"] == "env_ref"
+        assert entry["preferred"] == preferred
+        assert entry["reason_code"] == CREDENTIAL_BACKEND_UNAVAILABLE
+
+
+@pytest.mark.unit
+def test_store_explicit_keyring_select_time_degradation_logs_once() -> None:
+    """Verify a select-time keyring degradation logs exactly once through ``store``.
+
+    With ``preferred="keyring"`` and a keyring the cheap probe rejects up front,
+    ``select_credential_backend`` already logged the degradation and returned
+    env_ref; ``store_provider_credential`` then mints the ``env://`` offer without
+    re-entering the write-time degradation path, so the warning is emitted exactly
+    once rather than duplicated.
+    """
+    keyring_backend = KeyringCredentialBackend(
+        keyring_module=FakeKeyringModule(backend=_FailBackend())
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        ref = store_provider_credential(
+            CredentialRequest(
+                provider="github",
+                env_var="GH_TOKEN",
+                secret_source=_secret(_FAKE_GH_TOKEN),
+            ),
+            preferred="keyring",
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+            keyring_backend=keyring_backend,
+        )
+
+    assert ref.backend == "env_ref"
+    assert ref.ref == "env://GH_TOKEN"
+    degraded = [e for e in captured if e["event"] == "host_setup.credential_backend_degraded"]
+    assert len(degraded) == 1
+    assert degraded[0]["preferred"] == "keyring"
+    assert _FAKE_GH_TOKEN not in str(captured)
+
+
+@pytest.mark.unit
 def test_store_keyring_unusable_without_env_var_surfaces_interactive_input() -> None:
     """Verify a write-time-unusable keyring with no env_var mirrors the pre-create path.
 

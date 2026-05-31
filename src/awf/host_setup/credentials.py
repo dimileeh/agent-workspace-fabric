@@ -453,6 +453,13 @@ def select_credential_backend(
     back to env_ref otherwise (the safe default; headless-Linux-no-keychain gets
     the env-ref offer). ``"plain_file"`` returns the gated plain-file backend,
     whose consent/flag/platform checks run in ``create_ref``.
+
+    An explicit ``preferred="keyring"`` that falls back here (the cheap
+    ``is_available()`` probe found no usable keychain) emits a secret-free
+    ``host_setup.credential_backend_degraded`` warning so the degradation is
+    observable, mirroring the write-time degradation path in
+    ``store_provider_credential``. The ``None`` default stays silent: env_ref is
+    its documented outcome on a keychain-less host, not a degradation.
     """
     if preferred is not None and preferred not in CREDENTIAL_BACKENDS:
         raise CredentialError(
@@ -472,6 +479,25 @@ def select_credential_backend(
     resolved_keyring = keyring_backend or KeyringCredentialBackend()
     if resolved_keyring.is_available():
         return resolved_keyring
+    if preferred == "keyring":
+        # An explicit keyring request that the cheap ``is_available()`` probe
+        # rejects up front degrades to the env-ref offer. Mirror the write-time
+        # degradation log in ``store_provider_credential`` so both routes are
+        # equally observable: a caller who explicitly asked for keyring sees a
+        # secret-free structured warning rather than only a changed
+        # ``CredentialRef.backend``. ``preferred=None`` is the documented safe
+        # default (headless-Linux-no-keychain → env-ref), not a degradation from an
+        # explicit request, so it stays silent here to avoid warning on every
+        # default selection. The write-time path never double-logs: when this
+        # fires, keyring is not selected, so ``store_provider_credential`` mints
+        # env_ref without re-entering its own degradation branch.
+        logger.warning(
+            "host_setup.credential_backend_degraded",
+            requested_backend="keyring",
+            preferred=preferred,
+            effective_backend="env_ref",
+            reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
+        )
     return resolved_env
 
 
