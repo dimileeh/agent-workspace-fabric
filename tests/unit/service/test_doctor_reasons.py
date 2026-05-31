@@ -28,6 +28,18 @@ def test_protected_scope_terminal_reasons_have_doctor_guidance() -> None:
 
 
 @pytest.mark.unit
+def test_grok_runtime_cli_missing_has_doctor_guidance() -> None:
+    """Verify Grok runtime CLI preflight failures map to operator guidance."""
+    reason = _REASON_TEXT["GROK_RUNTIME_CLI_NOT_FOUND"]
+
+    assert "grok" in reason.message.lower()
+    assert reason.action
+    assert reason.likely_cause
+    assert reason.related_command == "awf service doctor"
+    assert reason.docs_link == "https://docs.x.ai/build/cli"
+
+
+@pytest.mark.unit
 def test_first_run_failure_reasons_have_operator_guidance() -> None:
     """Verify first-run failure reason codes map to operator guidance."""
     missing_codes = set(FIRST_RUN_FAILURE_REASON_CODES) - set(_REASON_TEXT)

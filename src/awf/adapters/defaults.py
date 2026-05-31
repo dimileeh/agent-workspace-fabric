@@ -16,6 +16,8 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
         # Pro-class model ID when the account has access.
         AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
         AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh"),
+        # xAI documents grok-build-0.1 as the Grok Build coding model.
+        AgentRuntime.grok: AgentDefaults(model="grok-build-0.1", effort="xhigh"),
     }
 )
 

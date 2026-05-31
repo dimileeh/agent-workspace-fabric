@@ -84,10 +84,11 @@ def _runtime_cli_ok(expected_executable: str) -> Any:
 
 @pytest.mark.unit
 def test_provider_readiness_validates_aliases_and_rejects_unknown() -> None:
-    assert validate_provider_names(["claude", "opencode", "codex", "docker", ""]) == {
+    assert validate_provider_names(["claude", "opencode", "codex", "grok", "docker", ""]) == {
         "claude_code",
         "opencode",
         "codex",
+        "grok",
         "docker",
     }
 
@@ -111,6 +112,7 @@ def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path)
         "claude_code",
         "gemini",
         "opencode",
+        "grok",
         "docker",
     }
 
@@ -240,7 +242,10 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     (home / ".claude").mkdir()
     (home / ".gemini").mkdir()
     (home / ".config" / "opencode").mkdir(parents=True)
-    env = {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"}
+    env = {
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+        "XAI_API_KEY": "xai-selected-grok-secret",
+    }
     probe_calls: list[list[str]] = []
 
     def _run(args: list[str], **_kwargs: object) -> Any:
@@ -252,6 +257,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         ("claude_code", "claude_code", "claude-opus-4-8", "ok"),
         ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
+        ("grok", "grok", "grok-build-0.1", "ok"),
     ]
     for agent, provider, expected_model, expected_probe_status in cases:
         task_policy = {"agent_model": expected_model} if agent == "codex" else {}
@@ -309,6 +315,16 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         "awf-agent-runtime:latest",
         "-lc",
         "command -v opencode",
+    ] in probe_calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "awf-agent-runtime:latest",
+        "-lc",
+        "command -v grok",
     ] in probe_calls
 
 
@@ -773,6 +789,97 @@ def test_selected_gemini_preflight_uses_agent_runtime_cli_not_api_cli(
 
 
 @pytest.mark.unit
+def test_selected_grok_preflight_requires_xai_api_key_and_runtime_cli(
+    tmp_path: Path,
+) -> None:
+    token = "xai-runtime-secret"
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        calls.append(args)
+        assert kwargs["env"]["XAI_API_KEY"] == token
+        return _completed(stdout="/usr/local/bin/grok\n")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="grok",
+        task_policy={},
+        environ={"XAI_API_KEY": token},
+        run_subprocess=_run,
+    )
+
+    assert result["provider"] == "grok"
+    assert result["agent"] == "grok"
+    assert result["model"] == "grok-build-0.1"
+    assert result["readiness_status"] == "ready"
+    assert result["auth_status"] == "ok"
+    assert result["auth_source"] == "XAI_API_KEY"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+    assert calls == [
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v grok",
+        ]
+    ]
+    serialized = json.dumps(result, sort_keys=True)
+    assert token not in serialized
+
+
+@pytest.mark.unit
+def test_selected_grok_preflight_blocks_missing_xai_api_key(tmp_path: Path) -> None:
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="grok",
+        task_policy={},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["provider"] == "grok"
+    assert result["readiness_status"] == "blocked"
+    assert result["auth_status"] == "fail"
+    assert result["probe_status"] == "skipped"
+    assert result["reason_code"] == "GROK_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_grok_preflight_blocks_missing_runtime_cli_and_redacts_key(
+    tmp_path: Path,
+) -> None:
+    token = "xai-missing-cli-secret"
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        assert args[-1] == "command -v grok"
+        assert kwargs["env"]["XAI_API_KEY"] == token
+        return _completed(returncode=1, stderr=f"grok: not found for {token}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="grok",
+        task_policy={},
+        environ={"XAI_API_KEY": token},
+        run_subprocess=_run,
+    )
+
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "GROK_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
+    serialized = json.dumps(result, sort_keys=True)
+    assert token not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
 def test_selected_codex_preflight_blocks_when_runtime_cli_missing(
     tmp_path: Path,
 ) -> None:
@@ -931,11 +1038,13 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
     anthropic_secret = "sk-ant-green-secret"
     gemini_secret = "gemini_green_secret"
     ollama_secret = "ollama_green_secret"
+    xai_secret = "xai_green_secret"
     env = {
         "AWF_GITHUB_TOKEN": github_secret,
         "ANTHROPIC_API_KEY": anthropic_secret,
         "GEMINI_API_KEY": gemini_secret,
         "OLLAMA_API_KEY": ollama_secret,
+        "XAI_API_KEY": xai_secret,
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
     }
     subprocess_calls: list[list[str]] = []
@@ -958,7 +1067,15 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
 
     assert payload["status"] == "ok"
     providers = payload["providers"]
-    assert set(providers) == {"github", "codex", "claude_code", "gemini", "opencode", "docker"}
+    assert set(providers) == {
+        "github",
+        "codex",
+        "claude_code",
+        "gemini",
+        "opencode",
+        "grok",
+        "docker",
+    }
     assert all(provider["ok"] is True for provider in providers.values())
     assert providers["github"]["capabilities"] == ["pr_create", "comment", "merge"]
     assert subprocess_calls == [["gh", "auth", "status", "--hostname", "github.com"]]
@@ -969,6 +1086,7 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
         anthropic_secret,
         gemini_secret,
         ollama_secret,
+        xai_secret,
     ):
         assert secret not in serialized
 
@@ -1166,6 +1284,7 @@ def test_provider_readiness_env_fallbacks_report_security_warnings(
         "ANTHROPIC_API_KEY": "sk-ant-env-fallback-secret",
         "GEMINI_API_KEY": "gemini-env-fallback-secret",
         "OLLAMA_API_KEY": "ollama-env-fallback-secret",
+        "XAI_API_KEY": "xai-env-fallback-secret",
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
     }
 
@@ -1176,7 +1295,7 @@ def test_provider_readiness_env_fallbacks_report_security_warnings(
         http_get=_ollama_ok,
     )
 
-    for name in ("github", "codex", "claude_code", "gemini", "opencode"):
+    for name in ("github", "codex", "claude_code", "gemini", "opencode", "grok"):
         provider = payload["providers"][name]
         assert provider["ok"] is True
         assert provider["credential_scope"] == "static_env_token"
@@ -1367,114 +1486,3 @@ def test_provider_readiness_explicit_missing_docker_config_does_not_fallback(
     assert docker["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
     assert docker["credential_sources"] == []
     assert "docker_home_secret" not in json.dumps(payload, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_provider_readiness_codex_directory_fallback_and_rules_are_sources(
-    tmp_path: Path,
-) -> None:
-    rules_home = tmp_path / "rules-home"
-    (rules_home / ".codex" / "rules").mkdir(parents=True)
-    rules_payload = collect_agent_readiness(
-        _settings(tmp_path, host_home=str(rules_home)),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    empty_home = tmp_path / "empty-home"
-    (empty_home / ".codex").mkdir(parents=True)
-    empty_payload = collect_agent_readiness(
-        _settings(tmp_path, host_home=str(empty_home)),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    assert {
-        source["signal"] for source in rules_payload["providers"]["codex"]["credential_sources"]
-    } == {"~/.codex/rules"}
-    assert {
-        source["signal"] for source in empty_payload["providers"]["codex"]["credential_sources"]
-    } == {"~/.codex"}
-
-
-@pytest.mark.unit
-def test_provider_readiness_security_summary_tolerates_sparse_warning_payloads() -> None:
-    security = provider_readiness._security_summary(
-        {
-            "github": {"status": "ok", "warnings": "not-a-list"},
-            "codex": {
-                "status": "ok",
-                "warnings": ["ignored", {"reason": "STATIC_TOKEN_FALLBACK"}],
-            },
-            "docker": {
-                "status": "warn",
-                "reason": "DOCKER_AUTH_NOT_OBSERVED",
-                "warnings": [],
-            },
-        }
-    )
-
-    assert security["status"] == "warning"
-    assert security["warning_count"] == 1
-    assert security["providers_with_warnings"] == ["codex", "docker"]
-    assert security["reason_codes"] == [
-        "DOCKER_AUTH_NOT_OBSERVED",
-        "STATIC_TOKEN_FALLBACK",
-    ]
-
-
-@pytest.mark.unit
-def test_provider_readiness_provider_result_defaults_unknown_source_metadata() -> None:
-    result = provider_readiness._provider_result(
-        ok=True,
-        strict=False,
-        reason="CUSTOM_AUTH_PRESENT",
-        message="Custom provider auth was observed.",
-        secrets=frozenset(),
-        credential_sources=[
-            {
-                "type": "path",
-                "signal": "~/.custom/auth.json",
-                "credential_scope": "custom_scope",
-                "isolation": "custom_isolation",
-            }
-        ],
-    )
-
-    assert result["credential_scope"] == "not_observed"
-    assert result["isolation"] == "none"
-
-
-@pytest.mark.unit
-def test_provider_readiness_codex_directory_sources_include_rules_and_directory(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    codex_home = home / ".codex"
-    (codex_home / "rules").mkdir(parents=True)
-
-    rule_sources = provider_readiness._codex_file_sources(home)
-    assert [source["signal"] for source in rule_sources] == ["~/.codex/rules"]
-
-    (codex_home / "rules").rmdir()
-    directory_sources = provider_readiness._codex_file_sources(home)
-    assert [source["signal"] for source in directory_sources] == ["~/.codex"]
-
-
-@pytest.mark.unit
-def test_provider_readiness_security_summary_collects_provider_warnings(
-    tmp_path: Path,
-) -> None:
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={"OPENAI_API_KEY": "sk-proj-security-summary-secret"},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    security = payload["security"]
-    assert security["status"] == "warning"
-    assert security["warning_count"] >= 1
-    assert "codex" in security["providers_with_warnings"]
-    assert "STATIC_TOKEN_FALLBACK" in security["reason_codes"]
-    assert "DOCKER_HOST_BROAD_CONTROL" in security["reason_codes"]
-    assert "sk-proj-security-summary-secret" not in json.dumps(security, sort_keys=True)

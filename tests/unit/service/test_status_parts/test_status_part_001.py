@@ -694,6 +694,7 @@ def test_service_status_provider_warnings_do_not_fail_by_default(tmp_path: Path)
         "claude_code",
         "gemini",
         "opencode",
+        "grok",
         "docker",
     }
     assert readiness["providers"]["github"]["status"] == "warn"
