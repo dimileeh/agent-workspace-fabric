@@ -1086,6 +1086,7 @@ async def _execute(
         state=state,
         base_branch=base_branch,
         remote_branch=remote_branch,
+        remote_push_url=remote_push_url,
         compose_project=compose_project,
         compose_file=compose_file,
         monitor_log=monitor_log,
