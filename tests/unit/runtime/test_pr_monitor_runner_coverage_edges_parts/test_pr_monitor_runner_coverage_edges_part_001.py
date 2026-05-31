@@ -586,6 +586,38 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
 
 
 @pytest.mark.unit
+def test_dns_base_fetch_errors_classified_transient() -> None:
+    assert _is_transient_base_fetch_error(
+        BaseFetchError(
+            "fatal: unable to access 'https://github.com/org/repo.git': "
+            "Could not resolve host: github.com"
+        )
+    )
+    assert _is_transient_base_fetch_error(
+        BaseFetchError(
+            "fatal: unable to access 'https://github.com/org/repo.git': "
+            "Temporary failure in name resolution"
+        )
+    )
+    assert _is_transient_base_fetch_error(
+        BaseFetchError(
+            "fatal: unable to access 'https://github.com/org/repo.git': Name or service not known"
+        )
+    )
+    assert _is_transient_base_fetch_error(
+        BaseFetchError(
+            "fatal: unable to access 'https://github.com/org/repo.git': Could not resolve proxy"
+        )
+    )
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError(
+            "could not resolve to a repository: The org/repo.git repository was renamed or removed"
+        )
+    )
+    assert not _is_transient_base_fetch_error(BaseFetchError("could not resolve to a node"))
+
+
+@pytest.mark.unit
 def test_github_error_redaction_covers_app_jwt_and_bearer_tokens() -> None:
     app_token = "gha_11AA22BB33CC44DD"
     jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
