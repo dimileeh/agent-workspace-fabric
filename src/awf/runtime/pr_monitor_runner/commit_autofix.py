@@ -31,7 +31,11 @@ def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
         if status == "??" or status[1] == " ":
             continue
         path = line[3:]
-        rename_paths = _split_porcelain_rename_paths(path) if status[0] in {"R", "C"} else None
+        rename_paths = (
+            _split_porcelain_rename_paths(path)
+            if status[:1] in {"R", "C"} or status[1:2] in {"R", "C"}
+            else None
+        )
         if rename_paths:
             _old_path, path = rename_paths
         paths.append(_unquote_porcelain_path(path))
