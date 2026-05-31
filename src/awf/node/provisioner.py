@@ -258,6 +258,13 @@ class Provisioner:
                     pre_launch_ws = await pre_launch_repo.get(workspace_id)
                     if pre_launch_ws is not None and pre_launch_ws.compose_project_name is None:
                         pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
+                        if (
+                            profile_resolution is not None
+                            and pre_launch_ws.resolved_profile is None
+                        ):
+                            pre_launch_ws.resolved_profile = profile_resolution.profile.model_dump(
+                                mode="json", by_alias=True
+                            )
                         await pre_launch_session.commit()
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
@@ -324,6 +331,10 @@ class Provisioner:
                 compose_fail_ws = await compose_fail_repo.get(workspace_id)
                 if compose_fail_ws is not None and compose_fail_ws.compose_project_name is None:
                     compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
+                    if profile_resolution is not None and compose_fail_ws.resolved_profile is None:
+                        compose_fail_ws.resolved_profile = profile_resolution.profile.model_dump(
+                            mode="json", by_alias=True
+                        )
                     await compose_fail_session.commit()
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
