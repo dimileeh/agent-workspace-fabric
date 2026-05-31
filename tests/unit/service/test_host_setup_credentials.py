@@ -491,6 +491,25 @@ def test_keyring_empty_secret_is_interactive_input_required() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("secret", ["   ", "\t\n"])
+def test_keyring_whitespace_only_secret_is_interactive_input_required(secret: str) -> None:
+    """Verify a whitespace-only secret is treated as missing input.
+
+    A whitespace-only value is truthy, so it would otherwise slip past the
+    ``not secret`` guard and be written to the keychain as an unusable
+    credential. It must instead raise ``INTERACTIVE_INPUT_REQUIRED`` and never
+    reach the backend, mirroring the env_ref name guard.
+    """
+    fake_keyring = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=fake_keyring)
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="github", secret_source=_secret(secret)))
+
+    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert fake_keyring.set_calls == []
+
+
+@pytest.mark.unit
 def test_plain_file_missing_secret_is_interactive_input_required(tmp_path: Path) -> None:
     """Verify plain-file storage with no secret source fails non-interactively."""
     secrets_dir = tmp_path / "secrets"

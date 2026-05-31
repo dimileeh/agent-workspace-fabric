@@ -477,7 +477,10 @@ def _pull_secret(request: CredentialRequest) -> str:
     """Pull the secret from the request; missing input fails non-interactively."""
     source = request.secret_source
     secret = source() if source is not None else None
-    if not secret:
+    # A whitespace-only value is truthy but unusable for authentication; treat it
+    # as missing input rather than writing it to the keychain/plain file. Mirrors
+    # the env_ref name guard (``not env_var or not env_var.strip()``).
+    if not secret or not secret.strip():
         raise _interactive_input_required(request, missing="secret")
     return secret
 
