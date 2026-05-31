@@ -175,13 +175,23 @@ def test_check_python_runtime_ok_and_blocked() -> None:
 
 
 @pytest.mark.unit
-def test_check_ports_ok_when_free_and_warns_when_in_use() -> None:
-    """Verify a free port is OK and an in-use port warns with the port in data."""
+def test_check_ports_ok_when_free_and_blocks_when_in_use() -> None:
+    """Verify a free port is OK and an in-use port BLOCKS with the port in data.
+
+    The local-service Compose stack publishes the API on a fixed host port
+    (``${AWF_API_HOST_PORT:-8000}:8000``) with no auto-fallback, so an occupied
+    port makes ``awf start`` fail to publish it. Reporting only a warning would
+    let ``awf setup --dry-run`` exit 0 and still advise ``awf start``, which then
+    fails — so an occupied API port is a readiness blocker, not advisory.
+    """
     free = check_ports(8000, is_available=lambda _port: True)
     in_use = check_ports(8000, is_available=lambda _port: False)
     assert free.level is SetupCheckLevel.OK
-    assert in_use.level is SetupCheckLevel.WARNING
+    assert in_use.level is SetupCheckLevel.BLOCKED
     assert in_use.data["port"] == 8000
+    assert in_use.fix is not None
+    # The fix must not promise an auto-fallback that the codebase does not implement.
+    assert "can also start on another port" not in in_use.fix
 
 
 # --- Disk -----------------------------------------------------------------

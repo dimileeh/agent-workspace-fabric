@@ -338,7 +338,13 @@ def check_ports(
     *,
     is_available: PortAvailableFn = _default_port_available,
 ) -> SetupCheckResult:
-    """Check the configured AWF API host port can be bound (advisory)."""
+    """Check the configured AWF API host port can be bound (a startup blocker if not).
+
+    The local-service Compose stack publishes the API on a fixed host port
+    (``${AWF_API_HOST_PORT:-8000}:8000``) and nothing auto-selects a free port at
+    start time, so an occupied port is a hard readiness blocker — ``awf start``
+    cannot publish the port and fails — rather than an advisory warning.
+    """
     if is_available(port):
         return SetupCheckResult(
             name="ports",
@@ -349,10 +355,13 @@ def check_ports(
         )
     return SetupCheckResult(
         name="ports",
-        level=SetupCheckLevel.WARNING,
+        level=SetupCheckLevel.BLOCKED,
         summary=f"API host port {port} is already in use.",
-        detail=f"0.0.0.0:{port} (all interfaces) is currently bound by another process.",
-        fix="Free the port or set a different api.host_port; AWF can also start on another port.",
+        detail=f"0.0.0.0:{port} (all interfaces) is currently bound by another process. "
+        "The local-service Compose stack publishes the API on this fixed host port, so "
+        "awf start cannot publish it and will fail until the port is free.",
+        fix="Free the port or set a different api.host_port (AWF_API_HOST_PORT), "
+        "then re-run awf setup --dry-run.",
         data={"port": port, "available": False},
     )
 
