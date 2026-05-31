@@ -1935,7 +1935,7 @@ def check_auth_mount_home_fallback(raw_home: str) -> SetupCheckResult:
     )
 
 
-def check_host_home() -> SetupCheckResult:
+def check_host_home(*, environ: Mapping[str, str] | None = None) -> SetupCheckResult:
     """Confirm the Compose auth-mount root resolves to an absolute path.
 
     Reached only when neither :func:`_invalid_host_home_override` nor
@@ -1946,7 +1946,23 @@ def check_host_home() -> SetupCheckResult:
     substitute nothing and anchor the auth mounts at the filesystem root). Every
     ``${AWF_HOST_HOME:-${HOME}}`` auth mount therefore resolves to an absolute
     target ``awf start`` can bind.
+
+    Like every other ``check_*`` OK result, ``data`` records the concrete value
+    that was validated so JSON consumers and readiness UIs can see *which*
+    auth-mount root was confirmed ready: the raw ``AWF_HOST_HOME`` override, the
+    ``${HOME}`` fall-back, and the effective ``${AWF_HOST_HOME:-${HOME}}`` root
+    every auth mount resolves to. The values are read from the same ``environ``
+    the upstream guards consult (the resolved service env, falling back to the
+    process env only when ``environ`` is ``None``), so the reported root cannot
+    diverge from the one the block/OK decision was made against.
     """
+    env = os.environ if environ is None else environ
+    env_value = env.get("AWF_HOST_HOME")
+    home = env.get("HOME")
+    # ${AWF_HOST_HOME:-${HOME}}: Compose substitutes the override only when it is
+    # non-empty, exactly as _invalid_host_home_override /
+    # _invalid_auth_mount_home_fallback decide which value they validated.
+    resolved_root = env_value if env_value else home
     return SetupCheckResult(
         name="host_home",
         level=SetupCheckLevel.OK,
@@ -1957,6 +1973,7 @@ def check_host_home() -> SetupCheckResult:
             "/.ssh, the agent CLI directories, ...) resolve to absolute targets awf start "
             "can bind."
         ),
+        data={"env_value": env_value, "home": home, "resolved_root": resolved_root},
     )
 
 
@@ -2031,7 +2048,7 @@ def run_system_checks(
     elif invalid_host_home_fallback is not None:
         host_home_check = check_auth_mount_home_fallback(invalid_host_home_fallback)
     else:
-        host_home_check = check_host_home()
+        host_home_check = check_host_home(environ=environ)
     # Probe the daemon ``awf start`` will use: the resolved service env can point
     # Docker at a different host (``AWF_DOCKER_HOST``) or blank an inherited
     # ``DOCKER_HOST``, so feed that selection into both the docker and compose

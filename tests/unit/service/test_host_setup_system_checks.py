@@ -2563,6 +2563,54 @@ def test_run_system_checks_host_home_ok_when_absolute_or_unset(
 
         host_home = next(result for result in results if result.name == "host_home")
         assert host_home.level is SetupCheckLevel.OK, repr(value)
+        # The OK result records the concrete auth-mount root that was validated,
+        # resolved as ${AWF_HOST_HOME:-${HOME}} from the same env the upstream
+        # guards consult -- an absolute override wins, unset/empty falls back to
+        # ${HOME} -- so JSON consumers see which root was confirmed ready.
+        expected_root = value if value else "/home/op"
+        assert host_home.data["resolved_root"] == expected_root, repr(value)
+        assert host_home.data["env_value"] == value, repr(value)
+        assert host_home.data["home"] == "/home/op", repr(value)
+
+
+@pytest.mark.unit
+def test_check_host_home_ok_records_resolved_auth_mount_root() -> None:
+    """The OK result echoes the resolved ``${AWF_HOST_HOME:-${HOME}}`` root.
+
+    Every other ``check_*`` OK result populates ``data`` with the value it
+    validated; the auth-mount root must come from the same ``environ`` the
+    upstream guards (``_invalid_host_home_override`` /
+    ``_invalid_auth_mount_home_fallback``) consult -- the resolved service env --
+    not the bare process env, or the reported root would diverge from the one the
+    block/OK decision was actually made against.
+    """
+    override = system_checks.check_host_home(
+        environ={"AWF_HOST_HOME": "/mnt/auth", "HOME": "/home/op"}
+    )
+    assert override.name == "host_home"
+    assert override.level is SetupCheckLevel.OK
+    assert override.data == {
+        "env_value": "/mnt/auth",
+        "home": "/home/op",
+        "resolved_root": "/mnt/auth",
+    }
+
+    fallback = system_checks.check_host_home(environ={"HOME": "/home/op"})
+    assert fallback.level is SetupCheckLevel.OK
+    assert fallback.data == {
+        "env_value": None,
+        "home": "/home/op",
+        "resolved_root": "/home/op",
+    }
+
+    # An empty override falls back to ${HOME}, exactly as the guards decide which
+    # value they validated, so the resolved root is the HOME path, not the empty
+    # override string.
+    empty_override = system_checks.check_host_home(
+        environ={"AWF_HOST_HOME": "", "HOME": "/home/op"}
+    )
+    assert empty_override.data["env_value"] == ""
+    assert empty_override.data["resolved_root"] == "/home/op"
 
 
 @pytest.mark.unit
