@@ -17,8 +17,13 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import AddressComments, MonitorState, ReviewThread
-from awf.runtime.pr_monitor_runner.helpers import _needs_human_reason_state_key
+from awf.runtime.pr_monitor import (
+    AddressComments,
+    MonitorConfig,
+    MonitorState,
+    ReviewThread,
+    decide,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -39,11 +44,11 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 @pytest.mark.unit
-async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_without_terminating(
+async def test_monitor_comment_repair_workflow_scope_failure_requeues_fix_without_terminating(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope comment repair failures block items for humans."""
+    """Verify workflow-scope comment repair failures leave fixes retryable."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed locally")
@@ -89,17 +94,13 @@ async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_w
 
     assert terminal is False
     assert state.iter_count == 1
-    expected_reason = (
-        "GitHub rejected the workflow-file push because the token lacks "
-        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
-        "with workflow push permission, then rerun the monitor repair."
-    )
-    assert state.threads_addressed_ids["T_workflow_scope"] == "needs_human"
-    assert "__review_thread_body_hash__:T_workflow_scope" in state.threads_addressed_ids
-    assert (
-        state.threads_addressed_ids[_needs_human_reason_state_key("T_workflow_scope")]
-        == expected_reason
-    )
+    assert "T_workflow_scope" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow_scope" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_workflow_scope" not in state.threads_addressed_ids
+    action = decide(_status_for_helpers(threads=(thread,)), state, MonitorConfig())
+    assert isinstance(action, AddressComments)
+    assert action.threads == (thread,)
+    assert action.review_comments == ()
     comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
     assert len(comment_calls) == 1
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
@@ -138,11 +139,11 @@ async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_w
 
 
 @pytest.mark.unit
-async def test_monitor_comment_repair_workflow_scope_notification_failure_keeps_needs_human_state(
+async def test_monitor_comment_repair_workflow_scope_notification_failure_keeps_fix_retryable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Notification failures must not mask comment-repair workflow-scope pushes."""
+    """Notification failures must not mask retryable workflow-scope push state."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed locally")
@@ -189,16 +190,13 @@ async def test_monitor_comment_repair_workflow_scope_notification_failure_keeps_
 
     assert terminal is False
     assert state.iter_count == 1
-    expected_reason = (
-        "GitHub rejected the workflow-file push because the token lacks "
-        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
-        "with workflow push permission, then rerun the monitor repair."
-    )
-    assert state.threads_addressed_ids["T_workflow_scope"] == "needs_human"
-    assert (
-        state.threads_addressed_ids[_needs_human_reason_state_key("T_workflow_scope")]
-        == expected_reason
-    )
+    assert "T_workflow_scope" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow_scope" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_workflow_scope" not in state.threads_addressed_ids
+    action = decide(_status_for_helpers(threads=(thread,)), state, MonitorConfig())
+    assert isinstance(action, AddressComments)
+    assert action.threads == (thread,)
+    assert action.review_comments == ()
     comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
     assert len(comment_calls) == 1
     async with factory() as s:

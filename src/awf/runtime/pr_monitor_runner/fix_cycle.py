@@ -571,25 +571,21 @@ def _requeue_workflow_scope_publish_dependent_items(
     resolution_dependent_ids: list[str],
     reason: str,
 ) -> None:
-    """Mark blocked fixes and requeue inline states needing GitHub resolution.
+    """Requeue blocked fixes and inline states needing GitHub resolution.
 
     GitHub rejects workflow-file pushes before the local commits reach the PR,
-    and retrying the same repair cannot succeed until an operator provides a
-    token with ``workflow`` scope. Convert committed fixes whose publication was
-    blocked so the standard human-notification path can surface the exact
-    permission reason. Clear inline false-positive state that still depends on a
-    later GraphQL ``resolve_thread`` call, including captured defers whose
-    durable issue marker survives state cleanup. Preserve durable review-level
-    false-positive resolutions.
+    and retrying the same repair cannot succeed until an operator provides a token
+    with ``workflow`` scope. The failure path already records the permission
+    reason and posts the human notification, so clear state for committed fixes
+    whose publication was blocked. That lets the next monitor pass retry pushing
+    the existing local fix once credentials are repaired. Also clear inline
+    false-positive state that still depends on a later GraphQL ``resolve_thread``
+    call, including captured defers whose durable issue marker survives state
+    cleanup. Preserve durable review-level false-positive resolutions.
     """
-    publish_blocked_ids = set(item_ids)
-    for item_id in dict.fromkeys(resolution_dependent_ids):
-        if item_id not in publish_blocked_ids:
-            _clear_addressed_state_by_id(state, item_id)
-    result = VerdictResult(verdict="needs_human", reason=reason)
-    for item_id in dict.fromkeys(item_ids):
-        state.mark_addressed(item_id, "needs_human")
-        _sync_needs_human_reason(state, item_id, result)
+    del reason
+    for item_id in dict.fromkeys([*resolution_dependent_ids, *item_ids]):
+        _clear_addressed_state_by_id(state, item_id)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
