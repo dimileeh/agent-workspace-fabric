@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,6 +41,13 @@ _log = get_logger(__name__)
 
 @dataclass(frozen=True)
 class _PostAgentCommitClassification:
+    """Structured result of classifying a post-agent ``git commit`` failure.
+
+    Carries the reason code, failed hook names, repair file lists, and
+    the repair strategy so the caller can decide whether to attempt
+    automatic repair, prompt the agent, or fail the workspace.
+    """
+
     reason_code: str
     failed_hooks: tuple[str, ...]
     format_repair_files: tuple[str, ...]
@@ -78,6 +86,7 @@ class _PostAgentCommitStepError(RuntimeError):
         reason_code_override: str | None = None,
         failure_reason_override: FailureReason | None = None,
     ) -> None:
+        """Initialise the error with stage, result, and optional overrides."""
         self.stage = stage
         self.result = result
         self.classification = classification
@@ -117,6 +126,13 @@ def _ruff_check_autofix_repair_files(output: str) -> tuple[str, ...]:
 def _classify_post_agent_commit_failure(
     result: CommandResult,
 ) -> _PostAgentCommitClassification:
+    """Classify why post-agent ``git commit`` exited non-zero.
+
+    Inspects the combined stdout/stderr for pre-commit hook names,
+    ruff-format reformat hints, and the generic failure case. Returns
+    a :class:`_PostAgentCommitClassification` with the appropriate
+    reason code, hook lists, repair file lists, and repair strategy.
+    """
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     combined = f"{stdout}\n{stderr}"
@@ -187,11 +203,44 @@ def _classify_post_agent_commit_failure(
     )
 
 
+_NOTHING_TO_COMMIT_PATTERN = re.compile(
+    r"nothing to commit|working tree clean",
+    re.IGNORECASE,
+)
+
+
+def _is_nothing_to_commit(result: CommandResult) -> bool:
+    """Return True when ``git commit`` failed because there was nothing to commit.
+
+    Detects the benign ``nothing to commit, working tree clean`` output
+    (or variants) that git emits when the index matches HEAD. This is
+    NOT a real git error — it means the agent (or a prior repair step)
+    already committed the work, so the post-agent commit should fall
+    through to the rev-list check instead of failing the workspace.
+
+    Returns False if the command succeeded (no failure to explain) or
+    if a pre-commit hook failure is present in the output, since either
+    case means the "nothing to commit" substring is not the real signal.
+    """
+    if result.ok:
+        return False
+    combined = f"{result.stdout or ''}\n{result.stderr or ''}"
+    if _PRE_COMMIT_HOOK_ID_PATTERN.search(combined):
+        return False
+    return bool(_NOTHING_TO_COMMIT_PATTERN.search(combined))
+
+
 def _build_post_agent_precommit_repair_prompt(
     *,
     classification: _PostAgentCommitClassification,
     staged_paths: Sequence[str],
 ) -> str:
+    """Build the repair prompt sent to the agent when semantic pre-commit hooks fail.
+
+    Includes failed hook names, semantic hook list, staged path preview,
+    normalizer-rewritten paths, formatter-reported paths, and a redacted
+    tail of the pre-commit output so the agent can fix the failures.
+    """
     failed_hooks = ", ".join(classification.failed_hooks) or "unknown"
     semantic_hooks = ", ".join(classification.semantic_hooks) or "unknown"
     staged_preview = "\n".join(f"- {path}" for path in staged_paths[:80])
@@ -227,6 +276,11 @@ def _build_post_agent_precommit_repair_prompt(
 
 
 def _post_validation_conformance_failure_text(failure: _PlanningRunFailure) -> str:
+    """Format a human-readable summary of a post-validation conformance failure.
+
+    Extracts the conformance details dict from the failure and renders
+    the summary, report reason code, and remaining gap descriptions.
+    """
     lines = [failure.message]
     details = failure.details or {}
     conformance = details.get("conformance")
@@ -247,6 +301,11 @@ def _post_validation_conformance_failure_text(failure: _PlanningRunFailure) -> s
 
 
 def _post_validation_conformance_agent_failure_message(exc: Any) -> str:
+    """Build a short human-readable message for a conformance agent failure.
+
+    Reads ``reason_code`` and ``result`` attributes from *exc* and
+    returns a redacted, truncated message suitable for logging.
+    """
     reason_code = getattr(exc, "reason_code", None) or "AGENT_CLI_FAILED"
     result = getattr(exc, "result", None)
     stderr = getattr(result, "stderr", "") if result else ""
@@ -265,6 +324,12 @@ def _post_validation_conformance_agent_failure_details(
     *,
     validation_run_id: str,
 ) -> dict[str, Any]:
+    """Build a structured details dict for a conformance agent failure.
+
+    Returns a dict with a ``conformance`` sub-dict (phase, reason_code,
+    returncode, redacted stdout/stderr) and the validation run id, plus
+    any agent details carried on the exception.
+    """
     reason_code = getattr(exc, "reason_code", None) or "AGENT_CLI_FAILED"
     result = getattr(exc, "result", None)
     stderr = getattr(result, "stderr", "") if result else ""
@@ -299,6 +364,12 @@ async def _run_baseline_coverage_preflight(
     compose_file: Path,
     profile: WorkspaceProfile,
 ) -> ValidationCoverageResult | None:
+    """Run the baseline coverage preflight check before agent work begins.
+
+    Skips when the profile sets ``baseline_coverage`` to ``"skip"`` or
+    when no coverage command is configured. Returns ``None`` on skip;
+    logs and returns the result even if below threshold.
+    """
     coverage = profile.validation.coverage
     if profile.validation.strategy.baseline_coverage == "skip":
         _log.info(
@@ -337,6 +408,12 @@ async def _run_final_coverage_gate(
     validation_tier: int,
     workspace_head_sha: str | None,
 ) -> _CoverageEvidenceResult:
+    """Run the final coverage quality gate after validation.
+
+    Attempts to reuse prior coverage evidence when the profile allows it
+    and the evidence is fresh; otherwise executes the coverage command
+    and returns an :class:`_CoverageEvidenceResult` with the outcome.
+    """
     from awf.control.executor.helpers import (
         _coverage_result_from_metadata,
         _validation_run_command_records,
