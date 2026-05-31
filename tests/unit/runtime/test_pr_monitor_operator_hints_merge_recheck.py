@@ -619,6 +619,85 @@ async def test_merge_final_recheck_blocks_hint_written_after_locked_gate(
 
 
 @pytest.mark.unit
+async def test_merge_last_chance_recheck_blocks_hint_written_after_final_refresh(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    state = MonitorState()
+    hint = OperatorHint(
+        reason="operator warning arrived after the final merge refresh",
+        operation_id="op_last_chance_merge_recheck",
+        requested_at="2026-05-31T11:55:00+00:00",
+    )
+    original_refresh = runner._refresh_operator_state_from_workspace
+    refresh_calls = 0
+
+    async def _write_hint_after_final_refresh(*args: object, **kwargs: object) -> bool:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        changed = await original_refresh(*args, **kwargs)
+        if refresh_calls == 2:
+            async with factory() as session:
+                workspace = await WorkspaceRepository(session).get(workspace_id)
+                assert workspace is not None
+                workspace.monitor_threads_addressed = persist_operator_hint(
+                    dict(workspace.monitor_threads_addressed or {}),
+                    hint,
+                )
+                await session.commit()
+        return changed
+
+    calls: list[OperatorHint] = []
+
+    async def _record_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        called_hint = kwargs["hint"]
+        state_arg = kwargs["state"]
+        assert isinstance(called_hint, OperatorHint)
+        assert isinstance(state_arg, MonitorState)
+        calls.append(called_hint)
+        mark_operator_hint_processed(state_arg)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(
+        runner,
+        "_refresh_operator_state_from_workspace",
+        _write_hint_after_final_refresh,
+    )
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _record_operator_hint_cycle)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert refresh_calls == 3
+    assert calls == [hint]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_merge_final_recheck_waits_on_freeze_written_after_locked_gate(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

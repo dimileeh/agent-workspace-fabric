@@ -479,6 +479,28 @@ async def handle_merge_action(
                         and settle_recheck_decision is None
                         and initial_grace_recheck_wait_seconds <= 0
                     ):
+                        last_chance_operator_state_refreshed = (
+                            await _refresh_operator_state_for_merge(
+                                event_name=(
+                                    "monitor.merge_operator_hint_last_chance_changed_action"
+                                )
+                            )
+                        )
+                        if last_chance_operator_state_refreshed and fresh_action is None:
+                            initial_grace_recheck_wait_seconds = _initial_review_grace_wait_seconds(
+                                state,
+                                pr_number=pr_number,
+                                now=time.monotonic(),
+                                grace_seconds=(self._config.initial_review_grace_period_seconds),
+                                poll_interval_seconds=(self._config.poll_interval_seconds),
+                            )
+                            if initial_grace_recheck_wait_seconds <= 0:
+                                await _recheck_non_check_reviewer_settle()
+                    if (
+                        fresh_action is None
+                        and settle_recheck_decision is None
+                        and initial_grace_recheck_wait_seconds <= 0
+                    ):
                         merge_operation = await self._begin_monitor_state_operation(
                             workspace_id=workspace_id,
                             action="merge",
