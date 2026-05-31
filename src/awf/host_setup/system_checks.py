@@ -2191,9 +2191,14 @@ def check_required_service_env(*, environ: Mapping[str, str] | None = None) -> S
     missing list, never the values themselves.
     """
     env = os.environ if environ is None else environ
-    missing = [
-        name for name in REQUIRED_LOCAL_SERVICE_ENV_VARS if non_empty_env_value(env, name) is None
-    ]
+    # Match Compose's ``${VAR:?...}`` semantics exactly: look up the *exact*
+    # uppercase key (env var names are case-sensitive on Unix, and the Compose
+    # file requires the literal ${AWF_API_TOKEN}/${AWF_POSTGRES_PASSWORD}) and
+    # treat empty as unset. A case-insensitive helper would pass on a resolved
+    # env that only carried lowercase awf_api_token/awf_postgres_password, yet
+    # docker compose -- which reads only the exact uppercase name -- would still
+    # abort awf start, so this gate must not over-match the case.
+    missing = [name for name in REQUIRED_LOCAL_SERVICE_ENV_VARS if not env.get(name)]
     if not missing:
         return SetupCheckResult(
             name="required_service_env",

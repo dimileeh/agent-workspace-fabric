@@ -2787,6 +2787,28 @@ def test_check_required_service_env_blocks_single_missing_without_leaking_presen
 
 
 @pytest.mark.unit
+def test_check_required_service_env_blocks_on_wrong_case_keys() -> None:
+    """Differently-cased keys block: Compose ``${VAR:?...}`` is case-sensitive.
+
+    ``docker/compose/local-service.yml`` interpolates the exact uppercase
+    ``${AWF_API_TOKEN:?...}`` / ``${AWF_POSTGRES_PASSWORD:?...}``; on Unix env var
+    names are case-sensitive, so a resolved env that only carries lowercase
+    ``awf_api_token``/``awf_postgres_password`` makes ``docker compose`` abort. The
+    probe must check the exact keys (not a case-insensitive lookup) so it cannot
+    report readiness for an ``awf start`` Compose will reject.
+    """
+    result = system_checks.check_required_service_env(
+        environ={
+            "awf_api_token": "lower-case-api-token",
+            "awf_postgres_password": "lower-case-pg-password",
+        }
+    )
+
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+
+
+@pytest.mark.unit
 def test_run_system_checks_blocks_on_missing_required_service_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
