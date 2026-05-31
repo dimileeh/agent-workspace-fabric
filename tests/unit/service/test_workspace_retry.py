@@ -510,6 +510,7 @@ async def _mark_failed(
     *,
     branch_name: str = "codex/old-attempt",
     remote_push_branch: str | None = None,
+    release_runtime: bool = True,
 ) -> dict[str, object]:
     """Mark a workspace as failed with shared transition/evidence payload."""
     async with factory() as session:
@@ -530,6 +531,12 @@ async def _mark_failed(
         }
         workspace.resolved_profile = frozen_profile
         await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        if release_runtime:
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+            )
         await session.commit()
         return frozen_profile
 
@@ -578,6 +585,11 @@ async def _mark_conformance_failed(
                 },
             },
         )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+        )
         await session.commit()
 
 
@@ -606,6 +618,11 @@ async def _mark_conformance_failed_without_evidence(
                 "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
                 "details": {"conformance": "legacy-invalid"},
             },
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
         )
         await session.commit()
 
@@ -641,6 +658,11 @@ async def _mark_agent_timeout_failed(
                     "retryable": True,
                 },
             },
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
         )
         await session.commit()
 
@@ -710,6 +732,11 @@ async def _mark_planning_scope_failed(
                     "remote_push_branch": "awf/ws_scope_old",
                 },
             },
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
         )
         await session.commit()
 
@@ -1598,17 +1625,6 @@ async def test_retry_allows_same_port_when_source_is_only_holder(
     await _mark_failed(factory, source.id)
 
     async with factory() as session:
-        repo = WorkspaceRepository(session)
-        ws = await repo.get(source.id)
-        assert ws is not None
-        await repo.add_event(
-            ws,
-            event_type="workspace.terminal_runtime_released",
-            reason_code="TERMINAL_RUNTIME_RELEASED",
-        )
-        await session.commit()
-
-    async with factory() as session:
         retry = await retry_workspace_row(
             session,
             source.id,
@@ -1651,7 +1667,7 @@ async def test_retry_rejects_host_port_conflict_with_source(
         )
         await session.commit()
 
-    await _mark_failed(factory, source.id)
+    await _mark_failed(factory, source.id, release_runtime=False)
 
     async with factory() as session:
         with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
