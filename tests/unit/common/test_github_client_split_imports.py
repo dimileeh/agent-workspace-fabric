@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 import importlib
-import sys
 
 import pytest
 
-
-def _clear_cached_module(monkeypatch: pytest.MonkeyPatch, module_name: str) -> None:
-    parent_name, _, attribute = module_name.rpartition(".")
-    parent = sys.modules.get(parent_name)
-    if parent is not None:
-        monkeypatch.delattr(parent, attribute, raising=False)
-    monkeypatch.delitem(sys.modules, module_name, raising=False)
+from tests.unit._helpers import clear_cached_module
 
 
 def _clear_split_github_modules(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,7 +16,7 @@ def _clear_split_github_modules(monkeypatch: pytest.MonkeyPatch) -> None:
         "awf.common.github_client_adoption",
         "awf.common.github_client_parsing",
     ]:
-        _clear_cached_module(monkeypatch, module_name)
+        clear_cached_module(monkeypatch, module_name)
 
 
 @pytest.mark.unit
