@@ -960,7 +960,7 @@ class TestAutoProfileHostPortConflict:
 
         async with session_factory() as s:
             existing_repo = WorkspaceRepository(s)
-            await existing_repo.create(
+            existing_ws = await existing_repo.create(
                 repo_url=str(origin_repo),
                 branch_base="development",
                 task_title="existing",
@@ -977,8 +977,8 @@ class TestAutoProfileHostPortConflict:
                         }
                     ],
                 },
-                compose_project_name="awf_existing_ws",
             )
+            existing_ws.compose_project_name = f"awf_{existing_ws.id}"
             await s.commit()
 
         async with session_factory() as s:
@@ -1014,8 +1014,8 @@ class TestAutoProfileHostPortConflict:
         class _ImmediateLaunchLauncher:
             async def launch(self, request: Any) -> ComposeProjectPaths:
                 return ComposeProjectPaths(
-                    compose_file=Path("/tmp/dummy.yml"),
-                    env_file=Path("/tmp/dummy.env"),
+                    project_dir=Path("/tmp/awf_dummy"),
+                    compose_file=Path("/tmp/awf_dummy/docker-compose.yml"),
                 )
 
         provisioner = Provisioner(
@@ -1027,7 +1027,7 @@ class TestAutoProfileHostPortConflict:
 
         async with session_factory() as s:
             existing_repo = WorkspaceRepository(s)
-            await existing_repo.create(
+            existing_ws = await existing_repo.create(
                 repo_url=str(origin_repo),
                 branch_base="development",
                 task_title="existing",
@@ -1044,8 +1044,8 @@ class TestAutoProfileHostPortConflict:
                         }
                     ],
                 },
-                compose_project_name="awf_existing_ws",
             )
+            existing_ws.compose_project_name = f"awf_{existing_ws.id}"
             await s.commit()
 
         async with session_factory() as s:
