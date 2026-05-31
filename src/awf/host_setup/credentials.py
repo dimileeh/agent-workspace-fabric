@@ -178,12 +178,19 @@ class CredentialRequest:
 
     ``secret_source`` is a lazy callable so a secret value is only pulled when a
     backend actually needs it (keyring/plain_file); env_ref never pulls a value.
+
+    ``non_interactive`` is advisory metadata only: this module never prompts, so
+    missing required input always raises ``INTERACTIVE_INPUT_REQUIRED`` regardless
+    of its value. It is surfaced solely as a secret-free detail on that error to
+    record the run's intent; it does not gate any prompting or fallback path.
     """
 
     provider: str
     account: str = _DEFAULT_ACCOUNT
     env_var: str | None = None
     secret_source: Callable[[], str | None] | None = None
+    # Advisory metadata only — does NOT gate behavior (see the class docstring);
+    # the module is unconditionally non-interactive.
     non_interactive: bool = True
 
 
