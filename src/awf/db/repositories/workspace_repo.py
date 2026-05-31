@@ -554,11 +554,14 @@ class WorkspaceRepository:
 
         Active and destroying workspaces always conflict because their
         compose stacks are still running.  Terminal workspaces (failed,
-        cancelled, completed, destroyed) conflict only when their
-        runtime has not been released yet — i.e. no
-        ``workspace.terminal_runtime_released`` event exists for that
-        workspace.  Once the terminal-runtime release sweep records the
-        event, the compose stack is gone and the host port is free.
+        cancelled, completed, destroyed) conflict only when they
+        actually acquired runtime resources — i.e. their
+        ``compose_project_name`` is not NULL — **and** their runtime
+        has not been released yet (no
+        ``workspace.terminal_runtime_released`` event exists).  A
+        workspace that failed during provisioning before the compose
+        stack was launched never bound a host port, so it does not
+        block port reuse even without a release event.
 
         NOTE: The TOCTOU window between this SELECT and the subsequent INSERT
         is closed by acquiring a per-port ``pg_advisory_xact_lock`` before
@@ -583,6 +586,7 @@ class WorkspaceRepository:
                 Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES),
                 and_(
                     Workspace.status.in_(HOST_PORT_TERMINAL_RELEASE_STATUSES),
+                    Workspace.compose_project_name.isnot(None),
                     ~terminal_runtime_released_exists,
                 ),
             )

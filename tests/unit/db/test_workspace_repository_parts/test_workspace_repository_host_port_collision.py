@@ -34,6 +34,7 @@ async def _make_workspace(
     status: WorkspaceStatus = WorkspaceStatus.requested,
     task_policy: dict | None = None,
     resolved_profile: dict | None = None,
+    compose_project_name: str | None = None,
 ) -> Workspace:
     ws = await repo.create(
         repo_url=_H2,
@@ -46,6 +47,8 @@ async def _make_workspace(
         resolved_profile=resolved_profile,
     )
     ws.status = status.value
+    if compose_project_name is not None:
+        ws.compose_project_name = compose_project_name
     await session.commit()
     return ws
 
@@ -126,6 +129,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_completed_released",
         )
         await repo.add_event(
             ws,
@@ -271,6 +275,7 @@ class TestFindHostPortConflicts:
                         }
                     ]
                 },
+                compose_project_name=f"awf_test_{status.value}_released",
             )
             await repo.add_event(
                 ws,
@@ -311,6 +316,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_failed_blocks",
         )
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[8080],
@@ -344,6 +350,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_cancelled_blocks",
         )
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[8080],
@@ -379,6 +386,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_completed_blocks",
         )
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[8080],
@@ -413,6 +421,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_failed_released",
         )
         await repo.add_event(
             ws,
@@ -446,6 +455,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_cancelled_released",
         )
         await repo.add_event(
             ws,
@@ -479,6 +489,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_destroyed_blocks",
         )
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[8080],
@@ -785,6 +796,7 @@ class TestFindHostPortConflicts:
                     }
                 ]
             },
+            compose_project_name="awf_test_wrong_reason",
         )
         await repo.add_event(
             ws,
@@ -799,3 +811,69 @@ class TestFindHostPortConflicts:
         assert len(conflicts) == 1
         assert conflicts[0].host_port == 8080
         assert conflicts[0].workspace_id == ws.id
+
+    @pytest.mark.asyncio
+    async def test_failed_pre_runtime_no_compose_project_not_blocking(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A failed workspace with no compose_project_name does not block host ports.
+
+        When a workspace fails during provisioning before the compose stack
+        is launched (e.g. git failure, profile resolution failure, egress
+        policy failure), ``compose_project_name`` stays NULL because no
+        container ever bound the host port.  Such pre-runtime terminal
+        workspaces must not block port reuse even without a
+        ``terminal_runtime_released`` event.
+        """
+        repo = WorkspaceRepository(session)
+        await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_pre_runtime_no_compose_project_not_blocking(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A cancelled workspace with no compose_project_name does not block host ports.
+
+        A workspace cancelled before the compose stack launched never bound
+        a host port, so it must not block port reuse.
+        """
+        repo = WorkspaceRepository(session)
+        await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.cancelled,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts == []
