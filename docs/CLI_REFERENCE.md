@@ -218,8 +218,10 @@ On non-2xx responses, the CLI prints request context in stderr before the
 response payload, for example: `error: POST <normalized_url> -> HTTP 404`.
 Sensitive query values in that URL context are redacted.
 
-`awf workspace adopt-pr` accepts `AWF_CLI_BASE_URL`/`--base-url` in any of these
-equivalent API-root forms:
+`awf workspace adopt-pr` accepts `AWF_BASE_URL`/`--base-url` in any of these
+equivalent API-root forms. `AWF_CLI_BASE_URL` is still honored for
+compatibility, but is deprecated. When neither variable is set, the host CLI
+derives `http://localhost:${AWF_API_HOST_PORT:-8000}`.
 
 ```bash
 awf workspace adopt-pr --base-url http://host:8000 --repo ...

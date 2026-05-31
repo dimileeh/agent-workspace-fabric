@@ -23,12 +23,14 @@ from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
+_DEPRECATED_CLI_BASE_URL_NOTICE = "AWF_CLI_BASE_URL is deprecated; use AWF_BASE_URL"
 _CONTROL_IDEMPOTENCY_KEY_HELP = (
     "Idempotency key for this mutating control. When omitted, generated and "
     "printed to stderr before the request; pass the same value again to safely "
     "retry after a timeout or dropped response."
 )
 _MIN_RICH_HELP_WIDTH = 80
+_cli_base_url_deprecation_notice_emitted = False
 
 
 class OutputFormat(StrEnum):
@@ -64,8 +66,30 @@ def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
 
 
 def _base_url(override: str | None) -> str:
-    """Get base url."""
-    return override or os.environ.get("AWF_CLI_BASE_URL", _DEFAULT_BASE_URL)
+    """Get the host-reachable AWF API base URL for CLI HTTP calls."""
+    if override:
+        return override
+    base_url = os.environ.get("AWF_BASE_URL")
+    if base_url:
+        return base_url
+    deprecated_base_url = os.environ.get("AWF_CLI_BASE_URL")
+    if deprecated_base_url:
+        _emit_deprecated_cli_base_url_notice()
+        return deprecated_base_url
+    host_port = os.environ.get("AWF_API_HOST_PORT")
+    if host_port:
+        return f"http://localhost:{host_port}"
+    return _DEFAULT_BASE_URL
+
+
+def _emit_deprecated_cli_base_url_notice() -> None:
+    """Warn once per process when the legacy CLI base URL variable is used."""
+    global _cli_base_url_deprecation_notice_emitted
+
+    if _cli_base_url_deprecation_notice_emitted:
+        return
+    typer.echo(_DEPRECATED_CLI_BASE_URL_NOTICE, err=True)
+    _cli_base_url_deprecation_notice_emitted = True
 
 
 def _api_token_headers(override: str | None) -> dict[str, str]:

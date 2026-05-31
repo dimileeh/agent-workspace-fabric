@@ -751,6 +751,22 @@ def test_resolve_service_api_base_url_uses_explicit_service_environment_url() ->
 
 
 @pytest.mark.unit
+def test_resolve_service_api_base_url_ignores_operator_base_url() -> None:
+    settings = Settings(_env_file=None)
+
+    api_base_url = service_config._resolve_service_api_base_url(  # noqa: SLF001
+        settings,
+        environ={"AWF_BASE_URL": "http://operator-host:8800"},
+        service_environ={
+            "AWF_BASE_URL": "http://operator-host:8800",
+            "AWF_API_BASE_URL": "http://api:8000",
+        },
+    )
+
+    assert api_base_url == "http://api:8000"
+
+
+@pytest.mark.unit
 def test_api_base_url_env_explicit_distinguishes_custom_and_derivable_defaults() -> None:
     assert service_config._api_base_url_env_is_explicit(  # noqa: SLF001
         {"AWF_API_BASE_URL": "https://awf.example.test"},
@@ -843,6 +859,16 @@ def test_service_settings_default_api_base_url_uses_api_host_port_override() -> 
     settings = resolve_service_settings(
         Settings(_env_file=None),
         environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_service_settings_default_api_base_url_ignores_operator_base_url() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"AWF_BASE_URL": "http://operator-host:8800", "AWF_API_HOST_PORT": "9100"},
     )
 
     assert settings.api_base_url == "http://localhost:9100"
