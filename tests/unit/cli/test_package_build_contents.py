@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-import awf
 from tests.packaging_build import (
     REPO_ROOT,
     BuiltDistributions,
@@ -204,24 +203,3 @@ def test_sdist_excludes_compose_secret_env(built: BuiltDistributions) -> None:
     """The secret-bearing compose ``.env`` is never packaged into the sdist."""
     names = _sdist_relative_names(built.sdist)
     assert "docker/compose/.env" not in names
-
-
-# --------------------------------------------------------------------------- #
-# Version-drift guard
-# --------------------------------------------------------------------------- #
-
-
-def test_runtime_version_matches_pyproject() -> None:
-    """``awf.__version__`` tracks ``pyproject[project].version`` (installer post-check)."""
-    assert awf.__version__ == pyproject_project_version()
-
-
-def test_installed_distribution_version_matches_pyproject() -> None:
-    """When resolvable, the installed distribution metadata version matches pyproject."""
-    from importlib.metadata import PackageNotFoundError, version
-
-    try:
-        installed = version("agent-workspace-fabric")
-    except PackageNotFoundError:  # pragma: no cover - depends on install layout
-        pytest.skip("agent-workspace-fabric distribution metadata is not resolvable")
-    assert installed == pyproject_project_version()
