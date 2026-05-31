@@ -498,6 +498,31 @@ def test_companion_name_with_leading_whitespace(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_no_spurious_warning_for_payload_overridden_keys(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keys overridden by the payload must not trigger validation or overlap warnings.
+
+    If DB_URL=${POSTGRES_URL} appears in the .env file but DB_URL is already
+    set in the companion's environment payload, the interpolation warning must
+    NOT fire because the file value is discarded by payload-wins precedence.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("DB_URL=${POSTGRES_URL}\nEXTRA=from-file\n")
+    companions = _c(("app", {"DB_URL": "postgres:5432/db"}))
+    result = merge_companion_env(
+        companions,
+        env_from=[("app", str(env_file))],
+        env_exclude=[],
+    )
+    assert result[0]["environment"]["DB_URL"] == "postgres:5432/db"
+    assert result[0]["environment"]["EXTRA"] == "from-file"
+    captured = capsys.readouterr()
+    assert "DB_URL" not in captured.err
+    assert "interpolation" not in captured.err.lower()
+
+
+@pytest.mark.unit
 def test_companion_name_whitespace_exclude(tmp_path: Path) -> None:
     """Companion name with trailing whitespace works for env-exclude."""
     companions = [

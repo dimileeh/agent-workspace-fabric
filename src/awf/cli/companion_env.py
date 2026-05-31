@@ -123,22 +123,22 @@ def merge_companion_env(
         companion = result[idx]
         file_vars = parse_dotenv_file(Path(file_path_str))
         env = cast(dict[str, str], companion.get("environment") or {})
-        skip_keys = _validate_env_keys(file_vars, comp_name)
+        pending_vars = {k: v for k, v in file_vars.items() if k not in env}
+        skip_keys = _validate_env_keys(pending_vars, comp_name)
         secret_keys = set(
             cast(dict[str, object], companion.get("environment_secrets") or {}).keys()
         )
-        overlap_keys = (set(file_vars.keys()) & secret_keys) - skip_keys
+        overlap_keys = (set(pending_vars.keys()) & secret_keys) - skip_keys
         for key in sorted(overlap_keys):
             _warn(
                 f"{comp_name!r}: skipping env key {key!r}: already declared in environment_secrets"
             )
-        for key, value in file_vars.items():
+        for key, value in pending_vars.items():
             if key in skip_keys:
                 continue
             if key in secret_keys:
                 continue
-            if key not in env:
-                env[key] = value
+            env[key] = value
         companion["environment"] = env
 
     # Apply env-exclude
