@@ -989,7 +989,8 @@ class TestGrokAdapter:
         sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
         assert args[sh_start : sh_start + 3] == ["sh", "-c", args[sh_start + 2]]
         script = args[sh_start + 2]
-        assert 'prompt="$(cat)"' in script
+        assert 'prompt="$(cat; printf x)"' in script
+        assert 'prompt="${prompt%x}"' in script
         assert 'exec grok -p "$prompt" "$@"' in script
         grok_args = args[sh_start + 4 :]
         assert grok_args == [
@@ -1071,7 +1072,7 @@ class TestGrokAdapter:
             env=env,
         )
         assert proc.stdin is not None
-        proc.stdin.write(b"workspace prompt")
+        proc.stdin.write(b"workspace prompt\n\n")
         await proc.stdin.drain()
         proc.stdin.close()
         await proc.stdin.wait_closed()
@@ -1082,7 +1083,7 @@ class TestGrokAdapter:
         assert stdout == b""
         assert json.loads(argv_copy.read_text()) == [
             "-p",
-            "workspace prompt",
+            "workspace prompt\n\n",
             "--always-approve",
             "--no-alt-screen",
             "--no-auto-update",

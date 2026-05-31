@@ -42,7 +42,8 @@ class GrokAdapter(AgentAdapter):
 
 
 def _grok_launcher_script() -> str:
-    return 'set -eu\nprompt="$(cat)"\nexec grok -p "$prompt" "$@"\n'
+    # The sentinel keeps command substitution from stripping prompt newlines.
+    return 'set -eu\nprompt="$(cat; printf x)"\nprompt="${prompt%x}"\nexec grok -p "$prompt" "$@"\n'
 
 
 def _model_for_effort(*, model: str | None, effort: str | None) -> str | None:
