@@ -481,6 +481,45 @@ def test_manifest_without_wheel_artifact_is_invalid(harness: InstallerHarness) -
 
 
 @pytest.mark.unit
+def test_signed_wheel_manifest_with_kind_bearing_signatures_installs(
+    harness: InstallerHarness,
+) -> None:
+    """A release-signed wheel still parses when signatures carry a ``kind`` key.
+
+    The T11 manifest sorts keys, so the wheel artifact's ``url`` follows its
+    ``signatures`` array. Once release signing fills that array with objects
+    that include their own ``kind``/``name``/``url`` fields, a parser that ends
+    the wheel block on any ``kind`` line — or captures the first ``name``/``url``
+    it sees — would stop before (or clobber) the artifact's real ``url`` and fail
+    a valid signed manifest with ``MANIFEST_INVALID``. Anchoring field matches to
+    the wheel object's own indentation keeps the nested signature object inert.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(
+        wheel=wheel,
+        sha256=digest,
+        wheel_signatures=[
+            {
+                "kind": "sigstore",
+                "name": "decoy-should-not-win",
+                "url": "https://example.invalid/decoy-signature",
+            }
+        ],
+    )
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "MANIFEST_INVALID" not in result.stderr
+    # The wheel was resolved from the manifest and handed to the install method,
+    # proving the nested signature "kind" did not abort wheel parsing.
+    assert "uv tool install" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
 def test_manifest_wheel_name_with_path_traversal_is_rejected(harness: InstallerHarness) -> None:
     """A wheel name that escapes ``WORK_DIR`` aborts before any download."""
     harness.add_uname("Linux", "x86_64")

@@ -339,6 +339,11 @@ resolve_manifest() {
 # Portable, jq-free: relies on the manifest's stable pretty-printed, sorted-key
 # shape (kind sorts first within each artifact object, so an artifact's own
 # name/sha256/url follow its "kind" line and precede the next object's "kind").
+# Field matches are anchored to the wheel object's own indentation so nested
+# objects inside the artifact — its "platform" block and, once release signing
+# populates it, "signatures" array entries (which sort before "url" and may
+# carry their own "kind"/"name"/"url" keys) — neither end the wheel block early
+# nor get mistaken for the wheel's own fields.
 parse_manifest() {
     local fields
     fields="$(
@@ -349,11 +354,18 @@ parse_manifest() {
                 sub(/"?,?[[:space:]]*$/, "", v)
                 return v
             }
-            /"kind"[[:space:]]*:[[:space:]]*"wheel"/ { in_wheel = 1; next }
-            in_wheel && /"kind"[[:space:]]*:/ { in_wheel = 0 }
-            in_wheel && /"name"[[:space:]]*:/ && name == "" { name = value($0) }
-            in_wheel && /"sha256"[[:space:]]*:/ && sha == "" { sha = value($0) }
-            in_wheel && /"url"[[:space:]]*:/ && url == "" { url = value($0) }
+            function indent(line) {
+                match(line, /^ */)
+                return RLENGTH
+            }
+            /"kind"[[:space:]]*:[[:space:]]*"wheel"/ {
+                if (!in_wheel) { in_wheel = 1; wheel_indent = indent($0) }
+                next
+            }
+            in_wheel && indent($0) == wheel_indent && /"kind"[[:space:]]*:/ { in_wheel = 0 }
+            in_wheel && indent($0) == wheel_indent && /"name"[[:space:]]*:/ && name == "" { name = value($0) }
+            in_wheel && indent($0) == wheel_indent && /"sha256"[[:space:]]*:/ && sha == "" { sha = value($0) }
+            in_wheel && indent($0) == wheel_indent && /"url"[[:space:]]*:/ && url == "" { url = value($0) }
             END {
                 if (name == "" || sha == "" || url == "") {
                     exit 3

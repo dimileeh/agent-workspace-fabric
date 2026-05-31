@@ -195,6 +195,7 @@ class InstallerHarness:
         wheel_name: str | None = None,
         tag: str | None = None,
         package: str | None = "agent-workspace-fabric",
+        wheel_signatures: list[dict[str, object]] | None = None,
     ) -> Path:
         """Write a T11-shaped manifest pointing at the fixture wheel.
 
@@ -207,6 +208,10 @@ class InstallerHarness:
         the top-level ``package`` field (defaults to ``agent-workspace-fabric``);
         pass a different name to model a manifest misattached to another package,
         or ``None`` to omit the field entirely (a legacy/hand-authored manifest).
+        ``wheel_signatures`` fills the wheel artifact's ``signatures`` array
+        (defaults to empty) so tests can model a release-signed manifest whose
+        signature objects carry their own ``kind``/``name``/``url`` keys; with
+        sorted keys these sort before the artifact's own ``url``.
         """
         artifacts = [
             {
@@ -214,7 +219,7 @@ class InstallerHarness:
                 "name": wheel_name if wheel_name is not None else wheel.name,
                 "platform": {"arch": "any", "os": "any", "python": ">=3.12"},
                 "sha256": sha256,
-                "signatures": [],
+                "signatures": wheel_signatures if wheel_signatures is not None else [],
                 "url": wheel_url if wheel_url is not None else f"file://{wheel}",
             }
         ]
