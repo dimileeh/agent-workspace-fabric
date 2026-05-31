@@ -669,6 +669,7 @@ class TestHappyPathPart001:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        """Verify lower Cursor effort does not force the thinking model."""
         ws_id = await _seed_ready_workspace(
             factory,
             agent="cursor",

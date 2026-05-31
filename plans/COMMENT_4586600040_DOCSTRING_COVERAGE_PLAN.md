@@ -39,6 +39,22 @@ runtime behavior, assertions, or repo-wide quality gates.
 5. Create `plans/COMMENT_4586600040_DOCSTRING_COVERAGE_VALIDATION.md` with
    requirement status and command evidence.
 
+## Follow-up Iteration
+
+A later Cursor effort-defaults commit added one more diff-scoped async test
+function without a docstring:
+`tests/unit/control/test_executor_parts/test_executor_part_002.py::test_cursor_lower_effort_without_model_override_omits_thinking_model`.
+
+Follow-up steps:
+
+1. Add a concise behavior-neutral docstring to that newly added test function.
+2. Re-run the diff-scoped AST audit for `origin/development...HEAD` and require
+   `missing_docstrings_on_added_defs=0`.
+3. Run focused Ruff and the single targeted pytest case for the touched test
+   file only.
+4. Update the validation document with the new evidence and note that broad
+   AWF/GitHub validation remains deferred to AWF.
+
 ## Assumptions/Changes
 
 - Focused Cursor pytest exposed one stale readiness test stub that still treated
