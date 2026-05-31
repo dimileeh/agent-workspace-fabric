@@ -266,6 +266,13 @@ class Provisioner:
                                 mode="json", by_alias=True
                             )
                         await pre_launch_session.commit()
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.provisioning,
+                    action="provision",
+                    reason_code="PROVISIONER_STALE_STATUS",
+                ):
+                    return
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,

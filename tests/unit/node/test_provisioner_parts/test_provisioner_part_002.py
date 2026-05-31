@@ -460,6 +460,95 @@ class TestOperatorControlRaces:
                 "actual_status": WorkspaceStatus.destroyed.value,
             }
 
+    @pytest.mark.unit
+    async def test_cancel_after_pre_launch_identity_commit_skips_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingGit:
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "d" * 40
+
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        class _CancellingBetweenRecheckAndLaunchProvisioner(Provisioner):
+            _recheck_call_count: int = 0
+
+            async def _recheck_status(
+                self,
+                workspace_id: str,
+                *,
+                expected: WorkspaceStatus,
+                action: str,
+                reason_code: str,
+            ) -> bool:
+                result = await super()._recheck_status(
+                    workspace_id,
+                    expected=expected,
+                    action=action,
+                    reason_code=reason_code,
+                )
+                self._recheck_call_count += 1
+                if self._recheck_call_count == 4 and result and action == "provision":
+                    await _force_destroy_provisioning_workspace(session_factory, workspace_id)
+                return result
+
+        launcher = _RecordingStackLauncher()
+        provisioner = _CancellingBetweenRecheckAndLaunchProvisioner(
+            session_factory=session_factory,
+            git=_RecordingGit(),  # type: ignore[arg-type]
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=_secret_profile().model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+
 
 class TestSecretLeaseIssueEdges:
     @pytest.mark.unit
