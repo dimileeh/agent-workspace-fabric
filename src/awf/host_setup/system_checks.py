@@ -476,33 +476,43 @@ def check_local_capacity(
     if memory is not None:
         data["memory_bytes"] = memory
 
-    if cpus is not None and cpus < minimum_cpus:
+    low_cpu = cpus is not None and cpus < minimum_cpus
+    low_memory = memory is not None and memory < minimum_memory_bytes
+    unknown_cpu = cpus is None
+
+    # Collect every capacity issue instead of early-returning on the first one,
+    # so an operator sees all problems in a single run rather than uncovering
+    # the next only after fixing the previous.
+    issues: list[str] = []
+    if low_cpu:
+        issues.append(f"{cpus} usable CPU(s) is below the recommended {minimum_cpus}")
+    if low_memory:
+        issues.append(f"{memory} bytes of memory is below the recommended {minimum_memory_bytes}")
+    if unknown_cpu:
+        issues.append("os.cpu_count() returned no value; capacity could not be estimated")
+
+    if issues:
+        summary = (
+            "Detected fewer CPUs than recommended for AWF workspaces."
+            if low_cpu or unknown_cpu
+            else "Detected less memory than recommended for AWF workspaces."
+        )
+        # Point operators at host CPU introspection only when an unknown CPU
+        # count is the sole issue; otherwise the generic provisioning hint
+        # covers the (possibly combined) low-capacity case.
+        if unknown_cpu and not low_cpu and not low_memory:
+            fix = "Verify the host environment exposes CPU information."
+        else:
+            fix = "Provision more CPU or memory or expect slower, lower-concurrency workspaces."
         return SetupCheckResult(
             name="local_capacity",
             level=SetupCheckLevel.WARNING,
-            summary="Detected fewer CPUs than recommended for AWF workspaces.",
-            detail=f"{cpus} usable CPU(s) is below the recommended {minimum_cpus}.",
-            fix="Provision more CPU or expect slower, lower-concurrency workspaces.",
+            summary=summary,
+            detail="; ".join(issues) + ".",
+            fix=fix,
             data=data,
         )
-    if memory is not None and memory < minimum_memory_bytes:
-        return SetupCheckResult(
-            name="local_capacity",
-            level=SetupCheckLevel.WARNING,
-            summary="Detected less memory than recommended for AWF workspaces.",
-            detail=f"{memory} bytes of memory is below the recommended {minimum_memory_bytes}.",
-            fix="Provision more memory or expect slower, lower-concurrency workspaces.",
-            data=data,
-        )
-    if cpus is None:
-        return SetupCheckResult(
-            name="local_capacity",
-            level=SetupCheckLevel.WARNING,
-            summary="Local CPU capacity could not be determined.",
-            detail="os.cpu_count() returned no value; capacity could not be estimated.",
-            fix="Verify the host environment exposes CPU information.",
-            data=data,
-        )
+
     if memory is not None:
         detail = "Host-local CPU and memory estimates are at or above the recommended floor."
     else:

@@ -303,6 +303,23 @@ def test_check_local_capacity_warns_on_low_memory() -> None:
     assert result.level is SetupCheckLevel.WARNING
 
 
+@pytest.mark.unit
+def test_check_local_capacity_reports_cpu_and_memory_issues_together() -> None:
+    """A host starved of both CPU and memory must surface both in one warning.
+
+    Regression: the check used to early-return on the first failing condition,
+    so an operator only ever saw one issue per run and would step-debug the
+    next after fixing the first.
+    """
+    result = check_local_capacity(
+        cpu_count=lambda: 1,
+        total_memory_bytes=lambda: 1 * 1024**3,
+    )
+    assert result.level is SetupCheckLevel.WARNING
+    assert "usable CPU(s) is below the recommended" in result.detail
+    assert "bytes of memory is below the recommended" in result.detail
+
+
 # --- run_system_checks wiring --------------------------------------------
 
 
