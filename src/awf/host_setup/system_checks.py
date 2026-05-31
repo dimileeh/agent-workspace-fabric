@@ -41,6 +41,13 @@ MIN_FREE_DISK_BYTES = 5 * 1024**3
 MIN_USABLE_CPUS = 2
 MIN_MEMORY_BYTES = 4 * 1024**3
 
+# Compose's built-in Postgres host-port default. The local-service stack
+# publishes Postgres as ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432`` and
+# nothing propagates a persisted value into the Compose env, so the readiness
+# probe mirrors only the Compose default here (no host_setup.config field exists
+# for it, unlike DEFAULT_API_HOST_PORT). Kept local to avoid editing config.py.
+DEFAULT_POSTGRES_HOST_PORT = 5433
+
 _DOCKER_INSTALL_DOCS = "https://docs.docker.com/get-docker/"
 _DOCKER_DAEMON_DOCS = "https://docs.docker.com/config/daemon/"
 _GIT_DOCS = "https://git-scm.com/downloads"
@@ -457,6 +464,75 @@ def check_ports(
     )
 
 
+def check_postgres_port(
+    port: int,
+    *,
+    probe: PortProbeFn = _default_port_probe,
+) -> SetupCheckResult:
+    """Check the Postgres host port can be bound (a startup blocker if not).
+
+    Mirrors :func:`check_ports` for the database. The local-service Compose stack
+    brings ``postgres`` up first and publishes it on a fixed host port
+    (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``) with no auto-fallback, so
+    an *occupied* port is a hard readiness blocker — ``awf start`` cannot publish
+    the port and fails — rather than an advisory warning. ``awf setup --dry-run``
+    used to probe only the API port, so an occupied 5433 (or override) passed
+    readiness yet still broke ``awf start``; this closes that parity gap.
+
+    A bind failure that is *not* occupancy (permission denied on a privileged
+    port, or another bind error) gets its own cause and fix and stays advisory:
+    this probe runs as the current user while ``awf start`` publishes the port
+    through the root Docker daemon, so such a failure does not prove the port is
+    unusable.
+    """
+    outcome = probe(port)
+    if outcome is PortProbeResult.FREE:
+        return SetupCheckResult(
+            name="postgres_port",
+            level=SetupCheckLevel.OK,
+            summary=f"Postgres host port {port} is free.",
+            detail=f"0.0.0.0:{port} (all interfaces) could be bound for the local AWF Postgres.",
+            data={"port": port, "available": True, "probe": outcome.value},
+        )
+    if outcome is PortProbeResult.PERMISSION_DENIED:
+        return SetupCheckResult(
+            name="postgres_port",
+            level=SetupCheckLevel.WARNING,
+            summary=f"Postgres host port {port} could not be probed: permission denied.",
+            detail=f"Binding 0.0.0.0:{port} (all interfaces) was refused with a permission "
+            "error; ports below 1024 are privileged and cannot be bound by an unprivileged "
+            "user. awf start publishes the port through the root Docker daemon and may still "
+            "succeed, so this probe cannot confirm the port is bindable.",
+            fix="Set a non-privileged AWF_POSTGRES_HOST_PORT (>= 1024), or verify "
+            "the port is reachable after awf start.",
+            data={"port": port, "available": False, "probe": outcome.value},
+        )
+    if outcome is PortProbeResult.UNAVAILABLE:
+        return SetupCheckResult(
+            name="postgres_port",
+            level=SetupCheckLevel.WARNING,
+            summary=f"Postgres host port {port} could not be probed.",
+            detail=f"Binding 0.0.0.0:{port} (all interfaces) failed for a reason other than "
+            "occupancy or permissions, so this probe could not confirm the port is bindable.",
+            fix="Verify the host can bind 0.0.0.0 on this port (check the address and any "
+            "network policy), or set a different AWF_POSTGRES_HOST_PORT, "
+            "then re-run awf setup --dry-run.",
+            data={"port": port, "available": False, "probe": outcome.value},
+        )
+    return SetupCheckResult(
+        name="postgres_port",
+        level=SetupCheckLevel.BLOCKED,
+        summary=f"Postgres host port {port} is already in use.",
+        detail=f"0.0.0.0:{port} (all interfaces) is currently bound by another process. "
+        "The local-service Compose stack publishes Postgres on this fixed host port "
+        "(127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432) and brings it up first, so "
+        "awf start cannot publish it and will fail until the port is free.",
+        fix="Free the port or set a different AWF_POSTGRES_HOST_PORT, "
+        "then re-run awf setup --dry-run.",
+        data={"port": port, "available": False, "probe": outcome.value},
+    )
+
+
 def check_disk(
     path: str | Path,
     *,
@@ -786,6 +862,93 @@ def check_api_host_port_override(raw: str) -> SetupCheckResult:
     )
 
 
+def _env_postgres_host_port(environ: Mapping[str, str]) -> int | None:
+    """Return a usable ``AWF_POSTGRES_HOST_PORT`` override, or ``None`` when unusable.
+
+    Mirrors :func:`_env_api_host_port` for the Postgres host port. A missing,
+    empty, whitespace-only, malformed, or out-of-range value yields ``None``.
+    Whether that ``None`` means a legitimate fall-back to Compose's ``5433``
+    default (only an *unset or empty* override, mirroring
+    ``${AWF_POSTGRES_HOST_PORT:-5433}``) or a startup blocker (any other set-but-
+    unusable value, including whitespace-only, which Compose interpolates
+    verbatim) is decided by :func:`_invalid_postgres_host_port_override`.
+    """
+    raw = environ.get("AWF_POSTGRES_HOST_PORT")
+    if raw is None:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = int(candidate)
+    except ValueError:
+        return None
+    if not 1 <= parsed <= 65535:
+        return None
+    return parsed
+
+
+def _resolve_postgres_host_port(*, environ: Mapping[str, str] | None) -> int:
+    """Resolve which Postgres host port the readiness probe should bind.
+
+    Mirrors :func:`_resolve_api_host_port`, minus a caller ``port`` override:
+    nothing passes an explicit Postgres port. Precedence follows the port
+    ``awf start`` actually publishes — the ``AWF_POSTGRES_HOST_PORT`` environment
+    override that Docker Compose interpolates into
+    ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``, and finally Compose's
+    built-in ``5433`` default when no override is set.
+    """
+    env = os.environ if environ is None else environ
+    override = _env_postgres_host_port(env)
+    if override is not None:
+        return override
+    return DEFAULT_POSTGRES_HOST_PORT
+
+
+def _invalid_postgres_host_port_override(*, environ: Mapping[str, str] | None) -> str | None:
+    """Return the raw ``AWF_POSTGRES_HOST_PORT`` when it is set to an unusable value.
+
+    Mirrors :func:`_invalid_api_host_port_override` for Postgres (no caller
+    ``port`` override exists). Returns ``None`` when the override is unset or
+    *genuinely empty* (a zero-length string) — the empty case is a legitimate
+    fall-back to Compose's ``5433`` default because
+    ``${AWF_POSTGRES_HOST_PORT:-5433}`` substitutes the default only when the
+    variable is unset or empty. Any other set value that does not parse to a
+    ``1..65535`` TCP port is returned, *including a whitespace-only value*, which
+    Compose interpolates verbatim so that ``awf start`` fails to publish the port.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get("AWF_POSTGRES_HOST_PORT")
+    if not raw:
+        return None
+    if _env_postgres_host_port(env) is not None:
+        return None
+    return raw
+
+
+def check_postgres_host_port_override(raw: str) -> SetupCheckResult:
+    """Report a set-but-unusable ``AWF_POSTGRES_HOST_PORT`` as a startup blocker.
+
+    Mirrors :func:`check_api_host_port_override` for Postgres. The local-service
+    Compose stack publishes Postgres as
+    ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``, so a non-empty value that
+    is not a ``1..65535`` TCP port is used verbatim and ``awf start`` fails to
+    publish the port. The readiness probe blocks on it rather than silently
+    falling back to the default port and reporting the wrong port as free.
+    """
+    return SetupCheckResult(
+        name="postgres_port",
+        level=SetupCheckLevel.BLOCKED,
+        summary=f"AWF_POSTGRES_HOST_PORT={raw!r} is not a valid TCP port.",
+        detail="AWF_POSTGRES_HOST_PORT must be an integer between 1 and 65535. The local-service "
+        "Compose stack publishes Postgres as 127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432, so "
+        "this value is used verbatim and awf start fails to publish the port.",
+        fix="Set AWF_POSTGRES_HOST_PORT to an integer between 1 and 65535, or unset it to use the "
+        "default 5433, then re-run awf setup --dry-run.",
+        data={"port": None, "available": False, "env_value": raw},
+    )
+
+
 def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
     """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unusable.
 
@@ -944,6 +1107,12 @@ def run_system_checks(
     else:
         resolved_port = _resolve_api_host_port(port=port, environ=environ)
         ports_check = check_ports(resolved_port)
+    invalid_postgres_host_port = _invalid_postgres_host_port_override(environ=environ)
+    if invalid_postgres_host_port is not None:
+        postgres_port_check = check_postgres_host_port_override(invalid_postgres_host_port)
+    else:
+        resolved_postgres_port = _resolve_postgres_host_port(environ=environ)
+        postgres_port_check = check_postgres_port(resolved_postgres_port)
     invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
     if invalid_work_dir is not None:
         disk_check = check_host_work_dir_override(invalid_work_dir)
@@ -957,6 +1126,7 @@ def run_system_checks(
         check_gh(),
         check_python_runtime(),
         ports_check,
+        postgres_port_check,
         disk_check,
         check_shell_path(),
         check_local_capacity(),
@@ -1119,6 +1289,7 @@ def _readiness_next_steps(*, blocked: bool) -> tuple[str, ...]:
 
 
 __all__ = [
+    "DEFAULT_POSTGRES_HOST_PORT",
     "INTERACTIVE_INPUT_REQUIRED",
     "KNOWN_SETUP_PROVIDERS",
     "MINIMUM_PYTHON",
@@ -1144,6 +1315,8 @@ __all__ = [
     "check_host_work_dir_override",
     "check_local_capacity",
     "check_ports",
+    "check_postgres_host_port_override",
+    "check_postgres_port",
     "check_python_runtime",
     "check_shell_path",
     "normalize_provider",

@@ -506,6 +506,9 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
         return fake_ok("disk")
 
     monkeypatch.setattr(system_checks, "check_ports", fake_ports)
+    monkeypatch.setattr(
+        system_checks, "check_postgres_port", lambda _port: fake_ok("postgres_port")
+    )
     monkeypatch.setattr(system_checks, "check_disk", fake_disk)
     monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
     monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))
@@ -519,6 +522,7 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
         "gh",
         "python",
         "ports",
+        "postgres_port",
         "disk",
         "shell_path",
         "local_capacity",
@@ -559,6 +563,9 @@ def test_run_system_checks_tolerates_unresolvable_work_dir_user(
     ):
         monkeypatch.setattr(system_checks, name, lambda name=name: fake_ok(name))
     monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
+    monkeypatch.setattr(
+        system_checks, "check_postgres_port", lambda _port: fake_ok("postgres_port")
+    )
 
     captured: dict[str, object] = {}
 
@@ -1103,6 +1110,9 @@ def _patch_probes_capture_port(
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
     monkeypatch.setattr(system_checks, "check_ports", fake_ports)
+    monkeypatch.setattr(
+        system_checks, "check_postgres_port", lambda _port: fake_ok("postgres_port")
+    )
     monkeypatch.setattr(system_checks, "check_disk", lambda _path: fake_ok("disk"))
     monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
     monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))
@@ -1268,6 +1278,203 @@ def test_check_api_host_port_override_blocks_with_value_in_data() -> None:
     assert result.fix is not None
 
 
+# --- Postgres host port --------------------------------------------------
+
+
+def _patch_probes_capture_postgres_port(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, object],
+) -> None:
+    """Patch every probe so ``run_system_checks`` runs in isolation, capturing the pg port."""
+
+    def fake_ok(name: str) -> SetupCheckResult:
+        return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
+
+    def fake_postgres_port(port: int) -> SetupCheckResult:
+        captured["postgres_port"] = port
+        return fake_ok("postgres_port")
+
+    monkeypatch.setattr(system_checks, "check_docker", lambda: fake_ok("docker"))
+    monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
+    monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
+    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
+    monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
+    monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
+    monkeypatch.setattr(system_checks, "check_postgres_port", fake_postgres_port)
+    monkeypatch.setattr(system_checks, "check_disk", lambda _path: fake_ok("disk"))
+    monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
+    monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))
+
+
+@pytest.mark.unit
+def test_check_postgres_port_ok_when_free_and_blocks_when_in_use() -> None:
+    """Verify a free pg port is OK and an in-use pg port BLOCKS with the port in data.
+
+    The local-service Compose stack brings ``postgres`` up first and publishes it
+    on a fixed host port (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``) with
+    no auto-fallback, so an occupied port makes ``awf start`` fail to publish it.
+    An occupied Postgres host port is therefore a readiness blocker, not advisory.
+    """
+    free = system_checks.check_postgres_port(5433, probe=lambda _port: PortProbeResult.FREE)
+    in_use = system_checks.check_postgres_port(5433, probe=lambda _port: PortProbeResult.IN_USE)
+    assert free.name == "postgres_port"
+    assert free.level is SetupCheckLevel.OK
+    assert free.data["available"] is True
+    assert in_use.name == "postgres_port"
+    assert in_use.level is SetupCheckLevel.BLOCKED
+    assert in_use.data["port"] == 5433
+    assert in_use.data["available"] is False
+    assert in_use.fix is not None
+
+
+@pytest.mark.unit
+def test_check_postgres_port_distinguishes_permission_and_other_bind_errors() -> None:
+    """Verify non-occupancy bind failures get their own cause/fix, not "in use"."""
+    permission = system_checks.check_postgres_port(
+        80, probe=lambda _port: PortProbeResult.PERMISSION_DENIED
+    )
+    other = system_checks.check_postgres_port(5433, probe=lambda _port: PortProbeResult.UNAVAILABLE)
+
+    assert permission.name == "postgres_port"
+    assert permission.level is SetupCheckLevel.WARNING
+    assert permission.data["probe"] == PortProbeResult.PERMISSION_DENIED.value
+    assert "permission" in permission.summary.lower()
+    assert "already in use" not in permission.summary
+    assert permission.fix is not None
+    assert "Free the port" not in permission.fix
+
+    assert other.name == "postgres_port"
+    assert other.level is SetupCheckLevel.WARNING
+    assert other.data["probe"] == PortProbeResult.UNAVAILABLE.value
+    assert "already in use" not in other.summary
+    assert other.fix is not None
+    assert "Free the port" not in other.fix
+
+
+@pytest.mark.unit
+def test_check_postgres_host_port_override_blocks_with_value_in_data() -> None:
+    """The pg override check is a hard blocker carrying the offending value."""
+    result = system_checks.check_postgres_host_port_override("abc")
+
+    assert result.name == "postgres_port"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["env_value"] == "abc"
+    assert result.data["available"] is False
+    assert "abc" in result.summary
+    assert result.fix is not None
+
+
+@pytest.mark.unit
+def test_run_system_checks_probes_postgres_default_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default Postgres host port 5433 in use yields a non-OK ``postgres_port`` result.
+
+    The local-service Compose stack publishes Postgres as
+    ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432`` and bootstrap brings it up
+    first, so an occupied 5433 makes ``awf start`` fail. ``run_system_checks`` must
+    surface this as a blocker, not silently report success.
+    """
+
+    def fake_ok(name: str) -> SetupCheckResult:
+        return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
+
+    captured: dict[str, object] = {}
+
+    def fake_postgres_port(port: int) -> SetupCheckResult:
+        captured["postgres_port"] = port
+        return SetupCheckResult(
+            name="postgres_port",
+            level=SetupCheckLevel.BLOCKED,
+            summary="pg in use",
+            detail="pg in use",
+            fix="free it",
+            data={"port": port, "available": False},
+        )
+
+    for name in (
+        "check_docker",
+        "check_compose",
+        "check_git",
+        "check_gh",
+        "check_python_runtime",
+        "check_shell_path",
+        "check_local_capacity",
+    ):
+        monkeypatch.setattr(system_checks, name, lambda name=name: fake_ok(name))
+    monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
+    monkeypatch.setattr(system_checks, "check_disk", lambda _path: fake_ok("disk"))
+    monkeypatch.setattr(system_checks, "check_postgres_port", fake_postgres_port)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={},
+    )
+
+    assert captured["postgres_port"] == system_checks.DEFAULT_POSTGRES_HOST_PORT
+    postgres = next(result for result in results if result.name == "postgres_port")
+    assert postgres.level is SetupCheckLevel.BLOCKED
+    assert postgres.data["port"] == 5433
+
+
+@pytest.mark.unit
+def test_run_system_checks_honors_awf_postgres_host_port_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``AWF_POSTGRES_HOST_PORT`` override is probed instead of the default 5433."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"AWF_POSTGRES_HOST_PORT": "6543"},
+    )
+
+    assert captured["postgres_port"] == 6543
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_set_but_invalid_postgres_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-empty but unusable ``AWF_POSTGRES_HOST_PORT`` blocks instead of probing."""
+    for invalid in ("abc", "0", "70000"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(),
+            work_dir=Path("/tmp"),
+            environ={"AWF_POSTGRES_HOST_PORT": invalid},
+        )
+
+        postgres = next(result for result in results if result.name == "postgres_port")
+        assert postgres.level is SetupCheckLevel.BLOCKED, repr(invalid)
+        assert postgres.data["env_value"] == invalid
+        # The bind probe must not run for a port the operator never published.
+        assert "postgres_port" not in captured, repr(invalid)
+
+
+@pytest.mark.unit
+def test_run_system_checks_falls_back_to_postgres_default_when_override_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing or empty ``AWF_POSTGRES_HOST_PORT`` falls back to Compose's 5433 default."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    for blank in (None, ""):
+        environ = {} if blank is None else {"AWF_POSTGRES_HOST_PORT": blank}
+        run_system_checks(
+            config=HostSetupConfig(),
+            work_dir=Path("/tmp"),
+            environ=environ,
+        )
+        assert captured["postgres_port"] == system_checks.DEFAULT_POSTGRES_HOST_PORT, repr(blank)
+
+
 def _patch_probes_capture_disk_path(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, object],
@@ -1287,6 +1494,9 @@ def _patch_probes_capture_disk_path(
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
     monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
+    monkeypatch.setattr(
+        system_checks, "check_postgres_port", lambda _port: fake_ok("postgres_port")
+    )
     monkeypatch.setattr(system_checks, "check_disk", fake_disk)
     monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
     monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))

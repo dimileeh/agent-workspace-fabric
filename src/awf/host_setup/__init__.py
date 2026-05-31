@@ -74,6 +74,7 @@ from awf.host_setup.source_assets import (
     verified_source_from_metadata,
 )
 from awf.host_setup.system_checks import (
+    DEFAULT_POSTGRES_HOST_PORT,
     KNOWN_SETUP_PROVIDERS,
     MIN_FREE_DISK_BYTES,
     MIN_MEMORY_BYTES,
@@ -96,6 +97,8 @@ from awf.host_setup.system_checks import (
     check_host_work_dir_override,
     check_local_capacity,
     check_ports,
+    check_postgres_host_port_override,
+    check_postgres_port,
     check_python_runtime,
     check_shell_path,
     normalize_provider,
@@ -115,6 +118,7 @@ __all__ = [
     "DEFAULT_API_HOST_PORT",
     "DEFAULT_HOST_SETUP_WORK_DIR",
     "DEFAULT_INSTALL_CHANNEL",
+    "DEFAULT_POSTGRES_HOST_PORT",
     "FIRST_RUN_CLIENT_REASON_CODES",
     "FIRST_RUN_CREDENTIAL_REASON_CODES",
     "FIRST_RUN_FAILURE_REASON_CODES",
@@ -180,6 +184,8 @@ __all__ = [
     "check_host_work_dir_override",
     "check_local_capacity",
     "check_ports",
+    "check_postgres_host_port_override",
+    "check_postgres_port",
     "check_python_runtime",
     "check_shell_path",
     "default_host_setup_config_path",
