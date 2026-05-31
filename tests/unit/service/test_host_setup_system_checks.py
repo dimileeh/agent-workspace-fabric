@@ -1350,20 +1350,24 @@ def test_run_system_checks_explicit_work_dir_overrides_env(
 def test_run_system_checks_falls_back_to_compose_default_work_dir_when_override_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing or blank ``AWF_HOST_WORK_DIR`` falls back to Compose's default.
+    """A missing or empty ``AWF_HOST_WORK_DIR`` falls back to Compose's default.
 
     The local-service Compose stack bind-mounts
     ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` and ``awf start`` never reads
     the persisted ``config.work_dir`` — it resolves the bind from the Compose
-    env. So an absent or whitespace-only override probes Compose's built-in
-    ``${HOME}/.awf/service`` default, and a non-default ``config.work_dir`` is
-    deliberately ignored: probing it would report disk readiness for a directory
-    ``awf start`` would never mount.
+    env. ``${VAR:-default}`` substitutes the default only when the variable is
+    *unset or empty* (a zero-length string), so an absent or genuinely-empty
+    override probes Compose's built-in ``${HOME}/.awf/service`` default. A
+    whitespace-only value is a non-empty literal Compose keeps verbatim, so it
+    blocks instead — see
+    ``test_run_system_checks_blocks_on_whitespace_only_work_dir_override``. A
+    non-default ``config.work_dir`` is deliberately ignored: probing it would
+    report disk readiness for a directory ``awf start`` would never mount.
     """
     captured: dict[str, object] = {}
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
-    for blank in (None, "", "   "):
+    for blank in (None, ""):
         environ = {"HOME": "/home/op"}
         if blank is not None:
             environ["AWF_HOST_WORK_DIR"] = blank
@@ -1372,6 +1376,57 @@ def test_run_system_checks_falls_back_to_compose_default_work_dir_when_override_
             environ=environ,
         )
         assert captured["disk_path"] == Path("/home/op/.awf/service"), repr(blank)
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_whitespace_only_work_dir_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only ``AWF_HOST_WORK_DIR`` blocks; it is not a blank fall-back.
+
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` substitutes the default only
+    when the variable is *unset or empty* (a zero-length string). A
+    whitespace-only value such as ``"   "`` is a non-empty string, so Compose
+    interpolates it verbatim into the bind source/target and ``awf service``
+    resolves the same override as its work_dir, so ``awf start`` mounts (or
+    fails on) that path instead of the default. The readiness probe must
+    therefore block on it rather than strip it to blank and silently probe the
+    ``${HOME}/.awf/service`` default, reporting readiness for the wrong
+    directory.
+    """
+    for whitespace in ("   ", "\t", " \t "):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": "/home/op", "AWF_HOST_WORK_DIR": whitespace},
+        )
+
+        disk = next(result for result in results if result.name == "disk")
+        assert disk.level is SetupCheckLevel.BLOCKED, repr(whitespace)
+        assert disk.data["env_value"] == whitespace
+        # The disk probe must not run for a work dir the operator never mounted.
+        assert "disk_path" not in captured, repr(whitespace)
+
+
+@pytest.mark.unit
+def test_run_system_checks_explicit_work_dir_suppresses_whitespace_override_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``work_dir`` wins over a whitespace env override without blocking."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        work_dir=Path("/explicit/state"),
+        environ={"AWF_HOST_WORK_DIR": "   "},
+    )
+
+    disk = next(result for result in results if result.name == "disk")
+    assert disk.level is SetupCheckLevel.OK
+    assert captured["disk_path"] == Path("/explicit/state")
 
 
 @pytest.mark.unit

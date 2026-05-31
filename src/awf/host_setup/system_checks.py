@@ -787,12 +787,16 @@ def check_api_host_port_override(raw: str) -> SetupCheckResult:
 
 
 def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
-    """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unset.
+    """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unusable.
 
-    Mirrors the Compose ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` bind
-    source: a missing, blank, or whitespace-only value yields ``None`` so the
-    disk probe falls back to Compose's ``${HOME}/.awf/service`` default rather
-    than inspecting an empty path.
+    A missing, empty, or whitespace-only value yields ``None``. Whether that
+    ``None`` means a legitimate fall-back to Compose's ``${HOME}/.awf/service``
+    default (only an *unset or empty* override, mirroring
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``) or a startup blocker (a
+    whitespace-only value, which Compose keeps as a non-empty literal and
+    interpolates verbatim into the bind path) is decided by
+    :func:`_invalid_host_work_dir_override`, which the readiness probe surfaces
+    as a blocker instead of silently probing the default work dir.
     """
     raw = environ.get("AWF_HOST_WORK_DIR")
     if raw is None:
@@ -851,6 +855,69 @@ def _resolve_work_dir(
     return _default_compose_work_dir(env)
 
 
+def _invalid_host_work_dir_override(
+    *,
+    work_dir: Path | None,
+    environ: Mapping[str, str] | None,
+) -> str | None:
+    """Return the raw ``AWF_HOST_WORK_DIR`` when it is set to an unusable value.
+
+    Returns ``None`` (no configuration error) when an explicit caller
+    ``work_dir`` wins, when the override is unset, or when it is *genuinely
+    empty* (a zero-length string) — the empty case is a legitimate fall-back to
+    Compose's ``${HOME}/.awf/service`` default because
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` substitutes the default only
+    when the variable is unset or empty. A whitespace-only value is returned
+    instead: Compose treats ``"   "`` as a non-empty literal and interpolates it
+    verbatim into the bind source/target, and ``awf service`` resolves the same
+    override as its ``work_dir`` (``_resolve_service_work_dir`` returns it
+    unstripped), so ``awf start`` mounts (or fails on) that path rather than the
+    default. The readiness probe must block on it instead of silently probing
+    the default work dir and reporting readiness for the wrong directory. The
+    ``not raw`` guard mirrors the same empty-vs-whitespace split as the API-port
+    override so the two layers agree.
+    """
+    if work_dir is not None:
+        return None
+    env = os.environ if environ is None else environ
+    raw = env.get("AWF_HOST_WORK_DIR")
+    if not raw:
+        return None
+    if _env_host_work_dir(env) is not None:
+        return None
+    return raw
+
+
+def check_host_work_dir_override(raw: str) -> SetupCheckResult:
+    """Report a set-but-unusable ``AWF_HOST_WORK_DIR`` as a startup blocker.
+
+    The local-service Compose stack bind-mounts
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` and ``awf service`` resolves
+    the same override as its work_dir, so a non-empty whitespace-only value is
+    used verbatim as the bind path and ``awf start`` mounts (or fails on) it
+    instead of the default. The readiness probe blocks on it rather than
+    silently probing the default work dir and reporting readiness for the wrong
+    directory.
+    """
+    return SetupCheckResult(
+        name="disk",
+        level=SetupCheckLevel.BLOCKED,
+        summary=f"AWF_HOST_WORK_DIR={raw!r} is whitespace-only, not a usable work directory.",
+        detail="AWF_HOST_WORK_DIR must be a real directory path. The local-service Compose stack "
+        "bind-mounts ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service} and awf service resolves the same "
+        "override as its work_dir, so this non-empty whitespace value is used verbatim as the "
+        "bind path and awf start mounts (or fails on) it instead of the default.",
+        fix="Set AWF_HOST_WORK_DIR to a real directory path, or unset it to use the default "
+        "${HOME}/.awf/service, then re-run awf setup --dry-run.",
+        data={
+            "path": None,
+            "free_bytes": None,
+            "minimum_bytes": MIN_FREE_DISK_BYTES,
+            "env_value": raw,
+        },
+    )
+
+
 def run_system_checks(
     *,
     config: HostSetupConfig,  # noqa: ARG001 - retained as the canonical host-setup input; no probe reads the persisted config (awf start resolves port/work dir from the Compose env only)
@@ -865,7 +932,12 @@ def run_system_checks(
     else:
         resolved_port = _resolve_api_host_port(port=port, environ=environ)
         ports_check = check_ports(resolved_port)
-    resolved_work_dir = _resolve_work_dir(work_dir=work_dir, environ=environ)
+    invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
+    if invalid_work_dir is not None:
+        disk_check = check_host_work_dir_override(invalid_work_dir)
+    else:
+        resolved_work_dir = _resolve_work_dir(work_dir=work_dir, environ=environ)
+        disk_check = check_disk(resolved_work_dir)
     return [
         check_docker(),
         check_compose(),
@@ -873,7 +945,7 @@ def run_system_checks(
         check_gh(),
         check_python_runtime(),
         ports_check,
-        check_disk(resolved_work_dir),
+        disk_check,
         check_shell_path(),
         check_local_capacity(),
     ]
@@ -1057,6 +1129,7 @@ __all__ = [
     "check_docker",
     "check_gh",
     "check_git",
+    "check_host_work_dir_override",
     "check_local_capacity",
     "check_ports",
     "check_python_runtime",
