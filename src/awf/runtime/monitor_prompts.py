@@ -73,7 +73,6 @@ def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
 
 def _render_owned_path_for_prompt(path: str) -> str:
     """Render operator-provided path data without allowing prompt line breaks."""
-
     return json.dumps(path, ensure_ascii=True)
 
 

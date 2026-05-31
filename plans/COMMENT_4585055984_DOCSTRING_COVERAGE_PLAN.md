@@ -56,6 +56,12 @@ diff-added D103 findings in `test_pr_monitor_runner_part_007.py`. Add concise
 test/fixture docstrings only and re-run the focused audit and targeted tests for
 that shard.
 
+A later owned-path prompt escaping review-repair commit introduced one
+diff-added pydocstyle D202 finding in `monitor_prompts.py` and three
+diff-added test-method D102 findings in `test_monitor_prompts.py`. Remove only
+the docstring-style blank line and add concise behavior-neutral test docstrings
+without changing prompt behavior or assertions.
+
 ## Verification Commands
 
 - Diff-scoped `ruff --select D` audit over changed Python files intersected

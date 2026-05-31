@@ -149,6 +149,7 @@ class TestAddressThread:
 
     @pytest.mark.unit
     def test_thread_prompt_escapes_owned_paths_before_embedding(self) -> None:
+        """Verify thread prompt owned paths are JSON-escaped before rendering."""
         thread = ReviewThread(
             thread_id="T",
             path=".github/workflows/publish.yml",
@@ -399,6 +400,7 @@ class TestAddressReviewComment:
 
     @pytest.mark.unit
     def test_review_comment_prompt_escapes_owned_paths_before_embedding(self) -> None:
+        """Verify review-comment owned paths are JSON-escaped before rendering."""
         c = ReviewComment(comment_id="C", body_excerpt="update publish workflow")
         prompt = address_review_comment_prompt(
             pr_number=1,
@@ -707,6 +709,7 @@ class TestFixCiPrompt:
 
     @pytest.mark.unit
     def test_ci_prompt_escapes_owned_paths_before_embedding(self) -> None:
+        """Verify CI prompt owned paths are JSON-escaped before rendering."""
         failures = (
             CheckFailure(
                 name="publish",

@@ -86,5 +86,29 @@ Plan reference: `plans/COMMENT_4585055984_DOCSTRING_COVERAGE_PLAN.md`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_007.py::test_auto_merge_dispatches_validation_recovery_before_merge tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_007.py::test_auto_merge_waits_for_reviewer_settle_before_validation_recovery -q`:
   2 passed.
 
+## Prompt-Escaping Follow-up Validation
+
+- After the later owned-path prompt escaping review-repair commit, the
+  diff-scoped `ruff --select D` audit over Python files changed in
+  `origin/development...HEAD`, intersected with actual PR-added lines, reported
+  four remaining findings:
+  `src/awf/runtime/monitor_prompts.py:75 D202`,
+  `tests/unit/runtime/test_monitor_prompts.py:151 D102`,
+  `:401 D102`, and `:709 D102`.
+- Removed only the D202 blank line after `_render_owned_path_for_prompt`'s
+  docstring and added behavior-neutral docstrings to the three owned-path
+  escaping prompt tests.
+- Re-ran the diff-scoped `ruff --select D` audit over all 26 Python files
+  changed in `origin/development...HEAD`, intersected with actual PR-added
+  lines: `diff_added_d_findings=0`.
+- `uv run --python 3.12 --extra dev ruff check src/awf/runtime/monitor_prompts.py tests/unit/runtime/test_monitor_prompts.py`:
+  passed.
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/monitor_prompts.py tests/unit/runtime/test_monitor_prompts.py`:
+  passed.
+- `git diff --check`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_prompts.py::TestAddressThread::test_thread_prompt_escapes_owned_paths_before_embedding tests/unit/runtime/test_monitor_prompts.py::TestAddressReviewComment::test_review_comment_prompt_escapes_owned_paths_before_embedding tests/unit/runtime/test_monitor_prompts.py::TestFixCiPrompt::test_ci_prompt_escapes_owned_paths_before_embedding -q`:
+  3 passed.
+
 Full AWF/GitHub validation, coverage gates, frontend builds, and CI-equivalent
 commands were intentionally not run in this agent phase.
