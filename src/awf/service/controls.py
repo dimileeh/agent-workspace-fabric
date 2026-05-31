@@ -22,6 +22,10 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import (
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+)
 from awf.node.cleanup import (
     WorkspaceCleanupResult,
 )
@@ -80,8 +84,6 @@ _OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
-_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE = "workspace.terminal_runtime_released"
-_TERMINAL_RUNTIME_RELEASED_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
@@ -94,7 +96,7 @@ async def _has_terminal_runtime_released_event(
         select(WorkspaceEvent.id)
         .where(
             WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
+            WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
         )
         .limit(1)
     )
@@ -395,8 +397,8 @@ class WorkspaceControlService:
         ):
             await repo.add_event(
                 workspace,
-                event_type=_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
-                reason_code=_TERMINAL_RUNTIME_RELEASED_REASON_CODE,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                 payload={
                     "compose_project_name": workspace.compose_project_name,
                     "workspace_status": workspace.status,
@@ -502,8 +504,8 @@ class WorkspaceControlService:
         if not await _has_terminal_runtime_released_event(self._session, workspace.id):
             await repo.add_event(
                 workspace,
-                event_type=_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
-                reason_code=_TERMINAL_RUNTIME_RELEASED_REASON_CODE,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                 payload={
                     "compose_project_name": workspace.compose_project_name,
                     "workspace_status": workspace.status,
@@ -1239,8 +1241,8 @@ class WorkspaceControlService:
             if not await _has_terminal_runtime_released_event(self._session, workspace.id):
                 await repo.add_event(
                     workspace,
-                    event_type=_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
-                    reason_code=_TERMINAL_RUNTIME_RELEASED_REASON_CODE,
+                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                     payload={
                         "compose_project_name": workspace.compose_project_name,
                         "workspace_status": WorkspaceStatus.destroyed.value,

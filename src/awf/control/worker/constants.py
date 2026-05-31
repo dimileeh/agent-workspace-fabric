@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 
 from awf.db.enums import TaskKind, WorkspaceStatus
+from awf.db.repositories.base import (
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+)
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
@@ -229,9 +233,8 @@ _CAPACITY_BLOCKER_SIGNATURE_FIELDS: tuple[str, ...] = (
 
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 
-_TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = "workspace.terminal_runtime_released"
-
-_TERMINAL_RUNTIME_RELEASE_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
+_TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = TERMINAL_RUNTIME_RELEASE_EVENT_TYPE
+_TERMINAL_RUNTIME_RELEASE_REASON_CODE = TERMINAL_RUNTIME_RELEASE_REASON_CODE
 
 _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_release_failed"
 

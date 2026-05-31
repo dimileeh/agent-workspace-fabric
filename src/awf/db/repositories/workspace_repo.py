@@ -47,6 +47,7 @@ from awf.db.repositories.base import (
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     HOST_PORT_CONFLICT_STATUSES,
     HOST_PORT_TERMINAL_RELEASE_STATUSES,
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
@@ -532,11 +533,10 @@ class WorkspaceRepository:
         if not host_ports:
             return []
 
-        _terminal_runtime_released_event = "workspace.terminal_runtime_released"
         terminal_runtime_released_exists = (
             select(WorkspaceEvent.id)
             .where(WorkspaceEvent.workspace_id == Workspace.id)
-            .where(WorkspaceEvent.event_type == _terminal_runtime_released_event)
+            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
             .exists()
         )
 
