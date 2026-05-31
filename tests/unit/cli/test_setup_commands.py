@@ -160,6 +160,42 @@ def test_setup_merges_compose_env_when_probing_api_port(
     assert captured["environ"] == merged
 
 
+@pytest.mark.unit
+def test_setup_probes_selected_source_checkout_env(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The readiness probes read the *selected* checkout's ``docker/compose/.env``.
+
+    Regression for PRRT_kwDOSJAM6s6F6Tt0: ``awf setup --source-checkout
+    /other/awf`` must resolve ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` from the
+    selected checkout's ``docker/compose/.env`` — the same file ``awf start``
+    later honors for the persisted checkout — instead of default ``.env``
+    discovery, so setup never probes/blocks on a port or disk path the matching
+    ``awf start`` would not use.
+    """
+    root = _make_source_checkout(tmp_path / "awf")
+    compose_env = root / "docker" / "compose" / ".env"
+    compose_env.parent.mkdir(parents=True, exist_ok=True)
+    compose_env.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_checks(**kwargs: object) -> list[SetupCheckResult]:
+        captured["environ"] = kwargs.get("environ")
+        return _all_ok()
+
+    monkeypatch.setattr(setup_commands, "run_system_checks", fake_checks)
+    result = _runner.invoke(
+        app,
+        ["setup", "--dry-run", "--source-checkout", str(root), "--format", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    environ = captured["environ"]
+    assert isinstance(environ, dict)
+    assert environ["AWF_API_HOST_PORT"] == "9100"
+
+
 # --- Provider selectors ---------------------------------------------------
 
 

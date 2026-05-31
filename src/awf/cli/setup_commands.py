@@ -115,15 +115,16 @@ def _run_setup(
         except SourceCheckoutError as exc:
             source_error = exc
 
-    # Probe the port ``awf start`` will actually publish. The documented
-    # local-service flow keeps ``AWF_API_HOST_PORT`` in ``docker/compose/.env``
-    # for Compose interpolation, so merge that file like the service path does;
-    # reading only ``os.environ`` would falsely block on the default 8000 when an
-    # operator moved the published port there. ``local_service_environ`` falls
-    # back to the process env when no ``.env`` exists yet (true first run).
-    from awf.service.config import local_service_environ
-
-    results = run_system_checks(config=config, environ=local_service_environ())
+    # Probe the port/disk ``awf start`` will actually use. The documented
+    # local-service flow keeps ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` in
+    # ``docker/compose/.env`` for Compose interpolation; ``_readiness_environ``
+    # merges that file (the selected ``--source-checkout``'s copy when one is
+    # verified) so setup probes the same values ``awf start`` will honor instead
+    # of the default 8000/work dir.
+    results = run_system_checks(
+        config=config,
+        environ=_readiness_environ(verified_source),
+    )
     payload = build_setup_readiness_payload(
         results,
         selected_providers=selected_providers,
@@ -159,6 +160,35 @@ def _run_setup(
             return _readiness_with_config_write_failure(payload, error)
 
     return payload
+
+
+def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[str, str]:
+    """Resolve the merged environment the read-only host probes should see.
+
+    Reading only ``os.environ`` would falsely block on the default 8000 / work
+    dir when an operator moved ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` into
+    ``docker/compose/.env``, so merge that file like the service path does.
+
+    When ``--source-checkout`` selected a verified checkout, read *that*
+    checkout's ``docker/compose/.env`` (with the checkout-root ``.env`` fallback,
+    exactly like ``awf start``'s ``_resolve_start_bootstrap_inputs``). Otherwise
+    setup would probe the default-discovered ``.env`` while ``awf start`` later
+    honors the persisted checkout's values, so a checkout-local
+    ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` could make setup block on a port
+    or disk path the matching start would not use. ``local_service_environ``
+    falls back to the process env when no ``.env`` exists yet (true first run).
+    """
+    from awf.service.config import local_service_environ
+
+    if verified_source is None:
+        return local_service_environ()
+
+    from awf.cli.init_ops import _resolve_existing_service_env_file
+
+    compose_env_candidate = verified_source.root / "docker" / "compose" / ".env"
+    resolved_read_env = _resolve_existing_service_env_file(compose_env_candidate)
+    read_env_file = resolved_read_env if resolved_read_env.exists() else None
+    return local_service_environ(env_file=read_env_file)
 
 
 def _readiness_with_config_write_failure(
