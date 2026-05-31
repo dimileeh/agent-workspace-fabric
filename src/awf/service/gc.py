@@ -283,6 +283,10 @@ WorkspaceGCWorktreeRemove = Callable[
     WorkspaceGCWorktreeRemoveResult | Awaitable[WorkspaceGCWorktreeRemoveResult],
 ]
 
+# Prunes stale cached companion images once per GC run (independent of the
+# per-workspace candidates). Returns a small report dict for the GC payload.
+CompanionImagePrune = Callable[[], Awaitable[dict[str, object]]]
+
 
 @dataclass(frozen=True)
 class WorkspaceGCPlan:
@@ -388,6 +392,7 @@ class WorkspaceGCResult:
     reservation_releases: dict[str, dict[str, object]]
     status: WorkspaceCleanupExecutionStatus
     reason_code: str
+    companion_image_prune: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         deleted_paths = set(self.deleted_paths)
@@ -409,6 +414,8 @@ class WorkspaceGCResult:
                 "reservation_releases": self.reservation_releases,
             }
         )
+        if self.companion_image_prune is not None:
+            payload["companion_image_prune"] = self.companion_image_prune
         payload["candidates"] = [
             candidate.to_dict(
                 deleted_paths=deleted_paths,
@@ -655,6 +662,7 @@ async def run_terminal_workspace_gc(
     cleanup_enabled: bool = True,
     compose_teardown: WorkspaceGCComposeTeardown | None = None,
     worktree_remover: WorkspaceGCWorktreeRemove | None = None,
+    companion_image_prune: CompanionImagePrune | None = None,
     now: datetime | None = None,
 ) -> WorkspaceGCResult:
     """Plan terminal workspace GC and optionally delete selected directories."""
@@ -705,6 +713,9 @@ async def run_terminal_workspace_gc(
         session_factory,
         workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
     )
+    companion_image_prune_result = (
+        await companion_image_prune() if companion_image_prune is not None else None
+    )
     return _gc_result(
         plan=plan,
         dry_run=False,
@@ -715,6 +726,7 @@ async def run_terminal_workspace_gc(
         secret_lease_revocations=secret_lease_revocations,
         worktree_removes=worktree_removes,
         reservation_releases=reservation_releases,
+        companion_image_prune=companion_image_prune_result,
     )
 
 
@@ -1115,6 +1127,7 @@ def _gc_result(
     secret_lease_revocations: dict[str, dict[str, object]] | None = None,
     worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] | None = None,
     reservation_releases: dict[str, dict[str, object]] | None = None,
+    companion_image_prune: dict[str, object] | None = None,
 ) -> WorkspaceGCResult:
     lease_revocations = secret_lease_revocations or {}
     wt_removes = worktree_removes or {}
@@ -1133,8 +1146,13 @@ def _gc_result(
             status="dry_run",
             reason_code=CLEANUP_DRY_RUN,
         )
-    has_errors = bool(delete_errors) or any(
-        v.get("error") is not None for v in res_releases.values()
+    companion_prune_failed = (
+        companion_image_prune is not None and companion_image_prune.get("status") == "failed"
+    )
+    has_errors = (
+        bool(delete_errors)
+        or any(v.get("error") is not None for v in res_releases.values())
+        or companion_prune_failed
     )
     status: WorkspaceCleanupExecutionStatus = "partial" if has_errors else "succeeded"
     return WorkspaceGCResult(
@@ -1149,6 +1167,7 @@ def _gc_result(
         reservation_releases=res_releases,
         status=status,
         reason_code=(CLEANUP_EXECUTION_PARTIAL if has_errors else CLEANUP_EXECUTION_SUCCEEDED),
+        companion_image_prune=companion_image_prune,
     )
 
 

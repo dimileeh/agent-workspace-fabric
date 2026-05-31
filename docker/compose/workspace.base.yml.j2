@@ -11,7 +11,8 @@ services:
   {{ s.name }}:
     container_name: "awf-{{ workspace_id }}-{{ s.name }}"
     {% if s.image %}image: "{{ s.image }}"
-    {% elif s.build_context %}build:
+    {% if s.local_image %}pull_policy: never
+    {% endif %}{% elif s.build_context %}build:
       context: "{{ s.build_context }}"
       dockerfile: "{{ s.dockerfile }}"
     {% endif %}{% if s.privileged %}privileged: true
