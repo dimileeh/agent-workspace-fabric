@@ -1060,6 +1060,7 @@ async def run_validation_and_fix_cycle(
             operation: str,
             result: CommandResult,
         ) -> None:
+            """Record a validation fix-pass git failure and mark workspace failed."""
             command_output = (result.stderr or result.stdout).strip()
             message = (
                 f"validation fix pass {operation} failed with exit {result.returncode}"

@@ -272,6 +272,7 @@ async def cleanup_validation_worktree_side_effects(
     """Restore dirty files created by AWF-owned validation commands."""
 
     async def _verify_head_unchanged(*, restore_ref: str) -> ValidationWorktreeCleanup | None:
+        """Verify HEAD still points at the pre-validation reference."""
         restore_target = await run_git(["rev-parse", restore_ref])
         if not restore_target.ok:
             return ValidationWorktreeCleanup(

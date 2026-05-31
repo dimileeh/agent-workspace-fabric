@@ -263,6 +263,7 @@ async def _pre_push_validation_worktree_check(
     """Check pre-push validation preconditions for clean validation worktree state."""
 
     async def _run_git(args: list[str]) -> Any:
+        """Run git command arguments inside the workspace worktree."""
         return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
 
     from awf.runtime.validation_worktree import check_validation_worktree_clean
@@ -279,6 +280,7 @@ async def _pre_push_validation_cleanup(
     """Clean validation side effects and restore the worktree to the requested ref."""
 
     async def _run_git(args: list[str]) -> Any:
+        """Run git command arguments inside the workspace worktree."""
         return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
 
     from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
