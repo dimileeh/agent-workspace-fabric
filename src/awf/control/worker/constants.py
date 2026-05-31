@@ -251,6 +251,7 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.completed,
     WorkspaceStatus.destroyed,
 )
+"""Terminal workspace statuses that indicate runtime resources should be released."""
 
 _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL = 10
 
