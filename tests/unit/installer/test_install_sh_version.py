@@ -14,6 +14,8 @@ that omits those fields (legacy/hand-authored) is not enforced, mirroring how
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from tests.unit.installer.conftest import InstallerHarness
@@ -32,6 +34,69 @@ def test_pinned_version_matching_manifest_installs(harness: InstallerHarness) ->
 
     assert result.returncode == 0, result.stderr
     assert "uv tool install" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("pin", ["v0.1.0", "V0.1.0"])
+def test_pinned_tag_style_version_installs(harness: InstallerHarness, pin: str) -> None:
+    """A tag-style pin (leading ``v``/``V``) installs the same correct release.
+
+    Users and CI commonly pin the git tag form ``vX.Y.Z`` (e.g. ``--version
+    v0.1.0``). ``VERSION`` is interpolated as the *bare* release version
+    everywhere downstream: ``verify_version`` compares the manifest's bare
+    ``version`` field to ``VERSION`` and its ``source.tag`` to ``v${VERSION}``. A
+    leading ``v`` left in place double-prepends (``vv0.1.0``) and trips
+    ``VERSION_MISMATCH`` for a correct release, so the installer normalizes the
+    tag prefix at parse time.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0", tag="v0.1.0")
+
+    result = harness.run(["--version", pin], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "VERSION_MISMATCH" not in result.stderr
+    assert "uv tool install" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_pinned_tag_style_version_resolves_single_v_manifest_url(
+    harness: InstallerHarness,
+) -> None:
+    """A tag-style pin resolves the ``v<version>`` asset URL, not ``vv<version>``.
+
+    With no ``AWF_INSTALL_MANIFEST`` override, ``resolve_manifest`` builds the
+    release-asset URL as ``<base>/releases/download/v${VERSION}/...``. Left
+    un-normalized, ``--version v0.1.0`` would request ``.../download/vv0.1.0/...``
+    and fail the manifest fetch even though ``v0.1.0`` is the real tag. Normalizing
+    the tag prefix keeps the fetch confined to the correct ``v0.1.0`` segment.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0", tag="v0.1.0")
+    # Lay the manifest out where resolve_manifest expects a tag-pinned asset:
+    #   <base>/releases/download/v0.1.0/awf-install-manifest.json
+    base = harness.root / "base"
+    asset_dir = base / "releases" / "download" / "v0.1.0"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(manifest, asset_dir / "awf-install-manifest.json")
+
+    result = harness.run(
+        ["--version", "v0.1.0", "--dry-run"],
+        extra_env={"AWF_INSTALL_BASE_URL": f"file://{base}"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "MANIFEST_UNAVAILABLE" not in result.stderr
+    # The resolved source path carries a single v segment, never a doubled vv.
+    assert "releases/download/v0.1.0/" in result.stdout
+    assert "vv0.1.0" not in result.stdout
+    assert "vv0.1.0" not in result.stderr
 
 
 @pytest.mark.unit

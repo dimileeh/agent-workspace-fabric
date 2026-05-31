@@ -126,20 +126,35 @@ require_version() {
     if [ -z "$1" ]; then
         bad_usage "empty value for --version; pass --version <X.Y.Z> or omit it to install the latest release"
     fi
+    local version="$1"
+    # Normalize a tag-style pin. Users and CI commonly pin the git tag form
+    # vX.Y.Z (e.g. --version v0.1.0), but VERSION is interpolated as the *bare*
+    # release version everywhere downstream: resolve_manifest builds the asset URL
+    # as .../releases/download/v${VERSION}/..., and verify_version compares the
+    # manifest's bare "version" field to VERSION and its source.tag to v${VERSION}.
+    # A leading v left in place double-prepends (vv0.1.0), breaking the manifest
+    # fetch or tripping VERSION_MISMATCH for a correct release. PEP 440 versions
+    # always start with a digit, so a single leading v/V is unambiguously the tag
+    # prefix; strip it so the stored token is the canonical bare version.
+    case "$version" in
+        [vV]*) version="${version#[vV]}" ;;
+    esac
     # VERSION is interpolated directly into the manifest URL path segment
     # (resolve_manifest builds .../releases/download/v${VERSION}/...). A value
     # carrying a slash or a path-traversal sequence (e.g. ../../../evil) would
     # escape that segment; against a file:// base (the AWF_INSTALL_BASE_URL test
     # seam) it could redirect the manifest fetch to an arbitrary local path before
-    # the sha256 gate runs. Constrain --version to a plain version token (must
-    # start alphanumeric; only letters, digits, '.', '-', '_', '+' thereafter) so
-    # the fetch stays confined to the expected v<VERSION> segment. This still
-    # admits PEP 440 release tags such as 1.2.3 or 1.2.3rc1.
-    case "$1" in
-        [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*)
+    # the sha256 gate runs. Constrain the normalized --version to a plain version
+    # token (must start alphanumeric; only letters, digits, '.', '-', '_', '+'
+    # thereafter) so the fetch stays confined to the expected v<VERSION> segment.
+    # The empty alternative also rejects a bare "v"/"V" that normalizes to nothing.
+    # This still admits PEP 440 release tags such as 1.2.3 or 1.2.3rc1.
+    case "$version" in
+        "" | [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*)
             bad_usage "invalid --version '$1'; expected a version like X.Y.Z (letters, digits, '.', '-', '_', '+' only)"
             ;;
     esac
+    VERSION="$version"
 }
 
 parse_args() {
