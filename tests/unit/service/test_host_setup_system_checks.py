@@ -491,7 +491,20 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
     def fake_ok(name: str) -> SetupCheckResult:
         return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
 
-    monkeypatch.setattr(system_checks, "check_docker", lambda: fake_ok("docker"))
+    # A real OK docker result carries ``data={"available": True}``; aggregation
+    # guards the compose probe on that flag, so the fake must mirror it or compose
+    # would be skipped and drop out of the ordered result list.
+    monkeypatch.setattr(
+        system_checks,
+        "check_docker",
+        lambda: SetupCheckResult(
+            name="docker",
+            level=SetupCheckLevel.OK,
+            summary="ok",
+            detail="ok",
+            data={"available": True},
+        ),
+    )
     monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
@@ -529,6 +542,107 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
     ]
     assert captured["port"] == HostSetupConfig().api.host_port
     assert isinstance(captured["disk_path"], Path)
+
+
+def _stub_non_docker_checks_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub every non-docker/compose probe to OK so aggregation runs in isolation."""
+
+    def fake_ok(name: str) -> SetupCheckResult:
+        return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
+
+    monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
+    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
+    monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
+    monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
+    monkeypatch.setattr(
+        system_checks, "check_postgres_port", lambda _port: fake_ok("postgres_port")
+    )
+    monkeypatch.setattr(system_checks, "check_disk", lambda _path: fake_ok("disk"))
+    monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
+    monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))
+
+
+@pytest.mark.unit
+def test_run_system_checks_omits_compose_when_docker_binary_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing Docker binary surfaces once, not as a second compose BLOCKED.
+
+    ``check_docker`` already reports the absent binary as BLOCKED. Running
+    ``check_compose`` afterwards would re-probe the same missing ``docker`` binary
+    and append a second BLOCKED result for one root cause, so an operator whose
+    only problem is a missing Docker install would chase a phantom Compose fix.
+    Aggregation guards the compose probe on ``check_docker``'s ``available`` flag,
+    so the probe is skipped entirely (not merely dropped) when Docker is absent.
+    """
+    docker_absent = SetupCheckResult(
+        name="docker",
+        level=SetupCheckLevel.BLOCKED,
+        summary="missing",
+        detail="missing",
+        data={"binary": "docker", "available": False},
+    )
+    compose_calls: list[int] = []
+
+    def tracking_compose() -> SetupCheckResult:
+        compose_calls.append(1)
+        return SetupCheckResult(
+            name="compose", level=SetupCheckLevel.BLOCKED, summary="x", detail="x"
+        )
+
+    monkeypatch.setattr(system_checks, "check_docker", lambda: docker_absent)
+    monkeypatch.setattr(system_checks, "check_compose", tracking_compose)
+    _stub_non_docker_checks_ok(monkeypatch)
+
+    results = run_system_checks(config=HostSetupConfig())
+
+    names = [r.name for r in results]
+    assert compose_calls == []
+    assert names == [
+        "docker",
+        "git",
+        "gh",
+        "python",
+        "ports",
+        "postgres_port",
+        "disk",
+        "shell_path",
+        "local_capacity",
+    ]
+
+
+@pytest.mark.unit
+def test_run_system_checks_keeps_compose_when_docker_daemon_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reachable Docker binary with a stopped daemon still gets a compose probe.
+
+    ``docker compose version`` reports the plugin without contacting the daemon,
+    so a down daemon (``available`` true, ``daemon`` false) is independent of
+    whether the Compose plugin is installed. The guard keys on ``available``, not
+    on the docker check being OK, so a genuinely missing plugin is not masked by a
+    daemon outage.
+    """
+    docker_daemon_down = SetupCheckResult(
+        name="docker",
+        level=SetupCheckLevel.BLOCKED,
+        summary="daemon down",
+        detail="daemon down",
+        data={"binary": "docker", "available": True, "daemon": False},
+    )
+    monkeypatch.setattr(system_checks, "check_docker", lambda: docker_daemon_down)
+    monkeypatch.setattr(
+        system_checks,
+        "check_compose",
+        lambda: SetupCheckResult(
+            name="compose", level=SetupCheckLevel.OK, summary="ok", detail="ok"
+        ),
+    )
+    _stub_non_docker_checks_ok(monkeypatch)
+
+    names = [r.name for r in run_system_checks(config=HostSetupConfig())]
+
+    assert names.index("compose") == 1
 
 
 @pytest.mark.unit
@@ -1104,7 +1218,20 @@ def _patch_probes_capture_port(
         captured["port"] = port
         return fake_ok("ports")
 
-    monkeypatch.setattr(system_checks, "check_docker", lambda: fake_ok("docker"))
+    # A real OK docker result carries ``data={"available": True}``; aggregation
+    # guards the compose probe on that flag, so the fake must mirror it or compose
+    # would be skipped and drop out of the ordered result list.
+    monkeypatch.setattr(
+        system_checks,
+        "check_docker",
+        lambda: SetupCheckResult(
+            name="docker",
+            level=SetupCheckLevel.OK,
+            summary="ok",
+            detail="ok",
+            data={"available": True},
+        ),
+    )
     monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
@@ -1294,7 +1421,20 @@ def _patch_probes_capture_postgres_port(
         captured["postgres_port"] = port
         return fake_ok("postgres_port")
 
-    monkeypatch.setattr(system_checks, "check_docker", lambda: fake_ok("docker"))
+    # A real OK docker result carries ``data={"available": True}``; aggregation
+    # guards the compose probe on that flag, so the fake must mirror it or compose
+    # would be skipped and drop out of the ordered result list.
+    monkeypatch.setattr(
+        system_checks,
+        "check_docker",
+        lambda: SetupCheckResult(
+            name="docker",
+            level=SetupCheckLevel.OK,
+            summary="ok",
+            detail="ok",
+            data={"available": True},
+        ),
+    )
     monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
@@ -1488,7 +1628,20 @@ def _patch_probes_capture_disk_path(
         captured["disk_path"] = path
         return fake_ok("disk")
 
-    monkeypatch.setattr(system_checks, "check_docker", lambda: fake_ok("docker"))
+    # A real OK docker result carries ``data={"available": True}``; aggregation
+    # guards the compose probe on that flag, so the fake must mirror it or compose
+    # would be skipped and drop out of the ordered result list.
+    monkeypatch.setattr(
+        system_checks,
+        "check_docker",
+        lambda: SetupCheckResult(
+            name="docker",
+            level=SetupCheckLevel.OK,
+            summary="ok",
+            detail="ok",
+            data={"available": True},
+        ),
+    )
     monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))

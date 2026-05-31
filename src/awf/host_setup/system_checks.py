@@ -1100,7 +1100,12 @@ def run_system_checks(
     port: int | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> list[SetupCheckResult]:
-    """Run every host system check in a stable order and return the results."""
+    """Run the host system checks in a stable order and return the results.
+
+    The Docker Compose probe is skipped when the Docker CLI is unavailable, so a
+    missing Docker install surfaces as a single blocker (the docker check) rather
+    than a duplicate compose failure for the same root cause.
+    """
     invalid_api_host_port = _invalid_api_host_port_override(port=port, environ=environ)
     if invalid_api_host_port is not None:
         ports_check = check_api_host_port_override(invalid_api_host_port)
@@ -1119,9 +1124,18 @@ def run_system_checks(
     else:
         resolved_work_dir = _resolve_work_dir(work_dir=work_dir, environ=environ)
         disk_check = check_disk(resolved_work_dir)
+    docker_check = check_docker()
+    # When the Docker CLI binary is absent, the ``docker compose`` plugin cannot
+    # exist either: check_compose would re-probe the same missing binary and
+    # append a second BLOCKED result for one root cause (a missing Docker
+    # install). Guard the compose probe on check_docker's ``available`` flag so
+    # that root cause surfaces exactly once. A reachable binary whose daemon is
+    # down keeps ``available`` true, so the plugin is still probed --
+    # ``docker compose version`` reports the plugin without contacting the daemon.
+    compose_checks = [check_compose()] if docker_check.data.get("available") else []
     return [
-        check_docker(),
-        check_compose(),
+        docker_check,
+        *compose_checks,
         check_git(),
         check_gh(),
         check_python_runtime(),
