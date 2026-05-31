@@ -627,12 +627,14 @@ def check_local_capacity(
 
 
 def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
-    """Return a usable ``AWF_API_HOST_PORT`` override, or ``None`` when unset.
+    """Return a usable ``AWF_API_HOST_PORT`` override, or ``None`` when unusable.
 
-    A missing, blank, malformed, or out-of-range value yields ``None`` so the
-    readiness probe falls back to the persisted config port instead of crashing;
-    Docker Compose surfaces an invalid published port on its own when the stack
-    starts.
+    A missing, blank, malformed, or out-of-range value yields ``None``. Callers
+    distinguish an *absent or blank* override (a legitimate fall-back to the
+    persisted config port, mirroring Compose's ``${AWF_API_HOST_PORT:-8000}``
+    default) from a *set but invalid* value via
+    :func:`_invalid_api_host_port_override`, which the readiness probe surfaces
+    as a startup blocker instead of silently probing the default port.
     """
     raw = environ.get("AWF_API_HOST_PORT")
     if raw is None:
@@ -673,6 +675,57 @@ def _resolve_api_host_port(
     if override is not None:
         return override
     return config.api.host_port
+
+
+def _invalid_api_host_port_override(
+    *,
+    port: int | None,
+    environ: Mapping[str, str] | None,
+) -> str | None:
+    """Return the raw ``AWF_API_HOST_PORT`` when it is set to an unusable value.
+
+    Returns ``None`` (no configuration error) when an explicit caller ``port``
+    wins, when the override is unset, or when it is blank/whitespace-only — the
+    last case is a legitimate fall-back to the persisted default because Compose
+    interpolates ``${AWF_API_HOST_PORT:-8000}``. Only a *non-empty* value that
+    does not parse to a ``1..65535`` TCP port is returned: Compose publishes it
+    verbatim into ``<value>:8000`` and ``awf start``/``awf service`` settings
+    reject the same override, so the readiness probe must block on it instead of
+    silently probing the default port.
+    """
+    if port is not None:
+        return None
+    env = os.environ if environ is None else environ
+    raw = env.get("AWF_API_HOST_PORT")
+    if raw is None or not raw.strip():
+        return None
+    if _env_api_host_port(env) is not None:
+        return None
+    return raw
+
+
+def check_api_host_port_override(raw: str) -> SetupCheckResult:
+    """Report a set-but-unusable ``AWF_API_HOST_PORT`` as a startup blocker.
+
+    The local-service Compose stack publishes the API as
+    ``${AWF_API_HOST_PORT:-8000}:8000`` and ``awf service`` settings parse the
+    same override, so a non-empty value that is not a ``1..65535`` TCP port is
+    used verbatim and ``awf start`` fails to publish the port. The readiness
+    probe blocks on it rather than silently falling back to the default port and
+    reporting the wrong port as free.
+    """
+    return SetupCheckResult(
+        name="ports",
+        level=SetupCheckLevel.BLOCKED,
+        summary=f"AWF_API_HOST_PORT={raw!r} is not a valid TCP port.",
+        detail="AWF_API_HOST_PORT must be an integer between 1 and 65535. The local-service "
+        "Compose stack publishes the API as ${AWF_API_HOST_PORT:-8000}:8000 and awf service "
+        "settings parse the same override, so this value is used verbatim and awf start fails "
+        "to publish the port.",
+        fix="Set AWF_API_HOST_PORT to an integer between 1 and 65535, or unset it to use the "
+        "default 8000, then re-run awf setup --dry-run.",
+        data={"port": None, "available": False, "env_value": raw},
+    )
 
 
 def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
@@ -726,7 +779,12 @@ def run_system_checks(
     environ: Mapping[str, str] | None = None,
 ) -> list[SetupCheckResult]:
     """Run every host system check in a stable order and return the results."""
-    resolved_port = _resolve_api_host_port(config, port=port, environ=environ)
+    invalid_api_host_port = _invalid_api_host_port_override(port=port, environ=environ)
+    if invalid_api_host_port is not None:
+        ports_check = check_api_host_port_override(invalid_api_host_port)
+    else:
+        resolved_port = _resolve_api_host_port(config, port=port, environ=environ)
+        ports_check = check_ports(resolved_port)
     resolved_work_dir = _resolve_work_dir(config, work_dir=work_dir, environ=environ)
     return [
         check_docker(),
@@ -734,7 +792,7 @@ def run_system_checks(
         check_git(),
         check_gh(),
         check_python_runtime(),
-        check_ports(resolved_port),
+        ports_check,
         check_disk(resolved_work_dir),
         check_shell_path(),
         check_local_capacity(),
@@ -910,6 +968,7 @@ __all__ = [
     "SetupCheckLevel",
     "SetupCheckResult",
     "build_setup_readiness_payload",
+    "check_api_host_port_override",
     "check_compose",
     "check_disk",
     "check_docker",

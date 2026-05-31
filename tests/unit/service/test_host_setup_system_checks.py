@@ -1002,20 +1002,87 @@ def test_run_system_checks_explicit_port_overrides_env(
 
 
 @pytest.mark.unit
-def test_run_system_checks_ignores_invalid_env_port(
+def test_run_system_checks_falls_back_to_config_port_when_override_blank(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A malformed/out-of-range override falls back to the persisted config port."""
+    """A missing or blank ``AWF_API_HOST_PORT`` falls back to the config port.
+
+    Compose interpolates ``${AWF_API_HOST_PORT:-8000}``, so an absent or
+    whitespace-only override is a legitimate fall-back to the persisted default
+    rather than a configuration error.
+    """
     captured: dict[str, object] = {}
     _patch_probes_capture_port(monkeypatch, captured)
 
-    for invalid in ("not-a-port", "", "0", "70000"):
+    for blank in ("", "   "):
         run_system_checks(
+            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
+            work_dir=Path("/tmp"),
+            environ={"AWF_API_HOST_PORT": blank},
+        )
+        assert captured["port"] == 8123, repr(blank)
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_set_but_invalid_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-empty but unusable ``AWF_API_HOST_PORT`` blocks instead of probing.
+
+    Compose publishes ``${AWF_API_HOST_PORT:-8000}:8000`` and ``awf service``
+    settings parse the same override, so a malformed or out-of-range value makes
+    ``awf start`` fail to publish the port. The readiness probe surfaces it as a
+    startup blocker rather than silently probing the default port and reporting
+    the wrong port as free.
+    """
+    for invalid in ("not-a-port", "0", "70000"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_port(monkeypatch, captured)
+
+        results = run_system_checks(
             config=HostSetupConfig(api=ApiConfig(host_port=8123)),
             work_dir=Path("/tmp"),
             environ={"AWF_API_HOST_PORT": invalid},
         )
-        assert captured["port"] == 8123, invalid
+
+        ports = next(result for result in results if result.name == "ports")
+        assert ports.level is SetupCheckLevel.BLOCKED, repr(invalid)
+        assert ports.data["env_value"] == invalid
+        # The bind probe must not run for a port the operator never published.
+        assert "port" not in captured, repr(invalid)
+
+
+@pytest.mark.unit
+def test_run_system_checks_explicit_port_suppresses_invalid_override_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``port`` wins over an invalid env override without blocking."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(api=ApiConfig(host_port=8000)),
+        work_dir=Path("/tmp"),
+        port=9999,
+        environ={"AWF_API_HOST_PORT": "not-a-port"},
+    )
+
+    ports = next(result for result in results if result.name == "ports")
+    assert ports.level is SetupCheckLevel.OK
+    assert captured["port"] == 9999
+
+
+@pytest.mark.unit
+def test_check_api_host_port_override_blocks_with_value_in_data() -> None:
+    """The override check is a hard blocker carrying the offending value."""
+    result = system_checks.check_api_host_port_override("abc")
+
+    assert result.name == "ports"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["env_value"] == "abc"
+    assert result.data["available"] is False
+    assert "abc" in result.summary
+    assert result.fix is not None
 
 
 def _patch_probes_capture_disk_path(
