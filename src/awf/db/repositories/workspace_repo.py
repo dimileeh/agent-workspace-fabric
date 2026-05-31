@@ -510,11 +510,12 @@ class WorkspaceRepository:
         host_ports: builtins.list[int],
         excluding_workspace_id: str | None = None,
     ) -> builtins.list[HostPortConflict]:
-        """Find active workspaces whose companions claim any of the given host ports.
+        """Find active workspaces whose companions or profile services claim any of the given host ports.
 
         A port conflict exists when a non-terminal workspace's companion
-        ``ports`` list includes ``[container_port, host_port]`` where
-        ``host_port`` appears in *host_ports*.
+        or profile service ``ports`` list includes
+        ``[container_port, host_port]`` where ``host_port`` appears in
+        *host_ports*.
 
         NOTE: A small TOCTOU window exists between this SELECT and the
         subsequent INSERT.  The caller must handle the resulting 409
@@ -524,7 +525,7 @@ class WorkspaceRepository:
             return []
 
         host_ports_set = set(host_ports)
-        stmt = select(Workspace.id, Workspace.task_policy).where(
+        stmt = select(Workspace.id, Workspace.task_policy, Workspace.resolved_profile).where(
             Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES)
         )
 
@@ -536,25 +537,46 @@ class WorkspaceRepository:
         conflicts: builtins.list[HostPortConflict] = []
         for row in rows:
             task_policy = row.task_policy
-            if not task_policy or not isinstance(task_policy, dict):
-                continue
-            companions = task_policy.get("companions")
-            if not companions or not isinstance(companions, list):
-                continue
-            for companion in companions:
-                if not isinstance(companion, dict):
-                    continue
-                ports = companion.get("ports")
-                if not ports or not isinstance(ports, list):
-                    continue
-                for port_mapping in ports:
-                    if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
-                        try:
-                            hp = int(port_mapping[1])
-                        except (ValueError, TypeError):
+            if task_policy and isinstance(task_policy, dict):
+                companions = task_policy.get("companions")
+                if companions and isinstance(companions, list):
+                    for companion in companions:
+                        if not isinstance(companion, dict):
                             continue
-                        if hp in host_ports_set:
-                            conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
+                        ports = companion.get("ports")
+                        if not ports or not isinstance(ports, list):
+                            continue
+                        for port_mapping in ports:
+                            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+                                try:
+                                    hp = int(port_mapping[1])
+                                except (ValueError, TypeError):
+                                    continue
+                                if hp in host_ports_set:
+                                    conflicts.append(
+                                        HostPortConflict(host_port=hp, workspace_id=row.id)
+                                    )
+
+            resolved_profile = row.resolved_profile
+            if resolved_profile and isinstance(resolved_profile, dict):
+                services = resolved_profile.get("services")
+                if services and isinstance(services, list):
+                    for service in services:
+                        if not isinstance(service, dict):
+                            continue
+                        svc_ports = service.get("ports")
+                        if not svc_ports or not isinstance(svc_ports, list):
+                            continue
+                        for port_mapping in svc_ports:
+                            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+                                try:
+                                    hp = int(port_mapping[1])
+                                except (ValueError, TypeError):
+                                    continue
+                                if hp in host_ports_set:
+                                    conflicts.append(
+                                        HostPortConflict(host_port=hp, workspace_id=row.id)
+                                    )
 
         return conflicts
 

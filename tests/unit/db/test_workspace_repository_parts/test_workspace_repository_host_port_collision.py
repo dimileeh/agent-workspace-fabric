@@ -33,6 +33,7 @@ async def _make_workspace(
     *,
     status: WorkspaceStatus = WorkspaceStatus.requested,
     task_policy: dict | None = None,
+    resolved_profile: dict | None = None,
 ) -> Workspace:
     ws = await repo.create(
         repo_url=_H2,
@@ -42,6 +43,7 @@ async def _make_workspace(
         agent="codex",
         test_commands=[],
         task_policy=task_policy or {},
+        resolved_profile=resolved_profile,
     )
     ws.status = status.value
     await session.commit()
@@ -416,6 +418,145 @@ class TestFindHostPortConflicts:
         repo = WorkspaceRepository(session)
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[],
+            excluding_workspace_id=None,
+        )
+        assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_profile_service_port_conflict(self, session: AsyncSession) -> None:
+        """Profile service host ports must be included in the conflict scan.
+
+        An existing workspace whose resolved_profile includes a service
+        with a host port should block a new workspace requesting the same
+        host port, even if the existing workspace has no companions.
+        """
+        repo = WorkspaceRepository(session)
+        existing_ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.running,
+            resolved_profile={
+                "name": "test-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 5432]],
+                    }
+                ],
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[5432],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 5432
+        assert conflicts[0].workspace_id == existing_ws.id
+
+    @pytest.mark.asyncio
+    async def test_profile_service_no_conflict(self, session: AsyncSession) -> None:
+        """Profile service with a different host port should not block."""
+        repo = WorkspaceRepository(session)
+        await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.running,
+            resolved_profile={
+                "name": "test-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 5432]],
+                    }
+                ],
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[9090],
+            excluding_workspace_id=None,
+        )
+        assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_both_companion_and_profile_service_ports_scanned(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Both companion and profile service ports from the same workspace are scanned."""
+        repo = WorkspaceRepository(session)
+        existing = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.running,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            resolved_profile={
+                "name": "test-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 5432]],
+                    }
+                ],
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080, 5432],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 2
+        conflict_ports = {c.host_port for c in conflicts}
+        assert conflict_ports == {8080, 5432}
+        assert all(c.workspace_id == existing.id for c in conflicts)
+
+    @pytest.mark.asyncio
+    async def test_profile_service_without_ports_no_conflict(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A profile service with no ports should not cause conflicts."""
+        repo = WorkspaceRepository(session)
+        await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.running,
+            resolved_profile={
+                "name": "test-profile",
+                "services": [
+                    {
+                        "name": "worker",
+                        "image": "worker:latest",
+                    }
+                ],
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_no_resolved_profile_no_conflict(self, session: AsyncSession) -> None:
+        """An existing workspace with no resolved_profile should not cause conflicts from services."""
+        repo = WorkspaceRepository(session)
+        await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.running,
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
             excluding_workspace_id=None,
         )
         assert conflicts == []
