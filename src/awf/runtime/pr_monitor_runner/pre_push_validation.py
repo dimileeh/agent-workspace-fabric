@@ -301,20 +301,24 @@ def _pre_push_dirty_result(
 
 
 def _pre_push_cleanup_result(
-    *,
     validation_run_id: str | None,
     workspace_head_sha: str | None,
     cleanup: ValidationWorktreeCleanup,
+    *,
+    upstream_failure: Mapping[str, object] | None = None,
 ) -> _PrePushValidationResult:
     from awf.runtime.validation_worktree import validation_worktree_cleanup_failure_message
 
+    extra_details: dict[str, object] = cleanup.details()
+    if upstream_failure is not None:
+        extra_details.update(upstream_failure)
     return _PrePushValidationResult(
         passed=False,
         validation_run_id=validation_run_id,
         workspace_head_sha=workspace_head_sha,
         reason_code=cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED,
         message=validation_worktree_cleanup_failure_message(cleanup),
-        extra_details=cleanup.details(),
+        extra_details=extra_details,
     )
 
 
@@ -511,6 +515,22 @@ async def _run_pre_push_validation(
                 result = replace(result, coverage=coverage_result)
     except ComposeExecCleanupError as exc:
         message = cleanup_failure_message(exc)
+        compose_failure_context: dict[str, object] = {
+            "compose_exec_reason_code": exc.reason_code,
+            "compose_exec_source": exc.source,
+            "compose_exec_label": exc.label,
+            "compose_exec_invocation_id": exc.invocation_id,
+            "compose_exec_message": message,
+        }
+        _log.warning(
+            "pre_push_validation.compose_exec_cleanup_failed",
+            workspace_id=workspace_id,
+            compose_exec_reason_code=exc.reason_code,
+            compose_exec_source=exc.source,
+            compose_exec_label=exc.label,
+            compose_exec_invocation_id=exc.invocation_id,
+            compose_exec_message=message,
+        )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
             worktree_path=worktree_path,
@@ -527,6 +547,7 @@ async def _run_pre_push_validation(
                 validation_run_id=validation_run_id,
                 workspace_head_sha=workspace_head_sha,
                 cleanup=cleanup_result,
+                upstream_failure=compose_failure_context,
             )
         await _finish_pre_push_validation_run(
             self,
@@ -543,6 +564,16 @@ async def _run_pre_push_validation(
         )
     except Exception as exc:
         message = f"unexpected error during PR monitor pre-push validation: {exc!r}"[:2000]
+        unexpected_failure_context: dict[str, object] = {
+            "unexpected_exception_type": exc.__class__.__name__,
+            "unexpected_exception_message": message,
+        }
+        _log.warning(
+            "pre_push_validation.unexpected_error",
+            workspace_id=workspace_id,
+            error_type=exc.__class__.__name__,
+            error_message=message,
+        )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
             worktree_path=worktree_path,
@@ -559,6 +590,7 @@ async def _run_pre_push_validation(
                 validation_run_id=validation_run_id,
                 workspace_head_sha=workspace_head_sha,
                 cleanup=cleanup_result,
+                upstream_failure=unexpected_failure_context,
             )
         await _finish_pre_push_validation_run(
             self,

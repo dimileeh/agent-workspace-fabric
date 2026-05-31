@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.common.compose_exec import ComposeExecCleanupError
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.common.github_client import RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
@@ -442,6 +442,106 @@ async def test_pre_push_validation_cleanup_error_records_failed_run(
     runs = await _validation_runs(factory, workspace_id)
     assert runs[-1].status == "failed"
     assert runs[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_cleanup_error_preserves_compose_exec_context_on_cleanup_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Cleanup failures should preserve compose-exec cleanup context for triage."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "c" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout="")  # pre-push clean check
+    cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")  # cleanup check
+    cmd.queue_result(returncode=1, stderr="restore failed")  # restore
+    validation = _FakeValidation(
+        ComposeExecCleanupError(
+            invocation_id="awf_pre_push_cleanup",
+            source="validation",
+            label="pytest",
+            message="tagged process still running",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert result.details is not None
+    assert result.details["compose_exec_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+    assert result.details["compose_exec_source"] == "validation"
+    assert result.details["compose_exec_label"] == "pytest"
+    assert result.details["compose_exec_invocation_id"] == "awf_pre_push_cleanup"
+    assert "tagged process still running" in str(result.details["compose_exec_message"])
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "failed"
+    assert runs[-1].reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_unexpected_exception_preserves_context_on_cleanup_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Unexpected validation exceptions should preserve exception context when cleanup later fails."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "x" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout="")  # pre-push clean check
+    cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")  # cleanup check
+    cmd.queue_result(returncode=1, stderr="restore failed")  # restore
+    validation = _FakeValidation(RuntimeError("validation runner exploded"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert result.details is not None
+    assert result.details["unexpected_exception_type"] == "RuntimeError"
+    assert "validation runner exploded" in str(result.details["unexpected_exception_message"])
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "failed"
+    assert runs[-1].reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
 
 
