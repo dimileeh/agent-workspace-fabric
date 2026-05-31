@@ -178,6 +178,89 @@ class TestFindHostPortConflicts:
         assert conflicts_after[0].host_port == 8080
         assert conflicts_after[0].workspace_id == ws.id
 
+    @pytest.mark.asyncio
+    async def test_later_release_supersedes_revocation_frees_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A later terminal_runtime_released event supersedes an earlier revocation.
+
+        When orphan cleanup fails and records a revoke event, a subsequent
+        stop/destroy that successfully releases the stack records a new
+        terminal_runtime_released event.  The later release must supersede
+        the earlier revocation so that the host port is treated as free.
+        """
+        import asyncio
+
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        )
+
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.destroyed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            compose_project_name="awf_test_later_release_supersedes",
+        )
+        await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        await session.commit()
+
+        conflicts_after_release = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts_after_release == [], "after initial release, ports should be free"
+
+        await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+            payload={"orphan_stop_error": "docker stop failed"},
+        )
+        await session.commit()
+
+        await asyncio.sleep(0.05)
+
+        conflicts_after_revoke = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts_after_revoke) == 1, (
+            "after revocation, ports must be treated as still occupied"
+        )
+
+        await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        await session.commit()
+
+        conflicts_after_rerelease = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts_after_rerelease == [], (
+            "after later successful release supersedes revocation, ports should be free"
+        )
+
 
 @pytest.mark.asyncio
 async def test_has_terminal_runtime_released_event_revoked(

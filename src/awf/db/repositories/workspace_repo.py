@@ -598,25 +598,30 @@ class WorkspaceRepository:
         if not host_ports:
             return []
 
-        terminal_runtime_released_exists = (
-            select(WorkspaceEvent.id)
+        terminal_runtime_latest_released_at = (
+            select(func.max(WorkspaceEvent.occurred_at))
             .where(WorkspaceEvent.workspace_id == Workspace.id)
             .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
             .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-            .exists()
+            .correlate(Workspace)
+            .scalar_subquery()
         )
 
-        terminal_runtime_release_revoked_exists = (
-            select(WorkspaceEvent.id)
+        terminal_runtime_latest_revoked_at = (
+            select(func.max(WorkspaceEvent.occurred_at))
             .where(WorkspaceEvent.workspace_id == Workspace.id)
             .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
             .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
-            .exists()
+            .correlate(Workspace)
+            .scalar_subquery()
         )
 
         terminal_runtime_effectively_released = and_(
-            terminal_runtime_released_exists,
-            ~terminal_runtime_release_revoked_exists,
+            terminal_runtime_latest_released_at.isnot(None),
+            or_(
+                terminal_runtime_latest_revoked_at.is_(None),
+                terminal_runtime_latest_released_at > terminal_runtime_latest_revoked_at,
+            ),
         )
 
         host_ports_set = set(host_ports)
