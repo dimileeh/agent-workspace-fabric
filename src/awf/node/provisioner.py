@@ -896,10 +896,15 @@ class Provisioner:
         ``workspace.provisioning_launching`` event in the same transaction.  The
         row lock serializes with concurrent cancel/stop/destroy operations that
         also read the workspace row before transitioning it to a terminal state.
-        The ``provisioning_launching`` event persists after the lock is released,
-        so cancel/stop code that runs later can detect that a launch is already
-        committed and skip recording ``terminal_runtime_released`` for a
-        workspace whose containers may still be starting up.
+
+        The current cancel/stop control operations use a *synchronous* project
+        stopper that blocks until containers are fully down, which guarantees the
+        stack is no longer consuming host ports before the ``terminal_runtime_released``
+        event is committed.  The ``provisioning_launching`` event serves as an
+        audit trail marker but is not currently read by cancel/stop logic; a
+        future async stopper would need to check this event before emitting
+        ``terminal_runtime_released`` to avoid a race with a launch that has
+        already committed.
 
         Returns ``True`` when the workspace is still ``provisioning`` and the
         launch-guard event was recorded; ``False`` otherwise.
