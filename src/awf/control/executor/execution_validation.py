@@ -79,6 +79,8 @@ from awf.runtime.validation_worktree import (
 
 @dataclass(frozen=True)
 class ExecutionValidationResult:
+    """Result for the execution validation loop."""
+
     stop: bool
     successful_validation_run_id: str | None
     successful_validation_workspace_head_sha: str | None
@@ -143,6 +145,7 @@ async def run_validation_and_fix_cycle(
     has_known_non_plan_output: bool,
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
 ) -> ExecutionValidationResult:
+    """Run validate/fix attempts and emit the terminal validation state."""
     if run_model is None:
         run_model = default_model
 

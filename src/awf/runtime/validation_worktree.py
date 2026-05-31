@@ -150,6 +150,8 @@ def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
 
 @dataclass(frozen=True)
 class ValidationWorktreeCheck:
+    """Result payload describing whether the validation worktree is clean."""
+
     clean: bool
     skipped: bool = False
     paths: tuple[str, ...] = ()
@@ -160,10 +162,12 @@ class ValidationWorktreeCheck:
 
     @property
     def tracked_paths(self) -> tuple[str, ...]:
+        """Return changed tracked paths, excluding any untracked entries."""
         untracked = set(self.untracked_paths)
         return tuple(path for path in self.paths if path not in untracked)
 
     def details(self) -> dict[str, object]:
+        """Serialize check metadata for structured validation evidence."""
         details: dict[str, object] = {
             "paths": list(self.paths),
             "untracked_paths": list(self.untracked_paths),
@@ -177,6 +181,8 @@ class ValidationWorktreeCheck:
 
 @dataclass(frozen=True)
 class ValidationWorktreeCleanup:
+    """Result payload describing a validation-worktree cleanup attempt."""
+
     cleaned: bool
     check: ValidationWorktreeCheck
     restore_ref: str = "HEAD"
@@ -188,9 +194,11 @@ class ValidationWorktreeCleanup:
 
     @property
     def ok(self) -> bool:
+        """Return whether cleanup completed successfully."""
         return self.reason_code is None
 
     def details(self) -> dict[str, object]:
+        """Serialize cleanup metadata for failure reporting and evidence."""
         details = self.check.details()
         details["restore_ref"] = self.restore_ref
         if self.reason_code is not None:
@@ -401,11 +409,13 @@ async def cleanup_validation_worktree_side_effects(
 
 
 def validation_worktree_preexisting_dirty_message(check: ValidationWorktreeCheck) -> str:
+    """Render a structured message for pre-existing dirty worktrees."""
     paths = ", ".join(check.paths) if check.paths else "<unknown>"
     return f"{check.message} Dirty paths: {paths}"
 
 
 def validation_worktree_cleanup_failure_message(cleanup: ValidationWorktreeCleanup) -> str:
+    """Render a structured message for cleanup failures with remaining paths."""
     if cleanup.verify_check is not None and cleanup.verify_check.paths:
         paths = ", ".join(cleanup.verify_check.paths)
     else:
