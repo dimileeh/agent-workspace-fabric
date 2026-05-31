@@ -42,6 +42,55 @@ def test_uninstall_managed_pipx_install(harness: InstallerHarness) -> None:
 
 
 @pytest.mark.unit
+def test_uninstall_removes_both_managers_when_both_manage(
+    harness: InstallerHarness,
+) -> None:
+    """When uv *and* pipx both manage the package, both copies are removed.
+
+    A package installed by both managers is reported by ``uv tool list`` and
+    ``pipx list`` at once. Stopping after the uv removal would leave the pipx
+    copy installed while the run reports success, so ``awf`` could stay
+    runnable. Both removal commands must run.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    joined = "\n".join(harness.calls())
+    assert f"uv tool uninstall {PACKAGE}" in joined
+    assert f"pipx uninstall {PACKAGE}" in joined
+
+
+@pytest.mark.unit
+def test_dry_run_uninstall_previews_both_managers_when_both_manage(
+    harness: InstallerHarness,
+) -> None:
+    """``--dry-run --uninstall`` previews both removals when both manage it.
+
+    The dry-run plan must enumerate every removal a real run would perform, so a
+    package owned by both uv and pipx shows both planned commands while neither
+    actually runs.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
+
+    result = harness.run(["--dry-run", "--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    joined = "\n".join(harness.calls())
+    # Neither removal command may run under dry-run.
+    assert f"uv tool uninstall {PACKAGE}" not in joined
+    assert f"pipx uninstall {PACKAGE}" not in joined
+    # Both planned removals must be previewed.
+    assert f"uv tool uninstall {PACKAGE}" in result.stdout
+    assert f"pipx uninstall {PACKAGE}" in result.stdout
+
+
+@pytest.mark.unit
 def test_uninstall_refuses_unmanaged_executable(harness: InstallerHarness) -> None:
     """An unmanaged awf on PATH is refused and never deleted."""
     harness.add_uname("Linux", "x86_64")

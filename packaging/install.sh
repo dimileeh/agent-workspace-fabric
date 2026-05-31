@@ -615,26 +615,38 @@ resolve_awf_path() {
 }
 
 uninstall_awf() {
-    if uv_lists_package; then
-        if [ "$DRY_RUN" -eq 1 ]; then
-            plan "uninstall via uv: uv tool uninstall ${PACKAGE}"
-            say "Dry run complete; no changes were made."
-            return 0
-        fi
-        uv tool uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "uv tool uninstall failed for $PACKAGE"
-        say "Uninstalled ${PACKAGE} via uv."
-        return 0
-    fi
+    # Probe both managers up front. A package installed by both uv and pipx is
+    # reported by each, so acting on only the first-found manager would leave the
+    # other copy installed while the run reports success (awf could stay
+    # runnable). Discover both, then remove from every manager that owns it.
+    local uv_managed=0
+    local pipx_managed=0
+    local removed=0
+    uv_lists_package && uv_managed=1
+    pipx_lists_package && pipx_managed=1
 
-    if pipx_lists_package; then
-        if [ "$DRY_RUN" -eq 1 ]; then
-            plan "uninstall via pipx: pipx uninstall ${PACKAGE}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        [ "$uv_managed" -eq 1 ] && plan "uninstall via uv: uv tool uninstall ${PACKAGE}"
+        [ "$pipx_managed" -eq 1 ] && plan "uninstall via pipx: pipx uninstall ${PACKAGE}"
+        if [ "$uv_managed" -eq 1 ] || [ "$pipx_managed" -eq 1 ]; then
             say "Dry run complete; no changes were made."
             return 0
         fi
-        pipx uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "pipx uninstall failed for $PACKAGE"
-        say "Uninstalled ${PACKAGE} via pipx."
-        return 0
+        # Neither manager owns it: fall through to the unmanaged refusal / no-op
+        # below. That is a policy check, not a mutation, so it still applies
+        # under --dry-run.
+    else
+        if [ "$uv_managed" -eq 1 ]; then
+            uv tool uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "uv tool uninstall failed for $PACKAGE"
+            say "Uninstalled ${PACKAGE} via uv."
+            removed=1
+        fi
+        if [ "$pipx_managed" -eq 1 ]; then
+            pipx uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "pipx uninstall failed for $PACKAGE"
+            say "Uninstalled ${PACKAGE} via pipx."
+            removed=1
+        fi
+        [ "$removed" -eq 1 ] && return 0
     fi
 
     local awf_path=""
