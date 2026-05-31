@@ -26,10 +26,6 @@ from awf.common.audit import build_audit_payload
 from awf.common.ids import (
     new_event_id,
 )
-from awf.common.owned_paths import (
-    internal_plan_artifact_owned_paths_from_profile,
-    interworkspace_owned_paths,
-)
 from awf.db.enums import (
     AgentRuntime,
     OperationType,
@@ -38,37 +34,23 @@ from awf.db.enums import (
 from awf.db.models import (
     MergeCandidate,
     Operation,
-    ResourceReservation,
     TaskAttempt,
     Workspace,
     WorkspaceEvent,
 )
 from awf.db.repositories.base import (
-    ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
-    HOST_PORT_CONFLICT_STATUSES,
-    HOST_PORT_TERMINAL_RELEASE_STATUSES,
-    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-    TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-    TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
     WorkspaceEventCreate,
     _candidate_terminal_close_reason,
-    _host_port_admission_advisory_lock_key,
     _matches_pr_adoption_identity,
-    _normalize_owned_path,
-    _owned_path_conflict_advisory_lock_key,
-    _owned_paths_overlap,
     _releases_resource_reservation,
     _schedulable_workspace_ids_stmt,
     _scheduler_scoring_time,
     _workspace_idempotency_advisory_lock_key,
     _workspace_status_value,
-    host_ports_from_resolved_profile,
-    host_ports_from_task_policy_companions,
     resolve_session_dialect_name,
 )
 from awf.db.repositories.quality_repo import (
@@ -78,6 +60,13 @@ from awf.db.repositories.quality_repo import (
 from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
     TaskRepository,
+)
+from awf.db.repositories.workspace_repo_host_ports import (
+    acquire_host_port_admission_lock,
+    acquire_owned_path_conflict_lock,
+    find_active_owned_path_conflicts,
+    find_active_owned_path_overlaps,
+    find_host_port_conflicts,
 )
 
 
@@ -419,20 +408,12 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> None:
-        """Serialize owned-path admission for one repo/base transaction on Postgres."""
-        if not any(_normalize_owned_path(path) != "" for path in owned_paths):
-            return
-
-        if self._dialect_name != "postgresql":
-            return
-
-        lock_key = _owned_path_conflict_advisory_lock_key(
+        return await acquire_owned_path_conflict_lock(
+            self._session,
+            self._dialect_name,
             repo_url=repo_url,
             branch_base=branch_base,
-        )
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": lock_key},
+            owned_paths=owned_paths,
         )
 
     async def acquire_host_port_admission_lock(
@@ -440,34 +421,9 @@ class WorkspaceRepository:
         *,
         host_ports: list[int],
     ) -> None:
-        """Serialize host-port admission checks per port via PostgreSQL advisory locks.
-
-        Acquires a transaction-scoped ``pg_advisory_xact_lock`` for each
-        distinct host port so that concurrent create/retry requests for the
-        same port cannot race past the conflict SELECT before the INSERT.
-        No-op on non-PostgreSQL dialects.
-        """
-        if not host_ports:
-            return
-
-        if self._dialect_name != "postgresql":
-            return
-
-        lock_key_fn = _host_port_admission_advisory_lock_key
-        seen_keys: set[int] = set()
-        distinct_keys: list[int] = []
-        for hp in dict.fromkeys(host_ports):
-            lock_key = lock_key_fn(hp)
-            if lock_key in seen_keys:
-                continue
-            seen_keys.add(lock_key)
-            distinct_keys.append(lock_key)
-        distinct_keys.sort()
-        for lock_key in distinct_keys:
-            await self._session.execute(
-                text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                {"lock_key": lock_key},
-            )
+        return await acquire_host_port_admission_lock(
+            self._session, self._dialect_name, host_ports=host_ports
+        )
 
     async def find_active_owned_path_conflicts(
         self,
@@ -478,22 +434,14 @@ class WorkspaceRepository:
         resolved_profile: Mapping[str, object] | None = None,
         workspace_id: str | None = None,
     ) -> list[OwnedPathConflict]:
-        """Return active owned-path overlaps in the legacy conflict shape."""
-        overlaps = await self.find_active_owned_path_overlaps(
+        return await find_active_owned_path_conflicts(
+            self._session,
             repo_url=repo_url,
             branch_base=branch_base,
             owned_paths=owned_paths,
             resolved_profile=resolved_profile,
             workspace_id=workspace_id,
         )
-        return [
-            OwnedPathConflict(
-                workspace_id=overlap.workspace_id,
-                existing_path=overlap.existing_path,
-                requested_path=overlap.requested_path,
-            )
-            for overlap in overlaps
-        ]
 
     async def find_active_owned_path_overlaps(
         self,
@@ -504,48 +452,14 @@ class WorkspaceRepository:
         resolved_profile: Mapping[str, object] | None = None,
         workspace_id: str | None = None,
     ) -> list[OwnedPathOverlap]:
-        """Return active inter-workspace owned-path overlaps for merge safety."""
-        requested_paths = list(
-            interworkspace_owned_paths(
-                owned_paths,
-                internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
-                    resolved_profile,
-                    workspace_id=workspace_id,
-                ),
-            )
+        return await find_active_owned_path_overlaps(
+            self._session,
+            repo_url=repo_url,
+            branch_base=branch_base,
+            owned_paths=owned_paths,
+            resolved_profile=resolved_profile,
+            workspace_id=workspace_id,
         )
-        if not requested_paths:
-            return []
-
-        stmt = (
-            select(Workspace)
-            .where(
-                Workspace.repo_url == repo_url,
-                Workspace.branch_base == branch_base,
-                Workspace.status.in_(ACTIVE_OWNED_PATH_OVERLAP_STATUSES),
-            )
-            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
-        )
-        rows = list((await self._session.execute(stmt)).scalars())
-        overlaps: list[OwnedPathOverlap] = []
-        for workspace in rows:
-            for existing_path in interworkspace_owned_paths(
-                workspace.owned_paths,
-                internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
-                    workspace.resolved_profile,
-                    workspace_id=workspace.id,
-                ),
-            ):
-                for requested_path in requested_paths:
-                    if _owned_paths_overlap(existing_path, requested_path):
-                        overlaps.append(
-                            OwnedPathOverlap(
-                                workspace_id=workspace.id,
-                                existing_path=existing_path,
-                                requested_path=requested_path,
-                            )
-                        )
-        return overlaps
 
     async def find_host_port_conflicts(
         self,
@@ -554,125 +468,12 @@ class WorkspaceRepository:
         excluding_workspace_id: str | None = None,
         node_id: str | None = None,
     ) -> builtins.list[HostPortConflict]:
-        """Find active workspaces whose companions or profile services claim any of the given host ports.
-
-        A port conflict exists when a workspace's companion or profile
-        service ``ports`` list includes ``[container_port, host_port]``
-        where ``host_port`` appears in *host_ports*.
-
-        Active and destroying workspaces always conflict because their
-        compose stacks are still running.  Terminal workspaces (failed,
-        cancelled, completed, destroyed) conflict only when they
-        actually acquired runtime resources — i.e. their
-        ``compose_project_name`` is not NULL — **and** their runtime
-        has not been released yet (no
-        ``workspace.terminal_runtime_released`` event exists).  A
-        workspace that failed during provisioning before the compose
-        stack was launched never bound a host port, so it does not
-        block port reuse even without a release event.
-
-        When *node_id* is provided, only workspaces on that node are
-        considered.  For claimed workspaces, ``Workspace.node_id`` is used
-        directly.  For unclaimed (queued) workspaces where
-        ``Workspace.node_id`` is still null, the planned node from the
-        latest active ``ResourceReservation`` row is consulted instead.
-        Host ports are Docker host ports and are scoped to the worker
-        node, so a workspace on node A binding port 8080 must not block
-        a create on node B that also wants 8080.
-
-        NOTE: The TOCTOU window between this SELECT and the subsequent INSERT
-        is closed by acquiring a per-port ``pg_advisory_xact_lock`` before
-        this method is called (see ``acquire_host_port_admission_lock``).
-        Concurrent requests for the same host port are serialized by that
-        lock.
-
-        SCALE CONSTRAINT: This method performs a full-table scan of all
-        active and terminal-unreleased workspaces (including their
-        ``task_policy`` and ``resolved_profile`` JSON blobs), then parses
-        ports in Python.  There is no WHERE clause that prunes by port
-        value.  As workspace count grows, every admission check becomes
-        more expensive.  When this becomes a bottleneck, consider adding
-        a JSONB index on the relevant port fields or a denormalized
-        ``host_ports`` integer-array column with a GIN index.
-        """
-        if not host_ports:
-            return []
-
-        terminal_runtime_latest_released_at = (
-            select(func.max(WorkspaceEvent.occurred_at))
-            .where(WorkspaceEvent.workspace_id == Workspace.id)
-            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
-            .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-            .correlate(Workspace)
-            .scalar_subquery()
+        return await find_host_port_conflicts(
+            self._session,
+            host_ports=host_ports,
+            excluding_workspace_id=excluding_workspace_id,
+            node_id=node_id,
         )
-
-        terminal_runtime_latest_revoked_at = (
-            select(func.max(WorkspaceEvent.occurred_at))
-            .where(WorkspaceEvent.workspace_id == Workspace.id)
-            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
-            .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
-            .correlate(Workspace)
-            .scalar_subquery()
-        )
-
-        terminal_runtime_effectively_released = and_(
-            terminal_runtime_latest_released_at.isnot(None),
-            or_(
-                terminal_runtime_latest_revoked_at.is_(None),
-                terminal_runtime_latest_released_at > terminal_runtime_latest_revoked_at,
-            ),
-        )
-
-        host_ports_set = set(host_ports)
-        stmt = select(Workspace.id, Workspace.task_policy, Workspace.resolved_profile).where(
-            or_(
-                Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES),
-                and_(
-                    Workspace.status.in_(HOST_PORT_TERMINAL_RELEASE_STATUSES),
-                    Workspace.compose_project_name.isnot(None),
-                    ~terminal_runtime_effectively_released,
-                ),
-            )
-        )
-
-        if node_id is not None:
-            active_reservation_node = (
-                select(ResourceReservation.node_id)
-                .where(ResourceReservation.workspace_id == Workspace.id)
-                .where(ResourceReservation.released_at.is_(None))
-                .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
-                .limit(1)
-                .correlate(Workspace)
-                .scalar_subquery()
-            )
-            effective_node = func.coalesce(Workspace.node_id, active_reservation_node)
-            stmt = stmt.where(effective_node == node_id)
-
-        if excluding_workspace_id is not None:
-            stmt = stmt.where(Workspace.id != excluding_workspace_id)
-
-        rows = (await self._session.execute(stmt)).all()
-
-        conflicts: builtins.list[HostPortConflict] = []
-        seen: builtins.set[builtins.tuple[str, int]] = set()
-        for row in rows:
-            for hp in host_ports_from_task_policy_companions(row.task_policy):
-                if hp in host_ports_set:
-                    key = (row.id, hp)
-                    if key not in seen:
-                        seen.add(key)
-                        conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
-
-            resolved_profile = row.resolved_profile
-            for hp in host_ports_from_resolved_profile(resolved_profile):
-                if hp in host_ports_set:
-                    key = (row.id, hp)
-                    if key not in seen:
-                        seen.add(key)
-                        conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
-
-        return conflicts
 
     async def list(
         self,
