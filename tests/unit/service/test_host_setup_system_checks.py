@@ -1,4 +1,10 @@
-"""Provider, readiness-payload, real-IO probe, and API host-port override tests."""
+"""Core host_setup system_checks suite: provider, readiness-payload, real-IO probe,
+and API host-port override tests.
+
+Focused offshoots live in ``test_host_setup_system_checks_host.py``,
+``test_host_setup_system_checks_ports.py``, and
+``test_host_setup_system_checks_probes.py``; shared helpers live in
+``host_setup_system_checks_support.py``."""
 
 from __future__ import annotations
 
