@@ -617,14 +617,64 @@ def check_local_capacity(
     )
 
 
+def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
+    """Return a usable ``AWF_API_HOST_PORT`` override, or ``None`` when unset.
+
+    A missing, blank, malformed, or out-of-range value yields ``None`` so the
+    readiness probe falls back to the persisted config port instead of crashing;
+    Docker Compose surfaces an invalid published port on its own when the stack
+    starts.
+    """
+    raw = environ.get("AWF_API_HOST_PORT")
+    if raw is None:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = int(candidate)
+    except ValueError:
+        return None
+    if not 1 <= parsed <= 65535:
+        return None
+    return parsed
+
+
+def _resolve_api_host_port(
+    config: HostSetupConfig,
+    *,
+    port: int | None,
+    environ: Mapping[str, str] | None,
+) -> int:
+    """Resolve which host port the readiness probe should bind.
+
+    Precedence mirrors the port ``awf start`` actually publishes rather than the
+    persisted default alone: an explicit caller override wins, then the
+    ``AWF_API_HOST_PORT`` environment override that Docker Compose interpolates
+    into ``${AWF_API_HOST_PORT:-8000}:8000`` (and that ``awf service bootstrap``
+    resolves the host-side URL from), and finally the persisted
+    ``config.api.host_port``. Honoring the env override keeps ``awf setup`` from
+    falsely blocking on the default 8000 when an operator has moved the published
+    port elsewhere.
+    """
+    if port is not None:
+        return port
+    env = os.environ if environ is None else environ
+    override = _env_api_host_port(env)
+    if override is not None:
+        return override
+    return config.api.host_port
+
+
 def run_system_checks(
     *,
     config: HostSetupConfig,
     work_dir: Path | None = None,
     port: int | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> list[SetupCheckResult]:
     """Run every host system check in a stable order and return the results."""
-    resolved_port = config.api.host_port if port is None else port
+    resolved_port = _resolve_api_host_port(config, port=port, environ=environ)
     resolved_work_dir = _safe_expanduser(config.work_dir) if work_dir is None else work_dir
     return [
         check_docker(),

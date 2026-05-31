@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from awf.host_setup import system_checks
-from awf.host_setup.config import HostSetupConfig
+from awf.host_setup.config import ApiConfig, HostSetupConfig
 from awf.host_setup.rendering import (
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
@@ -915,3 +915,79 @@ def test_system_checks_public_surface_reexported_from_package() -> None:
     for name in system_checks.__all__:
         assert name in host_setup.__all__, f"{name} missing from awf.host_setup.__all__"
         assert getattr(host_setup, name) is getattr(system_checks, name)
+
+
+def _patch_probes_capture_port(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, object],
+) -> None:
+    """Patch every probe so ``run_system_checks`` runs in isolation, capturing the port."""
+
+    def fake_ok(name: str) -> SetupCheckResult:
+        return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
+
+    def fake_ports(port: int) -> SetupCheckResult:
+        captured["port"] = port
+        return fake_ok("ports")
+
+    monkeypatch.setattr(system_checks, "check_docker", lambda: fake_ok("docker"))
+    monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
+    monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
+    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
+    monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
+    monkeypatch.setattr(system_checks, "check_ports", fake_ports)
+    monkeypatch.setattr(system_checks, "check_disk", lambda _path: fake_ok("disk"))
+    monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
+    monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))
+
+
+@pytest.mark.unit
+def test_run_system_checks_honors_awf_api_host_port_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``AWF_API_HOST_PORT`` override is probed instead of the config default."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_port(monkeypatch, captured)
+
+    run_system_checks(
+        config=HostSetupConfig(api=ApiConfig(host_port=8000)),
+        work_dir=Path("/tmp"),
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert captured["port"] == 9100
+
+
+@pytest.mark.unit
+def test_run_system_checks_explicit_port_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``port`` wins over both the env override and config."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_port(monkeypatch, captured)
+
+    run_system_checks(
+        config=HostSetupConfig(api=ApiConfig(host_port=8000)),
+        work_dir=Path("/tmp"),
+        port=9999,
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert captured["port"] == 9999
+
+
+@pytest.mark.unit
+def test_run_system_checks_ignores_invalid_env_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed/out-of-range override falls back to the persisted config port."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_port(monkeypatch, captured)
+
+    for invalid in ("not-a-port", "", "0", "70000"):
+        run_system_checks(
+            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
+            work_dir=Path("/tmp"),
+            environ={"AWF_API_HOST_PORT": invalid},
+        )
+        assert captured["port"] == 8123, invalid
