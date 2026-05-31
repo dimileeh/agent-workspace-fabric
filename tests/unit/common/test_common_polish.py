@@ -198,6 +198,28 @@ class TestSettings:
             Settings(_env_file=None, callbacks_allowed_hosts=123)
 
     @pytest.mark.unit
+    def test_service_startup_log_tail_lines_defaults_to_200(self) -> None:
+        settings = Settings(_env_file=None)
+
+        assert settings.worker_service_startup_log_tail_lines == 200
+
+    @pytest.mark.unit
+    def test_service_startup_log_tail_lines_reads_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_WORKER_SERVICE_STARTUP_LOG_TAIL_LINES", "42")
+
+        settings = Settings(_env_file=None)
+
+        assert settings.worker_service_startup_log_tail_lines == 42
+
+    @pytest.mark.unit
+    def test_service_startup_log_tail_lines_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, worker_service_startup_log_tail_lines=0)
+
+    @pytest.mark.unit
     def test_settings_identity_ref_uses_object_identity(self) -> None:
         settings = Settings(_env_file=None)
         other_settings = Settings(_env_file=None)
