@@ -2553,7 +2553,7 @@ def run_system_checks(
 # --- Provider validation / interactive guard ------------------------------
 
 KNOWN_SETUP_PROVIDERS: frozenset[str] = frozenset(
-    {"github", "codex", "claude_code", "gemini", "opencode", "grok", "awf_cloud"}
+    {"github", "codex", "claude_code", "cursor", "gemini", "opencode", "grok", "awf_cloud"}
 )
 _PROVIDER_ALIASES: Mapping[str, str] = {
     "openai": "codex",

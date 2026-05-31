@@ -1002,6 +1002,21 @@ def test_normalize_provider_accepts_grok_and_xai_alias() -> None:
 
 
 @pytest.mark.unit
+def test_normalize_provider_accepts_cursor() -> None:
+    """Verify the supported Cursor runtime is selectable through setup.
+
+    Cursor is a first-class provider everywhere else (provider readiness's
+    ``PROVIDER_NAMES``/``ProviderName``, ``awf service`` help, and the
+    ``cursor-agent`` adapter runtime), so ``awf setup --provider cursor`` must
+    resolve instead of failing ``SETUP_PROVIDER_UNKNOWN`` -- otherwise the
+    dry-run payload can never forward the Cursor selector to provider setup.
+    """
+    assert normalize_provider("cursor") == "cursor"
+    assert "cursor" in KNOWN_SETUP_PROVIDERS
+    assert normalize_provider("Cursor") == "cursor"
+
+
+@pytest.mark.unit
 def test_normalize_provider_unknown_raises_reason_coded() -> None:
     """Verify an unknown provider raises a reason-coded SetupCheckError."""
     with pytest.raises(SetupCheckError) as excinfo:
