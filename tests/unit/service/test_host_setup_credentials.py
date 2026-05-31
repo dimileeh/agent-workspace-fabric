@@ -664,6 +664,53 @@ def test_plain_file_fsyncs_directory_after_atomic_rename(
 
 
 @pytest.mark.unit
+def test_plain_file_fsyncs_created_ancestor_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify every ancestor directory created during setup is fsynced.
+
+    ``_mkdir_secure`` creates each missing level on the way to the leaf (e.g.
+    ``.awf`` then ``secrets``), but only the leaf was fsynced — after the secret
+    rename — by ``_write_secret_file``. The *creation* of the intermediate
+    directories was never journalled, so a crash between creating ``.awf`` and
+    finishing the secret write could lose those directory entries even though the
+    secret file's bytes and dirent were already durable. Fsyncing the parent of
+    each newly created level (where that level's directory entry lives) closes
+    the gap. Record every directory handed to the dir-fsync helper and prove the
+    parent of each created level — not merely the leaf — is among them.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    # ``.awf`` and ``secrets`` are both missing, so the creation loop runs for
+    # each; ``home`` is the pre-existing top of the freshly created chain.
+    awf_dir = home / ".awf"
+    secrets_dir = awf_dir / "secrets"
+    synced: list[Path] = []
+    real_fsync_dir = credentials._fsync_dir_best_effort
+
+    def _recording_fsync_dir(directory: Path) -> None:
+        synced.append(Path(directory))
+        real_fsync_dir(directory)
+
+    monkeypatch.setattr(credentials, "_fsync_dir_best_effort", _recording_fsync_dir)
+
+    PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    ).create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    # The parent of each level holds that level's directory entry: ``home``
+    # records the creation of ``.awf``, ``.awf`` records the creation of
+    # ``secrets``, and the leaf ``secrets`` records the secret file post-rename.
+    assert home in synced
+    assert awf_dir in synced
+    assert secrets_dir in synced
+
+
+@pytest.mark.unit
 def test_plain_file_scopes_secret_file_by_account(tmp_path: Path) -> None:
     """Verify plain-file storage scopes the secret file/ref by account.
 

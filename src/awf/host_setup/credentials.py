@@ -1054,6 +1054,17 @@ def _mkdir_secure(directory: Path) -> None:
             # mode check also pins ownership without a separate ``stat``.
             _reject_writable_ancestor(path, allow_sticky=False)
         _chmod_best_effort(path, 0o700)
+        # Make this freshly created level durable. ``path.mkdir`` only mutates
+        # ``path.parent``'s directory entry, so — exactly as ``_write_secret_file``
+        # fsyncs ``secrets_dir`` to make the renamed secret's dirent durable — fsync
+        # the *parent* here to journal ``path``'s creation. Without it only the leaf
+        # was synced (after the secret rename), leaving the intermediate levels
+        # (e.g. ``~/.awf`` beneath ``~/.awf/secrets``) unjournalled: a crash between
+        # creating an ancestor and finishing the secret write could lose those
+        # directory entries even though the secret bytes were synced. Best-effort
+        # and POSIX-only, matching the leaf sync: a dir-sync miss after a successful
+        # create is a durability gap, never a setup failure.
+        _fsync_dir_best_effort(path.parent)
     # A ``directory`` that already existed as a regular file (or a symlink to
     # one) never enters the creation loop above — ``probe.exists()`` is true on
     # the first iteration, so ``missing`` stays empty. Refuse a non-directory here
