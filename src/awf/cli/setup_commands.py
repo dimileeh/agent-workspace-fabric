@@ -115,7 +115,15 @@ def _run_setup(
         except SourceCheckoutError as exc:
             source_error = exc
 
-    results = run_system_checks(config=config)
+    # Probe the port ``awf start`` will actually publish. The documented
+    # local-service flow keeps ``AWF_API_HOST_PORT`` in ``docker/compose/.env``
+    # for Compose interpolation, so merge that file like the service path does;
+    # reading only ``os.environ`` would falsely block on the default 8000 when an
+    # operator moved the published port there. ``local_service_environ`` falls
+    # back to the process env when no ``.env`` exists yet (true first run).
+    from awf.service.config import local_service_environ
+
+    results = run_system_checks(config=config, environ=local_service_environ())
     payload = build_setup_readiness_payload(
         results,
         selected_providers=selected_providers,

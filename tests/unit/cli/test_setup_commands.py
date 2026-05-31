@@ -133,6 +133,33 @@ def test_setup_dry_run_json_success_shape(harness: _Harness) -> None:
     assert payload["next_steps"]
 
 
+# --- Compose env merge for host checks ------------------------------------
+
+
+@pytest.mark.unit
+def test_setup_merges_compose_env_when_probing_api_port(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host checks receive the merged Compose env so an ``AWF_API_HOST_PORT``
+    set only in ``docker/compose/.env`` is honored, not just the process env."""
+    import awf.service.config as service_config
+
+    merged = {"AWF_API_HOST_PORT": "9100"}
+    monkeypatch.setattr(service_config, "local_service_environ", lambda *_a, **_kw: merged)
+
+    captured: dict[str, object] = {}
+
+    def fake_checks(**kwargs: object) -> list[SetupCheckResult]:
+        captured["environ"] = kwargs.get("environ")
+        return _all_ok()
+
+    monkeypatch.setattr(setup_commands, "run_system_checks", fake_checks)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["environ"] == merged
+
+
 # --- Provider selectors ---------------------------------------------------
 
 
