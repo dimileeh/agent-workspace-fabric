@@ -554,6 +554,7 @@ def test_workflow_scope_requeue_clears_inline_threads_dependent_on_resolution() 
             "__review_thread_body_hash__:T_false_positive": "fp-hash",
             "T_defer": "defer",
             "__review_thread_body_hash__:T_defer": "defer-hash",
+            "__defer_reason__:T_defer": "captured defer reason",
             deferred_issue_marker: "https://github.com/dimileeh/aira-web/issues/305",
             "T_workflow": "fix_committed",
             "__review_thread_body_hash__:T_workflow": "workflow-hash",
@@ -575,6 +576,7 @@ def test_workflow_scope_requeue_clears_inline_threads_dependent_on_resolution() 
     assert "T_defer" not in state.threads_addressed_ids
     assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
+    assert "__defer_reason__:T_defer" not in state.threads_addressed_ids
     assert state.threads_addressed_ids[deferred_issue_marker].endswith("/issues/305")
     assert "T_workflow" not in state.threads_addressed_ids
     assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids

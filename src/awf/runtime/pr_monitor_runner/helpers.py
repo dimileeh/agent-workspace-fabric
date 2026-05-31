@@ -235,6 +235,7 @@ def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(
