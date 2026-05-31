@@ -793,6 +793,7 @@ async def execute(
                     worktree_path=worktree_path,
                     base_ref=base_commit,
                     changed_paths=staged_paths,
+                    owned_paths=list(ws.owned_paths),
                 )
                 violations = find_protected_quality_gate_changes(
                     changed_paths=staged_paths,

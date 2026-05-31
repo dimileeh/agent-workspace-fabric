@@ -18,6 +18,8 @@ AWF and the coding CLI for post-agent work, so keep them:
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from datetime import datetime
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
@@ -38,14 +40,40 @@ _SAFETY_POLICY = (
     "mark it false positive or defer with the conflict.\n"
 )
 
-_PROTECTED_FILE_POLICY = (
-    "Protected-file policy:\n"
-    "  - Do not edit protected workflow, quality-gate, or configuration files "
-    "unless those files are explicitly inside this workspace's owned paths or "
-    "this prompt says operator approval was granted. If the only correct fix "
-    "requires a protected file, leave the branch unchanged and print "
-    "`AWF-VERDICT: NEEDS_HUMAN: protected file approval required: <path/reason>`.\n"
-)
+
+def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
+    declared = [
+        _render_owned_path_for_prompt(path.strip()) for path in owned_paths if path and path.strip()
+    ]
+    if declared:
+        owned_block = "\n".join(f"  - {path}" for path in declared)
+        return (
+            "Protected-file policy:\n"
+            "  - Protected workflow, quality-gate, or configuration files are "
+            "editable only when they are inside this workspace's declared owned "
+            "paths (`owned_paths`) or this prompt says operator approval was granted.\n"
+            "Declared owned_paths:\n"
+            f"{owned_block}\n"
+            "  - These owned protected paths are editable by this repair agent "
+            "and must not be treated as protected-file approval blockers.\n"
+            "  - If the only correct fix requires an unowned protected file, "
+            "leave the branch unchanged and print `AWF-VERDICT: NEEDS_HUMAN: "
+            "protected file approval required: <path/reason>`.\n"
+        )
+    return (
+        "Protected-file policy:\n"
+        "  - Do not edit protected workflow, quality-gate, or configuration files "
+        "unless those files are explicitly inside this workspace's declared owned "
+        "paths (`owned_paths`) or this prompt says operator approval was granted. "
+        "If the only correct fix requires an unowned protected file, leave the "
+        "branch unchanged and print `AWF-VERDICT: NEEDS_HUMAN: protected file "
+        "approval required: <path/reason>`.\n"
+    )
+
+
+def _render_owned_path_for_prompt(path: str) -> str:
+    """Render operator-provided path data without allowing prompt line breaks."""
+    return json.dumps(path, ensure_ascii=True)
 
 
 def address_thread_prompt(
@@ -54,6 +82,7 @@ def address_thread_prompt(
     repo_slug: str,
     thread: ReviewThread,
     workspace_runtime_context: str = "",
+    owned_paths: Sequence[str] = (),
 ) -> str:
     """Prompt the CLI to address a single inline review thread."""
     line_hint = (
@@ -82,7 +111,7 @@ def address_thread_prompt(
         "false positive, or genuinely needs human input:\n\n"
         f"{evidence}\n\n"
         f"{_SAFETY_POLICY}\n"
-        f"{_PROTECTED_FILE_POLICY}\n"
+        f"{_protected_file_policy(owned_paths)}\n"
         "Decide in this order:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -112,6 +141,7 @@ def address_review_comment_prompt(
     repo_slug: str,
     comment: ReviewComment,
     workspace_runtime_context: str = "",
+    owned_paths: Sequence[str] = (),
 ) -> str:
     """Prompt for a review-level (outside-diff) comment."""
     evidence = render_untrusted_evidence(
@@ -139,7 +169,7 @@ def address_review_comment_prompt(
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"Body evidence:\n\n{evidence}\n\n"
         f"{_SAFETY_POLICY}\n"
-        f"{_PROTECTED_FILE_POLICY}\n"
+        f"{_protected_file_policy(owned_paths)}\n"
         "Use this decision tree:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -200,6 +230,7 @@ def fix_ci_prompt(
     repo_slug: str,
     failures: tuple[CheckFailure, ...],
     workspace_runtime_context: str = "",
+    owned_paths: Sequence[str] = (),
 ) -> str:
     """Prompt when CI is red. Includes truncated logs for each failing check."""
     if not failures:
@@ -280,7 +311,7 @@ def fix_ci_prompt(
         "Per-check failure details below (structured summaries and log excerpts "
         "are quoted as untrusted evidence when available):\n\n"
         f"{body}\n\n"
-        f"{_PROTECTED_FILE_POLICY}\n"
+        f"{_protected_file_policy(owned_paths)}\n"
         "Commit the fix with a message like "
         '"fix(ci): <which check> — <one-sentence root cause>". '
         "Do not disable, skip, or weaken the check — treat every failure as a real bug."

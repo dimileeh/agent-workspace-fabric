@@ -31,11 +31,13 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
+    _owned_paths_for_prompt_or_empty,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
     _AUDIT_GIT_PUSH_EVENT,
     _GITHUB_TRANSIENT_RETRY_REASON,
+    _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
@@ -43,6 +45,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _mark_review_comment_addressed,
     _redact_and_truncate_github_error,
     _review_comment_needs_attention,
+    _sync_needs_human_reason,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -90,6 +93,8 @@ async def _run_fix_cycle(
     """
     threads_to_resolve: list[str] = []
     publish_dependent_ids: list[str] = []
+    workflow_scope_publish_dependent_ids: list[str] = []
+    workflow_scope_resolution_dependent_ids: list[str] = []
     # Last settle-poll status; used after the loop to skip resolving threads that
     # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
     status: PRStatus | None = None
@@ -112,6 +117,23 @@ async def _run_fix_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
+
+    def _drop_pending_publish_state(item_id: str) -> None:
+        publish_dependent_ids[:] = [
+            queued_id for queued_id in publish_dependent_ids if queued_id != item_id
+        ]
+        workflow_scope_publish_dependent_ids[:] = [
+            queued_id for queued_id in workflow_scope_publish_dependent_ids if queued_id != item_id
+        ]
+        workflow_scope_resolution_dependent_ids[:] = [
+            queued_id
+            for queued_id in workflow_scope_resolution_dependent_ids
+            if queued_id != item_id
+        ]
+        threads_to_resolve[:] = [
+            queued_id for queued_id in threads_to_resolve if queued_id != item_id
+        ]
 
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
         # 1) Address each item in the current batch.
@@ -125,6 +147,7 @@ async def _run_fix_cycle(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     state=state,
+                    owned_paths=owned_paths,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -160,6 +183,11 @@ async def _run_fix_cycle(
                     stderr=str(exc),
                     reason_code=exc.reason_code,
                 )
+            # The same thread can be re-addressed in a later settle pass after
+            # new reviewer feedback changes its verdict. Remove stale
+            # publish/resolve queues before recording the latest outcome so
+            # workflow-scope push rollback follows the newest verdict only.
+            _drop_pending_publish_state(t.thread_id)
             _mark_review_thread_addressed(state, t, verdict)
             if verdict == "defer":
                 # Follow-up defer (#305): durably capture the deferred work
@@ -181,13 +209,15 @@ async def _run_fix_cycle(
                 )
                 if captured:
                     threads_to_resolve.append(t.thread_id)
-                    # Roll back with the publish-dependent set: if the push
-                    # later fails, the "defer" addressed marker is cleared so
-                    # the thread is re-addressed (and re-resolved) next cycle
-                    # instead of staying marked-addressed-but-unresolved and
-                    # wedging the merge gate. The filed-issue marker survives
-                    # the clear, so the idempotent capture never re-files.
+                    # Roll back with the generic publish-dependent set: if a
+                    # non-workflow push later fails, the "defer" addressed
+                    # marker is cleared so the thread is re-addressed (and
+                    # re-resolved) next cycle instead of staying
+                    # marked-addressed-but-unresolved and wedging the merge
+                    # gate. The filed-issue marker survives the clear, so the
+                    # idempotent capture never re-files.
                     publish_dependent_ids.append(t.thread_id)
+                    workflow_scope_resolution_dependent_ids.append(t.thread_id)
                 elif captured is False:
                     _mark_review_thread_addressed(state, t, "needs_human")
                 # captured is None: a transient capture failure already cleared
@@ -200,13 +230,14 @@ async def _run_fix_cycle(
                 # verdict (forcing a pointless re-address of feedback already
                 # judged to need a human), and the stale queued id could be
                 # resolved on the now-superseded defer.
-                if t.thread_id in publish_dependent_ids:
-                    publish_dependent_ids.remove(t.thread_id)
-                if t.thread_id in threads_to_resolve:
-                    threads_to_resolve.remove(t.thread_id)
+                _drop_pending_publish_state(t.thread_id)
             else:
                 threads_to_resolve.append(t.thread_id)
                 publish_dependent_ids.append(t.thread_id)
+                if verdict == "fix_committed":
+                    workflow_scope_publish_dependent_ids.append(t.thread_id)
+                elif verdict == "false_positive":
+                    workflow_scope_resolution_dependent_ids.append(t.thread_id)
         for c in reviews:
             try:
                 verdict_result = await self._address_review_comment_result(
@@ -217,6 +248,7 @@ async def _run_fix_cycle(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     state=state,
+                    owned_paths=owned_paths,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -253,6 +285,11 @@ async def _run_fix_cycle(
                     reason_code=exc.reason_code,
                 )
             verdict = verdict_result.verdict
+            # Review-level comments can also be re-addressed across settle
+            # passes. Drop stale publish dependencies before storing the latest
+            # verdict so a prior fix_committed pass cannot override it.
+            _drop_pending_publish_state(c.comment_id)
+            _sync_needs_human_reason(state, c.comment_id, verdict_result)
             _mark_review_comment_addressed(state, c, verdict)
             if verdict in {"false_positive", "defer"}:
                 await self._record_pr_feedback_resolution(
@@ -270,8 +307,16 @@ async def _run_fix_cycle(
             # thread path: the agent already judged this comment needs a human,
             # so a push failure must not clear that verdict and force a pointless
             # re-address next cycle.
-            if verdict not in {"needs_human", "defer", "agent_failed"}:
+            if verdict in {"needs_human", "agent_failed"}:
+                # A review comment re-addressed in a later pass may have been
+                # queued for rollback by an earlier fix_committed pass. Drop it
+                # from that stale queue so the latest non-publish-dependent
+                # verdict survives push-failure cleanup.
+                _drop_pending_publish_state(c.comment_id)
+            elif verdict != "defer":
                 publish_dependent_ids.append(c.comment_id)
+                if verdict == "fix_committed":
+                    workflow_scope_publish_dependent_ids.append(c.comment_id)
 
         # 2) Settle window — small sleep, then re-poll for new activity.
         await self._deps.sleep(self._config.settle_interval_seconds)
@@ -342,8 +387,16 @@ async def _run_fix_cycle(
     pushed_head_sha: str | None = None
     if push_result.failed:
         reason_code = push_result.reason_code
-        for item_id in publish_dependent_ids:
-            _clear_addressed_state_by_id(state, item_id)
+        if reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON:
+            _requeue_workflow_scope_publish_dependent_items(
+                state,
+                workflow_scope_publish_dependent_ids,
+                resolution_dependent_ids=workflow_scope_resolution_dependent_ids,
+                reason=push_result.error_message or _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+            )
+        else:
+            for item_id in publish_dependent_ids:
+                _clear_addressed_state_by_id(state, item_id)
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
             event_type=_AUDIT_GIT_PUSH_EVENT,
@@ -509,6 +562,30 @@ async def _run_fix_cycle(
                 },
             )
     return cast(_GitPushResult, push_result)
+
+
+def _requeue_workflow_scope_publish_dependent_items(
+    state: MonitorState,
+    item_ids: list[str],
+    *,
+    resolution_dependent_ids: list[str],
+    reason: str,
+) -> None:
+    """Requeue blocked fixes and inline states needing GitHub resolution.
+
+    GitHub rejects workflow-file pushes before the local commits reach the PR,
+    and retrying the same repair cannot succeed until an operator provides a token
+    with ``workflow`` scope. The failure path already records the permission
+    reason and posts the human notification, so clear state for committed fixes
+    whose publication was blocked. That lets the next monitor pass retry pushing
+    the existing local fix once credentials are repaired. Also clear inline
+    false-positive state that still depends on a later GraphQL ``resolve_thread``
+    call, including captured defers whose durable issue marker survives state
+    cleanup. Preserve durable review-level false-positive resolutions.
+    """
+    del reason
+    for item_id in dict.fromkeys([*resolution_dependent_ids, *item_ids]):
+        _clear_addressed_state_by_id(state, item_id)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:

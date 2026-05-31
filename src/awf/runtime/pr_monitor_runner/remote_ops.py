@@ -18,6 +18,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
+    _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -41,6 +42,43 @@ _log = get_logger(__name__)
 
 # Constants
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
+_WORKFLOW_FILE_PATH_RE = re.compile(r"\.github/workflows/[^\s`'\"()]+")
+_WORKFLOW_PERMISSION_TERM = r"`?workflows?`?(?:\s+|-)+(?:scope|permission)s?"
+_MISSING_WORKFLOW_SCOPE_PATTERNS = (
+    re.compile(
+        rf"\bwithout\s+(?:the\s+|a\s+)?{_WORKFLOW_PERMISSION_TERM}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_WORKFLOW_PERMISSION_TERM}\s+(?:is\s+|are\s+)?required\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:requires?|needs?|must\s+have|must\s+include)\s+"
+        rf"(?:the\s+|a\s+)?{_WORKFLOW_PERMISSION_TERM}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:missing|lacks?|does\s+not\s+have|doesn't\s+have|has\s+no)\s+"
+        rf"(?:the\s+|a\s+)?{_WORKFLOW_PERMISSION_TERM}\b",
+        re.IGNORECASE,
+    ),
+)
+_WORKFLOW_SCOPE_PUSH_CONTEXT_RE = re.compile(
+    r"refusing to allow|create or update workflow|workflow(?:-|\s+)file|"
+    r"\.github/workflows/",
+    re.IGNORECASE,
+)
+_DIRECT_WORKFLOW_SCOPE_REQUIRED_RE = re.compile(
+    rf"\b(?:remote:\s*)?(?:error:\s*)?{_WORKFLOW_PERMISSION_TERM}\s+"
+    rf"(?:is\s+|are\s+)?required\b",
+    re.IGNORECASE,
+)
+_GIT_PUSH_OUTPUT_CONTEXT_RE = re.compile(
+    r"\bremote:|\bremote rejected\b|\bpre-receive hook\b|\bhook declined\b|"
+    r"\bfailed to push\b",
+    re.IGNORECASE,
+)
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
@@ -91,6 +129,11 @@ class _GitPushResult:
         return self.failed and self.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 
     @property
+    def workflow_scope_required(self) -> bool:
+        """Return whether GitHub rejected a workflow-file push for missing scope."""
+        return self.failed and self.reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON
+
+    @property
     def terminal_monitor_failure(self: Any) -> bool:
         """Return whether the push failure should end monitor recovery."""
         return self.failed and (
@@ -128,6 +171,15 @@ class _ProtectedScopePushBlock:
     violations: tuple[Any, ...] = ()
 
 
+@dataclass(frozen=True)
+class _WorkflowScopePushBlock:
+    """Parsed GitHub missing-workflow-scope push rejection details."""
+
+    blocked: bool
+    message: str = ""
+    paths: tuple[str, ...] = ()
+
+
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
     """Map a push result to the monitor operation outcome label."""
     if push_result.reason_code in {
@@ -136,6 +188,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     }:
         return "pre_push_validation_failed"
+    if push_result.workflow_scope_required:
+        return "github_workflow_scope_required"
     if push_result.protected_scope_diff_unavailable:
         return "protected_scope_diff_unavailable"
     if push_result.protected_scope_blocked:
@@ -441,6 +495,31 @@ async def _git_push_result(
             stderr=r.stderr,
         )
 
+    push_output = _combined_git_output(r.stderr, r.stdout)
+    workflow_scope_block = _workflow_scope_push_block(push_output)
+    if workflow_scope_block.blocked:
+        message = workflow_scope_block.message
+        paths = workflow_scope_block.paths
+        _log.warning(
+            "monitor.push_failed_missing_workflow_scope",
+            paths=list(paths),
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=r.returncode,
+            stdout=r.stdout or "",
+            stderr=message,
+            reason_code=_GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+            details={
+                "phase": "git_push",
+                "permission": "workflow_scope",
+                "paths": list(paths),
+                "pushed": False,
+            },
+        )
+
+    _log_unmatched_workflow_file_push_output(push_output)
     stderr_lower = (r.stderr or "").lower()
     is_rejection = (
         "[rejected]" in stderr_lower
@@ -511,6 +590,50 @@ async def _git_push_result(
         stderr=r.stderr,
         recovered_by_resync=True,
     )
+
+
+def _combined_git_output(*outputs: str | None) -> str:
+    return "\n".join(output for output in outputs if output)
+
+
+def _log_unmatched_workflow_file_push_output(output: str) -> None:
+    paths = tuple(
+        dict.fromkeys(
+            match.group(0).rstrip(".,;:") for match in _WORKFLOW_FILE_PATH_RE.finditer(output)
+        )
+    )
+    if not paths:
+        return
+    _log.warning(
+        "monitor.push_failed_unmatched_workflow_file_context",
+        paths=list(paths),
+        output=redact_audit_text(output, limit=400),
+    )
+
+
+def _workflow_scope_push_block(output: str) -> _WorkflowScopePushBlock:
+    normalized = " ".join(output.split())
+    if not any(pattern.search(normalized) for pattern in _MISSING_WORKFLOW_SCOPE_PATTERNS):
+        return _WorkflowScopePushBlock(blocked=False)
+    has_workflow_file_context = _WORKFLOW_SCOPE_PUSH_CONTEXT_RE.search(normalized) is not None
+    has_direct_hook_context = (
+        _DIRECT_WORKFLOW_SCOPE_REQUIRED_RE.search(normalized) is not None
+        and _GIT_PUSH_OUTPUT_CONTEXT_RE.search(normalized) is not None
+    )
+    if not (has_workflow_file_context or has_direct_hook_context):
+        return _WorkflowScopePushBlock(blocked=False)
+    paths = tuple(
+        dict.fromkeys(
+            match.group(0).rstrip(".,;:") for match in _WORKFLOW_FILE_PATH_RE.finditer(normalized)
+        )
+    )
+    path_suffix = f" for {', '.join(paths)}" if paths else ""
+    message = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        f"`workflow` scope{path_suffix}. Grant a GitHub token with workflow "
+        "push permission, then rerun the monitor repair."
+    )
+    return _WorkflowScopePushBlock(blocked=True, message=message, paths=paths)
 
 
 async def _run_sync_base(
