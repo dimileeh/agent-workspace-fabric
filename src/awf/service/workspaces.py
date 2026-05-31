@@ -335,6 +335,31 @@ def _host_ports_from_resolved_profile(
     return host_ports
 
 
+def _host_ports_from_task_policy_companions(
+    task_policy: Mapping[str, Any] | None,
+) -> builtins.list[int]:
+    """Extract host-side ports from companions stored inside a workspace task_policy."""
+    if not task_policy or not isinstance(task_policy, dict):
+        return []
+    companions = task_policy.get("companions")
+    if not companions or not isinstance(companions, list):
+        return []
+    host_ports: builtins.list[int] = []
+    for companion in companions:
+        if not isinstance(companion, dict):
+            continue
+        ports = companion.get("ports")
+        if not ports or not isinstance(ports, list):
+            continue
+        for port_mapping in ports:
+            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+                try:
+                    host_ports.append(int(port_mapping[1]))
+                except (ValueError, TypeError):
+                    continue
+    return host_ports
+
+
 async def check_host_port_conflicts(
     repo: WorkspaceRepository,
     companions: Sequence[WorkspaceCompanionRequest],
@@ -1229,6 +1254,8 @@ __all__ = [
     "WorkspaceCreateIdempotencyConflictError",
     "HostPortConflict",
     "WorkspaceCreateHostPortConflictError",
+    "_host_ports_from_task_policy_companions",
+    "_host_ports_from_resolved_profile",
     "check_host_port_conflicts",
     "WorkspaceCreateInsufficientDiskError",
     "WorkspaceRetryResult",

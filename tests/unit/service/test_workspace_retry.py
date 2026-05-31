@@ -32,6 +32,7 @@ from awf.service.conformance_salvage import (
     ConformanceSalvageError,
 )
 from awf.service.workspaces import (
+    WorkspaceCreateHostPortConflictError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryNotFoundError,
     WorkspaceRetrySalvageUnavailableError,
@@ -1484,3 +1485,124 @@ async def test_retry_persists_task_kind_without_post_insert_update() -> None:
         if statement.startswith("update workspaces") and "task_kind" in statement
     ]
     assert task_kind_updates == []
+
+
+@pytest.mark.unit
+async def test_retry_rejects_host_port_conflict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying a workspace whose companion host port is still held by another
+    active workspace must raise WorkspaceCreateHostPortConflictError instead
+    of silently creating a workspace that will fail during compose-up."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        blocker = await repo.create(
+            repo_url="git@github.com:example/blocker.git",
+            branch_base="main",
+            task_title="Block port",
+            task_prompt="noop",
+            task_external_id=None,
+            task_class="test_task",
+            owned_paths=[],
+            task_policy={
+                "companions": [
+                    {"name": "blocker-svc", "ports": [[5432, 5434]]},
+                ],
+            },
+            auto_merge=False,
+            initial_review_grace_period_seconds=0,
+            agent="codex",
+            env_profile=None,
+            profile_ref=None,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=[],
+            requires_database=False,
+            idempotency_key=None,
+            task_kind="feature_branch_pr",
+            remote_push_branch=None,
+        )
+        await repo.transition(blocker, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.ready, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.running, reason_code="TEST")
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="host port conflict regression test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_allows_same_port_when_source_is_only_holder(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying must succeed when the only workspace holding the companion host
+    port is the failed source itself.  The source is excluded from the conflict
+    check because the retry replaces it."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        assert source.task_policy is not None
+        assert "companions" in source.task_policy
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="host port same-holder test",
+            provider_environ={},
+        )
+        assert retry.new_workspace.id != source.id

@@ -242,6 +242,26 @@ async def retry_workspace_row(
         "provider_readiness_preflight": preflight,
     }
 
+    host_ports: list[int] = []
+    host_ports.extend(
+        workspaces._host_ports_from_task_policy_companions(
+            source.task_policy,
+        )
+    )
+    host_ports.extend(
+        workspaces._host_ports_from_resolved_profile(source.resolved_profile),
+    )
+    if host_ports:
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=host_ports,
+            excluding_workspace_id=source.id,
+        )
+        if conflicts:
+            raise workspaces.WorkspaceCreateHostPortConflictError(
+                host_port=conflicts[0].host_port,
+                conflicting_workspace_id=conflicts[0].workspace_id,
+            )
+
     retried = await repo.create(
         repo_url=source.repo_url,
         branch_base=source.branch_base,

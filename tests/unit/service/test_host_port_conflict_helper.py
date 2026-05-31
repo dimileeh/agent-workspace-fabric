@@ -1,10 +1,13 @@
-"""Tests for ``_host_ports_from_resolved_profile`` and the ``check_host_port_conflicts`` service helper."""
+"""Tests for ``_host_ports_from_resolved_profile``, ``_host_ports_from_task_policy_companions``, and the ``check_host_port_conflicts`` service helper."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from awf.service.workspaces import _host_ports_from_resolved_profile
+from awf.service.workspaces import (
+    _host_ports_from_resolved_profile,
+    _host_ports_from_task_policy_companions,
+)
 
 
 class TestHostPortsFromResolvedProfile:
@@ -99,3 +102,75 @@ class TestHostPortsFromResolvedProfile:
         }
         result = _host_ports_from_resolved_profile(profile)
         assert result == [5432, 5432]
+
+
+class TestHostPortsFromTaskPolicyCompanions:
+    """Pure-unit tests for extracting host-side ports from task-policy companions."""
+
+    def test_none_returns_empty(self) -> None:
+        assert _host_ports_from_task_policy_companions(None) == []
+
+    def test_empty_dict_returns_empty(self) -> None:
+        assert _host_ports_from_task_policy_companions({}) == []
+
+    def test_no_companions_key_returns_empty(self) -> None:
+        assert _host_ports_from_task_policy_companions({"other": 1}) == []
+
+    def test_companions_not_list_returns_empty(self) -> None:
+        assert _host_ports_from_task_policy_companions({"companions": "bad"}) == []
+
+    def test_empty_companions_returns_empty(self) -> None:
+        assert _host_ports_from_task_policy_companions({"companions": []}) == []
+
+    def test_companion_without_ports_returns_empty(self) -> None:
+        assert _host_ports_from_task_policy_companions({"companions": [{"name": "x"}]}) == []
+
+    def test_companion_with_empty_ports_returns_empty(self) -> None:
+        assert _host_ports_from_task_policy_companions({"companions": [{"ports": []}]}) == []
+
+    def test_single_companion_single_port(self) -> None:
+        policy: dict[str, Any] = {"companions": [{"name": "sidecar", "ports": [[8080, 9090]]}]}
+        assert _host_ports_from_task_policy_companions(policy) == [9090]
+
+    def test_single_companion_multiple_ports(self) -> None:
+        policy: dict[str, Any] = {
+            "companions": [{"name": "web", "ports": [[80, 8080], [443, 8443]]}]
+        }
+        result = _host_ports_from_task_policy_companions(policy)
+        assert sorted(result) == [8080, 8443]
+
+    def test_multiple_companions(self) -> None:
+        policy: dict[str, Any] = {
+            "companions": [
+                {"name": "redis", "ports": [[6379, 6379]]},
+                {"name": "pg", "ports": [[5432, 5433]]},
+            ]
+        }
+        result = _host_ports_from_task_policy_companions(policy)
+        assert sorted(result) == [5433, 6379]
+
+    def test_non_dict_companion_entry_skipped(self) -> None:
+        policy: dict[str, Any] = {"companions": ["not-a-dict", {"ports": [[80, 8080]]}]}
+        assert _host_ports_from_task_policy_companions(policy) == [8080]
+
+    def test_non_list_tuple_port_mapping_skipped(self) -> None:
+        policy: dict[str, Any] = {"companions": [{"ports": ["9090"]}]}
+        assert _host_ports_from_task_policy_companions(policy) == []
+
+    def test_short_port_mapping_skipped(self) -> None:
+        policy: dict[str, Any] = {"companions": [{"ports": [[80]]}]}
+        assert _host_ports_from_task_policy_companions(policy) == []
+
+    def test_non_int_host_port_skipped(self) -> None:
+        policy: dict[str, Any] = {"companions": [{"ports": [[80, "abc"]]}]}
+        assert _host_ports_from_task_policy_companions(policy) == []
+
+    def test_duplicate_ports_not_deduped(self) -> None:
+        policy: dict[str, Any] = {
+            "companions": [
+                {"name": "a", "ports": [[80, 8080]]},
+                {"name": "b", "ports": [[80, 8080]]},
+            ]
+        }
+        result = _host_ports_from_task_policy_companions(policy)
+        assert result == [8080, 8080]

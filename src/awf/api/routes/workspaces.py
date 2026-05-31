@@ -695,6 +695,16 @@ async def retry_workspace(
             provider_readiness_override=provider_readiness_override,
             provider_readiness_override_reason=provider_readiness_override_reason,
         )
+    except WorkspaceCreateHostPortConflictError as exc:
+        await session.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorResponse(
+                error_code=exc.error_code,
+                message=exc.message,
+                detail=exc.detail,
+            ).model_dump(),
+        )
     except WorkspaceRetryError as exc:
         return _retry_error_response(exc)
 
