@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -805,6 +806,7 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
         "postgres_port",
         "disk",
         "host_home",
+        "required_service_env",
         "shell_path",
         "local_capacity",
     ]
@@ -875,6 +877,7 @@ def test_run_system_checks_omits_compose_when_docker_binary_absent(
         "postgres_port",
         "disk",
         "host_home",
+        "required_service_env",
         "shell_path",
         "local_capacity",
     ]
@@ -2668,6 +2671,148 @@ def test_check_host_home_override_blocks_with_value_in_data() -> None:
     assert padded.level is SetupCheckLevel.BLOCKED
     assert padded.data["env_value"] == " /home/op"
     assert "whitespace" in padded.summary
+
+
+# --- Required local-service Compose env -----------------------------------
+
+
+@pytest.mark.unit
+def test_check_required_service_env_ok_when_both_present_without_leaking_values() -> None:
+    """Both mandatory Compose vars set reports OK and never echoes their values.
+
+    The local-service stack interpolates AWF_API_TOKEN / AWF_POSTGRES_PASSWORD via
+    ``${VAR:?...}``, so a non-empty pair means ``docker compose`` can start. The OK
+    result is a non-secret presence fact: it records the variable *names* but must
+    never surface the secret values it read.
+    """
+    api_token = "set-api-token-value"
+    pg_password = "set-pg-password-value"
+    result = system_checks.check_required_service_env(
+        environ={"AWF_API_TOKEN": api_token, "AWF_POSTGRES_PASSWORD": pg_password}
+    )
+
+    assert result.name == "required_service_env"
+    assert result.level is SetupCheckLevel.OK
+    assert result.data == {
+        "required": ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"],
+        "missing": [],
+    }
+    rendered = " ".join(
+        [result.summary, result.detail, result.fix or "", json.dumps(dict(result.data))]
+    )
+    assert api_token not in rendered
+    assert pg_password not in rendered
+
+
+@pytest.mark.unit
+def test_check_required_service_env_blocks_when_unset() -> None:
+    """Unset mandatory Compose vars block and name both missing variables.
+
+    A clean first run (the documented ``cp .env.example docker/compose/.env`` ships
+    AWF_API_TOKEN empty) would otherwise pass every probe yet make ``docker compose``
+    abort, so this surfaces as a BLOCKED readiness issue naming both variables.
+    """
+    result = system_checks.check_required_service_env(environ={})
+
+    assert result.name == "required_service_env"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+    assert "AWF_API_TOKEN" in result.summary
+    assert "AWF_POSTGRES_PASSWORD" in result.summary
+    assert result.fix is not None
+    assert "docker/compose/.env" in result.fix
+
+
+@pytest.mark.unit
+def test_check_required_service_env_treats_empty_value_as_unset() -> None:
+    """An empty string is unset for Compose ``${VAR:?...}`` substitution.
+
+    Compose aborts on an empty value exactly as it does on a missing one (the
+    documented ``.env.example`` ships ``AWF_API_TOKEN=``), so the probe must treat
+    ``AWF_API_TOKEN=""`` as missing rather than report ready. A non-empty value
+    Compose would accept -- even an unusual whitespace one -- is left untouched so
+    the gate cannot diverge from Compose's own ``${VAR:?}`` semantics.
+    """
+    result = system_checks.check_required_service_env(
+        environ={"AWF_API_TOKEN": "", "AWF_POSTGRES_PASSWORD": ""}
+    )
+
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+
+    # A non-empty (even whitespace-only) value satisfies Compose's ``${VAR:?}``
+    # guard, so the probe reports it set rather than over-reaching past Compose.
+    whitespace_ok = system_checks.check_required_service_env(
+        environ={"AWF_API_TOKEN": " ", "AWF_POSTGRES_PASSWORD": "pw"}
+    )
+    assert whitespace_ok.level is SetupCheckLevel.OK
+
+
+@pytest.mark.unit
+def test_check_required_service_env_blocks_single_missing_without_leaking_present() -> None:
+    """One missing var blocks listing only it, never echoing the present secret."""
+    pg_password = "present-pg-password-value"
+    result = system_checks.check_required_service_env(
+        environ={"AWF_POSTGRES_PASSWORD": pg_password}
+    )
+
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["missing"] == ["AWF_API_TOKEN"]
+    assert "AWF_API_TOKEN" in result.summary
+    assert "AWF_POSTGRES_PASSWORD" not in result.summary
+    rendered = " ".join(
+        [result.summary, result.detail, result.fix or "", json.dumps(dict(result.data))]
+    )
+    assert pg_password not in rendered
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_missing_required_service_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aggregation surfaces the unset Compose vars as a blocker against the resolved env.
+
+    The setup CLI feeds ``run_system_checks`` the resolved service env; when that env
+    lacks the mandatory tokens the readiness payload must block instead of telling the
+    operator to run a ``awf start`` Compose will reject.
+    """
+
+    def fake_ok(name: str) -> SetupCheckResult:
+        return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
+
+    monkeypatch.setattr(
+        system_checks,
+        "check_docker",
+        lambda **_kwargs: SetupCheckResult(
+            name="docker",
+            level=SetupCheckLevel.OK,
+            summary="ok",
+            detail="ok",
+            data={"available": True},
+        ),
+    )
+    monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
+    _stub_non_docker_checks_ok(monkeypatch)
+    monkeypatch.setattr(system_checks, "check_host_home", lambda **_kwargs: fake_ok("host_home"))
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        environ={
+            "AWF_API_HOST_PORT": "8000",
+            "AWF_POSTGRES_HOST_PORT": "5433",
+            "HOME": "/home/op",
+        },
+    )
+
+    required = next(r for r in results if r.name == "required_service_env")
+    assert required.level is SetupCheckLevel.BLOCKED
+    assert required.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+
+    payload = build_setup_readiness_payload(results)
+    assert payload.status == "blocked"
+    rendered = json.dumps(render_first_run_json(payload))
+    assert "required_service_env" in rendered
+    assert "Run awf start" not in rendered
 
 
 # --- ${HOME} fallback validation (no AWF_HOST_* override set) --------------

@@ -2162,6 +2162,70 @@ def check_host_home(*, environ: Mapping[str, str] | None = None) -> SetupCheckRe
     )
 
 
+# The local-service Compose stack hard-requires two variables through Compose's
+# mandatory-substitution form ``${VAR:?message}``: ``AWF_API_TOKEN`` (the api /
+# worker auth token) and ``AWF_POSTGRES_PASSWORD`` (the Postgres password, reused
+# verbatim inside ``AWF_DATABASE_URL``) -- see docker/compose/local-service.yml.
+# When either is unset or empty, ``docker compose`` aborts *before* it starts any
+# service, so a clean first run that never set them clears every other probe yet
+# fails the instant the operator runs ``awf start`` (the documented bootstrap
+# copies .env.example, which ships AWF_API_TOKEN empty). Validate their presence
+# here so readiness cannot declare the machine ready -- and tell the operator to
+# run awf start -- for a start Compose will reject.
+REQUIRED_LOCAL_SERVICE_ENV_VARS: tuple[str, ...] = (
+    "AWF_API_TOKEN",
+    "AWF_POSTGRES_PASSWORD",
+)
+
+
+def check_required_service_env(*, environ: Mapping[str, str] | None = None) -> SetupCheckResult:
+    """Check the mandatory local-service Compose variables are set (non-secret).
+
+    ``docker/compose/local-service.yml`` interpolates ``AWF_API_TOKEN`` and
+    ``AWF_POSTGRES_PASSWORD`` with Compose's ``${VAR:?...}`` mandatory form, so an
+    unset or empty value makes ``docker compose`` abort before Core starts. The
+    probe reads the same resolved service env every other readiness check consults
+    (falling back to the process env only when ``environ`` is ``None``) and stays a
+    non-secret presence test: it never reads, stores, or logs the secret values --
+    only whether each is non-empty -- and records the variable *names* plus the
+    missing list, never the values themselves.
+    """
+    env = os.environ if environ is None else environ
+    missing = [
+        name for name in REQUIRED_LOCAL_SERVICE_ENV_VARS if non_empty_env_value(env, name) is None
+    ]
+    if not missing:
+        return SetupCheckResult(
+            name="required_service_env",
+            level=SetupCheckLevel.OK,
+            summary="Required local-service Compose variables are set.",
+            detail=(
+                "AWF_API_TOKEN and AWF_POSTGRES_PASSWORD are present and non-empty in the "
+                "resolved service env, so docker compose can interpolate the local-service "
+                "stack's mandatory ${VAR:?...} variables when awf start runs."
+            ),
+            data={"required": list(REQUIRED_LOCAL_SERVICE_ENV_VARS), "missing": []},
+        )
+    joined = ", ".join(missing)
+    return SetupCheckResult(
+        name="required_service_env",
+        level=SetupCheckLevel.BLOCKED,
+        summary=f"Required local-service Compose variable(s) unset or empty: {joined}.",
+        detail=(
+            f"The local-service Compose stack requires {joined} via mandatory ${{VAR:?...}} "
+            "substitution (docker/compose/local-service.yml), so docker compose aborts before "
+            "starting Core when they are unset or empty. Without this gate readiness would "
+            "report ready and tell you to run awf start, which would then fail. Only the "
+            "variable names are checked -- their values are never read or logged."
+        ),
+        fix=(
+            f"Set {joined} in docker/compose/.env (copied from .env.example, which ships "
+            "AWF_API_TOKEN empty) or export them before running awf start."
+        ),
+        data={"required": list(REQUIRED_LOCAL_SERVICE_ENV_VARS), "missing": missing},
+    )
+
+
 def run_system_checks(
     *,
     config: HostSetupConfig,  # noqa: ARG001 - retained as the canonical host-setup input; no probe reads the persisted config (awf start resolves port/work dir from the Compose env only)
@@ -2280,6 +2344,7 @@ def run_system_checks(
         *([ollama_bridge_target_host_check] if ollama_bridge_target_host_check is not None else []),
         disk_check,
         host_home_check,
+        check_required_service_env(environ=environ),
         check_shell_path(),
         check_local_capacity(),
     ]
@@ -2479,6 +2544,7 @@ __all__ = [
     "check_postgres_host_port_override",
     "check_postgres_port",
     "check_python_runtime",
+    "check_required_service_env",
     "check_shell_path",
     "check_work_dir_home_fallback",
     "normalize_provider",
