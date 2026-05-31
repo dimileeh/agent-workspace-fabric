@@ -35,8 +35,12 @@ from awf.host_setup.system_checks import (
     check_ports,
     check_python_runtime,
     check_shell_path,
+    checks_core,
+    checks_host,
+    checks_ports,
     normalize_provider,
     normalize_providers,
+    primitives,
     require_interactive,
     run_system_checks,
 )
@@ -108,7 +112,7 @@ def test_check_docker_blocked_when_probe_cannot_run() -> None:
 @pytest.mark.unit
 def test_docker_probe_environ_returns_none_without_service_env() -> None:
     """No resolved service env means the probe inherits the caller environment."""
-    assert system_checks._docker_probe_environ(None) is None
+    assert primitives._docker_probe_environ(None) is None
 
 
 @pytest.mark.unit
@@ -124,7 +128,7 @@ def test_docker_probe_environ_materializes_awf_docker_host(
     monkeypatch.setenv("DOCKER_CONTEXT", "desktop-linux")
     monkeypatch.delenv("DOCKER_HOST", raising=False)
 
-    resolved = system_checks._docker_probe_environ({"AWF_DOCKER_HOST": "tcp://remote:2375"})
+    resolved = primitives._docker_probe_environ({"AWF_DOCKER_HOST": "tcp://remote:2375"})
 
     assert resolved is not None
     assert resolved["DOCKER_HOST"] == "tcp://remote:2375"
@@ -145,7 +149,7 @@ def test_docker_probe_environ_clears_inherited_docker_host(
     monkeypatch.setenv("DOCKER_HOST", "tcp://inherited:2375")
     monkeypatch.setenv("DOCKER_CONTEXT", "remote")
 
-    resolved = system_checks._docker_probe_environ({"DOCKER_HOST": ""})
+    resolved = primitives._docker_probe_environ({"DOCKER_HOST": ""})
 
     assert resolved is not None
     assert "DOCKER_HOST" not in resolved
@@ -185,8 +189,8 @@ def test_run_system_checks_docker_probe_targets_resolved_docker_host(
         calls.append((tuple(args), env))
         return _Completed()
 
-    monkeypatch.setattr(system_checks.subprocess, "run", fake_run)
-    monkeypatch.setattr(system_checks.shutil, "which", lambda _cmd, **_kwargs: "/usr/bin/docker")
+    monkeypatch.setattr(primitives.subprocess, "run", fake_run)
+    monkeypatch.setattr(primitives.shutil, "which", lambda _cmd, **_kwargs: "/usr/bin/docker")
     _stub_non_docker_checks_ok(monkeypatch)
 
     results = run_system_checks(
@@ -230,8 +234,8 @@ def test_run_system_checks_docker_probe_inherits_env_without_service_env(
         calls.append((tuple(args), env))
         return _Completed()
 
-    monkeypatch.setattr(system_checks.subprocess, "run", fake_run)
-    monkeypatch.setattr(system_checks.shutil, "which", lambda _cmd: "/usr/bin/docker")
+    monkeypatch.setattr(primitives.subprocess, "run", fake_run)
+    monkeypatch.setattr(primitives.shutil, "which", lambda _cmd: "/usr/bin/docker")
     _stub_non_docker_checks_ok(monkeypatch)
 
     run_system_checks()
@@ -283,8 +287,8 @@ def test_run_system_checks_docker_binary_lookup_uses_resolved_path(
             return "/opt/docker/bin/docker"
         return None
 
-    monkeypatch.setattr(system_checks.subprocess, "run", fake_run)
-    monkeypatch.setattr(system_checks.shutil, "which", fake_which)
+    monkeypatch.setattr(primitives.subprocess, "run", fake_run)
+    monkeypatch.setattr(primitives.shutil, "which", fake_which)
     _stub_non_docker_checks_ok(monkeypatch)
 
     results = run_system_checks(
@@ -549,7 +553,7 @@ def test_resolve_path_tolerates_oserror(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(Path, "resolve", boom)
     raw = Path("/usr/local/bin")
-    assert system_checks._resolve_path(raw) == raw
+    assert checks_core._resolve_path(raw) == raw
 
 
 # --- Local capacity -------------------------------------------------------
@@ -1229,9 +1233,9 @@ def test_build_payload_source_checkout_error_without_missing_markers() -> None:
 def test_shell_path_fix_variants() -> None:
     """Verify the PATH fix hint is tailored per shell."""
     script_dir = Path("/opt/awf/bin")
-    assert "fish_add_path" in system_checks._shell_path_fix("/usr/bin/fish", script_dir)
-    assert "bashrc" in system_checks._shell_path_fix("/bin/bash", script_dir)
-    assert "shell profile" in system_checks._shell_path_fix("", script_dir)
+    assert "fish_add_path" in checks_core._shell_path_fix("/usr/bin/fish", script_dir)
+    assert "bashrc" in checks_core._shell_path_fix("/bin/bash", script_dir)
+    assert "shell profile" in checks_core._shell_path_fix("", script_dir)
 
 
 # --- Default real-IO probe helpers (hermetic) ----------------------------
@@ -1252,7 +1256,7 @@ def test_default_command_runner_success(monkeypatch: pytest.MonkeyPatch) -> None
     import subprocess
 
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: _FakeCompleted(0, "out", "err"))
-    result = system_checks._default_command_runner(["echo", "hi"])
+    result = primitives._default_command_runner(["echo", "hi"])
     assert result is not None
     assert result.returncode == 0
     assert result.stdout == "out"
@@ -1269,7 +1273,7 @@ def test_default_command_runner_returns_none_when_unlaunchable(
         raise FileNotFoundError
 
     monkeypatch.setattr(subprocess, "run", boom)
-    assert system_checks._default_command_runner(["missing-binary"]) is None
+    assert primitives._default_command_runner(["missing-binary"]) is None
 
 
 @pytest.mark.unit
@@ -1287,7 +1291,7 @@ def test_default_command_runner_returns_none_on_timeout(
         raise subprocess.TimeoutExpired(cmd="probe", timeout=5.0)
 
     monkeypatch.setattr(subprocess, "run", slow)
-    assert system_checks._default_command_runner(["probe"]) is None
+    assert primitives._default_command_runner(["probe"]) is None
 
 
 @pytest.mark.unit
@@ -1308,7 +1312,7 @@ def test_default_command_runner_decodes_with_replacement(
         return _FakeCompleted(0, "out", "err")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = system_checks._default_command_runner(["probe"])
+    result = primitives._default_command_runner(["probe"])
     assert result is not None
     assert captured["text"] is True
     assert captured["errors"] == "replace"
@@ -1325,10 +1329,10 @@ def test_default_port_probe_detects_in_use_and_free() -> None:
     port = listener.getsockname()[1]
     listener.listen(1)
     try:
-        assert system_checks._default_port_probe(port) is PortProbeResult.IN_USE
+        assert primitives._default_port_probe(port) is PortProbeResult.IN_USE
     finally:
         listener.close()
-    assert system_checks._default_port_probe(port) is PortProbeResult.FREE
+    assert primitives._default_port_probe(port) is PortProbeResult.FREE
 
 
 @pytest.mark.unit
@@ -1370,7 +1374,7 @@ def test_default_port_probe_classifies_bind_errno() -> None:
     for code, expected in cases.items():
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(socket, "socket", _factory(OSError(code, "boom")))
-            assert system_checks._default_port_probe(8000) is expected
+            assert primitives._default_port_probe(8000) is expected
 
 
 @pytest.mark.unit
@@ -1404,7 +1408,7 @@ def test_default_port_probe_detects_non_loopback_listener() -> None:
     port = listener.getsockname()[1]
     listener.listen(1)
     try:
-        assert system_checks._default_port_probe(port) is PortProbeResult.IN_USE
+        assert primitives._default_port_probe(port) is PortProbeResult.IN_USE
     finally:
         listener.close()
 
@@ -1420,10 +1424,10 @@ def test_loopback_port_probe_detects_in_use_and_free() -> None:
     port = listener.getsockname()[1]
     listener.listen(1)
     try:
-        assert system_checks._loopback_port_probe(port) is PortProbeResult.IN_USE
+        assert primitives._loopback_port_probe(port) is PortProbeResult.IN_USE
     finally:
         listener.close()
-    assert system_checks._loopback_port_probe(port) is PortProbeResult.FREE
+    assert primitives._loopback_port_probe(port) is PortProbeResult.FREE
 
 
 @pytest.mark.unit
@@ -1459,7 +1463,7 @@ def test_loopback_port_probe_ignores_non_loopback_listener() -> None:
     port = listener.getsockname()[1]
     listener.listen(1)
     try:
-        assert system_checks._loopback_port_probe(port) is PortProbeResult.FREE
+        assert primitives._loopback_port_probe(port) is PortProbeResult.FREE
     finally:
         listener.close()
 
@@ -1467,9 +1471,9 @@ def test_loopback_port_probe_ignores_non_loopback_listener() -> None:
 @pytest.mark.unit
 def test_default_free_disk_bytes_real_and_parent_fallback(tmp_path: Path) -> None:
     """Verify free-disk reads a real path and falls back to an existing parent."""
-    assert system_checks._default_free_disk_bytes(tmp_path) >= 0
+    assert primitives._default_free_disk_bytes(tmp_path) >= 0
     nested = tmp_path / "does" / "not" / "exist"
-    assert system_checks._default_free_disk_bytes(nested) >= 0
+    assert primitives._default_free_disk_bytes(nested) >= 0
 
 
 @pytest.mark.unit
@@ -1481,7 +1485,7 @@ def test_default_free_disk_bytes_returns_none_on_error(monkeypatch: pytest.Monke
         raise OSError
 
     monkeypatch.setattr(shutil, "disk_usage", boom)
-    assert system_checks._default_free_disk_bytes("/anything") is None
+    assert primitives._default_free_disk_bytes("/anything") is None
 
 
 @pytest.mark.unit
@@ -1493,7 +1497,7 @@ def test_default_free_disk_bytes_tolerates_unresolvable_user(
 
     monkeypatch.setattr(os.path, "expanduser", lambda value: value)
     # Falls back to the raw path and walks up to an existing parent (the CWD).
-    assert system_checks._default_free_disk_bytes("~olduser/.awf/service") >= 0
+    assert primitives._default_free_disk_bytes("~olduser/.awf/service") >= 0
 
 
 @pytest.mark.unit
@@ -1503,15 +1507,15 @@ def test_safe_expanduser_falls_back_on_unresolvable_user(
     """``_safe_expanduser`` returns the raw path when ``~user`` cannot be resolved."""
     import os.path
 
-    assert system_checks._safe_expanduser("~/awf") == Path("~/awf").expanduser()
+    assert primitives._safe_expanduser("~/awf") == Path("~/awf").expanduser()
     monkeypatch.setattr(os.path, "expanduser", lambda value: value)
-    assert system_checks._safe_expanduser("~olduser/.awf/service") == Path("~olduser/.awf/service")
+    assert primitives._safe_expanduser("~olduser/.awf/service") == Path("~olduser/.awf/service")
 
 
 @pytest.mark.unit
 def test_default_total_memory_bytes_real() -> None:
     """Verify the default memory probe returns None or a positive estimate."""
-    value = system_checks._default_total_memory_bytes()
+    value = primitives._default_total_memory_bytes()
     assert value is None or value > 0
 
 
@@ -1524,10 +1528,10 @@ def test_default_total_memory_bytes_handles_unavailable(monkeypatch: pytest.Monk
         raise ValueError
 
     monkeypatch.setattr(os, "sysconf", boom)
-    assert system_checks._default_total_memory_bytes() is None
+    assert primitives._default_total_memory_bytes() is None
 
     monkeypatch.setattr(os, "sysconf", lambda _name: 0)
-    assert system_checks._default_total_memory_bytes() is None
+    assert primitives._default_total_memory_bytes() is None
 
 
 # --- Package re-exports ---------------------------------------------------
@@ -1917,7 +1921,7 @@ def test_check_postgres_port_default_probe_is_loopback() -> None:
     import inspect
 
     default_probe = inspect.signature(system_checks.check_postgres_port).parameters["probe"].default
-    assert default_probe is system_checks._loopback_port_probe
+    assert default_probe is primitives._loopback_port_probe
 
 
 @pytest.mark.unit
@@ -3441,7 +3445,7 @@ def test_resolve_work_dir_without_home_returns_relative_default_not_keyerror() -
     example ``{}``) must fall through the normal path with an empty ``HOME``
     rather than raising an unguarded ``KeyError``.
     """
-    resolved = system_checks._resolve_work_dir(work_dir=None, environ={})
+    resolved = checks_host._resolve_work_dir(work_dir=None, environ={})
     assert resolved == Path(".awf") / "service"
 
 
@@ -3459,7 +3463,7 @@ def test_resolve_work_dir_without_home_returns_relative_default_not_keyerror() -
 @pytest.mark.unit
 def test_ollama_bridge_profile_enabled_parses_compose_profiles() -> None:
     """The profile gate mirrors bootstrap's comma/whitespace COMPOSE_PROFILES parse."""
-    enabled = system_checks._ollama_bridge_profile_enabled
+    enabled = checks_ports._ollama_bridge_profile_enabled
     assert enabled({"COMPOSE_PROFILES": "ollama-bridge"}) is True
     assert enabled({"COMPOSE_PROFILES": "a,ollama-bridge,b"}) is True
     assert enabled({"COMPOSE_PROFILES": "a ollama-bridge"}) is True
