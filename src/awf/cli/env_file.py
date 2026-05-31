@@ -36,7 +36,7 @@ def parse_dotenv_file(path: Path) -> dict[str, str]:
     Raises PermissionError if the file exists but is unreadable.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"--companion-env-from file not found: {path!r}") from exc
     except PermissionError as exc:

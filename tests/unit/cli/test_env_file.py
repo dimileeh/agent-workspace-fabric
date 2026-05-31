@@ -141,6 +141,15 @@ def test_parsed_strips_leading_whitespace_on_key(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_parsed_strips_utf8_bom(tmp_path: Path) -> None:
+    """A UTF-8 BOM at the start of the file does not corrupt the first key."""
+    env = tmp_path / ".env"
+    env.write_bytes(b"\xef\xbb\xbfDB_HOST=localhost\nDB_PORT=5432\n")
+    result = parse_dotenv_file(env)
+    assert result == {"DB_HOST": "localhost", "DB_PORT": "5432"}
+
+
+@pytest.mark.unit
 def test_parsed_file_not_found_raises() -> None:
     """A nonexistent file path raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError, match="--companion-env-from file not found"):
