@@ -552,6 +552,7 @@ class _TerminalDuringCleanupCommandRunner(FakeCommandRunner):
         input_bytes: bytes | None = None,
         cwd: str | None = None,
     ) -> CommandResult:
+        """Propagate restore commands and then mark the workspace as terminal."""
         result = await super().run(args, input_bytes=input_bytes, cwd=cwd)
         if self._triggered:
             return result
