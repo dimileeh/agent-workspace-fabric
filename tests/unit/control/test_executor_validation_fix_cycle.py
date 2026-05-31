@@ -453,6 +453,68 @@ class _StaleValidationFailureRunner:
         raise RuntimeError("validation crashed unexpectedly in stale test")
 
 
+class _StaleValidationSuccessRunner:
+    """Validation fake that returns success after moving workspace to terminal."""
+
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        terminal_status: WorkspaceStatus,
+    ) -> None:
+        self._factory = factory
+        self._terminal_status = terminal_status
+
+    async def run_profile_coverage(self, **_kwargs: object) -> None:
+        return None
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...] | list[str],
+        worktree_path: Path | None = None,
+        **_kwargs: object,
+    ) -> ValidationResult:
+        if tuple(phase_names) == ("setup", "pre_agent"):
+            return ValidationResult()
+
+        assert worktree_path is not None
+        generated = worktree_path / "apps" / "console" / "next-env.d.ts"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text(
+            '/// <reference types="next" />\nimport "./.next/types/routes.d.ts";\n',
+            encoding="utf-8",
+        )
+
+        async with self._factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            if self._terminal_status == WorkspaceStatus.cancelled:
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.cancelled,
+                    reason_code="OPERATOR_CANCEL",
+                )
+            else:
+                # The destroy path can race in from the control plane while
+                # the executor is between awaits; model the stale read.
+                ws.status = WorkspaceStatus.destroying.value
+            await session.commit()
+
+        return ValidationResult(
+            commands=[
+                ValidationCommandResult(
+                    command="pytest -q",
+                    returncode=0,
+                    duration_seconds=0.1,
+                    reason_code="VALIDATION_OK",
+                )
+            ]
+        )
+
+
 def _mark_git_worktree(worktree_path: Path) -> None:
     worktree_path.mkdir(parents=True, exist_ok=True)
     (worktree_path / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
@@ -652,6 +714,52 @@ class TestValidationSideEffectCleanup:
             ws = await WorkspaceRepository(session).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.cancelled.value
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [WorkspaceStatus.cancelled, WorkspaceStatus.destroying],
+    )
+    async def test_executor_stale_callback_still_returns_stop_when_cleanup_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        terminal_status: WorkspaceStatus,
+    ) -> None:
+        validation = _StaleValidationSuccessRunner(
+            factory=factory,
+            terminal_status=terminal_status,
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        _mark_git_worktree(worktree_path)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=0, stdout="")  # clean before validation
+        fake.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+        fake.queue_result(returncode=1, stderr="restore failed")
+
+        await executor.execute(ws_id)
+
+        joined_calls = [" ".join(call.args) for call in fake.calls]
+        assert any(
+            "restore --source deadbeef01 --staged --worktree -- apps/console/next-env.d.ts" in call
+            for call in joined_calls
+        )
+        assert all("push" not in call for call in joined_calls)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.status == terminal_status.value
+            assert ws.failure_reason is None
 
 
 class TestFixCycleRecoversAfterOneFailure:
