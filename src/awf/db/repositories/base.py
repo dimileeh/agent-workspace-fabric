@@ -167,6 +167,8 @@ class OwnedPathConflict:
 
 @dataclass(frozen=True)
 class HostPortConflict:
+    """A host-port already claimed by another active or staged workspace."""
+
     host_port: int
     workspace_id: str
 
