@@ -223,14 +223,18 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
     worktree = _init_fake_worktree(tmp_path)
     restore_ref = "a" * 40
     current_head = "b" * 40
+    calls: list[tuple[str, ...]] = []
 
     async def run_git(args: list[str]) -> _CommandResultLike:
+        calls.append(tuple(args))
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == ["rev-parse", "HEAD"]:
             return _CommandResultLike(0, f"{current_head}\n", None)
+        if args == ["reset", "--hard", restore_ref]:
+            return _CommandResultLike(0, "", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -238,8 +242,9 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
     )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
-    assert cleanup.cleanup_command is None
+    assert cleanup.cleanup_command == "git reset --hard"
     assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
+    assert ("reset", "--hard", restore_ref) in calls
 
 
 @pytest.mark.unit
@@ -290,6 +295,8 @@ async def test_cleanup_validation_worktree_detects_head_change_after_dirty_clean
             return _CommandResultLike(0, f"{restore_ref}\n", None)
         if args == ["rev-parse", "HEAD"]:
             return _CommandResultLike(0, f"{current_head}\n", None)
+        if args == ["reset", "--hard", restore_ref]:
+            return _CommandResultLike(0, "", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -299,8 +306,9 @@ async def test_cleanup_validation_worktree_detects_head_change_after_dirty_clean
     )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
-    assert cleanup.cleanup_command is None
+    assert cleanup.cleanup_command == "git reset --hard"
     assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
+    assert ("reset", "--hard", restore_ref) in calls
 
 
 @pytest.mark.unit

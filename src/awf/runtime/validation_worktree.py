@@ -325,6 +325,21 @@ async def cleanup_validation_worktree_side_effects(
             )
 
         if current_head_sha != restore_ref_sha:
+            rollback = await run_git(["reset", "--hard", restore_ref])
+            if not rollback.ok:
+                return ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation changed HEAD during execution. "
+                        f"Expected {restore_ref_sha[:8]}, found {current_head_sha[:8]}; "
+                        "rollback to the validation start ref failed."
+                    ),
+                    cleanup_command="git reset --hard",
+                    cleanup_stderr=(rollback.stderr or "")[:1000],
+                )
             return ValidationWorktreeCleanup(
                 cleaned=False,
                 check=check,
@@ -334,7 +349,7 @@ async def cleanup_validation_worktree_side_effects(
                     "AWF validation changed HEAD during execution. "
                     f"Expected {restore_ref_sha[:8]}, found {current_head_sha[:8]}."
                 ),
-                cleanup_command=None,
+                cleanup_command="git reset --hard",
             )
 
         return None
