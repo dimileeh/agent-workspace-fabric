@@ -34,6 +34,9 @@ def parse_dotenv_file(path: Path) -> dict[str, str]:
 
     Raises FileNotFoundError if the file does not exist.
     Raises PermissionError if the file exists but is unreadable.
+
+    Note: inline comments (``KEY=value # comment``) are NOT supported — the
+    ``#`` and everything after it is treated as part of the value.
     """
     try:
         text = path.read_text(encoding="utf-8-sig")
