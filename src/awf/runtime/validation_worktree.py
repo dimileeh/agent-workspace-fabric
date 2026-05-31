@@ -8,10 +8,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.commands import CommandResult
+from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED as _VALIDATION_WORKTREE_CLEANUP_FAILED,
+)
+from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY as _VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+)
+from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_STATUS_FAILED as _VALIDATION_WORKTREE_STATUS_FAILED,
+)
 
-VALIDATION_WORKTREE_PRE_EXISTING_DIRTY = "VALIDATION_WORKTREE_PRE_EXISTING_DIRTY"
-VALIDATION_WORKTREE_CLEANUP_FAILED = "VALIDATION_WORKTREE_CLEANUP_FAILED"
-VALIDATION_WORKTREE_STATUS_FAILED = "VALIDATION_WORKTREE_STATUS_FAILED"
+VALIDATION_WORKTREE_CLEANUP_FAILED: str = _VALIDATION_WORKTREE_CLEANUP_FAILED
+VALIDATION_WORKTREE_PRE_EXISTING_DIRTY: str = _VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+VALIDATION_WORKTREE_STATUS_FAILED: str = _VALIDATION_WORKTREE_STATUS_FAILED
 
 GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
@@ -192,7 +201,7 @@ class ValidationWorktreeCleanup:
 
     cleaned: bool
     check: ValidationWorktreeCheck
-    restore_ref: str = "HEAD"
+    restore_ref: str | None = None
     reason_code: str | None = None
     message: str = ""
     cleanup_command: str | None = None
@@ -267,7 +276,7 @@ async def cleanup_validation_worktree_side_effects(
     *,
     run_git: GitRunner,
     worktree_path: Path,
-    restore_ref: str = "HEAD",
+    restore_ref: str | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
 
@@ -360,23 +369,11 @@ async def cleanup_validation_worktree_side_effects(
         worktree_path=worktree_path,
     )
     if check.clean:
-        if restore_ref == "HEAD":
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=(
-                    "Could not verify validation worktree HEAD after cleanup because "
-                    "`restore_ref` was not captured before validation."
-                ),
-            )
-
-        if restore_ref != "HEAD":
+        if restore_ref is not None:
             head_check = await _verify_head_unchanged(restore_ref=restore_ref)
             if head_check is not None:
                 return head_check
-        return ValidationWorktreeCleanup(cleaned=False, check=check, restore_ref=restore_ref)
+        return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
     if check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
         return ValidationWorktreeCleanup(
             cleaned=False,
@@ -388,7 +385,20 @@ async def cleanup_validation_worktree_side_effects(
 
     tracked_paths = check.tracked_paths
     untracked_paths = check.untracked_paths
+    if restore_ref is None and tracked_paths:
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=check,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=(
+                "Could not verify validation worktree HEAD after cleanup because "
+                "`restore_ref` was not captured before validation."
+            ),
+        )
+
     if tracked_paths:
+        assert restore_ref is not None
         restore = await run_git(
             ["restore", "--source", restore_ref, "--staged", "--worktree", "--", *tracked_paths]
         )
@@ -443,7 +453,7 @@ async def cleanup_validation_worktree_side_effects(
             verify_check=verify,
         )
 
-    if restore_ref != "HEAD":
+    if restore_ref is not None:
         head_check = await _verify_head_unchanged(restore_ref=restore_ref)
         if head_check is not None:
             return head_check

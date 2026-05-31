@@ -86,6 +86,7 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
 ) -> None:
     """A failed git restore should not crash if stderr is None."""
     worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate restore failure after a dirty tracked file is reported."""
@@ -96,7 +97,9 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
-        run_git=run_git, worktree_path=worktree
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
     )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
@@ -134,6 +137,7 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
 ) -> None:
     """If cleanup succeeds but worktree remains dirty, do not label status as the cleanup command."""
     worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
 
     calls: list[tuple[str, ...]] = []
 
@@ -149,7 +153,9 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
-        run_git=run_git, worktree_path=worktree
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
     )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
@@ -163,6 +169,7 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
 ) -> None:
     """Status inspection failures during post-clean verification."""
     worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
     calls: list[tuple[str, ...]] = []
 
     async def run_git(args: list[str]) -> _CommandResultLike:
@@ -181,7 +188,9 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
-        run_git=run_git, worktree_path=worktree
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
     )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
@@ -256,10 +265,10 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
 
 
 @pytest.mark.unit
-async def test_cleanup_validation_worktree_rejects_clean_state_with_default_head_reference(
+async def test_cleanup_validation_worktree_treats_clean_state_as_noop_when_restore_ref_is_missing(
     tmp_path: Path,
 ) -> None:
-    """A clean worktree cannot be validated without a captured pre-validation HEAD."""
+    """A clean worktree does not fail cleanup when no pre-validation HEAD was captured."""
     worktree = _init_fake_worktree(tmp_path)
     calls: list[tuple[str, ...]] = []
 
@@ -271,14 +280,12 @@ async def test_cleanup_validation_worktree_rejects_clean_state_with_default_head
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
-        run_git=run_git, worktree_path=worktree, restore_ref="HEAD"
+        run_git=run_git, worktree_path=worktree
     )
 
-    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
-    assert cleanup.message == (
-        "Could not verify validation worktree HEAD after cleanup because "
-        "`restore_ref` was not captured before validation."
-    )
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert cleanup.message == ""
     assert calls == [("status", "--porcelain=v1", "--untracked-files=all")]
 
 
