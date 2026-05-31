@@ -44,7 +44,6 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
-    BaseFetchError,
     ProtectedScopeDiffError,
 )
 from awf.service.merge_queue import MergeQueueBlocker
@@ -660,6 +659,151 @@ async def test_execute_ci_fix_diff_baseline_unavailable_terminates_with_diff_rea
     assert scope_events[0].reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
     assert scope_events[0].payload is not None
     assert scope_events[0].payload["reason"] == "diff_baseline_unavailable"
+
+
+@pytest.mark.unit
+async def test_execute_ci_fix_workflow_scope_push_failure_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify CI repair workflow-scope push failures are terminal."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    cmd.queue_result(returncode=0)  # gh pr comment notification
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Updated workflow repair.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing check"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
+    assert ci_operation.status == OperationStatus.failed.value
+    assert ci_operation.error_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert ci_operation.result is not None
+    assert ci_operation.result["outcome"] == "github_workflow_scope_required"
+    assert ci_operation.result["reason_code"] == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert ci_operation.result["failure_evidence"]["reason_code"] == (
+        "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    )
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "ci_repair_push"
+    assert push_events[0].payload["outcome"] == "failed"
+    assert push_events[0].payload["evidence"]["reason_code"] == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
+    assert len(comment_calls) == 1
+    body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
+    assert "GitHub rejected the workflow-file push" in body
+    assert "`workflow` scope for .github/workflows/publish.yml" in body
+
+
+@pytest.mark.unit
+async def test_execute_ci_fix_workflow_scope_notification_failure_still_terminates(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Notification failures must not skip terminal workflow-scope handling."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    cmd.queue_result(returncode=1, stderr="bad credentials")  # gh pr comment notification
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Updated workflow repair.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing check"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
+    assert ci_operation.status == OperationStatus.failed.value
+    assert ci_operation.error_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
+    assert len(comment_calls) == 1
 
 
 @pytest.mark.unit
@@ -1340,65 +1484,3 @@ async def test_fetch_base_repairs_multiple_broken_awf_refs_before_failing_worksp
         "bad ref ws_old_1",
         "bad ref ws_old_2",
     ]
-
-
-@pytest.mark.unit
-async def test_fetch_base_wraps_broken_ref_repair_exceptions_as_base_fetch_error(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    mocker: pytest_mock.MockerFixture,
-) -> None:
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    fetch_base_once = mocker.patch.object(
-        runner,
-        "_fetch_base_once",
-        mocker.AsyncMock(
-            return_value=CommandResult(
-                returncode=1,
-                stdout="",
-                stderr="fatal: bad object refs/heads/awf/ws_old",
-            )
-        ),
-    )
-    repair = mocker.patch.object(
-        runner,
-        "_repair_orphaned_broken_awf_ref",
-        mocker.AsyncMock(side_effect=RuntimeError("database unavailable")),
-    )
-
-    with pytest.raises(BaseFetchError, match="broken AWF ref repair failed") as exc:
-        await runner._fetch_base(
-            workspace_id="ws_current",
-            worktree_path=tmp_path / "worktrees" / "ws_current",
-            base_branch="development",
-        )
-
-    assert "database unavailable" in str(exc.value)
-    assert fetch_base_once.await_count == 1
-    repair.assert_awaited_once()
-
-
-@pytest.mark.unit
-async def test_missing_workspace_terminal_helpers_return_without_side_effects(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    with pytest.raises(RuntimeError, match="disappeared"):
-        await runner._load_workspace("ws_missing")
-    await runner._persist_state("ws_missing", MonitorState(last_push_sha="abc"))
-    await runner._terminate_failed("ws_missing", message="missing")
-    await runner._terminate_completed("ws_missing", pr_merge_sha="abc")

@@ -24,8 +24,6 @@ from awf.common.github_client import GitHubClientError, RepoRef
 from awf.control.protected_file_diffs import git_show_text
 from awf.db.enums import (
     OperationStatus,
-    OperationType,
-    TaskClass,
     WorkspaceStatus,
 )
 from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation, Workspace
@@ -53,11 +51,10 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
-from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.comments import VerdictResult, _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.helpers import (
     _ci_transient_rerun_attempt,
     _initial_review_grace_started_key,
-    _non_check_reviewer_settle_started_key,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
@@ -171,6 +168,19 @@ class _CommandIterable:
 
 def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:
     return [call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
+
+
+@pytest.mark.unit
+async def test_owned_paths_for_prompt_propagates_session_factory_type_error() -> None:
+    """Verify owned-path prompt loading preserves session factory TypeError."""
+
+    def _broken_session_factory() -> object:
+        raise TypeError("session factory contract changed")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(session_factory=_broken_session_factory))
+
+    with pytest.raises(TypeError, match="session factory contract changed"):
+        await _owned_paths_for_prompt(runner, "ws_1")  # type: ignore[arg-type]
 
 
 class _CapturingGH:
@@ -292,20 +302,6 @@ async def _provider_recovery_snapshot(
             operations,
             requested_ids,
         )
-
-
-async def _mark_refactor_task(
-    factory: async_sessionmaker[AsyncSession],
-    workspace_id: str,
-    *,
-    auto_merge: bool = True,
-) -> None:
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.task_class = TaskClass.refactor_task.value
-        workspace.auto_merge = auto_merge
-        await session.commit()
 
 
 async def _dispatch_merge_recovery(
@@ -560,13 +556,16 @@ async def test_protected_status_diff_for_unreadable_file_fails_closed(
 
 @pytest.mark.unit
 async def test_address_review_comment_prompt_receives_workspace_runtime_context(
+    factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify review-comment prompts receive workspace runtime context."""
     context = "Workspace runtime context\n- Use `$AWF_TEST_DATABASE_URL`."
     runner = _monitor_runner(
         tmp_path,
         FakeCommandRunner(),
+        session_factory=factory,
         workspace_runtime_context=context,
     )
     captured: dict[str, str] = {}
@@ -1377,120 +1376,3 @@ async def test_wait_for_ci_records_check_wait_operation(
         "outcome": "wait_elapsed",
         "slept_seconds": 60,
     }
-
-
-@pytest.mark.unit
-async def test_auto_merge_dispatches_validation_recovery_before_merge(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 81
-    head_sha = "b" * 40
-    cmd = FakeCommandRunner()
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    await _mark_refactor_task(factory, workspace_id)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        initial_review_grace_period_seconds=0,
-    )
-
-    terminal = await runner._execute(
-        action=Merge(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_green_status(pr_number=pr_number, head_sha=head_sha),
-        state=MonitorState(started_at=0.0),
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-
-    assert terminal is True
-    assert _gh_pr_merge_calls(cmd) == []
-    assert workspace is not None
-    assert workspace.status == WorkspaceStatus.ready.value
-    assert len(operations) == 1
-    assert operations[0].type == "validate"
-    assert operations[0].status == OperationStatus.pending.value
-    assert operations[0].payload["action"] == "validate_only"
-    assert operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
-    assert operations[0].payload["source_head_sha"] == head_sha
-
-
-@pytest.mark.unit
-async def test_auto_merge_waits_for_reviewer_settle_before_validation_recovery(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 811
-    head_sha = "8" * 40
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    await _mark_refactor_task(factory, workspace_id)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        initial_review_grace_period_seconds=0,
-        non_check_reviewer_settle_seconds=900,
-    )
-    state = MonitorState(started_at=1000.0)
-
-    terminal = await runner._execute(
-        action=Merge(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_green_status(pr_number=pr_number, head_sha=head_sha),
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-
-    assert terminal is False
-    assert sleep_fn.calls == [60]
-    assert workspace is not None
-    assert workspace.status == WorkspaceStatus.monitoring_pr.value
-    assert not [op for op in operations if op.type == OperationType.validate.value]
-    settle_operations = [
-        op
-        for op in operations
-        if op.type == OperationType.monitor_state.value
-        and op.payload.get("reason_code") == "NON_CHECK_REVIEWER_SETTLE"
-    ]
-    assert len(settle_operations) == 1
-    assert (
-        _non_check_reviewer_settle_started_key(pr_number=pr_number, head_sha=head_sha)
-        in state.threads_addressed_ids
-    )
