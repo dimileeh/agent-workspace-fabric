@@ -23,23 +23,23 @@ def monitor_precommit_autofix_repair_paths(commit_result: CommandResult) -> tupl
     if _PRE_COMMIT_AUTOFIX_MARKER not in output:
         return ()
 
-    failed_hooks = tuple(
-        dict.fromkeys(
-            match.group("hook_id") for match in _PRE_COMMIT_HOOK_ID_PATTERN.finditer(output)
-        )
-    )
-    deterministic_hooks = tuple(
-        hook for hook in failed_hooks if hook in _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS
-    )
-    semantic_hooks = tuple(
-        hook for hook in failed_hooks if hook not in _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS
-    )
-    if semantic_hooks or not deterministic_hooks:
-        return ()
+    hook_matches = tuple(_PRE_COMMIT_HOOK_ID_PATTERN.finditer(output))
+    repair_paths: list[str] = []
+    for index, hook_match in enumerate(hook_matches):
+        hook_id = hook_match.group("hook_id")
+        if hook_id not in _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS:
+            continue
 
-    return tuple(
-        dict.fromkeys(
-            match.group("path").strip()
-            for match in _PRE_COMMIT_FIXING_PATH_PATTERN.finditer(output)
+        next_hook_start = (
+            hook_matches[index + 1].start() if index + 1 < len(hook_matches) else len(output)
         )
-    )
+        hook_output = output[hook_match.start() : next_hook_start]
+        if _PRE_COMMIT_AUTOFIX_MARKER not in hook_output:
+            continue
+
+        repair_paths.extend(
+            match.group("path").strip()
+            for match in _PRE_COMMIT_FIXING_PATH_PATTERN.finditer(hook_output)
+        )
+
+    return tuple(dict.fromkeys(repair_paths))

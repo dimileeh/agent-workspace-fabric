@@ -75,7 +75,7 @@ def test_monitor_precommit_autofix_skips_formatter_check_repair_paths() -> None:
 
 
 @pytest.mark.unit
-def test_monitor_precommit_autofix_skips_mixed_normalizer_and_format_check_paths() -> None:
+def test_monitor_precommit_autofix_keeps_normalizer_paths_when_format_check_cofails() -> None:
     output = (
         "fix end of files................................................Failed\n"
         "- hook id: end-of-file-fixer\n"
@@ -89,7 +89,9 @@ def test_monitor_precommit_autofix_skips_mixed_normalizer_and_format_check_paths
     )
     commit_result = CommandResult(returncode=1, stdout=output, stderr="")
 
-    assert _monitor_precommit_autofix_repair_paths(commit_result) == ()
+    assert _monitor_precommit_autofix_repair_paths(commit_result) == (
+        "docs/awf-plans/ws_761.conformance.json",
+    )
 
 
 def _deterministic_autofix_stderr(*paths: str) -> str:
@@ -99,6 +101,28 @@ def _deterministic_autofix_stderr(*paths: str) -> str:
         "- exit code: 1\n"
         "- files were modified by this hook\n\n" + "".join(f"Fixing {path}\n" for path in paths)
     )
+
+
+def _deterministic_autofix_with_cofailed_mypy_stderr(*paths: str) -> str:
+    return (
+        _deterministic_autofix_stderr(*paths)
+        + "mypy...................................................................Failed\n"
+        "- hook id: awf-mypy\n"
+        "- exit code: 1\n\n"
+        "src/awf/runtime/pr_monitor_runner/precommit_autofix.py:1: error: example\n"
+    )
+
+
+@pytest.mark.unit
+def test_monitor_precommit_autofix_keeps_normalizer_paths_when_semantic_hook_cofails() -> None:
+    fixed_path = "docs/awf-plans/ws_761.conformance.json"
+    commit_result = CommandResult(
+        returncode=1,
+        stdout="",
+        stderr=_deterministic_autofix_with_cofailed_mypy_stderr(fixed_path),
+    )
+
+    assert _monitor_precommit_autofix_repair_paths(commit_result) == (fixed_path,)
 
 
 @pytest.mark.unit
@@ -214,6 +238,36 @@ async def test_monitor_precommit_autofix_retry_allows_untracked_operation_paths(
     assert retry is not None
     retry_result, restaged_paths = retry
     assert retry_result.ok
+    assert restaged_paths == (fixed_path,)
+    assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
+
+
+@pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_restages_normalizer_when_other_hook_cofails(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "docs/awf-plans/ws_761.conformance.json"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=1, stderr="mypy still failed")
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_with_cofailed_mypy_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(fixed_path,),
+    )
+
+    assert retry is not None
+    retry_result, restaged_paths = retry
+    assert not retry_result.ok
     assert restaged_paths == (fixed_path,)
     assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
 
