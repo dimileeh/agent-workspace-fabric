@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from awf.host_setup import system_checks
-from awf.host_setup.config import ApiConfig, HostSetupConfig
+from awf.host_setup.config import DEFAULT_API_HOST_PORT, ApiConfig, HostSetupConfig
 from awf.host_setup.rendering import (
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
@@ -1075,25 +1075,29 @@ def test_run_system_checks_explicit_port_overrides_env(
 
 
 @pytest.mark.unit
-def test_run_system_checks_falls_back_to_config_port_when_override_blank(
+def test_run_system_checks_falls_back_to_compose_default_when_override_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing or blank ``AWF_API_HOST_PORT`` falls back to the config port.
+    """A missing or blank ``AWF_API_HOST_PORT`` falls back to Compose's default.
 
-    Compose interpolates ``${AWF_API_HOST_PORT:-8000}``, so an absent or
-    whitespace-only override is a legitimate fall-back to the persisted default
-    rather than a configuration error.
+    Compose interpolates ``${AWF_API_HOST_PORT:-8000}`` and ``awf start`` never
+    reads the persisted ``config.api.host_port`` — it publishes that Compose
+    default from the resolved service env. So an absent or whitespace-only
+    override probes Compose's built-in ``8000`` rather than blocking, and a
+    non-default ``config.api.host_port`` is deliberately ignored: probing it
+    would report readiness for a port ``awf start`` would never publish.
     """
     captured: dict[str, object] = {}
     _patch_probes_capture_port(monkeypatch, captured)
 
-    for blank in ("", "   "):
+    for blank in (None, "", "   "):
+        environ = {} if blank is None else {"AWF_API_HOST_PORT": blank}
         run_system_checks(
             config=HostSetupConfig(api=ApiConfig(host_port=8123)),
             work_dir=Path("/tmp"),
-            environ={"AWF_API_HOST_PORT": blank},
+            environ=environ,
         )
-        assert captured["port"] == 8123, repr(blank)
+        assert captured["port"] == DEFAULT_API_HOST_PORT, repr(blank)
 
 
 @pytest.mark.unit

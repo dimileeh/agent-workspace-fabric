@@ -19,7 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from awf.host_setup.config import HostSetupConfig
+from awf.host_setup.config import DEFAULT_API_HOST_PORT, HostSetupConfig
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_PROVIDER_UNKNOWN,
@@ -651,9 +651,9 @@ def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
     """Return a usable ``AWF_API_HOST_PORT`` override, or ``None`` when unusable.
 
     A missing, blank, malformed, or out-of-range value yields ``None``. Callers
-    distinguish an *absent or blank* override (a legitimate fall-back to the
-    persisted config port, mirroring Compose's ``${AWF_API_HOST_PORT:-8000}``
-    default) from a *set but invalid* value via
+    distinguish an *absent or blank* override (a legitimate fall-back to
+    Compose's ``8000`` default, mirroring ``${AWF_API_HOST_PORT:-8000}``) from a
+    *set but invalid* value via
     :func:`_invalid_api_host_port_override`, which the readiness probe surfaces
     as a startup blocker instead of silently probing the default port.
     """
@@ -673,21 +673,26 @@ def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
 
 
 def _resolve_api_host_port(
-    config: HostSetupConfig,
     *,
     port: int | None,
     environ: Mapping[str, str] | None,
 ) -> int:
     """Resolve which host port the readiness probe should bind.
 
-    Precedence mirrors the port ``awf start`` actually publishes rather than the
-    persisted default alone: an explicit caller override wins, then the
-    ``AWF_API_HOST_PORT`` environment override that Docker Compose interpolates
-    into ``${AWF_API_HOST_PORT:-8000}:8000`` (and that ``awf service bootstrap``
-    resolves the host-side URL from), and finally the persisted
-    ``config.api.host_port``. Honoring the env override keeps ``awf setup`` from
-    falsely blocking on the default 8000 when an operator has moved the published
-    port elsewhere.
+    Precedence mirrors the port ``awf start`` actually publishes: an explicit
+    caller override wins, then the ``AWF_API_HOST_PORT`` environment override
+    that Docker Compose interpolates into ``${AWF_API_HOST_PORT:-8000}:8000``
+    (and that ``awf service bootstrap`` resolves the host-side URL from), and
+    finally Compose's built-in ``8000`` default when no override is set. Honoring
+    the env override keeps ``awf setup`` from falsely blocking on the default
+    8000 when an operator has moved the published port elsewhere.
+
+    The persisted ``config.api.host_port`` is deliberately *not* consulted here.
+    ``awf start`` publishes ``${AWF_API_HOST_PORT:-8000}`` from the resolved
+    Compose env and never reads ``config.api.host_port``; nothing propagates that
+    persisted value into the Compose env. Probing it would report readiness for a
+    port ``awf start`` would never publish whenever an operator set a non-default
+    ``config.api.host_port`` without also exporting ``AWF_API_HOST_PORT``.
     """
     if port is not None:
         return port
@@ -695,7 +700,7 @@ def _resolve_api_host_port(
     override = _env_api_host_port(env)
     if override is not None:
         return override
-    return config.api.host_port
+    return DEFAULT_API_HOST_PORT
 
 
 def _invalid_api_host_port_override(
@@ -707,8 +712,9 @@ def _invalid_api_host_port_override(
 
     Returns ``None`` (no configuration error) when an explicit caller ``port``
     wins, when the override is unset, or when it is blank/whitespace-only — the
-    last case is a legitimate fall-back to the persisted default because Compose
-    interpolates ``${AWF_API_HOST_PORT:-8000}``. Only a *non-empty* value that
+    last case is a legitimate fall-back to Compose's ``8000`` default because
+    Compose interpolates ``${AWF_API_HOST_PORT:-8000}``. Only a *non-empty* value
+    that
     does not parse to a ``1..65535`` TCP port is returned: Compose publishes it
     verbatim into ``<value>:8000`` and ``awf start``/``awf service`` settings
     reject the same override, so the readiness probe must block on it instead of
@@ -804,7 +810,7 @@ def run_system_checks(
     if invalid_api_host_port is not None:
         ports_check = check_api_host_port_override(invalid_api_host_port)
     else:
-        resolved_port = _resolve_api_host_port(config, port=port, environ=environ)
+        resolved_port = _resolve_api_host_port(port=port, environ=environ)
         ports_check = check_ports(resolved_port)
     resolved_work_dir = _resolve_work_dir(config, work_dir=work_dir, environ=environ)
     return [
