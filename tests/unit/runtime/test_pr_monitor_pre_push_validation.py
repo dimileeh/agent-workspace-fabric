@@ -956,6 +956,68 @@ async def test_ci_repair_uses_validated_push(
 
 
 @pytest.mark.unit
+async def test_ci_repair_owned_path_lookup_failure_stops_before_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CI repair should not build prompts with fallback-empty owned paths."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        """Indicate there is no pre-existing dirty worktree state."""
+
+    async def _provider_allows_cli(*_args: object) -> bool:
+        """Return a fixed provider policy for CLI suppression in repairs."""
+        return False
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        """Return a fixed starting head for CI repair simulation."""
+        return ("start", None)
+
+    def _broken_session_factory() -> object:
+        raise TypeError("session factory unavailable")
+
+    async def _unexpected_commit(**_kwargs: object) -> bool:
+        """Fail loudly if repair reaches commit after owned-path lookup fails."""
+        pytest.fail("CI repair must not commit after owned-path lookup failure")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _provider_allows_cli)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner._deps, "session_factory", _broken_session_factory)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit)
+
+    with pytest.raises(TypeError, match="session factory unavailable"):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(
+                    name="ci",
+                    conclusion="FAILURE",
+                    log_excerpt="failed",
+                ),
+            ),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+            state=MonitorState(),
+        )
+
+    assert adapter.calls == []
+
+
+@pytest.mark.unit
 async def test_sync_base_uses_validated_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
