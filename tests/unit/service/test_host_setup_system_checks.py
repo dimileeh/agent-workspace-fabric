@@ -185,7 +185,7 @@ def test_run_system_checks_docker_probe_targets_resolved_docker_host(
         return _Completed()
 
     monkeypatch.setattr(system_checks.subprocess, "run", fake_run)
-    monkeypatch.setattr(system_checks.shutil, "which", lambda _cmd: "/usr/bin/docker")
+    monkeypatch.setattr(system_checks.shutil, "which", lambda _cmd, **_kwargs: "/usr/bin/docker")
     _stub_non_docker_checks_ok(monkeypatch)
 
     results = run_system_checks(
@@ -238,6 +238,65 @@ def test_run_system_checks_docker_probe_inherits_env_without_service_env(
 
     info_env = next(env for args, env in calls if args[:2] == ("docker", "info"))
     assert info_env is None
+
+
+@pytest.mark.unit
+def test_run_system_checks_docker_binary_lookup_uses_resolved_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Docker binary-presence gate searches the resolved service env PATH.
+
+    The readiness runner locates ``docker`` via the resolved service env PATH
+    (``subprocess`` honours ``env['PATH']`` for executable resolution, exactly as
+    ``awf start`` hands its merged service env to the Docker subprocesses), so the
+    binary-presence ``which`` gate must search that same PATH. Using the bare
+    process PATH would report "Docker CLI is not installed" for a ``docker``
+    reachable only through the resolved service env's PATH -- falsely blocking
+    ``awf setup --dry-run`` for a startup configuration that would succeed.
+    """
+
+    class _Completed:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_run(
+        args: Sequence[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        errors: str,
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> _Completed:
+        return _Completed()
+
+    seen: list[str | None] = []
+
+    def fake_which(cmd: str, path: str | None = None) -> str | None:
+        seen.append(path)
+        # ``docker`` resolves only against the service-env PATH, never the bare
+        # process environment.
+        if cmd == "docker" and path is not None and "/opt/docker/bin" in path:
+            return "/opt/docker/bin/docker"
+        return None
+
+    monkeypatch.setattr(system_checks.subprocess, "run", fake_run)
+    monkeypatch.setattr(system_checks.shutil, "which", fake_which)
+    _stub_non_docker_checks_ok(monkeypatch)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        environ={"PATH": "/opt/docker/bin"},
+    )
+
+    docker_check = next(r for r in results if r.name == "docker")
+    assert docker_check.level is SetupCheckLevel.OK
+    assert docker_check.data["available"] is True
+    # The gate searched the resolved service-env PATH, not the bare process PATH.
+    assert any(path is not None and "/opt/docker/bin" in path for path in seen)
 
 
 # --- Compose --------------------------------------------------------------

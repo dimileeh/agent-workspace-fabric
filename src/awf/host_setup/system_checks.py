@@ -239,6 +239,31 @@ def _docker_probe_runner(environ: Mapping[str, str] | None) -> CommandRunner:
     return run
 
 
+def _docker_probe_which(environ: Mapping[str, str] | None) -> WhichFn:
+    """Return a ``which`` that resolves the Docker binary against the probe PATH.
+
+    The Docker readiness runner locates ``docker`` via the resolved service
+    environment's PATH -- ``subprocess`` honours ``env['PATH']`` for executable
+    resolution, exactly as ``awf start`` hands its merged service env to the
+    Docker subprocesses. The binary-presence gate must therefore search that same
+    PATH; falling back to ``shutil.which`` against the bare process environment
+    would report "Docker CLI is not installed" for a ``docker`` reachable only
+    through the resolved service env's PATH, falsely blocking
+    ``awf setup --dry-run`` for a startup configuration that would succeed.
+
+    Returns ``shutil.which`` unchanged when no service environment is supplied
+    (direct/test callers), mirroring :func:`_docker_probe_runner`'s pass-through.
+    """
+    probe_env = _docker_probe_environ(environ)
+    if probe_env is None:
+        return shutil.which
+
+    def which(cmd: str) -> str | None:
+        return shutil.which(cmd, path=probe_env.get("PATH"))
+
+    return which
+
+
 def _probe_port_bind(port: int, host: str) -> PortProbeResult:
     """Classify whether ``port`` can be bound on ``host``, by ``errno``.
 
@@ -1764,9 +1789,15 @@ def run_system_checks(
     # Probe the daemon ``awf start`` will use: the resolved service env can point
     # Docker at a different host (``AWF_DOCKER_HOST``) or blank an inherited
     # ``DOCKER_HOST``, so feed that selection into both the docker and compose
-    # probes instead of silently inheriting the bare process environment.
+    # probes instead of silently inheriting the bare process environment. The
+    # runner locates ``docker`` via the resolved env's PATH (subprocess honours
+    # ``env['PATH']`` for executable resolution), so the binary-presence gate must
+    # search that same PATH -- otherwise a ``docker`` reachable only through the
+    # service env's PATH would be reported "not installed" before the runner is
+    # even tried.
     docker_runner = _docker_probe_runner(environ)
-    docker_check = check_docker(run=docker_runner)
+    docker_which = _docker_probe_which(environ)
+    docker_check = check_docker(which=docker_which, run=docker_runner)
     # When the Docker CLI binary is absent, the ``docker compose`` plugin cannot
     # exist either: check_compose would re-probe the same missing binary and
     # append a second BLOCKED result for one root cause (a missing Docker
