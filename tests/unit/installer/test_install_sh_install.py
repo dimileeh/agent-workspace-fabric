@@ -380,6 +380,47 @@ def test_empty_version_space_form_is_a_bad_usage_error(harness: InstallerHarness
 
 
 @pytest.mark.unit
+def test_empty_install_dir_equals_form_is_a_bad_usage_error(harness: InstallerHarness) -> None:
+    """``--install-dir=`` must not silently fall back to the default bin directory.
+
+    ``--install-dir`` scopes where uv/pipx link the executable, how ``awf``
+    reachability is verified, and which bin dir uninstall re-exports. Every
+    downstream use gates on ``[ -n "$INSTALL_DIR" ]``, so an empty value (e.g.
+    ``--install-dir=`` or an empty wrapper variable) is indistinguishable from
+    omitting the flag and silently mutates uv/pipx's default bin dir instead of the
+    caller's intended isolated location. Reject it with ``BAD_USAGE`` at parse time.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--install-dir="], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "BAD_USAGE" in result.stderr
+    assert "--install-dir" in result.stderr
+    # Rejected during arg parsing: no platform probe, manifest fetch, or install.
+    assert harness.calls() == []
+
+
+@pytest.mark.unit
+def test_empty_install_dir_space_form_is_a_bad_usage_error(harness: InstallerHarness) -> None:
+    """``--install-dir ""`` (empty wrapper variable) is rejected the same way."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--install-dir", ""], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "BAD_USAGE" in result.stderr
+    assert "--install-dir" in result.stderr
+    assert harness.calls() == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "bad_version",
     ["../../../evil", "1.2.3/../../etc", "/etc/passwd", "..", "v1 2"],

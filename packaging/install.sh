@@ -156,6 +156,22 @@ require_version() {
     VERSION="$version"
 }
 
+require_install_dir() {
+    # --install-dir scopes three things: where uv/pipx link the executable
+    # (UV_TOOL_BIN_DIR/PIPX_BIN_DIR), how `awf` reachability is verified, and which
+    # bin dir uninstall re-exports so neither manager orphans the link. Every
+    # downstream use gates on [ -n "$INSTALL_DIR" ], so an empty value (e.g.
+    # `--install-dir=` or an empty wrapper variable) is indistinguishable from
+    # omitting the flag and silently mutates uv/pipx's default bin dir instead of
+    # the caller's intended isolated location. Reject an explicit empty value at
+    # the boundary; omitting --install-dir entirely is still valid (uses default).
+    # Unlike --version this imposes no charset constraint: a bin path legitimately
+    # contains slashes, so only emptiness is rejected here.
+    if [ -z "$1" ]; then
+        bad_usage "empty value for --install-dir; pass --install-dir <path> or omit it to use the default bin directory"
+    fi
+}
+
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -191,10 +207,12 @@ parse_args() {
             --install-dir)
                 require_value "$1" "$#"
                 INSTALL_DIR="$2"
+                require_install_dir "$INSTALL_DIR"
                 shift 2
                 ;;
             --install-dir=*)
                 INSTALL_DIR="${1#*=}"
+                require_install_dir "$INSTALL_DIR"
                 shift
                 ;;
             --shell)
