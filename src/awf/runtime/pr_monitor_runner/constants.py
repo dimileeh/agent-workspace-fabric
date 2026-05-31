@@ -59,6 +59,10 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
     "secondary rate limit",
     "abuse detection",
     "something went wrong",
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "could not resolve proxy",
 )
 
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
