@@ -817,6 +817,128 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed validation-fix commit must not leave staged changes for the next repair."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    fix_start_head = "e" * 40
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is False
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+    assert any("clean -fd" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit-path exception should not strand the fix-pass worktree delta."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    fix_start_head = "9" * 40
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        raise RuntimeError("commit path failed")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is False
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+    assert any("clean -fd" in call for call in joined_calls)
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_revalidates_before_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -830,6 +952,7 @@ async def test_pre_push_validation_fix_pass_revalidates_before_push(
     cmd = FakeCommandRunner()
     first_head = "b" * 40
     fixed_head = "c" * 40
+    cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
@@ -884,6 +1007,7 @@ async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
     cmd = FakeCommandRunner()
     first_head = "d" * 40
     fixed_head = "e" * 40
+    cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
@@ -942,6 +1066,7 @@ async def test_pre_push_validation_fix_pass_commits_agent_failure_evidence(
     first_head = "f" * 40
     fixed_head = "1" * 40
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()
@@ -994,6 +1119,9 @@ async def test_pre_push_validation_fix_pass_cleanup_failure_blocks_push(
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'2' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'2' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {'2' * 8}\n")
+    cmd.queue_result(returncode=0, stdout="")
     adapter = FakeAdapter()
     adapter.queue(
         exc=ComposeExecCleanupError(
@@ -1041,6 +1169,9 @@ async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reaso
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {'f' * 8}\n")
+    cmd.queue_result(returncode=0, stdout="")
     runner = make_runner(
         factory=factory,
         cmd=cmd,

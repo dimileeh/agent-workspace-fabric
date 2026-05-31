@@ -340,6 +340,15 @@ async def _run_pre_push_validation_fix_pass(
     first_fail = validation_result.first_failure
     if first_fail is None:
         return False
+    worktree_path = self._worktrees_root / workspace_id
+    fix_start_head = await self._rev_parse_head(worktree_path)
+    if fix_start_head is None:
+        _log.warning(
+            "monitor.pre_push_validation_fix_start_head_unavailable",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+        )
+        return False
     context = ValidationFixContext(
         failed_command=first_fail.command,
         returncode=first_fail.returncode,
@@ -405,6 +414,14 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason_code=exc.reason_code,
         )
+        await _rollback_failed_pre_push_validation_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            pass_number=pass_number,
+            reason="compose_cleanup_failed",
+        )
         return False
     except Exception as exc:
         _log.warning(
@@ -413,20 +430,85 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             error=repr(exc),
         )
+        await _rollback_failed_pre_push_validation_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            pass_number=pass_number,
+            reason="agent_exception",
+        )
         return False
 
-    return bool(
-        await self._commit_dirty_worktree(
-            workspace_id=workspace_id,
-            message=f"awf: pre-push validation fix for {workspace_id}",
-            compose_project=compose_project,
-            compose_file=compose_file,
-            state=state,
-            command_evidence=command_evidence,
-            protected_scope_revert_remote_branch=remote_branch,
-            remote_push_url=remote_url,
+    try:
+        committed = bool(
+            await self._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=f"awf: pre-push validation fix for {workspace_id}",
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                command_evidence=command_evidence,
+                protected_scope_revert_remote_branch=remote_branch,
+                remote_push_url=remote_url,
+            )
         )
+    except Exception as exc:
+        _log.warning(
+            "monitor.pre_push_validation_fix_commit_failed",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            error=repr(exc),
+        )
+        await _rollback_failed_pre_push_validation_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            pass_number=pass_number,
+            reason="commit_exception",
+        )
+        return False
+    if not committed:
+        await _rollback_failed_pre_push_validation_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            pass_number=pass_number,
+            reason="commit_failed",
+        )
+    return committed
+
+
+async def _rollback_failed_pre_push_validation_fix_pass(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    restore_ref: str,
+    pass_number: int,
+    reason: str,
+) -> bool:
+    """Rollback uncommitted validation-fix edits before the monitor loops again."""
+    reset = await self._deps.runner.run(
+        _git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
     )
+    clean = await self._deps.runner.run(_git_worktree_command(worktree_path, "clean", "-fd"))
+    ok = bool(reset.ok and clean.ok)
+    log = _log.info if ok else _log.warning
+    log(
+        "monitor.pre_push_validation_fix_rollback",
+        workspace_id=workspace_id,
+        pass_number=pass_number,
+        reason=reason,
+        restore_ref=restore_ref,
+        reset_returncode=reset.returncode,
+        clean_returncode=clean.returncode,
+        reset_stderr=(reset.stderr or "")[:400],
+        clean_stderr=(clean.stderr or "")[:400],
+    )
+    return ok
 
 
 async def _run_pre_push_validation(

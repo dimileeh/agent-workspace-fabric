@@ -29,6 +29,10 @@ rather than by the agent or user.
 - Cleanup failure must block push with structured paths and reason code.
 - Executor validation must clean validation-created dirt before PR creation.
 - Validation-fix agent commits must not include AWF validation side effects.
+- If a PR-monitor validation-fix agent edits files but AWF cannot commit those
+  edits, AWF must roll back the local fix-pass delta before the monitor loops
+  again. A failed commit attempt must not leave staged or unstaged repair files
+  behind for the next comment/CI repair turn.
 
 ## Implementation
 
@@ -43,6 +47,10 @@ rather than by the agent or user.
 - In executor validation, wrap each validation pass with the same guard and
   fail the validation operation immediately when cleanup cannot restore a clean
   worktree.
+- In PR-monitor validation-fix passes, capture the fix-pass start HEAD before
+  invoking the agent. On agent cleanup/exception or failed dirty-worktree commit,
+  run an AWF-owned `git reset --hard <fix-start-head>` plus `git clean -fd`,
+  log the rollback result, and return a fix failure without attempting push.
 
 ## Verification
 
