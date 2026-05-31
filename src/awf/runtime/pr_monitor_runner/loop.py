@@ -1062,13 +1062,16 @@ async def _execute(
                 return True
             state.iter_count += 1
             return False
-        if not push_result.pushed and (
-            state.pending_operator_hint is None
-            or state.pending_operator_hint.status in {"needs_human", "agent_failed"}
+        if push_result.pushed or (
+            not push_result.pushed
+            and (
+                state.pending_operator_hint is None
+                or state.pending_operator_hint.status in {"needs_human", "agent_failed"}
+            )
         ):
-            # Persist terminal or processed no-op hint status before returning
-            # to the outer loop so a restart cannot re-run the same hint as
-            # pending.
+            # Persist terminal, processed no-op, or pushed hint status before
+            # returning to the outer loop so a restart cannot re-run the same
+            # hint as pending.
             await self._persist_state(workspace_id, state)
         if push_result.pushed:
             outcome = "operator_hint_pushed"

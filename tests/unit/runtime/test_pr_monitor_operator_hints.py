@@ -582,6 +582,83 @@ async def test_operator_hint_terminal_failure_persists_needs_human_status(
 
 
 @pytest.mark.unit
+async def test_operator_hint_pushed_processed_status_is_persisted_before_return(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair produced a fix commit",
+        operation_id="op_pushed_processed_persisted",
+        requested_at="2026-05-31T05:20:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
+        await session.commit()
+
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _pushed_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        state_arg = kwargs["state"]
+        assert isinstance(state_arg, MonitorState)
+        operator_hints.mark_operator_hint_processed(state_arg)
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _pushed_operator_hint_cycle)
+
+    handled = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert handled is False
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+        operation = (
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == workspace_id,
+                        Operation.type == OperationType.comment_repair.value,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    assert persisted is not None
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert monitor_state[operator_hint_processed_key("op_pushed_processed_persisted")] == (
+        "processed"
+    )
+    assert operation.result["outcome"] == "operator_hint_pushed"
+    assert operation.result["pushed"] is True
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("terminal_status", ["needs_human", "agent_failed"])
 async def test_operator_hint_non_pushed_terminal_status_is_persisted_before_return(
     factory: async_sessionmaker[AsyncSession],
