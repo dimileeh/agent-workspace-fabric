@@ -97,6 +97,7 @@ async def _has_terminal_runtime_released_event(
         .where(
             WorkspaceEvent.workspace_id == workspace_id,
             WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
         )
         .limit(1)
     )
