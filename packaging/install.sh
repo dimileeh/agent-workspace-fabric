@@ -233,6 +233,27 @@ parse_args() {
         uv | pipx) ;;
         *) bad_usage "unsupported method: $METHOD (expected uv|pipx)" ;;
     esac
+
+    # Install-only pins are meaningless during --uninstall: uninstall_awf removes
+    # whatever uv/pipx currently manage regardless of version, and ignores the
+    # channel entirely. Silently accepting them would let `install.sh --version
+    # 0.2.0 --uninstall` look version-gated while it performs a standard managed
+    # removal. Reject the combination at parse time so the no-op flag is obvious at
+    # the boundary instead of after the fact. --method/--install-dir are NOT
+    # rejected: uninstall probes both managers by presence (not by --method, so a
+    # routing-follows-discovery removal stays valid) and re-exports --install-dir
+    # as the install-time bin dir so neither manager orphans the executable.
+    if [ "$DO_UNINSTALL" -eq 1 ]; then
+        if [ -n "$VERSION" ]; then
+            bad_usage "--version is not valid with --uninstall; uninstall removes whatever uv/pipx currently manage regardless of version"
+        fi
+        # CHANNEL defaults to stable, so an explicit --channel stable is
+        # indistinguishable from the default and harmless; only a non-default
+        # channel signals a meaningful (but ignored) pin worth rejecting.
+        if [ "$CHANNEL" != "stable" ]; then
+            bad_usage "--channel is not valid with --uninstall; uninstall is channel-independent"
+        fi
+    fi
 }
 
 # --------------------------------------------------------------------------

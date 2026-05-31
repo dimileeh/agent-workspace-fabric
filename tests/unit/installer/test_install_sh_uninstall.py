@@ -415,6 +415,72 @@ def test_uninstall_managed_pipx_install_with_large_list(
 
 
 @pytest.mark.unit
+def test_uninstall_rejects_version_pin(harness: InstallerHarness) -> None:
+    """``--version`` paired with ``--uninstall`` is rejected at parse time.
+
+    Uninstall removes whatever uv/pipx currently manage regardless of version, so
+    a ``--version`` pin is silently meaningless. Without an explicit guard
+    ``install.sh --version 0.2.0 --uninstall`` looks version-gated while
+    performing a standard managed removal. Reject the combination as ``BAD_USAGE``
+    (exit 2) before any removal runs so the no-op flag is obvious at the boundary.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output="")
+
+    result = harness.run(["--uninstall", "--version", "0.2.0"])
+
+    assert result.returncode == 2, result.stderr
+    assert "BAD_USAGE" in result.stderr
+    assert "--version" in result.stderr
+    # The parse-time rejection precedes discovery: no removal command runs.
+    joined = "\n".join(harness.calls())
+    assert f"uv tool uninstall {PACKAGE}" not in joined
+    assert f"pipx uninstall {PACKAGE}" not in joined
+
+
+@pytest.mark.unit
+def test_uninstall_rejects_non_default_channel(harness: InstallerHarness) -> None:
+    """A non-default ``--channel`` paired with ``--uninstall`` is rejected.
+
+    Uninstall is channel-independent, so ``--channel prerelease --uninstall`` is a
+    silent no-op flag. Reject it as ``BAD_USAGE`` (exit 2) so the meaningless
+    combination surfaces at parse time rather than after a standard removal.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output="")
+
+    result = harness.run(["--uninstall", "--channel", "prerelease"])
+
+    assert result.returncode == 2, result.stderr
+    assert "BAD_USAGE" in result.stderr
+    assert "--channel" in result.stderr
+    joined = "\n".join(harness.calls())
+    assert f"uv tool uninstall {PACKAGE}" not in joined
+    assert f"pipx uninstall {PACKAGE}" not in joined
+
+
+@pytest.mark.unit
+def test_uninstall_allows_explicit_default_channel(harness: InstallerHarness) -> None:
+    """``--channel stable`` (the default) does not trip the uninstall guard.
+
+    The guard rejects only a *non-default* channel: an explicit ``stable`` is
+    indistinguishable from the default and harmless, so the managed removal
+    proceeds normally. This keeps the guard from breaking the common case while
+    still flagging a meaningful channel pin.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output="")
+
+    result = harness.run(["--uninstall", "--channel", "stable"])
+
+    assert result.returncode == 0, result.stderr
+    assert f"uv tool uninstall {PACKAGE}" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
 def test_uninstall_aborts_on_unsupported_platform_before_mutation(
     harness: InstallerHarness,
 ) -> None:
