@@ -834,6 +834,7 @@ def _workspace_pr_adoption_policy(workspace: Workspace) -> Mapping[str, Any]:
 
 
 def _candidate_terminal_close_reason(status: WorkspaceStatus) -> str:
+    """Return a close-reason string corresponding to *status* for terminal cleanup."""
     if status == WorkspaceStatus.failed:
         return "WORKSPACE_FAILED"
     if status == WorkspaceStatus.cancelled:

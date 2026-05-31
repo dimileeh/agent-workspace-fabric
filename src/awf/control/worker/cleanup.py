@@ -349,6 +349,15 @@ async def _record_terminal_runtime_released(
     candidate: _TerminalRuntimeCandidate,
     cleanup: WorkspaceCleanupResult,
 ) -> None:
+    """Record a ``workspace.terminal_runtime_released`` event after terminal cleanup completes.
+
+    Uses ``SELECT FOR UPDATE SKIP LOCKED`` inside a retried DB operation to
+    deduplicate against concurrent workers racing on the same candidate
+    (possible when ``node_id`` is ``NULL``). Skips recording if the workspace
+    is no longer in a terminal-release status or the event already exists.
+    On recording failure, logs a warning and records a failed-release event
+    instead so the host port is still reclaimable downstream.
+    """
     payload = {
         "compose_project_name": candidate.compose_project_name,
         "workspace_status": candidate.status.value,
