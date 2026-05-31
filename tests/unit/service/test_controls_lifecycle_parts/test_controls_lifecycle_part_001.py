@@ -1019,6 +1019,73 @@ async def test_remonitor_no_reason_past_settle_arms_current_candidate_head(
 
 
 @pytest.mark.unit
+async def test_remonitor_no_reason_past_settle_prefers_workspace_head_when_open_candidate_stale(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    stale_candidate_head_sha = "e" * 40
+    workspace_head_sha = "f" * 40
+    candidate.head_sha = stale_candidate_head_sha
+    candidate.updated_at = datetime(2026, 5, 31, 14, 0, tzinfo=UTC)
+    await session.flush()
+    initial_done_key = _initial_review_grace_done_key(50)
+    initial_started_key = _initial_review_grace_started_key(50)
+    workspace_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=50,
+        head_sha=workspace_head_sha,
+    )
+    stale_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=stale_candidate_head_sha,
+    )
+    workspace_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=workspace_head_sha,
+    )
+    workspace.monitor_last_commit_sha = workspace_head_sha
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        workspace_settle_done_key: "elapsed",
+    }
+    workspace.updated_at = datetime(2026, 5, 31, 14, 1, tzinfo=UTC)
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=None,
+        idempotency_key="remonitor-no-reason-stale-open-candidate-head",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is paused "
+                "until reviewer settle is re-evaluated."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert candidate.head_sha == stale_candidate_head_sha
+    assert initial_done_key not in monitor_state
+    assert workspace_settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert stale_settle_started_key not in monitor_state
+    assert float(monitor_state[workspace_settle_started_key]) >= 1_000_000_000
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+
+
+@pytest.mark.unit
 async def test_remonitor_no_reason_stale_past_settle_does_not_arm_current_candidate_head(
     session: AsyncSession,
 ) -> None:
