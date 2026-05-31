@@ -1738,12 +1738,13 @@ async def test_cancel_workspace_records_terminal_runtime_released_when_launching
 
 
 @pytest.mark.unit
-async def test_stop_workspace_skips_terminal_runtime_released_when_no_launching(
+async def test_stop_workspace_records_terminal_runtime_released_when_compose_project_name(
     engine: AsyncEngine,
 ) -> None:
-    """When no provisioning_launching event exists, stop_workspace must not
-    record terminal_runtime_released because the compose project was never
-    started and ports were never actually bound."""
+    """When a workspace has a compose_project_name, stop_workspace must record
+    terminal_runtime_released even without a provisioning_launching event,
+    because _source_runtime_not_yet_released treats compose_project_name as
+    proof that ports were claimed and blocks retries until release."""
     factory = make_session_factory(engine)
     async with factory() as session:
         workspace = await _create_control_workspace(
@@ -1777,9 +1778,10 @@ async def test_stop_workspace_skips_terminal_runtime_released_when_no_launching(
         release_events = [
             e for e in events if e.event_type == "workspace.terminal_runtime_released"
         ]
-        assert len(release_events) == 0, (
-            "terminal_runtime_released must not be recorded when "
-            "provisioning_launching guard does not exist"
+        assert len(release_events) == 1, (
+            "terminal_runtime_released must be recorded when "
+            "compose_project_name is set, so _source_runtime_not_yet_released "
+            "does not block retries"
         )
 
 

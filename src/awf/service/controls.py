@@ -520,9 +520,10 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 payload=event_payload,
             )
-        if await _has_provisioning_launching_event(
-            self._session, workspace.id
-        ) and not await _has_terminal_runtime_released_event(self._session, workspace.id):
+        if (
+            workspace.compose_project_name is not None
+            and not await _has_terminal_runtime_released_event(self._session, workspace.id)
+        ):
             await repo.add_event(
                 workspace,
                 event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
