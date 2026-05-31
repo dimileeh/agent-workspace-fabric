@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.repositories import PRFeedbackResolutionRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     AddressComments,
@@ -706,6 +707,75 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
 
 
 @pytest.mark.unit
+async def test_workflow_scope_push_failure_requeues_false_positive_review_comment_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify workflow-scope push failures do not preserve unpublished review verdicts."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: local workflow fix already handles it")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[]))
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    comment = ReviewComment(
+        comment_id="issue:workflow",
+        body="Review-level workflow concern",
+        body_excerpt="Review-level workflow concern",
+        author="chatgpt-codex-connector[bot]",
+        url="https://github.example/comment/issue-workflow",
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert "issue:workflow" not in state.threads_addressed_ids
+    assert "__review_comment_body_hash__:issue:workflow" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:issue:workflow" not in state.threads_addressed_ids
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert rows == []
+
+    action = decide(_status(reviews=(comment,)), state, MonitorConfig())
+
+    assert isinstance(action, AddressComments)
+    assert action.threads == ()
+    assert action.review_comments == (comment,)
+
+
+@pytest.mark.unit
 async def test_workflow_scope_push_failure_requeues_captured_defer_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -809,8 +879,8 @@ def test_workflow_scope_requeue_clears_inline_threads_dependent_on_resolution() 
     assert "T_workflow" not in state.threads_addressed_ids
     assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids["issue:1"] == "false_positive"
-    assert state.threads_addressed_ids["__review_comment_body_hash__:issue:1"] == "comment-hash"
+    assert "issue:1" not in state.threads_addressed_ids
+    assert "__review_comment_body_hash__:issue:1" not in state.threads_addressed_ids
 
 
 @pytest.mark.unit

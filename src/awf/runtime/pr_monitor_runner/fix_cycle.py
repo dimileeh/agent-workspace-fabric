@@ -97,7 +97,7 @@ async def _run_fix_cycle(
     # Last settle-poll status; used after the loop to skip resolving threads that
     # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
     status: PRStatus | None = None
-    fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
+    publish_dependent_review_comment_resolutions: list[tuple[ReviewComment, VerdictResult]] = []
     threads = list(initial_threads)
     reviews = list(initial_reviews)
     worktree_path = self._worktrees_root / workspace_id
@@ -266,7 +266,7 @@ async def _run_fix_cycle(
             verdict = verdict_result.verdict
             _sync_needs_human_reason(state, c.comment_id, verdict_result)
             _mark_review_comment_addressed(state, c, verdict)
-            if verdict in {"false_positive", "defer"}:
+            if verdict == "defer":
                 await self._record_pr_feedback_resolution(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -276,8 +276,8 @@ async def _run_fix_cycle(
                     verdict_result=verdict_result,
                     operation_id=operation_id,
                 )
-            elif verdict == "fix_committed":
-                fixed_review_comments.append((c, verdict_result))
+            elif verdict in {"false_positive", "fix_committed"}:
+                publish_dependent_review_comment_resolutions.append((c, verdict_result))
             # Exclude ``needs_human`` from the rollback set, mirroring the inline
             # thread path: the agent already judged this comment needs a human,
             # so a push failure must not clear that verdict and force a pointless
@@ -409,7 +409,7 @@ async def _run_fix_cycle(
         )
 
     resolution_head_sha = pushed_head_sha or pr_head_sha
-    for comment, verdict_result in fixed_review_comments:
+    for comment, verdict_result in publish_dependent_review_comment_resolutions:
         await self._record_pr_feedback_resolution(
             workspace_id=workspace_id,
             repo=repo,
@@ -543,23 +543,17 @@ def _requeue_workflow_scope_publish_dependent_items(
     *,
     inline_thread_ids: list[str],
 ) -> None:
-    """Clear unresolved inline states and unpublished fixes after scope failure.
+    """Clear publish-dependent review states after workflow-scope failure.
 
     GitHub rejects workflow-file pushes before the local commits reach the PR.
-    Drop ``fix_committed`` state so unresolved review items route back through
-    ``AddressComments`` after the operator grants a token with workflow scope.
-    Also drop inline thread verdicts such as ``false_positive``/``defer`` that
-    still depended on the skipped post-push ``resolve_thread()`` step. Review
-    comment false positives are preserved because they do not have a GraphQL
-    thread-resolution step.
+    Drop every item the fix cycle marked publish-dependent so unresolved review
+    items route back through ``AddressComments`` after the operator grants a
+    token with workflow scope. The explicit defer-filed markers are separate
+    state keys, so ``_clear_addressed_state_by_id`` still preserves inline defer
+    idempotency while clearing verdict/body/reason state.
     """
-    inline_thread_id_set = set(inline_thread_ids)
+    del inline_thread_ids
     for item_id in item_ids:
-        if (
-            item_id not in inline_thread_id_set
-            and state.threads_addressed_ids.get(item_id) != "fix_committed"
-        ):
-            continue
         _clear_addressed_state_by_id(state, item_id)
 
 
