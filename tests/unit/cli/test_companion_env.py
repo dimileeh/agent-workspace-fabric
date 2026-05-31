@@ -120,7 +120,7 @@ def test_missing_env_file_raises() -> None:
 
 @pytest.mark.unit
 @pytest.mark.skipif(
-    os.getuid() == 0,
+    getattr(os, "getuid", lambda: -1)() == 0,
     reason="root bypasses file permissions, so chmod(0o000) does not make the file unreadable",
 )
 def test_unreadable_env_file_raises(tmp_path: Path) -> None:
