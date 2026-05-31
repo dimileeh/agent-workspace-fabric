@@ -185,16 +185,19 @@ async def _refresh_operator_state_from_workspace(
 
     changed = False
     db_hint = operator_hint_from_threads(db_threads_addressed)
-    if (
-        db_hint is not None
-        and not (
-            state.pending_operator_hint is not None
-            and _operator_hint_matches(state.pending_operator_hint, db_hint)
-        )
-        and not _operator_hint_is_processed(state.threads_addressed_ids, db_hint)
+    if db_hint is not None and not _operator_hint_is_processed(
+        state.threads_addressed_ids,
+        db_hint,
     ):
-        state.pending_operator_hint = db_hint
-        changed = True
+        state_hint = state.pending_operator_hint
+        state_hint_matches = state_hint is not None and _operator_hint_matches(
+            state_hint,
+            db_hint,
+        )
+        db_hint_is_terminal_update = _operator_hint_is_terminal(db_hint) and state_hint != db_hint
+        if not state_hint_matches or db_hint_is_terminal_update:
+            state.pending_operator_hint = db_hint
+            changed = True
 
     if pr_number is None:
         return changed

@@ -31,9 +31,12 @@ from awf.runtime.pr_monitor import (
     Merge,
     MergeableState,
     MergeStateStatus,
+    MonitorConfig,
     MonitorState,
+    NotifyHuman,
     OperatorHint,
     PRStatus,
+    decide,
 )
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -618,6 +621,60 @@ async def test_persist_state_preserves_concurrent_terminal_operator_hint_status(
     assert persisted_hint["status"] == terminal_status
     assert persisted_hint["status_reason"] == terminal_reason
     assert monitor_state["second-thread"] == "fix_committed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("terminal_status", ["needs_human", "agent_failed"])
+async def test_refresh_operator_state_imports_concurrent_terminal_same_operation_hint(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    terminal_status: Literal["needs_human", "agent_failed"],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    pending_hint = OperatorHint(
+        reason="investigate the operator supplied remonitor hint",
+        operation_id="op_hint_refresh_terminal_elsewhere",
+        requested_at="2026-05-31T00:45:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, pending_hint)
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    stale_workspace = await runner._load_workspace(workspace_id)
+    stale_state = runner._load_state(stale_workspace)
+    assert stale_state.pending_operator_hint == pending_hint
+    assert await runner._refresh_operator_state_from_workspace(workspace_id, stale_state) is False
+    assert stale_state.pending_operator_hint == pending_hint
+
+    terminal_reason = "another monitor pass could not safely apply the hint"
+    terminal_hint = OperatorHint(
+        reason=pending_hint.reason,
+        operation_id=pending_hint.operation_id,
+        requested_at=pending_hint.requested_at,
+        status=terminal_status,
+        status_reason=terminal_reason,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, terminal_hint)
+        await session.commit()
+
+    changed = await runner._refresh_operator_state_from_workspace(workspace_id, stale_state)
+    action = decide(_ready_status(), stale_state, MonitorConfig(auto_merge=True))
+
+    assert changed is True
+    assert stale_state.pending_operator_hint == terminal_hint
+    assert isinstance(action, NotifyHuman)
 
 
 @pytest.mark.unit
