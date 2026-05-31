@@ -68,29 +68,9 @@ from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
     SecretLeaseService,
 )
+from awf.service.workspaces import WorkspaceCreateHostPortConflictError
 
 _log = get_logger(__name__)
-
-
-class _ProfileHostPortConflictError(Exception):
-    """Proxy for ``WorkspaceCreateHostPortConflictError`` to avoid circular imports.
-
-    The real class is imported on first use.  This proxy duck-types the
-    same ``host_port`` / ``conflicting_workspace_id`` attributes.
-    """
-
-    def __init__(
-        self,
-        *,
-        host_port: int,
-        conflicting_workspace_id: str,
-    ) -> None:
-        self.host_port = host_port
-        self.conflicting_workspace_id = conflicting_workspace_id
-        self.message = (
-            f"Host port {host_port} is already in use by workspace {conflicting_workspace_id}"
-        )
-        super().__init__(self.message)
 
 
 class ServiceStartupDiagnosticsCapturer(Protocol):
@@ -337,7 +317,7 @@ class Provisioner:
                 from_status=WorkspaceStatus.provisioning,
             )
             raise
-        except _ProfileHostPortConflictError as exc:
+        except WorkspaceCreateHostPortConflictError as exc:
             _log.error(
                 "provisioner.auto_profile_host_port_conflict",
                 workspace_id=workspace_id,
@@ -897,7 +877,7 @@ class Provisioner:
                     host_port=conflicts[0].host_port,
                     conflicting_workspace_id=conflicts[0].workspace_id,
                 )
-                raise _ProfileHostPortConflictError(
+                raise WorkspaceCreateHostPortConflictError(
                     host_port=conflicts[0].host_port,
                     conflicting_workspace_id=conflicts[0].workspace_id,
                 )
