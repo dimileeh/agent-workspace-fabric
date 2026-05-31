@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.enums import OperationType
+from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.models import Operation
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -37,7 +37,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
-from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+from awf.runtime.pr_monitor_runner.types import BaseFetchError, ProtectedScopeDiffError
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -580,6 +580,81 @@ async def test_merge_rechecks_persisted_operator_hint_before_merge_pr(
     assert terminal is False
     assert calls == [hint]
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_merge_recheck_dispatches_persisted_operator_hint_before_pre_merge_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+        pre_merge_settle_seconds=2,
+    )
+    stale_state = MonitorState()
+    hint = OperatorHint(
+        reason="operator warning arrived during the pre-merge settle window",
+        operation_id="op_merge_recheck_error",
+        requested_at="2026-05-31T00:10:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint(
+            dict(workspace.monitor_threads_addressed or {}),
+            hint,
+        )
+        await session.commit()
+
+    calls: list[OperatorHint] = []
+
+    async def _raise_pre_merge_base_fetch_error(**_kwargs: object) -> PRStatus:
+        raise BaseFetchError("base fetch failed while operator hint was pending")
+
+    async def _record_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        called_hint = kwargs["hint"]
+        state_arg = kwargs["state"]
+        assert isinstance(called_hint, OperatorHint)
+        assert isinstance(state_arg, MonitorState)
+        calls.append(called_hint)
+        mark_operator_hint_processed(state_arg)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(
+        runner,
+        "_fetch_status_for_decision",
+        _raise_pre_merge_base_fetch_error,
+    )
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _record_operator_hint_cycle)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=stale_state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert calls == [hint]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
 
 
 @pytest.mark.unit

@@ -558,6 +558,32 @@ async def handle_merge_action(
                 raise RuntimeError("merge gate blocker was not handled")
             return cast(bool | None, handled)
 
+        if fresh_action is not None:
+            if fresh_status is None:  # pragma: no cover - defensive invariant
+                raise RuntimeError("pre-merge recheck produced an action without status")
+            # Re-enter the dispatcher for refreshed non-merge actions before
+            # converting a simultaneous pre-merge recheck failure into retry or
+            # terminal workspace state. Non-Merge actions do not perform this
+            # pre-merge recheck, so decision oscillation remains bounded by the
+            # outer monitor loop.
+            return cast(
+                bool | None,
+                await self._execute(
+                    action=fresh_action,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=fresh_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                ),
+            )
+
         if recheck_base_error is not None:
             base_fetch_result = await self._wait_after_transient_base_fetch_error(
                 recheck_base_error,
@@ -604,33 +630,6 @@ async def handle_merge_action(
                 message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[:2000],
             )
             return True
-
-        if fresh_action is not None:
-            if fresh_status is None:  # pragma: no cover - defensive invariant
-                raise RuntimeError("pre-merge recheck produced an action without status")
-            # This re-enters the dispatcher at most one stack frame
-            # deeper: the original action was Merge, and we only
-            # recurse when the refreshed decision is explicitly not
-            # Merge. Non-Merge actions do not perform this pre-merge
-            # recheck, so decision oscillation is handled by the
-            # outer monitor loop rather than recursive growth.
-            return cast(
-                bool | None,
-                await self._execute(
-                    action=fresh_action,
-                    workspace_id=workspace_id,
-                    repo_url=repo_url,
-                    repo=repo,
-                    pr_number=pr_number,
-                    status=fresh_status,
-                    state=state,
-                    base_branch=base_branch,
-                    remote_branch=remote_branch,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    monitor_log=monitor_log,
-                ),
-            )
 
         if merge_blocker is not None:
             if await self._wait_after_transient_github_error(
