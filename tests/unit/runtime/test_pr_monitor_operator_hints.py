@@ -374,6 +374,60 @@ async def test_monitor_state_round_trips_pending_operator_hint(
 
 
 @pytest.mark.unit
+async def test_persist_state_preserves_concurrent_processed_operator_hint_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    hint = OperatorHint(
+        reason="fix the stale docs CTA",
+        operation_id="op_hint_processed_elsewhere",
+        requested_at="2026-05-30T12:00:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint(
+            {"review-thread": "fix_committed"},
+            hint,
+        )
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    stale_workspace = await runner._load_workspace(workspace_id)
+    stale_state = runner._load_state(stale_workspace)
+    assert stale_state.pending_operator_hint == hint
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            "review-thread": "fix_committed",
+            operator_hint_processed_key("op_hint_processed_elsewhere"): "processed",
+        }
+        await session.commit()
+
+    stale_state.mark_addressed("second-thread", "fix_committed")
+    await runner._persist_state(workspace_id, stale_state)
+
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert persisted is not None
+    monitor_state = persisted.monitor_threads_addressed
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert monitor_state[operator_hint_processed_key("op_hint_processed_elsewhere")] == "processed"
+    assert monitor_state["review-thread"] == "fix_committed"
+    assert monitor_state["second-thread"] == "fix_committed"
+
+
+@pytest.mark.unit
 async def test_persist_state_preserves_concurrent_operator_hint_and_freeze(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

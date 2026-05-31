@@ -26,6 +26,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.runtime.operator_hints import (
+    OPERATOR_HINT_PROCESSED_KEY_PREFIX,
     OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
     operator_hint_processed_key,
@@ -148,6 +149,11 @@ def _merge_concurrent_operator_hint(
     db_threads_addressed: dict[str, str],
     state_hint: OperatorHint | None,
 ) -> dict[str, str]:
+    if state_hint is not None and _operator_hint_is_processed(db_threads_addressed, state_hint):
+        threads_addressed = persist_operator_hint(threads_addressed, None)
+    for key, value in db_threads_addressed.items():
+        if key.startswith(OPERATOR_HINT_PROCESSED_KEY_PREFIX) and value == "processed":
+            threads_addressed[key] = value
     db_hint = operator_hint_from_threads(db_threads_addressed)
     if db_hint is None:
         return threads_addressed
