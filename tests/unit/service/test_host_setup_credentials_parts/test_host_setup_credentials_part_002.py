@@ -413,6 +413,28 @@ def test_import_keyring_module_returns_none_when_missing(
 
 
 @pytest.mark.unit
+def test_import_keyring_module_returns_none_on_non_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a non-``ImportError`` import side effect degrades to ``None``.
+
+    On a headless host a broken system D-Bus binding can make ``keyring``'s
+    module-level code raise something other than ``ImportError`` (e.g. an
+    ``OSError`` or bare ``RuntimeError``). The import guard must mirror the
+    broad ``except Exception`` used by every other keyring call site so the
+    failure degrades to ``None`` (and selection falls back to env-ref) instead
+    of crashing ``is_available``/``select_credential_backend``.
+    """
+
+    def _broken_import(name: str) -> object:
+        """Raise a non-``ImportError`` as a half-configured stack would."""
+        raise RuntimeError("D-Bus session bus is not available")
+
+    monkeypatch.setattr(credentials.importlib, "import_module", _broken_import)
+    assert credentials._import_keyring_module() is None
+
+
+@pytest.mark.unit
 def test_keyring_backend_uses_lazy_import_when_module_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -645,7 +645,16 @@ def _import_keyring_module() -> KeyringModule | None:
     """Lazily import the optional ``keyring`` library, or ``None`` if absent."""
     try:
         module = importlib.import_module("keyring")
-    except ImportError:
+    except Exception:  # noqa: BLE001 - mirrors the broad guard on get_keyring/set_password
+        # Besides ``ImportError`` for an absent install, ``keyring``'s
+        # module-level code touches an unbounded system surface on import
+        # (SecretService/DBus bindings, platform backends). A half-configured
+        # stack on headless Linux can raise standard exceptions such as
+        # ``OSError`` or a bare ``RuntimeError`` as an import side effect.
+        # Treat any such failure as "no keyring available" so selection
+        # degrades to env-ref instead of crashing ``is_available`` on exactly
+        # the hosts this fallback serves; ``BaseException`` (KeyboardInterrupt,
+        # SystemExit, CancelledError) still propagates.
         return None
     return cast("KeyringModule", module)
 
