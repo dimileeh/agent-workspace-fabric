@@ -535,6 +535,19 @@ def _resolve_service_runtime_env_files(
     )
 
 
+# Public, intentionally-stable names for the Compose env-resolution helpers above.
+# ``awf setup`` readiness must resolve the Compose env exactly as ``awf start``
+# does (so its port/work-dir probes match the real startup environment), so it
+# reuses these helpers across the module boundary. Exposing them without the
+# leading underscore makes that an explicit public contract: a rename or
+# signature change breaks at import/CI time rather than silently at the
+# ``setup`` call site. Existing in-module and sibling callers keep the
+# underscore-prefixed names as internal aliases.
+resolve_service_compose_paths = _resolve_service_compose_paths
+resolve_service_runtime_env_files = _resolve_service_runtime_env_files
+resolve_existing_service_env_file = _resolve_existing_service_env_file
+
+
 def _trusted_service_compose_env_file_from_verified_paths(
     compose_file: Path,
     env_file: Path,
