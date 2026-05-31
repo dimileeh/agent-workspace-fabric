@@ -757,3 +757,45 @@ class TestFindHostPortConflicts:
             excluding_workspace_id=None,
         )
         assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_terminal_workspace_wrong_reason_code_still_blocking(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A terminal workspace with a terminal_runtime_released event of the right
+        event_type but wrong reason_code still blocks host ports.
+
+        The conflict-check query must match on both event_type AND reason_code
+        to stay semantically identical to the worker cleanup sweep.  If an
+        event is recorded with the correct event_type but a different
+        reason_code, the port must still be considered in use.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.completed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="SOME_OTHER_REASON",
+        )
+        await session.commit()
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == ws.id

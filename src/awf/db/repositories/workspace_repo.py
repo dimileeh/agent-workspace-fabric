@@ -48,6 +48,7 @@ from awf.db.repositories.base import (
     HOST_PORT_CONFLICT_STATUSES,
     HOST_PORT_TERMINAL_RELEASE_STATUSES,
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
@@ -539,6 +540,7 @@ class WorkspaceRepository:
             select(WorkspaceEvent.id)
             .where(WorkspaceEvent.workspace_id == Workspace.id)
             .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+            .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
             .exists()
         )
 

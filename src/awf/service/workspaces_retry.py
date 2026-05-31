@@ -244,12 +244,12 @@ async def retry_workspace_row(
 
     host_ports: list[int] = []
     host_ports.extend(
-        workspaces._host_ports_from_task_policy_companions(
+        workspaces.host_ports_from_task_policy_companions(
             source.task_policy,
         )
     )
     host_ports.extend(
-        workspaces._host_ports_from_resolved_profile(source.resolved_profile),
+        workspaces.host_ports_from_resolved_profile(source.resolved_profile),
     )
     if host_ports:
         conflicts = await repo.find_host_port_conflicts(

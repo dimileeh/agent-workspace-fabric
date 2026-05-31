@@ -314,10 +314,6 @@ class WorkspaceCreateHostPortConflictError(Exception):
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 
 
-_host_ports_from_resolved_profile = host_ports_from_resolved_profile
-_host_ports_from_task_policy_companions = host_ports_from_task_policy_companions
-
-
 async def check_host_port_conflicts(
     repo: WorkspaceRepository,
     companions: Sequence[WorkspaceCompanionRequest],
@@ -338,7 +334,7 @@ async def check_host_port_conflicts(
     new workspace is caught before Docker Compose provisioning starts.
     """
     host_ports = [hp for c in companions for _, hp in c.ports]
-    host_ports.extend(_host_ports_from_resolved_profile(resolved_profile))
+    host_ports.extend(host_ports_from_resolved_profile(resolved_profile))
     if host_ports:
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
@@ -1212,8 +1208,8 @@ __all__ = [
     "WorkspaceCreateIdempotencyConflictError",
     "HostPortConflict",
     "WorkspaceCreateHostPortConflictError",
-    "_host_ports_from_task_policy_companions",
-    "_host_ports_from_resolved_profile",
+    "host_ports_from_task_policy_companions",
+    "host_ports_from_resolved_profile",
     "check_host_port_conflicts",
     "WorkspaceCreateInsufficientDiskError",
     "WorkspaceRetryResult",
