@@ -252,6 +252,7 @@ async def retry_workspace_row(
         workspaces.host_ports_from_resolved_profile(source.resolved_profile),
     )
     if host_ports:
+        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
         )

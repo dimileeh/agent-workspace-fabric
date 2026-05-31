@@ -1339,6 +1339,14 @@ def _workspace_idempotency_advisory_lock_key(key: str) -> int:
     return unsigned
 
 
+def _host_port_admission_advisory_lock_key(host_port: int) -> int:
+    digest = hashlib.sha256(f"awf:host-port-admission\x00{host_port}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
+
+
 def owned_paths_overlap(left: str, right: str) -> bool:
     return _owned_paths_overlap(left, right)
 

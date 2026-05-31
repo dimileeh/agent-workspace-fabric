@@ -54,6 +54,7 @@ from awf.db.repositories.base import (
     OwnedPathOverlap,
     WorkspaceEventCreate,
     _candidate_terminal_close_reason,
+    _host_port_admission_advisory_lock_key,
     _matches_pr_adoption_identity,
     _normalize_owned_path,
     _owned_path_conflict_advisory_lock_key,
@@ -431,6 +432,36 @@ class WorkspaceRepository:
             {"lock_key": lock_key},
         )
 
+    async def acquire_host_port_admission_lock(
+        self,
+        *,
+        host_ports: list[int],
+    ) -> None:
+        """Serialize host-port admission checks per port via PostgreSQL advisory locks.
+
+        Acquires a transaction-scoped ``pg_advisory_xact_lock`` for each
+        distinct host port so that concurrent create/retry requests for the
+        same port cannot race past the conflict SELECT before the INSERT.
+        No-op on non-PostgreSQL dialects.
+        """
+        if not host_ports:
+            return
+
+        if self._dialect_name != "postgresql":
+            return
+
+        lock_key_fn = _host_port_admission_advisory_lock_key
+        seen_keys: set[int] = set()
+        for hp in dict.fromkeys(host_ports):
+            lock_key = lock_key_fn(hp)
+            if lock_key in seen_keys:
+                continue
+            seen_keys.add(lock_key)
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+
     async def find_active_owned_path_conflicts(
         self,
         *,
@@ -529,9 +560,11 @@ class WorkspaceRepository:
         workspace.  Once the terminal-runtime release sweep records the
         event, the compose stack is gone and the host port is free.
 
-        NOTE: A small TOCTOU window exists between this SELECT and the
-        subsequent INSERT.  The caller must handle the resulting 409
-        idempotently if a race occurs.
+        NOTE: The TOCTOU window between this SELECT and the subsequent INSERT
+        is closed by acquiring a per-port ``pg_advisory_xact_lock`` before
+        this method is called (see ``acquire_host_port_admission_lock``).
+        Concurrent requests for the same host port are serialized by that
+        lock.
         """
         if not host_ports:
             return []

@@ -284,11 +284,10 @@ class WorkspaceCreateInsufficientDiskError(Exception):
 class WorkspaceCreateHostPortConflictError(Exception):
     """Raised when a companion host_port is already mapped by a non-terminal workspace.
 
-    TOCTOU note: there is a time-of-check/time-of-use window between
-    the SELECT that finds the conflict and the INSERT that creates the new
-    workspace.  Docker Compose itself would fail in the same scenario, so
-    this check is a best-effort early detection, not a serialisation
-    guarantee.
+    TOCTOU note: the check-and-create sequence for host-port admission is
+    serialized with a per-port PostgreSQL advisory transaction lock
+    (``pg_advisory_xact_lock``), closing the time-of-check/time-of-use
+    window for concurrent create/retry requests on the same host port.
     """
 
     error_code = "HOST_PORT_CONFLICT"
@@ -332,10 +331,17 @@ async def check_host_port_conflicts(
     *incoming* workspace request.  Its ``services[].ports`` host-side entries
     are included in the conflict check so that a profile-service port on the
     new workspace is caught before Docker Compose provisioning starts.
+
+    A per-port PostgreSQL advisory lock is acquired before the conflict
+    SELECT so that two concurrent requests for the same host port cannot
+    both pass the check before either inserts.  The lock is transaction-
+    scoped (``pg_advisory_xact_lock``) and released automatically on commit
+    or rollback.
     """
     host_ports = [hp for c in companions for _, hp in c.ports]
     host_ports.extend(host_ports_from_resolved_profile(resolved_profile))
     if host_ports:
+        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
             excluding_workspace_id=excluding_workspace_id,
