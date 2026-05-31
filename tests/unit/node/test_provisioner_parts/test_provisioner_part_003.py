@@ -29,7 +29,8 @@ from awf.node.compose_manager import (
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
-from awf.profiles.resolver import ProfileResolutionError
+from awf.profiles.models import ProfileService, WorkspaceProfile
+from awf.profiles.resolver import ProfileResolution, ProfileResolutionError
 from tests.postgres import postgres_test_engine
 
 _COMPOSE_TEMPLATE = (
@@ -946,6 +947,20 @@ class TestAutoProfileHostPortConflict:
         origin_repo: Path,
     ) -> None:
         conflicting_port = 15432
+        _port_conflict_profile = ProfileResolution(
+            profile=WorkspaceProfile(
+                name="auto",
+                services=[
+                    ProfileService(
+                        name="postgres",
+                        image="postgres:16",
+                        ports=[(5432, conflicting_port)],
+                    )
+                ],
+            ),
+            network_posture="open",
+            reason="auto",
+        )
 
         class _NeverReachedLauncher:
             async def launch(self, request: Any) -> object:
@@ -979,6 +994,7 @@ class TestAutoProfileHostPortConflict:
                 },
             )
             existing_ws.compose_project_name = f"awf_{existing_ws.id}"
+            existing_ws.node_id = "test-node-01"
             await s.commit()
 
         async with session_factory() as s:
@@ -994,7 +1010,12 @@ class TestAutoProfileHostPortConflict:
             await s.commit()
             ws_id = ws.id
 
-        await provisioner.provision(ws_id)
+        from unittest.mock import patch
+
+        with patch(
+            "awf.node.provisioner.resolve_workspace_profile", return_value=_port_conflict_profile
+        ):
+            await provisioner.provision(ws_id)
 
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
@@ -1009,7 +1030,24 @@ class TestAutoProfileHostPortConflict:
         git_manager: GitManager,
         origin_repo: Path,
     ) -> None:
+        from unittest.mock import patch
+
         from awf.node.compose_manager import ComposeProjectPaths
+
+        _no_conflict_profile = ProfileResolution(
+            profile=WorkspaceProfile(
+                name="auto",
+                services=[
+                    ProfileService(
+                        name="postgres",
+                        image="postgres:16",
+                        ports=[(5432, 15433)],
+                    )
+                ],
+            ),
+            network_posture="open",
+            reason="auto",
+        )
 
         class _ImmediateLaunchLauncher:
             async def launch(self, request: Any) -> ComposeProjectPaths:
@@ -1046,6 +1084,7 @@ class TestAutoProfileHostPortConflict:
                 },
             )
             existing_ws.compose_project_name = f"awf_{existing_ws.id}"
+            existing_ws.node_id = "test-node-01"
             await s.commit()
 
         async with session_factory() as s:
@@ -1061,7 +1100,10 @@ class TestAutoProfileHostPortConflict:
             await s.commit()
             ws_id = ws.id
 
-        await provisioner.provision(ws_id)
+        with patch(
+            "awf.node.provisioner.resolve_workspace_profile", return_value=_no_conflict_profile
+        ):
+            await provisioner.provision(ws_id)
 
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
