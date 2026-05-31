@@ -416,6 +416,8 @@ def validation_worktree_preexisting_dirty_message(check: ValidationWorktreeCheck
 
 def validation_worktree_cleanup_failure_message(cleanup: ValidationWorktreeCleanup) -> str:
     """Render a structured message for cleanup failures with remaining paths."""
+    if cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return cleanup.message
     if cleanup.verify_check is not None and cleanup.verify_check.paths:
         paths = ", ".join(cleanup.verify_check.paths)
     else:
