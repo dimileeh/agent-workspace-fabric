@@ -11,6 +11,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -43,7 +44,7 @@ from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
 )
-from awf.runtime.validation_worktree import ValidationWorktreeCheck
+from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
 )
@@ -895,6 +896,111 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
     assert getattr(mark_kwargs["from_status"], "value", mark_kwargs["from_status"]) == "validating"
     assert mark_kwargs["failure_reason"] == FailureReason.infrastructure_failure
     assert mark_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+
+
+@pytest.mark.unit
+async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanup_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate({"name": "validation-callback-race"})
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "validation-callback-race"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        test_commands=[],
+        task_class=None,
+        operations=[],
+    )
+
+    class _ThrowingValidation:
+        async def run_profile_phases(self, **_kwargs: object) -> object:
+            raise ComposeExecCleanupError(
+                invocation_id="validate-race",
+                source="agent",
+                label="validate",
+                message="cleanup timed out",
+            )
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(max_validation_fix_passes=0, planning_max_iterations_default=3),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-callback-race"),
+        _finish_validation_callback_if_terminal=AsyncMock(side_effect=[False, True]),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=_ThrowingValidation(),
+    )
+
+    async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_resolved_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_callback_race",
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_callback_race",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_callback_race",
+        adapter=object(),  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert result.successful_validation_run_id is None
+    assert executor._finish_validation_callback_if_terminal.await_count == 2
+    executor._finish_validation_run.assert_not_awaited()
+    executor._finish_pending_validate_operations.assert_not_awaited()
 
 
 @pytest.mark.unit
