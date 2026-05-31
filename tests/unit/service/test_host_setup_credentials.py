@@ -701,6 +701,73 @@ def test_keyring_rejects_unsafe_provider_identifier(provider: str) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("provider", "account", "field"),
+    [
+        (_FAKE_TOKEN, "default", "provider"),
+        ("github", _FAKE_GH_TOKEN, "account"),
+    ],
+)
+def test_keyring_rejects_token_shaped_identifier(
+    provider: str,
+    account: str,
+    field: str,
+) -> None:
+    """Verify token-shaped provider/account identifiers are refused pre-storage.
+
+    A token accidentally populating ``provider``/``account`` still matches the
+    filename-safe regex, so without an explicit token-shape guard it would be
+    interpolated into the keychain service/account name before the resulting ref
+    is rejected. The guard must refuse it with the same secret-free reason code
+    env var names already use, and never reach the keychain write.
+    """
+    module = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=module)
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(
+                provider=provider,
+                account=account,
+                secret_source=_secret(_FAKE_GH_TOKEN),
+            )
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {"field": field}
+    assert module.set_calls == []
+    assert _FAKE_TOKEN not in str(error.to_dict())
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_plain_file_rejects_token_shaped_provider(tmp_path: Path) -> None:
+    """Verify a token-shaped provider is refused before any plain-file write.
+
+    The provider is interpolated into the secret file path, so a token-shaped
+    value must be rejected with a secret-free reason code and leave neither the
+    secret file nor the secrets directory behind.
+    """
+    secrets_dir = tmp_path / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider=_FAKE_TOKEN, secret_source=_secret(_FAKE_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {"field": "provider"}
+    assert not secrets_dir.exists()
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
 def test_keyring_set_password_failure_is_reason_coded() -> None:
     """Verify keychain write failures surface as backend-unavailable errors."""
     backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule(raise_on_set=True))

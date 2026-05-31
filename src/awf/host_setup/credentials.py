@@ -498,7 +498,21 @@ def _build_credential_ref(backend: CredentialBackendKind, ref: str) -> Credentia
 
 
 def _require_safe_identifier(value: str, *, field: str) -> str:
-    """Return ``value`` if it is a safe ref/filename identifier, else reject it."""
+    """Return ``value`` if it is a safe ref/filename identifier, else reject it.
+
+    A token-shaped value (e.g. ``sk-proj-...``/``github_pat_...``) still matches
+    the filename-safe regex, so a provider/account accidentally populated with a
+    raw secret would otherwise be interpolated into the keychain service name or
+    plain-file path before ``CredentialRef`` rejects the resulting ref. Refuse it
+    up front with the same secret-free reason code env var names use, so the token
+    never reaches a storage path and the failure stays reason-coded.
+    """
+    if _TOKEN_SHAPE_RE.search(value) is not None:
+        raise CredentialError(
+            reason_code=CREDENTIAL_REF_INVALID,
+            message=f"Credential {field} identifier resembles a raw secret value.",
+            details={"field": field},
+        )
     if not _SAFE_IDENTIFIER_RE.fullmatch(value):
         raise CredentialError(
             reason_code=CREDENTIAL_REF_INVALID,
