@@ -39,6 +39,7 @@ from awf.db.repositories import (
 from awf.db.repositories.base import (
     PROVISIONING_LAUNCHING_EVENT_TYPE,
     PROVISIONING_LAUNCHING_REASON_CODE,
+    host_ports_from_resolved_profile,
 )
 from awf.node.companion_services import (
     MaterializedCompanionService,
@@ -65,6 +66,27 @@ from awf.service.secret_leases import (
 )
 
 _log = get_logger(__name__)
+
+
+class _ProfileHostPortConflictError(Exception):
+    """Proxy for ``WorkspaceCreateHostPortConflictError`` to avoid circular imports.
+
+    The real class is imported on first use.  This proxy duck-types the
+    same ``host_port`` / ``conflicting_workspace_id`` attributes.
+    """
+
+    def __init__(
+        self,
+        *,
+        host_port: int,
+        conflicting_workspace_id: str,
+    ) -> None:
+        self.host_port = host_port
+        self.conflicting_workspace_id = conflicting_workspace_id
+        self.message = (
+            f"Host port {host_port} is already in use by workspace {conflicting_workspace_id}"
+        )
+        super().__init__(self.message)
 
 
 class ServiceStartupDiagnosticsCapturer(Protocol):
@@ -257,6 +279,12 @@ class Provisioner:
                     reason_code="PROVISIONER_STALE_STATUS",
                 ):
                     return
+                if profile_resolution is not None:
+                    await self._check_auto_resolved_profile_host_ports(
+                        workspace_id=workspace_id,
+                        profile=profile,
+                        excluding_workspace_id=workspace_id,
+                    )
                 try:
                     async with self._session_factory() as pre_launch_session:
                         pre_launch_repo = WorkspaceRepository(pre_launch_session)
@@ -296,6 +324,20 @@ class Provisioner:
                 workspace_id=workspace_id,
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=str(exc)[:2000],
+                from_status=WorkspaceStatus.provisioning,
+            )
+            raise
+        except _ProfileHostPortConflictError as exc:
+            _log.error(
+                "provisioner.auto_profile_host_port_conflict",
+                workspace_id=workspace_id,
+                host_port=exc.host_port,
+                conflicting_workspace_id=exc.conflicting_workspace_id,
             )
             await self._mark_failed(
                 workspace_id=workspace_id,
@@ -796,6 +838,48 @@ class Provisioner:
             )
             await session.commit()
             return False
+
+    async def _check_auto_resolved_profile_host_ports(
+        self,
+        *,
+        workspace_id: str,
+        profile: WorkspaceProfile,
+        excluding_workspace_id: str | None = None,
+    ) -> None:
+        """Check auto-resolved profile service ports for admission after provision-time resolution.
+
+        When ``profile_ref`` is ``"auto"`` (the default), the create-path admission
+        gate cannot check profile service ports because the worktree (and therefore
+        the repo-local profile) is not available until provisioning.  This method
+        closes that gap by re-checking host ports after the profile has been
+        resolved inside the provisioner.
+
+        Raises :class:`WorkspaceCreateHostPortConflictError` on conflict so the
+        caller can mark the workspace as failed.
+        """
+        resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+        auto_profile_host_ports = host_ports_from_resolved_profile(resolved_profile_dict)
+        if not auto_profile_host_ports:
+            return
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            await repo.acquire_host_port_admission_lock(host_ports=auto_profile_host_ports)
+            conflicts = await repo.find_host_port_conflicts(
+                host_ports=auto_profile_host_ports,
+                excluding_workspace_id=excluding_workspace_id,
+            )
+            if conflicts:
+                _log.error(
+                    "provisioner.auto_profile_host_port_conflict",
+                    workspace_id=workspace_id,
+                    host_port=conflicts[0].host_port,
+                    conflicting_workspace_id=conflicts[0].workspace_id,
+                )
+                raise _ProfileHostPortConflictError(
+                    host_port=conflicts[0].host_port,
+                    conflicting_workspace_id=conflicts[0].workspace_id,
+                )
+            await session.commit()
 
     async def _recheck_before_launch(self, workspace_id: str) -> bool:
         """Recheck workspace status with a row lock and record a launch guard.

@@ -27,7 +27,7 @@ from awf.node.compose_manager import (
     ComposeProjectPaths,
 )
 from awf.node.git_manager import GitManager
-from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.node.provisioner import Provisioner, ProvisionerConfig, _ProfileHostPortConflictError
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.resolver import ProfileResolutionError
 from tests.postgres import postgres_test_engine
@@ -926,3 +926,145 @@ class TestProvisionerConfigValidation:
     def test_non_positive_tail_lines_is_rejected(self, bad_value: int) -> None:
         with pytest.raises(ValueError, match="service_startup_log_tail_lines must be > 0"):
             ProvisionerConfig(node_id="test-node-01", service_startup_log_tail_lines=bad_value)
+
+
+class TestAutoProfileHostPortConflict:
+    """Regression: auto-resolved profile service ports checked at provision time.
+
+    When profile_ref="auto" (the default), the create-path admission gate
+    cannot check profile service host ports because the worktree is unavailable
+    and the profile is not yet resolved.  The provisioner resolves the profile
+    after cloning the worktree; this is the moment to catch conflicts that
+    slipped through the earlier admission check.
+    """
+
+    @pytest.mark.unit
+    async def test_auto_profile_port_conflict_marks_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        conflicting_port = 15432
+
+        class _NeverReachedLauncher:
+            async def launch(self, request: Any) -> object:
+                raise AssertionError("launch should not be reached when port conflicts")
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_NeverReachedLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+
+        async with session_factory() as s:
+            existing_repo = WorkspaceRepository(s)
+            await existing_repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="existing",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "port-holder",
+                    "services": [
+                        {
+                            "name": "postgres",
+                            "image": "postgres:16",
+                            "ports": [[5432, conflicting_port]],
+                        }
+                    ],
+                },
+                compose_project_name="awf_existing_ws",
+            )
+            await s.commit()
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="new-ws",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(_ProfileHostPortConflictError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+
+    @pytest.mark.unit
+    async def test_auto_profile_no_port_conflict_succeeds_to_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        from awf.node.compose_manager import ComposeProjectPaths
+
+        class _ImmediateLaunchLauncher:
+            async def launch(self, request: Any) -> ComposeProjectPaths:
+                return ComposeProjectPaths(
+                    compose_file=Path("/tmp/dummy.yml"),
+                    env_file=Path("/tmp/dummy.env"),
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_ImmediateLaunchLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+
+        async with session_factory() as s:
+            existing_repo = WorkspaceRepository(s)
+            await existing_repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="existing",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "port-holder",
+                    "services": [
+                        {
+                            "name": "postgres",
+                            "image": "postgres:16",
+                            "ports": [[5432, 15432]],
+                        }
+                    ],
+                },
+                compose_project_name="awf_existing_ws",
+            )
+            await s.commit()
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="new-ws",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
