@@ -27,7 +27,7 @@ from awf.api.schemas import (
     WorkspaceRuntimeResponse,
 )
 from awf.api.schemas_companions import WorkspaceCompanionRequest
-from awf.common.config import Settings
+from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
@@ -544,8 +544,9 @@ class WorkspaceService:
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
+            resolved_settings = self._settings or get_settings()
             req_profile, resolved_profile = workspace_create_profile_snapshots(req)
-            node_id = self._settings.worker_node_id if self._settings else None
+            node_id = resolved_settings.worker_node_id
             await check_host_port_conflicts(
                 repo,
                 req.companions,
@@ -557,7 +558,7 @@ class WorkspaceService:
                 s,
                 req,
                 idempotency_key=idempotency_key,
-                settings=self._settings,
+                settings=resolved_settings,
                 disk_check=disk_check,
                 requested_profile=req_profile,
                 resolved_profile=resolved_profile,
