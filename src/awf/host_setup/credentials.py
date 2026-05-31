@@ -206,6 +206,9 @@ class KeyringModule(Protocol):
     def get_password(self, service: str, username: str) -> str | None:
         """Return the stored secret for ``service``/``username``, or ``None``."""
 
+    def delete_password(self, service: str, username: str) -> None:
+        """Remove the stored secret for ``service``/``username`` if present."""
+
 
 class CredentialBackend(Protocol):
     """One credential backend that yields a safe reference."""
@@ -294,12 +297,25 @@ class KeyringCredentialBackend:
         try:
             stored = module.get_password(service, account)
         except Exception as exc:
+            # ``set_password`` already succeeded, so the secret may sit in the
+            # keychain even though this read-back could not confirm durability.
+            # ``store_provider_credential`` degrades a write-unusable keyring to
+            # env_ref; discard the unverified write first so the recorded
+            # ``env://NAME`` ref never diverges from a value left orphaned in the
+            # OS keychain under a backend nothing will resolve through.
+            _discard_keyring_write(module, service, account)
             raise CredentialError(
                 reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
                 message="The keyring backend rejected the credential read-back.",
                 details={"backend": self.kind, "error_type": type(exc).__name__},
             ) from exc
         if stored != secret:
+            # Same orphan hazard as the read-back-raises branch: a backend that
+            # accepted the write yet did not round-trip it (a no-usable-child
+            # ChainerBackend stores nothing, but a partial write may persist the
+            # value) is about to be abandoned for env_ref, so best-effort delete
+            # keeps the recorded backend and the keychain in sync.
+            _discard_keyring_write(module, service, account)
             raise CredentialError(
                 reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
                 message="The keyring backend did not durably store the credential.",
@@ -505,6 +521,24 @@ def store_provider_credential(
         # (the actionable "provide an env var" signal), never the raw keyring error.
         fallback = env_backend or EnvRefCredentialBackend()
         return fallback.create_ref(request)
+
+
+def _discard_keyring_write(module: KeyringModule, service: str, account: str) -> None:
+    """Best-effort delete a just-written secret whose durability is unproven.
+
+    Called only from ``KeyringCredentialBackend.create_ref``'s read-back-failure
+    paths, where ``set_password`` already succeeded but the round-trip could not
+    confirm the secret is durably stored. The caller then degrades to env_ref;
+    removing the value first ensures the recorded ``env://NAME`` ref never
+    diverges from a secret still living in the keychain. ``delete_password``
+    touches the same unbounded third-party surface as the write (and may be
+    missing on a partial module, or raise ``PasswordDeleteError`` when the slot
+    is already empty), so every failure is swallowed: cleanup is best-effort and
+    must never mask the underlying backend-unavailable signal. ``BaseException``
+    (KeyboardInterrupt, SystemExit, CancelledError) still propagates.
+    """
+    with suppress(Exception):
+        module.delete_password(service, account)
 
 
 def _import_keyring_module() -> KeyringModule | None:

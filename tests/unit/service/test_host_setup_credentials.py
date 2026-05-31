@@ -113,6 +113,7 @@ class FakeKeyringModule:
         self._read_back_error = read_back_error
         self.errors = _FakeKeyringErrors
         self.set_calls: list[tuple[str, str, str]] = []
+        self.delete_calls: list[tuple[str, str]] = []
         self._stored: dict[tuple[str, str], str] = {}
 
     def get_keyring(self) -> object:
@@ -138,6 +139,19 @@ class FakeKeyringModule:
         if self._read_back_error is not None:
             raise self._read_back_error
         return self._stored.get((service, username))
+
+    def delete_password(self, service: str, username: str) -> None:
+        """Remove a stored secret, raising like keyring on a missing entry.
+
+        The real ``keyring.delete_password`` raises ``PasswordDeleteError`` when
+        the slot is empty, so model that here to exercise the best-effort
+        cleanup's exception suppression on the no-orphan (write-dropped) path.
+        """
+        key = (service, username)
+        self.delete_calls.append(key)
+        if key not in self._stored:
+            raise _FakeKeyringError("no such password")
+        del self._stored[key]
 
 
 def _secret(value: str | None) -> Callable[[], str | None]:
@@ -1326,6 +1340,65 @@ def test_keyring_create_ref_readback_failure_is_reason_coded() -> None:
     assert error.__cause__ is read_error
     assert "DBus session closed" not in str(error.to_dict())
     assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_create_ref_discards_orphaned_write_on_readback_failure() -> None:
+    """Verify a persisted-but-unverified write is deleted before signalling unavailable.
+
+    ``set_password`` succeeds (the secret reaches the keychain), then the read-back
+    ``get_password`` raises — durability cannot be confirmed, so ``create_ref``
+    raises ``CREDENTIAL_BACKEND_UNAVAILABLE`` and the caller degrades to env_ref.
+    The just-written secret must be deleted first so the recorded ``env://`` ref
+    never diverges from a value left orphaned in the OS keychain under a backend
+    nothing will resolve through.
+    """
+    module = FakeKeyringModule(read_back_error=OSError("DBus session closed"))
+    backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    assert exc_info.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The write was attempted, then cleaned up: no secret is orphaned in the keychain.
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    assert module.delete_calls == [("awf/github", "default")]
+    assert module._stored == {}
+
+
+@pytest.mark.unit
+def test_store_cleans_up_orphaned_keyring_write_before_env_ref_fallback() -> None:
+    """Verify degrading to env_ref never leaves the keyring write orphaned.
+
+    A read-back failure after a persisting ``set_password`` makes ``create_ref``
+    raise ``CREDENTIAL_BACKEND_UNAVAILABLE``, so ``store_provider_credential``
+    degrades to the ``env://`` offer. Recording ``env://NAME`` while the secret
+    still lives in the OS keychain would point the host config at the wrong
+    backend, so the orphaned write must be removed before the fallback runs.
+    """
+    module = FakeKeyringModule(read_back_error=OSError("DBus session closed"))
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+
+    ref = store_provider_credential(
+        CredentialRequest(
+            provider="github",
+            env_var="GH_TOKEN",
+            secret_source=_secret(_FAKE_GH_TOKEN),
+        ),
+        preferred=None,
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=False,
+        plain_file_consent=False,
+        keyring_backend=keyring_backend,
+    )
+
+    assert ref.backend == "env_ref"
+    assert ref.ref == "env://GH_TOKEN"
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    assert module.delete_calls == [("awf/github", "default")]
+    assert module._stored == {}
 
 
 @pytest.mark.unit
