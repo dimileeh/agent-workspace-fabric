@@ -493,11 +493,15 @@ def _pull_secret(request: CredentialRequest) -> str:
     source = request.secret_source
     secret = source() if source is not None else None
     # A whitespace-only value is truthy but unusable for authentication; treat it
-    # as missing input rather than writing it to the keychain/plain file. Mirrors
-    # the env_ref name guard (``not env_var or not env_var.strip()``).
-    if not secret or not secret.strip():
+    # as missing input rather than writing it to the keychain/plain file. Strip
+    # surrounding whitespace from the stored value too, so a padded secret (a
+    # common copy-paste artifact) is normalised instead of written verbatim and
+    # silently failing auth later. Mirrors the env_ref name path, which strips
+    # its identifier (``name = env_var.strip()``) before use.
+    stripped = secret.strip() if secret else None
+    if not stripped:
         raise _interactive_input_required(request, missing="secret")
-    return secret
+    return stripped
 
 
 def _interactive_input_required(

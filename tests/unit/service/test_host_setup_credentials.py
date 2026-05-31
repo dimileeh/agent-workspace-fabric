@@ -381,6 +381,32 @@ def test_plain_file_scopes_secret_file_by_account(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_plain_file_strips_secret_whitespace_before_storage(tmp_path: Path) -> None:
+    """Verify a whitespace-padded secret is stripped before the plain-file write.
+
+    Surrounding whitespace would otherwise be written to the ``0600`` secret file
+    verbatim and silently break authentication later, so the stored value is
+    normalised the same way the keyring path normalises it.
+    """
+    secrets_dir = tmp_path / "secrets"
+    ref = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    ).create_ref(
+        CredentialRequest(
+            provider="openai",
+            secret_source=_secret(f"\t{_FAKE_TOKEN}\n"),
+        )
+    )
+
+    target = secrets_dir / "openai.default"
+    assert ref.ref == f"plain-file://{target}"
+    assert target.read_text(encoding="utf-8") == _FAKE_TOKEN
+
+
+@pytest.mark.unit
 def test_plain_file_rejects_token_shaped_account(tmp_path: Path) -> None:
     """Verify a token-shaped account is refused before any plain-file write.
 
@@ -607,6 +633,29 @@ def test_keyring_whitespace_only_secret_is_interactive_input_required(secret: st
 
     assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
     assert fake_keyring.set_calls == []
+
+
+@pytest.mark.unit
+def test_keyring_strips_secret_whitespace_before_storage() -> None:
+    """Verify a whitespace-padded secret is stripped before the keychain write.
+
+    A secret padded with leading/trailing whitespace is truthy and survives the
+    whitespace-only guard, but the surrounding whitespace would make the stored
+    credential fail silently at authentication time. It must be stripped before
+    storage, mirroring the env_ref path which strips its identifier before use.
+    """
+    module = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=module)
+
+    backend.create_ref(
+        CredentialRequest(
+            provider="github",
+            secret_source=_secret(f"  {_FAKE_GH_TOKEN}  "),
+        )
+    )
+
+    # The padded value is normalised to the bare token before it reaches storage.
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
 
 
 @pytest.mark.unit
