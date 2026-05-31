@@ -334,6 +334,100 @@ def test_write_secret_file_tolerates_real_dir_racing_into_mkdir(
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="permission semantics are POSIX-specific")
+def test_write_secret_file_rejects_writable_dir_racing_into_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group/world-writable *directory* racing into a missing component is refused.
+
+    Regression for PRRT_kwDOSJAM6s6F8uMR: when ``secrets_dir`` is under a parent
+    that does not exist during the symlink walk (e.g. ``<tmp>/awf/secrets`` with
+    ``<tmp>/awf`` absent), a local user can win the race before AWF's ``mkdir`` and
+    create that intermediate component as a real, group/world-writable directory
+    they own. The ``FileExistsError`` branch previously accepted *any* real raced-in
+    directory — only re-``lstat``-ing for a symlink/non-dir and chmod-ing
+    best-effort — so it never ran the writable-ancestor guard the *pre-existing*
+    ancestor path applies. AWF would then create the 0o700 secrets dir beneath that
+    attacker-controlled writable ancestor, which can ``rename`` it aside and plant a
+    redirecting symlink before the later secret write. A raced-in component must be
+    treated like a pre-existing ancestor and refused when group/world-writable.
+    """
+    anchor = tmp_path / "home"
+    anchor.mkdir()
+    raced = anchor / "awf"  # intermediate component the attacker wins the race for
+    secrets_dir = raced / "secrets"
+    target = secrets_dir / "github.secret"
+
+    real_mkdir = Path.mkdir
+
+    def racing_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        # The attacker materialises the intermediate component as a group/world-
+        # writable (non-sticky) directory the instant before AWF's create lands.
+        if self == raced and not self.exists():
+            real_mkdir(self)
+            self.chmod(0o777)
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # We fail closed at the raced-in writable component: no secrets dir, no secret,
+    # and the attacker-owned ancestor was not silently tightened through.
+    assert not secrets_dir.exists()
+    assert not target.exists()
+    assert stat.S_IMODE(raced.stat().st_mode) == 0o777
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="sticky-bit semantics are POSIX-specific")
+def test_write_secret_file_rejects_sticky_writable_dir_racing_into_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A *sticky* group/world-writable directory racing in is still refused.
+
+    Companion to the non-sticky raced-in guard (PRRT_kwDOSJAM6s6F8uMR): the sticky
+    exemption in ``_reject_writable_ancestor`` is sound only for a *pre-existing*,
+    trusted, non-attacker-owned parent such as a root-owned ``/tmp`` — there a
+    non-owner attacker cannot rename AWF's entry. A component that races in mid-
+    create can instead be one the attacker just made and *owns*, and a directory's
+    owner may rename entries inside it regardless of the sticky bit. So an attacker
+    could otherwise set ``0o1777`` to dodge the writable-ancestor check while still
+    holding the swap right. The raced-in path must reject a group/world-writable
+    component without honouring the sticky exemption.
+    """
+    anchor = tmp_path / "home"
+    anchor.mkdir()
+    raced = anchor / "awf"
+    secrets_dir = raced / "secrets"
+    target = secrets_dir / "github.secret"
+
+    real_mkdir = Path.mkdir
+
+    def racing_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        # Attacker sets the sticky bit (0o1777) trying to slip past the /tmp-style
+        # exemption — but as the directory's owner they keep the rename/swap right.
+        if self == raced and not self.exists():
+            real_mkdir(self)
+            self.chmod(0o1777)
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert not secrets_dir.exists()
+    assert not target.exists()
+    assert stat.S_IMODE(raced.stat().st_mode) == 0o1777
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="chmod hardening only runs on POSIX")
 def test_write_secret_file_refuses_unhardenable_world_traversable_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

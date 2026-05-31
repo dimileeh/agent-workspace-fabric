@@ -1000,6 +1000,21 @@ def _mkdir_secure(directory: Path) -> None:
                 raise NotADirectoryError(
                     errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path)
                 ) from None
+            # A real directory that raced in is untrusted: unlike a pre-existing
+            # OS-provided ancestor (e.g. a root-owned sticky ``/tmp``), a component
+            # that appeared mid-create can be one a local attacker just made and
+            # *owns*, leaving the secrets dir AWF then creates beneath it under an
+            # attacker-controlled writable parent that can ``rename`` it aside and
+            # plant a redirecting symlink before the later secret write
+            # (PRRT_kwDOSJAM6s6F8uMR). Treat it like a pre-existing ancestor and
+            # refuse a group/world-writable one — but ``allow_sticky=False``, since
+            # the sticky exemption assumes a non-owner attacker, and the owner of a
+            # raced-in sticky dir keeps the rename/swap right. AWF itself never races
+            # a group/world-writable component into existence (it creates each
+            # 0o700), and AWF could only *use* a surviving 0o700 dir it owns —
+            # writing into a 0o700 dir it did not own would fail ``EACCES`` — so this
+            # mode check also pins ownership without a separate ``stat``.
+            _reject_writable_ancestor(path, allow_sticky=False)
         _chmod_best_effort(path, 0o700)
     # A ``directory`` that already existed as a regular file (or a symlink to
     # one) never enters the creation loop above — ``probe.exists()`` is true on
@@ -1045,7 +1060,7 @@ def _reject_group_or_world_accessible_dir(directory: Path) -> None:
         )
 
 
-def _reject_writable_ancestor(ancestor: Path) -> None:
+def _reject_writable_ancestor(ancestor: Path, *, allow_sticky: bool = True) -> None:
     """Refuse a pre-existing ancestor a local attacker could swap before the write, on POSIX.
 
     ``_mkdir_secure`` validates the secrets dir and its ancestors (symlinks,
@@ -1060,20 +1075,26 @@ def _reject_writable_ancestor(ancestor: Path) -> None:
     never exists — the default ``~/.awf/secrets`` under a user-owned home is
     unaffected, and an operator simply points ``secrets_dir`` at a non-writable path.
 
-    The sticky bit (``0o1000``) is the exemption: on a sticky directory (e.g.
-    ``/tmp``) only an entry's *owner* may rename or delete it, so a non-owner
-    attacker cannot swap the secrets dir AWF created and owns there — exactly the
-    guarantee a plain world-writable parent lacks. POSIX-only: the rwx model and
-    rename-permission semantics do not apply off POSIX, where ``_chmod_best_effort``
-    is itself a no-op, so a non-POSIX ``st_mode`` carrying those bits is ignored
-    rather than treated as a swap vector.
+    The sticky bit (``0o1000``) is exempted by default: on a sticky directory (e.g.
+    a root-owned ``/tmp``) only an entry's *owner* may rename or delete it, so a
+    non-owner attacker cannot swap the secrets dir AWF created and owns there —
+    exactly the guarantee a plain world-writable parent lacks. That exemption is
+    sound only for a *trusted, non-attacker-owned* ancestor; pass
+    ``allow_sticky=False`` for an untrusted component that raced into existence
+    mid-create (PRRT_kwDOSJAM6s6F8uMR), where the attacker may *own* the sticky
+    directory and so retains the rename/swap right the exemption assumes they lack.
+    POSIX-only: the rwx model and rename-permission semantics do not apply off
+    POSIX, where ``_chmod_best_effort`` is itself a no-op, so a non-POSIX
+    ``st_mode`` carrying those bits is ignored rather than treated as a swap vector.
     """
     if os.name != "posix":
         return
     mode = ancestor.stat().st_mode
-    # Group- or other-writable (``0o022``) without the sticky bit (``0o1000``) lets
-    # any writer rename the entry below it and plant a redirecting symlink.
-    if mode & 0o022 and not mode & 0o1000:
+    # Group- or other-writable (``0o022``) lets any writer rename the entry below it
+    # and plant a redirecting symlink. The sticky bit (``0o1000``) neutralises that
+    # only when the directory is trusted (``allow_sticky``); an attacker-ownable
+    # raced-in component is checked without that exemption.
+    if mode & 0o022 and not (allow_sticky and mode & 0o1000):
         raise PermissionError(
             errno.EPERM,
             "Secrets directory has a group- or world-writable ancestor that could be "
