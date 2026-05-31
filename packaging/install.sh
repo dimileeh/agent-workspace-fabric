@@ -731,6 +731,34 @@ resolve_awf_path() {
     return 1
 }
 
+# Uninstall via uv with the same bin dir the matching install used. install_uv
+# links the executable into UV_TOOL_BIN_DIR="$INSTALL_DIR"; `uv tool uninstall`
+# removes entry points from the bin dir it computes *at uninstall time*, so
+# without re-exporting that path uv deletes the tool env but leaves
+# ${INSTALL_DIR}/awf orphaned and still exits 0 — a still-runnable awf masked by
+# a success exit. With no --install-dir, leave UV_TOOL_BIN_DIR unset so uv uses
+# its normal default rather than an empty bin dir.
+uninstall_via_uv() {
+    if [ -n "$INSTALL_DIR" ]; then
+        UV_TOOL_BIN_DIR="$INSTALL_DIR" uv tool uninstall "$PACKAGE"
+    else
+        uv tool uninstall "$PACKAGE"
+    fi
+}
+
+# Uninstall via pipx, mirroring install_pipx's PIPX_BIN_DIR for the same reason:
+# pipx links console scripts into PIPX_BIN_DIR and, on uninstall, only removes
+# scripts from the bin dir it computes now. Without the install-time
+# PIPX_BIN_DIR it removes the venv but leaves ${INSTALL_DIR}/awf behind and still
+# exits 0. Leave PIPX_BIN_DIR unset when no --install-dir was given.
+uninstall_via_pipx() {
+    if [ -n "$INSTALL_DIR" ]; then
+        PIPX_BIN_DIR="$INSTALL_DIR" pipx uninstall "$PACKAGE"
+    else
+        pipx uninstall "$PACKAGE"
+    fi
+}
+
 uninstall_awf() {
     # Probe both managers up front. A package installed by both uv and pipx is
     # reported by each, so acting on only the first-found manager would leave the
@@ -761,7 +789,7 @@ uninstall_awf() {
         # never masked by a success exit.
         local failed_via=""
         if [ "$uv_managed" -eq 1 ]; then
-            if uv tool uninstall "$PACKAGE"; then
+            if uninstall_via_uv; then
                 say "Uninstalled ${PACKAGE} via uv."
                 removed=1
             else
@@ -769,7 +797,7 @@ uninstall_awf() {
             fi
         fi
         if [ "$pipx_managed" -eq 1 ]; then
-            if pipx uninstall "$PACKAGE"; then
+            if uninstall_via_pipx; then
                 say "Uninstalled ${PACKAGE} via pipx."
                 removed=1
             else

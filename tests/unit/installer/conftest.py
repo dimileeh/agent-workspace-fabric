@@ -79,7 +79,9 @@ class InstallerHarness:
         ``uv tool dir --bin`` reports the directory uv links executables into,
         which uv derives from ``UV_TOOL_BIN_DIR``/``XDG_BIN_HOME`` and defaults to
         ``~/.local/bin``. ``tool_bin_dir`` overrides that to simulate a uv
-        configured to install elsewhere.
+        configured to install elsewhere. ``tool uninstall`` additionally records
+        a ``uv-tool-uninstall-env UV_TOOL_BIN_DIR=<value|<unset>>`` line so tests
+        can assert the installer re-exports the install-time bin dir on uninstall.
         """
         bin_dir_expr = (
             json.dumps(tool_bin_dir) if tool_bin_dir is not None else '"$HOME/.local/bin"'
@@ -93,6 +95,8 @@ class InstallerHarness:
             "    fi\n"
             "    exit 0 ;;\n"
             '  "tool uninstall")\n'
+            "    printf '%s\\n' \"uv-tool-uninstall-env UV_TOOL_BIN_DIR=${UV_TOOL_BIN_DIR:-<unset>}\""
+            ' >> "$AWF_STUB_LOG"\n'
             f"    exit {uninstall_rc} ;;\n"
             '  "tool list")\n'
             f"    printf '%b' {json.dumps(list_output)}\n"
@@ -121,7 +125,9 @@ class InstallerHarness:
         ``pipx environment --value PIPX_BIN_DIR`` reports the directory pipx
         links console scripts into, which pipx derives from ``PIPX_BIN_DIR`` and
         defaults to ``~/.local/bin``. ``bin_dir`` overrides that to simulate a
-        pipx configured to install elsewhere.
+        pipx configured to install elsewhere. ``uninstall`` additionally records
+        a ``pipx-uninstall-env PIPX_BIN_DIR=<value|<unset>>`` line so tests can
+        assert the installer re-exports the install-time bin dir on uninstall.
         """
         bin_dir_expr = json.dumps(bin_dir) if bin_dir is not None else '"$HOME/.local/bin"'
         behavior = (
@@ -133,6 +139,8 @@ class InstallerHarness:
             "    fi\n"
             "    exit 0 ;;\n"
             "  uninstall)\n"
+            "    printf '%s\\n' \"pipx-uninstall-env PIPX_BIN_DIR=${PIPX_BIN_DIR:-<unset>}\""
+            ' >> "$AWF_STUB_LOG"\n'
             f"    exit {uninstall_rc} ;;\n"
             "  list)\n"
             f"    printf '%b' {json.dumps(list_output)}\n"

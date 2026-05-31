@@ -65,6 +65,82 @@ def test_uninstall_removes_both_managers_when_both_manage(
 
 
 @pytest.mark.unit
+def test_uninstall_pipx_passes_install_dir_as_pipx_bin_dir(
+    harness: InstallerHarness,
+) -> None:
+    """Uninstalling a pipx install honours ``--install-dir`` via ``PIPX_BIN_DIR``.
+
+    ``install_pipx`` links console scripts into ``PIPX_BIN_DIR="$INSTALL_DIR"``.
+    On uninstall, pipx only removes scripts from the bin dir it computes at that
+    moment, so without re-exporting the install-time ``PIPX_BIN_DIR`` it deletes
+    the venv but orphans ``${INSTALL_DIR}/awf`` while still exiting 0 — a
+    still-runnable ``awf`` masked by a success exit. The uninstall must pass the
+    same ``PIPX_BIN_DIR`` the matching install used.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output="")
+    harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
+
+    result = harness.run(["--uninstall", "--install-dir", "/custom/bin"])
+
+    assert result.returncode == 0, result.stderr
+    joined = "\n".join(harness.calls())
+    assert f"pipx uninstall {PACKAGE}" in joined
+    # The removal ran with the install-time PIPX_BIN_DIR so the script linked
+    # into the custom dir is removed, not orphaned behind a success exit.
+    assert "pipx-uninstall-env PIPX_BIN_DIR=/custom/bin" in joined
+
+
+@pytest.mark.unit
+def test_uninstall_uv_passes_install_dir_as_uv_tool_bin_dir(
+    harness: InstallerHarness,
+) -> None:
+    """Uninstalling a uv install honours ``--install-dir`` via ``UV_TOOL_BIN_DIR``.
+
+    ``install_uv`` links the executable into ``UV_TOOL_BIN_DIR="$INSTALL_DIR"``.
+    ``uv tool uninstall`` removes entry points from the bin dir it computes at
+    uninstall time, so the install-time ``UV_TOOL_BIN_DIR`` must be re-exported or
+    ``${INSTALL_DIR}/awf`` is orphaned while the run still exits 0 — the same
+    defect the pipx path has.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output="")
+
+    result = harness.run(["--uninstall", "--install-dir", "/custom/bin"])
+
+    assert result.returncode == 0, result.stderr
+    joined = "\n".join(harness.calls())
+    assert f"uv tool uninstall {PACKAGE}" in joined
+    assert "uv-tool-uninstall-env UV_TOOL_BIN_DIR=/custom/bin" in joined
+
+
+@pytest.mark.unit
+def test_uninstall_without_install_dir_leaves_bin_dir_env_unset(
+    harness: InstallerHarness,
+) -> None:
+    """Without ``--install-dir`` the uninstall must not force an empty bin dir.
+
+    Exporting ``PIPX_BIN_DIR=`` / ``UV_TOOL_BIN_DIR=`` (empty) would point each
+    manager at an empty bin dir instead of its normal default, breaking the
+    common no-``--install-dir`` uninstall. With no override the variable must be
+    left unset so each manager resolves its usual default bin dir — mirroring how
+    ``install_uv``/``install_pipx`` only set the prefix when ``INSTALL_DIR`` is
+    non-empty.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    joined = "\n".join(harness.calls())
+    assert "uv-tool-uninstall-env UV_TOOL_BIN_DIR=<unset>" in joined
+    assert "pipx-uninstall-env PIPX_BIN_DIR=<unset>" in joined
+
+
+@pytest.mark.unit
 def test_uninstall_fails_when_pipx_removal_fails_after_uv_succeeds(
     harness: InstallerHarness,
 ) -> None:
