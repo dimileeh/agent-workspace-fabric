@@ -172,6 +172,63 @@ async def test_monitor_precommit_autofix_retry_does_not_restage_staged_only_repa
 
 
 @pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_allows_untracked_operation_paths(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "src/awf/fixed.py"
+    untracked_path = "docs/new-notes.md"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f"?? {untracked_path}\nMM {fixed_path}\n")
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0)
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(untracked_path, fixed_path),
+    )
+
+    assert retry is not None
+    retry_result, restaged_paths = retry
+    assert retry_result.ok
+    assert restaged_paths == (fixed_path,)
+    assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
+
+
+@pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_rejects_untracked_paths_outside_operation(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "src/awf/fixed.py"
+    untracked_path = "docs/new-notes.md"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f"?? {untracked_path}\nMM {fixed_path}\n")
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(fixed_path,),
+    )
+
+    assert retry is None
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.unit
 async def test_monitor_precommit_autofix_retry_restages_modified_rename_destination(
     tmp_path: Path,
 ) -> None:

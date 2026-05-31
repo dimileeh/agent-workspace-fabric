@@ -23,13 +23,12 @@ def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
     """Extract paths with unstaged worktree changes from porcelain output."""
     paths: list[str] = []
     for line in status_stdout.splitlines():
-        if not line:
+        if not line or len(line) < 4 or line[2] != " ":
             continue
-        if line.startswith("?? ") or (len(line) >= 4 and line[2] == " " and line[1] != " "):
-            status = line[:2]
-            path = line[3:]
-        else:
+        status = line[:2]
+        if status == "??" or status[1] == " ":
             continue
+        path = line[3:]
         if status[0] in {"R", "C"} and " -> " in path:
             _old_path, path = path.split(" -> ", 1)
         paths.append(path)
