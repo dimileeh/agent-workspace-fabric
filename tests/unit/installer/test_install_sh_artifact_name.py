@@ -17,10 +17,11 @@ success if the wheel exposes an ``awf`` command).
 ``verify_artifact_name`` therefore validates the wheel filename's own distribution
 and version components before download/install, mirroring the manifest generator's
 ``_validate_distribution_metadata`` (``scripts/generate_install_manifest.py``) so
-the installer accepts exactly the escaped wheel names a real release emits. A
-manifest that omits the top-level ``version`` (legacy/hand-authored) is not
-enforced for the version arm, mirroring how ``verify_version`` tolerates a missing
-field.
+the installer accepts exactly the escaped wheel names a real release emits. When a
+manifest omits its top-level ``version`` (legacy/hand-authored) the wheel filename is
+still cross-checked against a pinned ``--version`` -- the documented trust boundary --
+so an incomplete manifest cannot smuggle a different release past the pin; only an
+unpinned install with no declared version is left unenforced (nothing to compare).
 """
 
 from __future__ import annotations
@@ -179,3 +180,98 @@ def test_wheel_artifact_check_applies_under_dry_run(harness: InstallerHarness) -
     assert result.returncode != 0
     assert "PACKAGE_MISMATCH" in result.stderr
     assert "Dry run complete" not in result.stdout
+
+
+@pytest.mark.unit
+def test_pinned_version_missing_manifest_version_rejects_mismatched_wheel(
+    harness: InstallerHarness,
+) -> None:
+    """A versionless manifest cannot smuggle a different release past a ``--version`` pin.
+
+    The caller pins ``--version 0.1.0`` but the resolved manifest omits both its
+    top-level ``version`` and ``source.tag`` (a legacy/hand-authored shape), so
+    ``verify_version`` finds nothing to enforce. Its wheel artifact is a fully
+    coherent 0.2.0 release (its own name + sha256 match), so the checksum gate would
+    pass. ``--version`` is the documented trust boundary, so the artifact-name check
+    must fall back to comparing the wheel's own version against the pin rather than
+    returning early — otherwise the pin silently installs 0.2.0.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel(version="0.2.0")
+    manifest = harness.write_manifest(
+        wheel=wheel,
+        sha256=digest,
+        version="0.2.0",
+        include_version=False,
+        include_tag=False,
+    )
+
+    result = harness.run(["--version", "0.1.0"], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "VERSION_MISMATCH" in result.stderr
+    # Both the wheel's version and the requested pin are surfaced for diagnosis.
+    assert "0.2.0" in result.stderr
+    assert "0.1.0" in result.stderr
+    # Abort before the checksum gate and any install mutation.
+    assert "uv tool install" not in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_pinned_version_missing_manifest_version_accepts_matching_wheel(
+    harness: InstallerHarness,
+) -> None:
+    """A versionless manifest whose wheel matches the pin still installs.
+
+    The legacy/hand-authored manifest omits ``version`` and ``source.tag``, but its
+    wheel filename is for exactly the pinned ``0.1.0`` release. The pin-fallback in
+    the artifact-name check must accept it rather than over-reject a legitimate
+    versionless manifest.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(
+        wheel=wheel,
+        sha256=digest,
+        version="0.1.0",
+        include_version=False,
+        include_tag=False,
+    )
+
+    result = harness.run(["--version", "0.1.0"], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "VERSION_MISMATCH" not in result.stderr
+    assert "uv tool install" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_unpinned_missing_manifest_version_accepts_wheel(harness: InstallerHarness) -> None:
+    """An unpinned install with a versionless manifest is left unenforced.
+
+    Without a ``--version`` pin and without a declared manifest version there is
+    nothing to compare the wheel version against, so the artifact-name check accepts
+    the wheel as the version of record — preserving the deliberate tolerance of
+    legacy/hand-authored manifests and not over-tightening unpinned installs.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel(version="0.2.0")
+    manifest = harness.write_manifest(
+        wheel=wheel,
+        sha256=digest,
+        version="0.2.0",
+        include_version=False,
+        include_tag=False,
+    )
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "VERSION_MISMATCH" not in result.stderr
+    assert "uv tool install" in "\n".join(harness.calls())

@@ -554,9 +554,11 @@ normalize_dist_name() {
 # Cross-check the wheel filename's own distribution/version before downloading.
 # Wheel filenames are {distribution}-{version}-{python}-{abi}-{platform}.whl with
 # the distribution and version escaped (PEP 427/503), so normalize both sides the
-# way the generator's _validate_distribution_metadata does before comparing. A
-# manifest that omits the top-level version (legacy/hand-authored) is not enforced
-# for the version arm, mirroring verify_version's tolerance of a missing field.
+# way the generator's _validate_distribution_metadata does before comparing. When the
+# manifest omits its top-level version (legacy/hand-authored), the wheel filename is
+# still cross-checked against a pinned --version so an incomplete manifest cannot
+# smuggle a different release past the pin; only an unpinned install with no declared
+# version is left unenforced (nothing to compare against).
 verify_artifact_name() {
     case "$ARTIFACT_NAME" in
         *.whl) ;;
@@ -590,12 +592,32 @@ verify_artifact_name() {
     # set -e abort the install with no reason token.
     local manifest_version
     manifest_version="$(extract_manifest_version || true)"
-    [ -n "$manifest_version" ] || return 0
-    local lc_wheel_version lc_manifest_version
+
+    # Choose the version the wheel must match. The manifest's declared top-level
+    # version is authoritative when present (verify_version already proved it equals
+    # any --version pin). When it is absent, verify_version could not enforce the pin
+    # either, so the wheel filename is the only remaining evidence of which release
+    # this is: if the caller pinned --version, compare the wheel version against that
+    # pin (the documented trust boundary, RELEASING.md) so an incomplete manifest
+    # omitting both top-level version and source.tag cannot install a different
+    # release (e.g. agent_workspace_fabric-0.2.0-...whl under --version 0.1.0). With
+    # neither a declared manifest version nor a pin there is nothing to compare
+    # against, so accept the wheel version as the version of record.
+    local expected_version expected_source
+    if [ -n "$manifest_version" ]; then
+        expected_version="$manifest_version"
+        expected_source="the manifest declares version ${manifest_version}"
+    elif [ -n "$VERSION" ]; then
+        expected_version="$VERSION"
+        expected_source="the pinned --version is ${VERSION}"
+    else
+        return 0
+    fi
+    local lc_wheel_version lc_expected_version
     lc_wheel_version="$(printf '%s' "$wheel_version" | tr '[:upper:]' '[:lower:]')"
-    lc_manifest_version="$(printf '%s' "$manifest_version" | tr '[:upper:]' '[:lower:]')"
-    if [ "$lc_wheel_version" != "$lc_manifest_version" ]; then
-        fail VERSION_MISMATCH "manifest wheel artifact ${ARTIFACT_NAME} is for version ${wheel_version} but the manifest declares version ${manifest_version} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest whose wheel is for a different release"
+    lc_expected_version="$(printf '%s' "$expected_version" | tr '[:upper:]' '[:lower:]')"
+    if [ "$lc_wheel_version" != "$lc_expected_version" ]; then
+        fail VERSION_MISMATCH "manifest wheel artifact ${ARTIFACT_NAME} is for version ${wheel_version} but ${expected_source} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest whose wheel is for a different release"
     fi
 }
 

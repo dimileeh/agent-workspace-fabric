@@ -206,6 +206,8 @@ class InstallerHarness:
         tag: str | None = None,
         package: str | None = "agent-workspace-fabric",
         wheel_signatures: list[dict[str, object]] | None = None,
+        include_version: bool = True,
+        include_tag: bool = True,
     ) -> Path:
         """Write a T11-shaped manifest pointing at the fixture wheel.
 
@@ -222,6 +224,10 @@ class InstallerHarness:
         (defaults to empty) so tests can model a release-signed manifest whose
         signature objects carry their own ``kind``/``name``/``url`` keys; with
         sorted keys these sort before the artifact's own ``url``.
+        ``include_version``/``include_tag`` drop the top-level ``version`` and the
+        ``source.tag`` fields respectively (both default present) so tests can model
+        a legacy/hand-authored manifest that omits the version evidence
+        ``verify_version`` and ``verify_artifact_name`` cross-check against a pin.
         """
         artifacts = [
             {
@@ -245,18 +251,21 @@ class InstallerHarness:
                     "url": f"file://{wheel.parent / sdist_name}",
                 }
             )
+        source: dict[str, object] = {
+            "commit": None,
+            "repository": REPOSITORY_URL,
+        }
+        if include_tag:
+            source["tag"] = tag if tag is not None else f"v{version}"
         manifest: dict[str, object] = {
             "artifacts": artifacts,
             "channel": channel,
             "generated_at": "2026-05-29T00:00:00Z",
             "schema_version": 1,
-            "source": {
-                "commit": None,
-                "repository": REPOSITORY_URL,
-                "tag": tag if tag is not None else f"v{version}",
-            },
-            "version": version,
+            "source": source,
         }
+        if include_version:
+            manifest["version"] = version
         if package is not None:
             manifest["package"] = package
         path = self.root / "awf-install-manifest.json"
