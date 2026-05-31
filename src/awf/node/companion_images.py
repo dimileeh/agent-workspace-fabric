@@ -170,7 +170,14 @@ class CompanionImageBuilder:
             # linger (the next wave re-checks the tag cheaply), so the registry
             # only ever holds in-flight builds.
             task.add_done_callback(lambda _task: self._builds.pop(tag, None))
-        return await task
+        # ``asyncio.shield`` isolates the shared build from any single waiter's
+        # cancellation. Awaiting the Task directly would propagate a cancelled
+        # waiter's ``CancelledError`` into the shared Task (an awaiter becomes the
+        # Task's ``_fut_waiter``, so cancelling the waiter cancels the Task),
+        # aborting the in-flight build for *every* other waiter in the wave rather
+        # than just abandoning that one wait. Shielded, a cancelled waiter only
+        # drops its own wait while the build runs on for the survivors.
+        return await asyncio.shield(task)
 
     async def _ensure_build(
         self,

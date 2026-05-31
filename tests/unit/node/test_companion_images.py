@@ -21,9 +21,16 @@ from awf.node.compose_manager import (
 class _FakeCompose:
     """Minimal ComposeManager stand-in exposing only the builder's docker calls."""
 
-    def __init__(self, *, exists: bool = False, build_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        exists: bool = False,
+        build_error: Exception | None = None,
+        build_gate: asyncio.Event | None = None,
+    ) -> None:
         self.exists_result = exists
         self.build_error = build_error
+        self.build_gate = build_gate
         self.exists_calls: list[str] = []
         self.build_calls: list[dict[str, object]] = []
         self._built_tags: set[str] = set()
@@ -42,6 +49,11 @@ class _FakeCompose:
         labels: dict[str, str] | None = None,
         capture_timeout_seconds: float | None = None,
     ) -> None:
+        # An optional gate lets a test hold the build in flight (so a waiter can
+        # be cancelled while the shared build is still running) and only record
+        # the call once released -- a build cancelled mid-flight never appends.
+        if self.build_gate is not None:
+            await self.build_gate.wait()
         await asyncio.sleep(0)
         self.build_calls.append(
             {
@@ -423,3 +435,50 @@ async def test_ensure_reuses_image_across_workspaces_for_identical_build_inputs(
 
     assert first == second  # same tag -> reused across workspaces
     assert len(compose.build_calls) == 1  # the second reused the first build
+
+
+@pytest.mark.unit
+async def test_ensure_waiter_cancellation_does_not_abort_shared_build() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F6Lh0: concurrent waiters for the same tag
+    # share one in-flight build task. Awaiting that Task directly would propagate
+    # a single waiter's cancellation into the shared Task (a waiter awaiting a
+    # Task becomes that Task's _fut_waiter, so cancelling the waiter cancels the
+    # Task), aborting the build for *every* other waiter in the wave. asyncio
+    # .shield isolates the shared build so a cancelled waiter only abandons its
+    # own wait while the build keeps running for the survivors.
+    """Cancelling one waiter leaves the shared build intact for the others."""
+    gate = asyncio.Event()
+    compose = _FakeCompose(exists=False, build_gate=gate)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    async def _ensure() -> str | None:
+        return await builder.ensure(
+            name="backend",
+            commit_sha="abc123def456",
+            build_context="/ctx",
+            dockerfile="Dockerfile",
+            relative_build_context=".",
+            capture_timeout_seconds=660.0,
+        )
+
+    cancelled_waiter = asyncio.create_task(_ensure())
+    surviving_waiter = asyncio.create_task(_ensure())
+    # Let both waiters attach to the one shared build task before cancelling.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(builder._builds) == 1  # noqa: SLF001  # a single shared build
+
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    # Releasing the gate lets the shared build finish; the surviving waiter must
+    # still receive the tag rather than a propagated CancelledError.
+    gate.set()
+    result = await surviving_waiter
+
+    expected = companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
+    )
+    assert result == expected
+    assert len(compose.build_calls) == 1  # the shared build ran once, uncancelled
