@@ -12,6 +12,7 @@ from awf.runtime.pr_monitor_runner.comments import (
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_porcelain,
+    _split_porcelain_rename_paths,
     _unquote_porcelain_path,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -30,8 +31,9 @@ def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
         if status == "??" or status[1] == " ":
             continue
         path = line[3:]
-        if status[0] in {"R", "C"} and " -> " in path:
-            _old_path, path = path.split(" -> ", 1)
+        rename_paths = _split_porcelain_rename_paths(path) if status[0] in {"R", "C"} else None
+        if rename_paths:
+            _old_path, path = rename_paths
         paths.append(_unquote_porcelain_path(path))
     return list(dict.fromkeys(paths))
 

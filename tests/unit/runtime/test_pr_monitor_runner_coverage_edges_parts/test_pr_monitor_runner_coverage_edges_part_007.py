@@ -1125,6 +1125,7 @@ def test_git_push_and_porcelain_helpers_cover_clean_rename_and_invalid_lines() -
         "?? docs/new.md\n"
         ' M "dir a/file b.txt"\n'
         "R  old/name.py -> src/name.py\n"
+        'R  "src/old -> backup.py" -> src/new.py\n'
         " M src/changed.py\n"
     ) == [
         "src/changed.py",
@@ -1132,6 +1133,8 @@ def test_git_push_and_porcelain_helpers_cover_clean_rename_and_invalid_lines() -
         "dir a/file b.txt",
         "old/name.py",
         "src/name.py",
+        "src/old -> backup.py",
+        "src/new.py",
     ]
     assert _untracked_paths_from_porcelain(
         '?? old/name.py -> src/name.py\n?? "docs/new note.md"\n?? docs/new.md\n'

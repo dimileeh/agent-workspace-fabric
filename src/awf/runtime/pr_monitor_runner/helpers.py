@@ -1296,11 +1296,17 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
         if not line:
             continue
         if line.startswith("?? ") or (len(line) >= 4 and line[2] == " "):
+            status = line[:2]
             path = line[3:]
         else:
             continue
-        if " -> " in path:
-            old_path, new_path = path.split(" -> ", 1)
+        rename_paths = (
+            _split_porcelain_rename_paths(path)
+            if status[:1] in {"R", "C"} or status[1:2] in {"R", "C"}
+            else None
+        )
+        if rename_paths:
+            old_path, new_path = rename_paths
             paths.extend(
                 [
                     _unquote_porcelain_path(old_path),
@@ -1323,6 +1329,30 @@ _PORCELAIN_C_ESCAPES = {
     '"': 0x22,
     "\\": 0x5C,
 }
+
+
+def _split_porcelain_rename_paths(path: str) -> tuple[str, str] | None:
+    """Split porcelain rename paths on the separator outside C-quoted paths."""
+    in_quote = False
+    escaped = False
+    for index, char in enumerate(path):
+        if in_quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_quote = False
+            continue
+
+        if char == '"':
+            in_quote = True
+            continue
+
+        if path.startswith(" -> ", index):
+            return path[:index], path[index + 4 :]
+
+    return None
 
 
 def _unquote_porcelain_path(path: str) -> str:

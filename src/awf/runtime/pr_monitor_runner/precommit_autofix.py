@@ -7,6 +7,8 @@ import re
 from awf.common.commands import CommandResult
 
 _PRE_COMMIT_AUTOFIX_MARKER = "files were modified by this hook"
+# Exact hook IDs only: custom deterministic wrappers around these normalizers
+# must add their own IDs here to opt in without widening to semantic fixers.
 _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS = frozenset(
     {
         "trailing-whitespace",
