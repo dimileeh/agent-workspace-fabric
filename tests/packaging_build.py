@@ -17,6 +17,7 @@ the amortized cost is one build per worker that needs an artifact.
 
 from __future__ import annotations
 
+import atexit
 import shutil
 import subprocess
 import tempfile
@@ -55,6 +56,11 @@ def build_distributions() -> BuiltDistributions:
         raise PackageBuildUnavailableError("uv is not available to build distributions")
 
     out_dir = Path(tempfile.mkdtemp(prefix="awf-pkg-build-"))
+    # The built artifacts must outlive this call (tests reference the wheel/sdist
+    # paths for the rest of the process), so defer cleanup to process exit rather
+    # than a context manager. This also reclaims temp dirs from failed build
+    # attempts, which lru_cache does not cache.
+    atexit.register(shutil.rmtree, out_dir, ignore_errors=True)
     try:
         result = subprocess.run(
             [uv, "build", "--out-dir", str(out_dir), str(REPO_ROOT)],
