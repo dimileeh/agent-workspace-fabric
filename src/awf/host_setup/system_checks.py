@@ -1037,27 +1037,42 @@ def check_host_port_conflict(api_port: int, postgres_port: int) -> SetupCheckRes
 def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
     """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unusable.
 
-    A missing, empty, whitespace-only, *or surrounding-whitespace* (padded)
-    value yields ``None``. The override is "usable" only when AWF can honor it
-    identically across every layer, and a value with leading/trailing whitespace
-    cannot be: the readiness probe would ``strip`` it, but Compose interpolates
-    ``${AWF_HOST_WORK_DIR}`` verbatim and ``awf service``'s
-    ``_resolve_service_work_dir`` returns it *unstripped*, so a padded
-    ``" /data/awf"`` would pass disk readiness for the stripped ``/data/awf``
-    while ``awf start`` mounts (and the service resolves) the spaced path.
+    A missing, empty, whitespace-only, *surrounding-whitespace* (padded), *or
+    non-absolute* (relative or ``~``-prefixed) value yields ``None``. The
+    override is "usable" only when AWF can honor it identically across every
+    layer, and these values cannot be:
+
+    * A value with leading/trailing whitespace: the readiness probe would
+      ``strip`` it, but Compose interpolates ``${AWF_HOST_WORK_DIR}`` verbatim
+      and ``awf service``'s ``_resolve_service_work_dir`` returns it
+      *unstripped*, so a padded ``" /data/awf"`` would pass disk readiness for
+      the stripped ``/data/awf`` while ``awf start`` mounts (and the service
+      resolves) the spaced path.
+    * A non-absolute value such as ``data/awf`` or ``~/.awf/service``: the
+      local-service Compose file uses ``${AWF_HOST_WORK_DIR}`` as *both* the bind
+      source and the mount target (``docker/compose/local-service.yml``), and
+      Docker's mount target must be an absolute path. Neither Compose nor
+      ``_resolve_service_work_dir`` expands a leading ``~`` or resolves a
+      relative path, so the readiness probe — which *does* expand ``~`` and reads
+      a relative path against the current process — would report readiness for a
+      directory ``awf start`` can never mount.
+
     Whether that ``None`` means a legitimate fall-back to Compose's
     ``${HOME}/.awf/service`` default (only an *unset or empty* override,
     mirroring ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``) or a startup
-    blocker (a whitespace-only or padded value, which Compose keeps as a
-    non-empty literal and interpolates verbatim into the bind path) is decided by
-    :func:`_invalid_host_work_dir_override`, which the readiness probe surfaces
-    as a blocker instead of silently probing the stripped or default work dir.
+    blocker (a whitespace-only, padded, or non-absolute value, which Compose
+    keeps as a non-empty literal and interpolates verbatim into the bind path) is
+    decided by :func:`_invalid_host_work_dir_override`, which the readiness probe
+    surfaces as a blocker instead of silently probing the stripped, expanded, or
+    default work dir.
     """
     raw = environ.get("AWF_HOST_WORK_DIR")
     if raw is None:
         return None
     candidate = raw.strip()
     if not candidate or candidate != raw:
+        return None
+    if not Path(candidate).is_absolute():
         return None
     return candidate
 
@@ -1122,16 +1137,18 @@ def _invalid_host_work_dir_override(
     empty* (a zero-length string) — the empty case is a legitimate fall-back to
     Compose's ``${HOME}/.awf/service`` default because
     ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` substitutes the default only
-    when the variable is unset or empty. A whitespace-only *or
-    surrounding-whitespace* (padded) value is returned instead: Compose treats
-    ``"   "`` and ``" /data/awf"`` as non-empty literals and interpolates them
-    verbatim into the bind source/target, and ``awf service`` resolves the same
-    override as its ``work_dir`` (``_resolve_service_work_dir`` returns it
-    unstripped), so ``awf start`` mounts (or fails on) that exact path rather
-    than the stripped or default one. The readiness probe must block on it
-    instead of silently probing the stripped/default work dir and reporting
-    readiness for the wrong directory. The ``not raw`` guard mirrors the same
-    empty-vs-whitespace split as the API-port override so the two layers agree.
+    when the variable is unset or empty. A whitespace-only, *surrounding-
+    whitespace* (padded), *or non-absolute* (relative or ``~``-prefixed) value is
+    returned instead: Compose treats ``"   "``, ``" /data/awf"``, ``data/awf``,
+    and ``~/.awf/service`` as non-empty literals and interpolates them verbatim
+    into the bind source/target, and ``awf service`` resolves the same override
+    as its ``work_dir`` (``_resolve_service_work_dir`` returns it unstripped and
+    unexpanded). Docker's mount target must be absolute, so ``awf start`` mounts
+    (or fails on) that exact path rather than the stripped, expanded, or default
+    one. The readiness probe must block on it instead of silently probing the
+    stripped/expanded/default work dir and reporting readiness for the wrong
+    directory. The ``not raw`` guard mirrors the same empty-vs-whitespace split
+    as the API-port override so the two layers agree.
     """
     if work_dir is not None:
         return None
@@ -1147,28 +1164,65 @@ def _invalid_host_work_dir_override(
 def check_host_work_dir_override(raw: str) -> SetupCheckResult:
     """Report a set-but-unusable ``AWF_HOST_WORK_DIR`` as a startup blocker.
 
-    The local-service Compose stack bind-mounts
-    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` and ``awf service`` resolves
-    the same override as its work_dir, so a non-empty value that is whitespace-
-    only or carries leading/trailing whitespace is used verbatim as the bind
-    path and ``awf start`` mounts (or fails on) it instead of the stripped or
-    default path. The readiness probe blocks on it rather than silently probing
-    the stripped/default work dir and reporting readiness for the wrong
-    directory.
+    The local-service Compose stack uses ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``
+    as *both* the bind source and the mount target and ``awf service`` resolves
+    the same override as its work_dir, both verbatim, so two classes of value are
+    used as the bind path exactly as written rather than as the readiness probe
+    would normalize them:
+
+    * whitespace-only or surrounding-whitespace values, which Compose keeps
+      unstripped; and
+    * non-absolute values (a relative path or a leading ``~``), which Docker
+      rejects because a mount target must be absolute and neither Compose nor
+      ``awf service`` expands ``~`` or resolves a relative path.
+
+    Either way ``awf start`` mounts (or fails on) the literal value instead of
+    the stripped/expanded path the readiness probe would otherwise report, so the
+    probe blocks rather than reporting readiness for a directory that is never
+    mounted.
     """
+    candidate = raw.strip()
+    if candidate and candidate == raw:
+        # Non-empty with no surrounding whitespace, but not an absolute path: a
+        # relative path or a leading ``~`` Compose/awf service keep verbatim.
+        summary = f"AWF_HOST_WORK_DIR={raw!r} is not an absolute path, not a usable work directory."
+        detail = (
+            "AWF_HOST_WORK_DIR must be an absolute directory path. The local-service Compose "
+            "stack uses ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service} as both the bind source and "
+            "the mount target, and awf service resolves the same override as its work_dir — all "
+            "verbatim. Docker's bind mount target must be absolute and neither Compose nor awf "
+            "service expands a leading ~ or resolves a relative path, so awf start fails to mount "
+            "this value even though the readiness probe could resolve it (expanding ~ or reading "
+            "it relative to the current process)."
+        )
+        fix = (
+            "Set AWF_HOST_WORK_DIR to an absolute directory path (for example "
+            "/home/you/.awf/service rather than ~/.awf/service or data/awf), or unset it to use "
+            "the default ${HOME}/.awf/service, then re-run awf setup --dry-run."
+        )
+    else:
+        summary = (
+            f"AWF_HOST_WORK_DIR={raw!r} has leading or trailing whitespace, "
+            "not a usable work directory."
+        )
+        detail = (
+            "AWF_HOST_WORK_DIR must be a real directory path with no surrounding whitespace. "
+            "The local-service Compose stack bind-mounts ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service} "
+            "and awf service resolves the same override as its work_dir, so this value is used "
+            "verbatim — with its surrounding whitespace — as the bind path and awf start mounts (or "
+            "fails on) it instead of the stripped path the readiness probe would otherwise report."
+        )
+        fix = (
+            "Set AWF_HOST_WORK_DIR to a real directory path with no leading or trailing "
+            "whitespace, or unset it to use the default ${HOME}/.awf/service, then re-run "
+            "awf setup --dry-run."
+        )
     return SetupCheckResult(
         name="disk",
         level=SetupCheckLevel.BLOCKED,
-        summary=f"AWF_HOST_WORK_DIR={raw!r} has leading or trailing whitespace, "
-        "not a usable work directory.",
-        detail="AWF_HOST_WORK_DIR must be a real directory path with no surrounding whitespace. "
-        "The local-service Compose stack bind-mounts ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service} "
-        "and awf service resolves the same override as its work_dir, so this value is used "
-        "verbatim — with its surrounding whitespace — as the bind path and awf start mounts (or "
-        "fails on) it instead of the stripped path the readiness probe would otherwise report.",
-        fix="Set AWF_HOST_WORK_DIR to a real directory path with no leading or trailing "
-        "whitespace, or unset it to use the default ${HOME}/.awf/service, then re-run "
-        "awf setup --dry-run.",
+        summary=summary,
+        detail=detail,
+        fix=fix,
         data={
             "path": None,
             "free_bytes": None,

@@ -646,21 +646,23 @@ def test_run_system_checks_keeps_compose_when_docker_daemon_down(
 
 
 @pytest.mark.unit
-def test_run_system_checks_tolerates_unresolvable_work_dir_user(
+def test_run_system_checks_blocks_unresolvable_work_dir_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``docker/compose/.env`` ``AWF_HOST_WORK_DIR: ~olduser/...`` must not crash.
+    """A ``docker/compose/.env`` ``AWF_HOST_WORK_DIR: ~olduser/...`` blocks, never crashes.
 
-    ``Path.expanduser`` raises ``RuntimeError`` for a ``~user`` component the host
-    cannot resolve. Aggregation runs before the reason-coded setup handlers, so an
-    unguarded expansion of the Compose work-dir override would abort
-    ``awf setup --dry-run`` with a traceback instead of producing the readiness
-    payload.
+    A ``~user`` override is non-absolute: Compose and ``awf service`` keep it
+    verbatim (they do not expand ``~``) and Docker's mount target must be
+    absolute, so ``awf start`` could never mount it. The readiness probe blocks it
+    before attempting any expansion, so an unresolvable ``~user`` component —
+    which would make ``Path.expanduser`` raise ``RuntimeError`` — can never abort
+    ``awf setup --dry-run`` with a traceback.
     """
     import os.path
 
-    # Simulate a host that cannot resolve the ``~user`` component: os.path leaves
-    # the leading ``~user`` intact, which makes Path.expanduser raise RuntimeError.
+    # Simulate a host that cannot resolve the ``~user`` component: if anything
+    # tried to expand it, ``Path.expanduser`` would raise ``RuntimeError``. The
+    # non-absolute block fires first, so nothing does.
     monkeypatch.setattr(os.path, "expanduser", lambda value: value)
 
     def fake_ok(name: str) -> SetupCheckResult:
@@ -695,8 +697,11 @@ def test_run_system_checks_tolerates_unresolvable_work_dir_user(
     )
 
     assert [r.name for r in results].count("disk") == 1
-    # The unresolvable expansion falls back to the raw path rather than raising.
-    assert captured["disk_path"] == Path("~olduser/.awf/service")
+    disk = next(result for result in results if result.name == "disk")
+    assert disk.level is SetupCheckLevel.BLOCKED
+    assert disk.data["env_value"] == "~olduser/.awf/service"
+    # Blocked before any expansion, so the disk probe never runs (no traceback).
+    assert "disk_path" not in captured
 
 
 # --- Provider normalization ----------------------------------------------
@@ -1920,19 +1925,39 @@ def test_run_system_checks_honors_awf_host_work_dir_env(
 
 
 @pytest.mark.unit
-def test_run_system_checks_expands_awf_host_work_dir_env(
+def test_run_system_checks_blocks_on_non_absolute_work_dir_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``~`` in the env override is expanded before the disk probe inspects it."""
-    captured: dict[str, object] = {}
-    _patch_probes_capture_disk_path(monkeypatch, captured)
+    """A relative or ``~``-prefixed ``AWF_HOST_WORK_DIR`` blocks; it is not probed.
 
-    run_system_checks(
-        config=HostSetupConfig(work_dir="/persisted/state"),
-        environ={"AWF_HOST_WORK_DIR": "~/custom/state"},
-    )
+    The local-service Compose file uses ``${AWF_HOST_WORK_DIR}`` as *both* the
+    bind source and the mount target (``docker/compose/local-service.yml``), and
+    Docker's mount target must be an absolute path. Neither Compose nor ``awf
+    service``'s ``_resolve_service_work_dir`` expands a leading ``~`` or resolves
+    a relative path, so a value such as ``data/awf`` or ``~/.awf/service`` is
+    mounted verbatim and ``awf start`` fails — even though the readiness probe
+    could expand ``~`` or read the relative path against the current process. The
+    probe must block on it instead of reporting readiness for a directory that is
+    never mounted.
 
-    assert captured["disk_path"] == Path("~/custom/state").expanduser()
+    (The old behavior expanded ``~`` for the disk probe; that hid this exact
+    divergence, so the readiness check now blocks non-absolute overrides the same
+    way it already blocks whitespace-only and padded ones.)
+    """
+    for non_absolute in ("data/awf", "./data/awf", "~/.awf/service", "~op/.awf/service"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": "/home/op", "AWF_HOST_WORK_DIR": non_absolute},
+        )
+
+        disk = next(result for result in results if result.name == "disk")
+        assert disk.level is SetupCheckLevel.BLOCKED, repr(non_absolute)
+        assert disk.data["env_value"] == non_absolute
+        # The disk probe must not run for a path the operator never mounted.
+        assert "disk_path" not in captured, repr(non_absolute)
 
 
 @pytest.mark.unit
