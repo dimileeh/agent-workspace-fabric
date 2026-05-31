@@ -981,6 +981,37 @@ def _mkdir_secure(directory: Path) -> None:
     if not directory.is_dir():
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(directory))
     _chmod_best_effort(directory, 0o700)
+    # The hardening chmod above is *best-effort*: when ``secrets_dir`` points at a
+    # pre-existing directory the operator does not own (e.g. ``/tmp`` or a
+    # root-owned 0777 shared dir), the ``chmod`` raises and ``_chmod_best_effort``
+    # suppresses it, silently leaving the dir group/world-accessible. A freshly
+    # created level is safe (its 0o700 create-time mode already holds, only ever
+    # tightened by the umask), but this explicit-path fallback would otherwise
+    # write the secret and mint a ``plain-file://`` ref inside a world-traversable
+    # dir — demoting the plain-file backend's own 0700 directory guarantee. Verify
+    # the result and fail closed so the secret never lands in a shared directory.
+    _reject_group_or_world_accessible_dir(directory)
+
+
+def _reject_group_or_world_accessible_dir(directory: Path) -> None:
+    """Refuse ``directory`` if any group/other permission bit survives, on POSIX.
+
+    The owner-private (0o700) guarantee means group and other must hold no read,
+    write, or execute bit. ``directory`` has been confirmed a real (non-symlink)
+    directory by the guards in ``_mkdir_secure``, so ``stat`` reflects the
+    directory itself rather than a redirected link target. POSIX-only: the
+    rwx-for-group/other model does not apply off POSIX, where ``_chmod_best_effort``
+    is itself a no-op, so a non-POSIX ``st_mode`` carrying those bits is ignored
+    rather than treated as a hardening failure.
+    """
+    if os.name != "posix":
+        return
+    if directory.stat().st_mode & 0o077:
+        raise PermissionError(
+            errno.EPERM,
+            "Secrets directory is group- or world-accessible and could not be hardened to 0700.",
+            str(directory),
+        )
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:

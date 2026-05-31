@@ -586,6 +586,26 @@ def test_fsync_dir_best_effort_skips_non_posix_hosts(
     credentials._fsync_dir_best_effort(tmp_path)
 
 
+@pytest.mark.unit
+def test_reject_group_or_world_accessible_dir_skips_non_posix_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the owner-private directory guard is a no-op on non-POSIX hosts.
+
+    The rwx-for-group/other permission model the guard enforces is POSIX-specific
+    (``_chmod_best_effort`` is itself a no-op off POSIX), so the guard must return
+    without refusing a directory whose mode carries group/other bits the platform
+    ignores — a 0o755 dir that would be fatal on POSIX is accepted off it.
+    """
+    target = tmp_path / "secrets"
+    target.mkdir()
+    target.chmod(0o755)  # group/world-accessible: fatal on POSIX, ignored off it
+    monkeypatch.setattr(credentials.os, "name", "nt")
+
+    credentials._reject_group_or_world_accessible_dir(target)
+
+
 # --------------------------------------------------------------------------- #
 # 12. Credential refs stay within the ProviderConfig storage cap.
 # --------------------------------------------------------------------------- #

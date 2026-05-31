@@ -334,6 +334,65 @@ def test_write_secret_file_tolerates_real_dir_racing_into_mkdir(
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="chmod hardening only runs on POSIX")
+def test_write_secret_file_refuses_unhardenable_world_traversable_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing secrets dir that stays world-traversable is refused.
+
+    Regression for PRRT_kwDOSJAM6s6F8eRy: when an operator points ``secrets_dir``
+    at an existing directory they do not own (e.g. ``/tmp`` or a root-owned 0777
+    shared directory), the hardening chmod at the end of ``_mkdir_secure`` is
+    *best-effort* — ``_chmod_best_effort`` suppresses the ``OSError`` a not-owned
+    ``chmod`` raises — so the directory silently stays world-traversable. A
+    freshly *created* dir is safe (the 0o700 create-time mode holds), but for this
+    explicit-path fallback the backend would otherwise still write the secret and
+    return a ``plain-file://`` ref inside the shared dir, bypassing the plain-file
+    backend's own 0700 directory guarantee. The mode check must be fatal on POSIX
+    *before* any secret is written. Neutralising ``_chmod_best_effort`` models the
+    silently-failing not-owned chmod without needing a second uid.
+    """
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir(mode=0o700)
+    secrets_dir.chmod(0o755)  # world-readable + world-traversable, not owner-private
+    # Model an operator who cannot chmod the dir: the hardening chmod is a no-op,
+    # leaving the 0o755 mode in place exactly as a suppressed ``OSError`` would.
+    monkeypatch.setattr(credentials, "_chmod_best_effort", lambda *_a, **_k: None)
+    target = secrets_dir / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The secret never landed in the world-traversable directory...
+    assert not target.exists()
+    assert list(secrets_dir.iterdir()) == []
+    # ...the directory mode was left untouched (we failed closed, did not accept it).
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o755
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="chmod hardening only runs on POSIX")
+def test_write_secret_file_accepts_preexisting_owner_private_dir(tmp_path: Path) -> None:
+    """A pre-existing 0o700 secrets dir is accepted (the fatal check is scoped).
+
+    The world-traversable refusal must not regress the common reuse case: a
+    secrets dir already created 0o700 by an earlier credential write is owner-
+    private, so the re-stat after the hardening chmod sees no group/other bits and
+    the secret is written normally.
+    """
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir(mode=0o700)
+    target = secrets_dir / "github.secret"
+
+    credentials._write_secret_file(target, "tok-value")
+
+    assert target.read_text(encoding="utf-8") == "tok-value"
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 def test_plain_file_backend_refuses_symlinked_secrets_dir(tmp_path: Path) -> None:
     """``create_ref`` refuses a symlinked secrets dir end-to-end (no resolve-away).
