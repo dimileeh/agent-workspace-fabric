@@ -482,11 +482,13 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             agent_runtime_image: str,
             auth_mount_resolver: object | None = None,
             secret_lease_resolver: object | None = None,
+            companion_image_builder: object | None = None,
         ) -> None:
             created["stack_compose"] = compose
             created["stack_agent_runtime_image"] = agent_runtime_image
             created["stack_auth_mount_resolver"] = auth_mount_resolver
             created["stack_secret_lease_resolver"] = secret_lease_resolver
+            created["stack_companion_image_builder"] = companion_image_builder
 
     class _Provisioner:
         def __init__(
@@ -496,11 +498,13 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             git: object,
             stack_launcher: object,
             config: object,
+            service_diagnostics: object = None,
         ) -> None:
             created["provisioner_session_factory"] = session_factory
             created["provisioner_git"] = git
             created["provisioner_stack_launcher"] = stack_launcher
             created["provisioner_config"] = config
+            created["provisioner_service_diagnostics"] = service_diagnostics
 
     class _ControlWorker:
         def __init__(

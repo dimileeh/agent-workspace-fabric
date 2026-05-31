@@ -74,6 +74,8 @@ class ServiceSettings:
     database_url: str
     docker_host: str
     agent_runtime_image: str
+    companion_image_cache_enabled: bool = True
+    companion_image_retention_hours: int = 168
     work_dir: str
     api_token: str | None
     github_token: str | None
@@ -90,6 +92,7 @@ class ServiceSettings:
     host_home: str = "~"
     node_id: str | None = None
     branch_prefix: str = "awf"
+    service_startup_log_tail_lines: int = 200
     min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
     completed_workspace_retention_hours: float = DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS
     workspace_cleanup_enabled: bool = True
@@ -99,6 +102,21 @@ class ServiceSettings:
     local_capacity_cpu_cores: float | None = None
     local_capacity_memory_gb: float | None = None
     local_capacity_dind_slots: int | None = None
+
+    def __post_init__(self) -> None:
+        """Catch a non-positive tail at settings resolution, not worker startup.
+
+        ``Settings.worker_service_startup_log_tail_lines`` enforces ``gt=0`` and
+        ``ProvisionerConfig.__post_init__`` re-checks, but a bad value assigned
+        directly to this dataclass would otherwise only fail later when
+        ``build_worker_runtime`` constructs the ``ProvisionerConfig``. Mirror the
+        guard here so it surfaces at the layer that converts the env-var setting.
+        """
+        if self.service_startup_log_tail_lines <= 0:
+            raise ValueError(
+                "service_startup_log_tail_lines must be > 0, "
+                f"got {self.service_startup_log_tail_lines}"
+            )
 
 
 @dataclass
@@ -189,6 +207,8 @@ def resolve_service_settings(
         database_url=database_url,
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,
+        companion_image_cache_enabled=settings.companion_image_cache_enabled,
+        companion_image_retention_hours=settings.companion_image_retention_hours,
         work_dir=work_dir,
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
@@ -206,6 +226,7 @@ def resolve_service_settings(
         planning_max_iterations_default=settings.planning_max_iterations_default,
         node_id=_empty_to_none(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
         branch_prefix=settings.worker_branch_prefix,
+        service_startup_log_tail_lines=settings.worker_service_startup_log_tail_lines,
         completed_workspace_retention_hours=settings.completed_workspace_retention_hours,
         workspace_cleanup_enabled=settings.workspace_cleanup_enabled,
         workspace_cleanup_scan_interval_seconds=settings.workspace_cleanup_scan_interval_seconds,

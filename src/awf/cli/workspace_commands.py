@@ -19,6 +19,8 @@ from awf.cli.common import (
     _handle_response,
     _parse_json_option,
 )
+from awf.cli.companion_env import merge_companion_env
+from awf.cli.env_file import parse_env_exclude_arg, parse_env_from_arg
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -30,8 +32,9 @@ from awf.db.enums import (
 
 _DX_FIRST_PATH_HELP = (
     "For first-time users: the current runnable first path is "
-    "`awf service bootstrap`, then `awf init <path>` to prepare your project "
-    "repository. `awf setup` and `awf start` are reserved future command surfaces."
+    "`awf service bootstrap` (or the friendly `awf start` wrapper), then "
+    "`awf init <path>` to prepare your project repository. `awf setup` is a "
+    "reserved future command surface."
 )
 
 workspace_app = typer.Typer(
@@ -135,6 +138,23 @@ def workspace_create(
         "--companion-json",
         help="Repeatable JSON companion service definition.",
     ),
+    companion_env_from: list[str] | None = typer.Option(
+        None,
+        "--companion-env-from",
+        help=(
+            "Repeatable. Read a .env file and merge its vars into the "
+            "matching companion's environment. Format: name=path. Explicit "
+            "--companion-json values win over file values."
+        ),
+    ),
+    companion_env_exclude: list[str] | None = typer.Option(
+        None,
+        "--companion-env-exclude",
+        help=(
+            "Repeatable. Drop named keys from a companion's merged environment. "
+            "Format: name=KEY1,KEY2,..."
+        ),
+    ),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -210,6 +230,25 @@ def workspace_create(
         body["companions"] = [
             _parse_json_option("--companion-json", companion) for companion in companion_json
         ]
+
+    if companion_env_from is not None or companion_env_exclude is not None:
+        try:
+            env_from_pairs: list[tuple[str, str]] = []
+            if companion_env_from:
+                for arg in companion_env_from:
+                    env_from_pairs.append(parse_env_from_arg(arg))
+            env_exclude_parsed: list[tuple[str, set[str]]] = []
+            if companion_env_exclude:
+                for arg in companion_env_exclude:
+                    env_exclude_parsed.append(parse_env_exclude_arg(arg))
+            body["companions"] = merge_companion_env(
+                body.get("companions", []),
+                env_from=env_from_pairs,
+                env_exclude=env_exclude_parsed,
+            )
+        except (ValueError, FileNotFoundError, PermissionError, UnicodeDecodeError) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
 
     headers = _api_token_headers(api_token)
     if idempotency_key:

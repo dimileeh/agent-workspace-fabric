@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import structlog
 
 from awf.common.audit import REDACTION_MARKER
 from awf.common.config import Settings
+from awf.node.companion_images import CompanionImageBuilder
 from awf.profiles.models import ProfileMonitor, ProfileRuntime, ProfileService, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 from awf.service import worker as worker_mod
@@ -51,6 +53,20 @@ def _in_process_merge_coordinator(
 ) -> InProcessMergeCoordinator:
     del engine
     return InProcessMergeCoordinator()
+
+
+@pytest.mark.unit
+def test_companion_image_builder_enabled_by_default(tmp_path: Path) -> None:
+    """The worker constructs a companion image builder by default."""
+    builder = worker_mod._companion_image_builder_for(_settings(tmp_path), object())  # type: ignore[arg-type]
+    assert isinstance(builder, CompanionImageBuilder)
+
+
+@pytest.mark.unit
+def test_companion_image_builder_disabled_returns_none(tmp_path: Path) -> None:
+    """The worker returns no companion image builder when caching is disabled."""
+    settings = dataclasses.replace(_settings(tmp_path), companion_image_cache_enabled=False)
+    assert worker_mod._companion_image_builder_for(settings, object()) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
@@ -107,6 +123,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
             created["compose_work_dir"] = work_dir
             created["compose_template_path"] = template_path
+            created["compose_instance"] = self
 
     class _LocalSecretLeaseMountResolver:
         def __init__(
@@ -128,11 +145,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             agent_runtime_image: str,
             auth_mount_resolver: object,
             secret_lease_resolver: object,
+            companion_image_builder: object = None,
         ) -> None:
             created["stack_compose"] = compose
             created["stack_agent_runtime_image"] = agent_runtime_image
             created["stack_auth_mount_resolver"] = auth_mount_resolver
             created["stack_secret_lease_resolver"] = secret_lease_resolver
+            created["stack_companion_image_builder"] = companion_image_builder
 
     class _Provisioner:
         def __init__(
@@ -142,11 +161,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             git: object,
             stack_launcher: object,
             config: object,
+            service_diagnostics: object = None,
         ) -> None:
             created["provisioner_session_factory"] = session_factory
             created["provisioner_git"] = git
             created["provisioner_stack_launcher"] = stack_launcher
             created["provisioner_config"] = config
+            created["provisioner_service_diagnostics"] = service_diagnostics
 
     class _WorkspaceExecutor:
         def __init__(
@@ -259,6 +280,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["stack_auth_mount_resolver"].workspace_owner_uid == 1000
     assert created["stack_auth_mount_resolver"].workspace_owner_gid == 1000
     assert created["stack_secret_lease_resolver"].__class__ is _LocalSecretLeaseMountResolver
+    assert isinstance(created["stack_companion_image_builder"], CompanionImageBuilder)
     assert created["executor_log_store"] is created["validation_log_store"]
     assert created["executor_usage_sampler"].__class__ is worker_mod.CcusageCollector
     assert created["executor_usage_sampler"]._runner is created["executor_runner"]
@@ -274,6 +296,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].max_concurrent_provisions == 2
     assert created["worker_config"].max_concurrent_executions == 4
     assert created["worker_config"].node_id == "node-1"
+    # Issue #299: the provisioner receives the ComposeManager as its
+    # service-startup diagnostics capturer so companion logs/healthcheck state
+    # are captured into the SERVICE_STARTUP_FAILURE event before teardown.
+    assert created["provisioner_service_diagnostics"] is created["compose_instance"]
 
     default_monitor = created["executor_monitor_factory"](
         object(),
@@ -658,6 +684,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             git: object,
             stack_launcher: object,
             config: object,
+            service_diagnostics: object = None,
         ) -> None:
             created["provisioner_config"] = config
 

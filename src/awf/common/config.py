@@ -326,6 +326,23 @@ class Settings(BaseSettings):
     # Docker
     docker_host: str = Field(default="unix:///var/run/docker.sock")
     agent_runtime_image: str = Field(default="awf-agent-runtime:latest")
+    companion_image_cache_enabled: bool = Field(
+        default=True,
+        description=(
+            "Pre-build each companion image once per (name, commit) on the host "
+            "daemon and reference it via image: so parallel dispatches reuse it."
+        ),
+    )
+    companion_image_retention_hours: int = Field(
+        default=168,
+        ge=1,
+        description=(
+            "Creation age after which cached companion images are pruned by GC. "
+            "Keyed on image creation time, not last use (Docker has no last-used "
+            "filter), so a still-current image built earlier may be evicted and "
+            "rebuilt cold on the next dispatch."
+        ),
+    )
     work_dir: str = Field(
         default=".awf",
         description="Local AWF state root. Log streams live under <work_dir>/logs.",
@@ -383,6 +400,15 @@ class Settings(BaseSettings):
     worker_max_concurrent_executions: int = Field(default=3, gt=0)
     worker_node_id: str | None = Field(default=None)
     worker_branch_prefix: str = Field(default="awf")
+    worker_service_startup_log_tail_lines: int = Field(
+        default=200,
+        gt=0,
+        description=(
+            "How many companion container log lines to capture into the persisted "
+            "SERVICE_STARTUP_FAILURE event when a service healthcheck fails to go "
+            "green. Default: 200."
+        ),
+    )
     agent_wall_timeout_seconds: float = Field(
         default=7200,
         gt=0,

@@ -303,6 +303,93 @@ class TestRender:
         assert "raw-secret-value" not in rendered
 
     @pytest.mark.unit
+    def test_companion_with_prebuilt_image_renders_image_not_build(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A companion with a prebuilt image renders image: and suppresses build:."""
+        spec = _spec(
+            tmp_path,
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    image="awf-companion-backend:abc123def456",
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        backend = parsed["services"]["backend"]
+        assert backend["image"] == "awf-companion-backend:abc123def456"
+        assert "build" not in backend
+
+    @pytest.mark.unit
+    def test_companion_without_image_still_renders_build(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A companion without a prebuilt image still renders build:."""
+        spec = _spec(
+            tmp_path,
+            companions=(CompanionService(name="backend", build_context="/host/backend"),),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        backend = parsed["services"]["backend"]
+        assert backend["build"] == {"context": "/host/backend", "dockerfile": "Dockerfile"}
+        assert "image" not in backend
+
+    @pytest.mark.unit
+    def test_companion_prebuilt_image_pins_pull_policy_never(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A companion's locally pre-built tag is never pulled from a registry.
+
+        Companion ``awf-companion-*`` tags only ever exist on the host daemon,
+        so Compose must not try to pull them. ``pull_policy: never`` turns an
+        absent local image into a clear local-image-missing error instead of a
+        confusing (and slow) registry pull that fails with "not found".
+        """
+        spec = _spec(
+            tmp_path,
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    image="awf-companion-backend:abc123def456",
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        backend = parsed["services"]["backend"]
+        assert backend["image"] == "awf-companion-backend:abc123def456"
+        assert backend["pull_policy"] == "never"
+
+    @pytest.mark.unit
+    def test_profile_registry_image_is_still_pullable(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Profile services reference registry images and must stay pullable.
+
+        ``pull_policy: never`` is scoped to locally pre-built companion images;
+        pinning it on a profile-declared registry image (postgres, redis, ...)
+        would wrongly block the registry pull the service depends on.
+        """
+        spec = _spec(
+            tmp_path,
+            services=(ComposeService(name="redis", image="redis:7"),),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        redis = parsed["services"]["redis"]
+        assert redis["image"] == "redis:7"
+        assert "pull_policy" not in redis
+
+    @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
         # Container names embed the workspace_id so operators can ``docker ps
         # --filter name=awf-ws_test123`` to find the stack.
@@ -589,6 +676,18 @@ class TestRender:
         assert parsed["volumes"]["dind_data"]["name"] == "awf-ws_test123-dind_data"
 
     @pytest.mark.unit
+    def test_dind_daemon_uses_configured_dind_image(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(
+            tmp_path,
+            docker_mode="dind",
+            dind_image="ghcr.io/example/dind:buildx",
+        )
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+        assert parsed["services"]["docker"]["image"] == "ghcr.io/example/dind:buildx"
+
+    @pytest.mark.unit
     def test_dind_mode_sets_default_agent_docker_host(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
@@ -801,6 +900,32 @@ class TestRender:
         assert env["COMPOSE_FILE"] == str(compose_file)
 
     @pytest.mark.unit
+    async def test_ensure_project_up_without_wait_omits_wait_flags(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.ensure_project_up(
+            project_name="awf_ws_resume",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws_resume",
+            wait=False,
+        )
+
+        assert calls
+        assert calls[0] == ("docker", "compose", "up", "-d", "--remove-orphans")
+        assert "--wait" not in calls[0]
+
+    @pytest.mark.unit
     async def test_compose_command_times_out_and_kills_hung_process(
         self,
         manager: ComposeManager,
@@ -909,6 +1034,32 @@ class TestRender:
         assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
 
     @pytest.mark.unit
+    async def test_docker_capture_translates_non_filenotfound_oserror(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``PermissionError`` (docker binary present but not executable) is an
+        # ``OSError`` subclass that is *not* ``FileNotFoundError``; it must still be
+        # translated to a structured ``DOCKER_UNAVAILABLE`` error so best-effort
+        # callers like ``capture_companion_diagnostics`` never leak a raw ``OSError``.
+        async def _raise_permission(*_args: object, **_kwargs: object) -> _FakeProcess:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(
+            compose_module.asyncio,
+            "create_subprocess_exec",
+            _raise_permission,
+        )
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
+
+        assert exc.value.returncode == 127
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+        assert "Permission denied" in exc.value.stderr
+
+    @pytest.mark.unit
     async def test_docker_capture_times_out_and_kills_hung_process(
         self,
         manager: ComposeManager,
@@ -929,3 +1080,153 @@ class TestRender:
         assert exc.value.returncode == 124
         assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
         assert "exceeded" in exc.value.stderr
+
+
+class TestCompanionImageCommands:
+    """Tests for the ComposeManager companion image Docker commands."""
+
+    @pytest.mark.unit
+    async def test_companion_image_exists_true_on_zero_exit(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """companion_image_exists returns True on a zero-exit inspect."""
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0, stdout=b"sha256:abc\n")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        assert await manager.companion_image_exists("awf-companion-backend:abc") is True
+        assert calls[0] == ("docker", "image", "inspect", "awf-companion-backend:abc")
+
+    @pytest.mark.unit
+    async def test_companion_image_exists_false_when_inspect_fails(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """companion_image_exists returns False when the inspect fails."""
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=1, stderr=b"No such image")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        assert await manager.companion_image_exists("missing:tag") is False
+
+    @pytest.mark.unit
+    async def test_build_companion_image_passes_tag_dockerfile_and_labels(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """build_companion_image passes the tag, Dockerfile, and managed labels."""
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.build_companion_image(
+            tag="awf-companion-backend:abc",
+            build_context="/host/backend",
+            dockerfile="Dockerfile",
+            labels={"awf.managed-companion": "true", "awf.companion.name": "backend"},
+        )
+
+        assert calls[0] == (
+            "docker",
+            "build",
+            "-t",
+            "awf-companion-backend:abc",
+            "-f",
+            "/host/backend/Dockerfile",
+            "--label",
+            "awf.managed-companion=true",
+            "--label",
+            "awf.companion.name=backend",
+            "/host/backend",
+        )
+
+    @pytest.mark.unit
+    async def test_build_companion_image_without_labels_omits_label_flags(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """build_companion_image omits the label flags when no labels are given."""
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.build_companion_image(
+            tag="awf-companion-backend:abc",
+            build_context="/host/backend",
+            dockerfile="Dockerfile",
+        )
+
+        assert calls[0] == (
+            "docker",
+            "build",
+            "-t",
+            "awf-companion-backend:abc",
+            "-f",
+            "/host/backend/Dockerfile",
+            "/host/backend",
+        )
+        assert "--label" not in calls[0]
+
+    @pytest.mark.unit
+    async def test_build_companion_image_anchors_dockerfile_to_build_context(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression for PRRT_kwDOSJAM6s6F5073: ``docker build`` resolves a ``-f``
+        # path relative to the process working directory (the AWF service cwd),
+        # not the build context. A context-relative ``dockerfile`` must be
+        # anchored to the absolute build context so the pre-build does not look
+        # for the Dockerfile under the service cwd, fail, and fall back to an
+        # inline compose build.
+        """build_companion_image anchors the Dockerfile path to the build context."""
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.build_companion_image(
+            tag="awf-companion-backend:abc",
+            build_context="/host/aira-agent",
+            dockerfile="docker/backend.Dockerfile",
+        )
+
+        assert calls[0] == (
+            "docker",
+            "build",
+            "-t",
+            "awf-companion-backend:abc",
+            "-f",
+            "/host/aira-agent/docker/backend.Dockerfile",
+            "/host/aira-agent",
+        )
+
+    @pytest.mark.unit
+    async def test_build_companion_image_raises_on_failure(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """build_companion_image raises when the docker build fails."""
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=1, stderr=b"build failed")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError):
+            await manager.build_companion_image(
+                tag="awf-companion-backend:abc",
+                build_context="/host/backend",
+                dockerfile="Dockerfile",
+            )
