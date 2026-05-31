@@ -25,8 +25,8 @@ from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 _DX_FIRST_PATH_HELP = """
 For first-time users: the current runnable first path is
 `awf service bootstrap` (or the friendly `awf start` wrapper), then
-`awf init <path>` to prepare your project repository. `awf setup` is a
-reserved future command surface.
+`awf init <path>` to prepare your project repository. Run `awf setup
+--dry-run` first for a read-only host readiness check.
 """
 _PROVIDER_HELP = (
     "Repeatable provider strictness check: github, codex, claude_code, cursor, "

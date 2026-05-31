@@ -60,8 +60,8 @@ __all__ = [
 _DX_FIRST_PATH_HELP = """
 For first-time users: the current runnable first path is
 `awf service bootstrap` (or the friendly `awf start` wrapper), then
-`awf init <path>` to prepare your project repository. `awf setup` is a
-reserved future command surface.
+`awf init <path>` to prepare your project repository. Run `awf setup
+--dry-run` first for a read-only host readiness check.
 """
 
 _MUTATES_GLOBAL_HELP = """
@@ -92,9 +92,11 @@ app.add_typer(smoke_app, name="smoke")
 app.command(
     "setup",
     help=(
-        "Prepare this machine for AWF first-run use. "
-        "Reserved before full setup checks land. "
-        "Current runnable path: awf service bootstrap, then awf init <path>."
+        "Prepare this machine for AWF first-run use. Runs read-only host "
+        "readiness checks (Docker, Compose, Git, gh, Python, ports, disk, "
+        "PATH, capacity) and reports blockers without starting Core. Use "
+        "--dry-run to only check, --provider to target a provider, and "
+        "--format json for scripting."
     ),
 )(setup_command)
 app.command(
