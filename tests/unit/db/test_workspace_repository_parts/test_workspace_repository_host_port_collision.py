@@ -190,8 +190,11 @@ class TestFindHostPortConflicts:
         terminal_runtime_released event.  The later release must supersede
         the earlier revocation so that the host port is treated as free.
         """
-        import asyncio
+        from datetime import UTC, datetime
 
+        import sqlalchemy as sa
+
+        from awf.db.models import WorkspaceEvent
         from awf.db.repositories.base import (
             TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
             TERMINAL_RUNTIME_RELEASE_REASON_CODE,
@@ -220,6 +223,16 @@ class TestFindHostPortConflicts:
             event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
             reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
         )
+        released_ev = (
+            await session.execute(
+                sa.select(WorkspaceEvent)
+                .where(WorkspaceEvent.workspace_id == ws.id)
+                .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+                .order_by(WorkspaceEvent.occurred_at.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        released_ev.occurred_at = datetime(2026, 5, 31, 12, 0, 0, tzinfo=UTC)
         await session.commit()
 
         conflicts_after_release = await repo.find_host_port_conflicts(
@@ -234,9 +247,17 @@ class TestFindHostPortConflicts:
             reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
             payload={"orphan_stop_error": "docker stop failed"},
         )
+        revoked_ev = (
+            await session.execute(
+                sa.select(WorkspaceEvent)
+                .where(WorkspaceEvent.workspace_id == ws.id)
+                .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+                .order_by(WorkspaceEvent.occurred_at.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        revoked_ev.occurred_at = datetime(2026, 5, 31, 12, 0, 1, tzinfo=UTC)
         await session.commit()
-
-        await asyncio.sleep(0.05)
 
         conflicts_after_revoke = await repo.find_host_port_conflicts(
             host_ports=[8080],
@@ -251,6 +272,16 @@ class TestFindHostPortConflicts:
             event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
             reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
         )
+        rerelease_ev = (
+            await session.execute(
+                sa.select(WorkspaceEvent)
+                .where(WorkspaceEvent.workspace_id == ws.id)
+                .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+                .order_by(WorkspaceEvent.occurred_at.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        rerelease_ev.occurred_at = datetime(2026, 5, 31, 12, 0, 2, tzinfo=UTC)
         await session.commit()
 
         conflicts_after_rerelease = await repo.find_host_port_conflicts(
