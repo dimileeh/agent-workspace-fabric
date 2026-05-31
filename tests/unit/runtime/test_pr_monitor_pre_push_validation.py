@@ -163,6 +163,19 @@ def _failing_coverage_result(tmp_path: Path) -> ValidationCoverageResult:
     )
 
 
+def _provider_coverage_failure_without_command() -> ValidationCoverageResult:
+    """Build a failed provider result without an associated command record."""
+    return ValidationCoverageResult(
+        provider="python",
+        percent=None,
+        minimum_percent=99.0,
+        enforce=True,
+        status="failed",
+        reason_code="COVERAGE_PROVIDER_FAILED",
+        provider_failure_evidence=["coverage provider did not produce totals"],
+    )
+
+
 async def _set_resolved_profile(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -313,6 +326,85 @@ async def test_pre_push_validation_failure_does_not_push(
     assert result.details["validation_reason_code"] == "PYTEST_TEST_FAILURE"
     assert result.details["failing_command"] == "pytest -q"
     assert result.details["failing_returncode"] == 1
+
+
+@pytest.mark.unit
+def test_pre_push_failure_helpers_prefer_real_migration_and_coverage_commands(
+    tmp_path: Path,
+) -> None:
+    """Direct helper coverage for migration and coverage command failures."""
+    migration_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="alembic upgrade head",
+        returncode=1,
+        reason_code="MIGRATION_FAILED",
+        artifact_name="migration_failed",
+    )
+    coverage_command_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage report",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="coverage_missing",
+    )
+    coverage_failure = ValidationCoverageResult(
+        provider="python",
+        percent=None,
+        minimum_percent=99.0,
+        enforce=True,
+        status="failed",
+        reason_code="COVERAGE_COMMAND_FAILED",
+        command_result=coverage_command_failure,
+    )
+    result = ValidationResult(
+        migration=migration_failure,
+        commands=[],
+        coverage=coverage_failure,
+    )
+
+    failures = pre_push_validation_module._failed_pre_push_commands(result)
+
+    assert failures == (migration_failure, coverage_command_failure)
+    assert pre_push_validation_module._first_real_pre_push_failure(result) is (migration_failure)
+    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is None
+    assert pre_push_validation_module._pre_push_validation_reason_code(result) == "MIGRATION_FAILED"
+
+
+@pytest.mark.unit
+def test_pre_push_failure_helpers_identify_pure_coverage_toolchain_failure(
+    tmp_path: Path,
+) -> None:
+    """A coverage command returning 127 is still a pure toolchain-missing failure."""
+    coverage_command_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage report",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="coverage_toolchain_missing",
+    )
+    result = ValidationResult(
+        coverage=ValidationCoverageResult(
+            provider="python",
+            percent=None,
+            minimum_percent=99.0,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_COMMAND_FAILED",
+            command_result=coverage_command_failure,
+        )
+    )
+
+    assert pre_push_validation_module._first_real_pre_push_failure(result) is None
+    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is (
+        coverage_command_failure
+    )
+    assert (
+        pre_push_validation_module._pre_push_validation_reason_code(result)
+        == "COVERAGE_COMMAND_FAILED"
+    )
 
 
 @pytest.mark.unit
@@ -817,6 +909,123 @@ async def test_pre_push_validation_coverage_failure_persists_coverage_reason_cod
     assert runs[-1].reason_code == "COVERAGE_BELOW_THRESHOLD"
     assert runs[-1].coverage is not None
     assert runs[-1].coverage["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_coverage_provider_failure_without_command_skips_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Coverage provider failures without command records cannot run a fix pass."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'8' * 40}\n")
+    validation = _FakeValidation(
+        ValidationResult(coverage=_provider_coverage_failure_without_command())
+    )
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == "COVERAGE_PROVIDER_FAILED"
+    assert "failing_command" not in result.details
+    assert "failing_returncode" not in result.details
+    assert len(validation.calls) == 1
+    assert adapter.calls == []
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_coverage_provider_skip_still_pushes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A configured coverage provider may decline to emit a result."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id, include_coverage=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'9' * 40}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    validation = _FakeValidation(
+        _validation_result(tmp_path, ok=True),
+        coverage_result=None,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert len(validation.coverage_calls) == 1
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "succeeded"
+    assert runs[-1].coverage is None
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_without_failure_returns_false() -> None:
+    """A validation result with no command failure should not invoke a fix agent."""
+    validation_result = pre_push_validation_module._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_provider",
+        workspace_head_sha="a" * 40,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="coverage provider failed",
+        validation_reason_code="COVERAGE_PROVIDER_FAILED",
+        result=ValidationResult(coverage=_provider_coverage_failure_without_command()),
+    )
+
+    committed = await pre_push_validation_module._run_pre_push_validation_fix_pass(
+        object(),
+        workspace_id="ws_provider",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        remote_branch="awf/ws_provider",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=(),
+    )
+
+    assert committed is False
 
 
 @pytest.mark.unit

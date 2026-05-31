@@ -9,9 +9,15 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor.constants import PR_MONITOR_SETUP_FAILED_REASON_CODE
+from awf.common.compose_exec import ComposeExecCleanupError
+from awf.control.executor.constants import (
+    PR_MONITOR_SETUP_FAILED_REASON_CODE,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
+)
+from awf.control.executor.monitor_handoff_audit import _record_setup_dependency_network_events
 from awf.control.executor.monitor_handoff_setup import _run_monitor_handoff_profile_setup
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -19,6 +25,8 @@ from awf.runtime.ownership import (
 )
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
+    SETUP_DEPENDENCY_NETWORK_RETRY,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
     ValidationCommandResult,
     ValidationResult,
 )
@@ -28,6 +36,7 @@ from tests.unit.control.test_executor_error_paths_parts.test_executor_error_path
     _RecordingValidation,
     _seed_ready,
     _setup_dependency_command_result,
+    _setup_dependency_metadata,
     _SetupDependencyValidation,
     factory,
     fake,
@@ -65,6 +74,28 @@ def _credential_setup_command_failure(tmp_path: Path) -> ValidationCommandResult
         stderr_path=stderr_path,
         phase="setup",
         reason_code="COMMAND_FAILED",
+    )
+
+
+def _setup_dependency_exhausted_without_retry_count(
+    tmp_path: Path,
+) -> ValidationCommandResult:
+    stdout_path = tmp_path / "setup_exhausted_no_retry_count.stdout"
+    stderr_path = tmp_path / "setup_exhausted_no_retry_count.stderr"
+    stdout_path.write_text("setup stdout\n", encoding="utf-8")
+    stderr_path.write_text("setup stderr\n", encoding="utf-8")
+    metadata = _setup_dependency_metadata(retry_exhausted=True)
+    metadata["retry_count"] = 0
+    return ValidationCommandResult(
+        command="uv sync --extra dev",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="setup",
+        reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE,
+        retry_count=0,
+        metadata={"setup_dependency_network": metadata},
     )
 
 
@@ -113,6 +144,43 @@ class _EventRecordingValidation(_RecordingValidation):
 
 
 class TestExecutorMonitorHandoffSetup:
+    @pytest.mark.unit
+    async def test_setup_dependency_exhausted_event_without_retry_event_when_count_zero(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+
+        class _Executor:
+            _session_factory = factory
+
+        await _record_setup_dependency_network_events(
+            _Executor(),
+            workspace_id=ws_id,
+            result=ValidationResult(
+                commands=[_setup_dependency_exhausted_without_retry_count(tmp_path)]
+            ),
+        )
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            retry_events = [
+                event
+                for event in ws.events
+                if event.event_type == SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE
+                and event.reason_code == SETUP_DEPENDENCY_NETWORK_RETRY
+            ]
+            exhausted_events = [
+                event
+                for event in ws.events
+                if event.event_type == SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE
+                and event.reason_code == SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED
+            ]
+            assert retry_events == []
+            assert len(exhausted_events) == 1
+
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_repairs_runtime_ownership_before_setup(
         self,
@@ -505,6 +573,88 @@ class TestExecutorMonitorHandoffSetup:
         message = mark_failed_calls[-1]["message"]
         assert "profile setup failed: git clone https://[redacted]@" in message
         assert "supersecret" not in message
+
+    @pytest.mark.unit
+    async def test_handoff_setup_cleanup_failure_marks_infrastructure_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Validation:
+            async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+                raise ComposeExecCleanupError(
+                    invocation_id="awf_monitor_handoff_setup_cleanup",
+                    source="validation",
+                    label="setup",
+                    message="tagged process still running",
+                )
+
+        class _Executor:
+            _validation = _Validation()
+
+            async def _record_setup_dependency_network_events(
+                self,
+                **_kwargs: object,
+            ) -> None:
+                raise AssertionError("cleanup failures should not record setup events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        result = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-cleanup",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert result is False
+        assert mark_failed_calls
+        failure = mark_failed_calls[-1]
+        assert failure["failure_reason"] == FailureReason.infrastructure_failure
+        assert failure["reason_code"] == "EXEC_PROCESS_CLEANUP_FAILED"
+        assert "tagged process still running" in failure["message"]
+
+    @pytest.mark.unit
+    async def test_handoff_setup_event_recording_failure_is_best_effort(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        event_attempts: list[str] = []
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Validation:
+            async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+                return ValidationResult()
+
+        class _Executor:
+            _validation = _Validation()
+
+            async def _record_setup_dependency_network_events(
+                self,
+                **_kwargs: object,
+            ) -> None:
+                event_attempts.append("record")
+                raise RuntimeError("audit sink temporarily unavailable")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        result = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-event-best-effort",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert result is True
+        assert event_attempts == ["record"]
+        assert mark_failed_calls == []
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_setup_exception_records_named_reason_code(
