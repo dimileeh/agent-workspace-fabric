@@ -47,6 +47,11 @@ def _first_output_line(stdout: str | None) -> str:
     return stdout.splitlines()[0].strip()
 
 
+def _normalize_porcelain_path(path: str) -> str:
+    """Normalize porcelain-like paths for tolerant membership comparisons."""
+    return path[:-1] if path.endswith("/") else path
+
+
 def _resolve_head_sha(result: CommandResult, *, ref: str) -> tuple[str | None, str]:
     """Extract a resolved revision SHA from a git rev-parse output."""
     sha = _first_output_line(result.stdout)
@@ -176,20 +181,20 @@ async def check_validation_worktree_clean(
     status_stdout = status.stdout or ""
     ignored_paths = _ignored_paths_from_porcelain(status_stdout)
     if ignore_all_ignored:
-        ignored_paths_to_ignore = set(ignored_paths)
+        ignored_paths_to_ignore = {_normalize_porcelain_path(path) for path in ignored_paths}
     elif ignore_ignored_paths is None:
         ignored_paths_to_ignore = set()
     else:
-        ignored_paths_to_ignore = set(ignore_ignored_paths)
+        ignored_paths_to_ignore = {_normalize_porcelain_path(path) for path in ignore_ignored_paths}
     paths = tuple(
         path
         for path in _changed_paths_from_porcelain(status_stdout)
-        if path not in ignored_paths_to_ignore
+        if _normalize_porcelain_path(path) not in ignored_paths_to_ignore
     )
     untracked_paths = tuple(
         path
         for path in _untracked_paths_from_porcelain(status_stdout)
-        if path not in ignored_paths_to_ignore
+        if _normalize_porcelain_path(path) not in ignored_paths_to_ignore
     )
     if not paths and not untracked_paths:
         return ValidationWorktreeCheck(clean=True, ignored_paths=ignored_paths)
@@ -358,9 +363,11 @@ async def cleanup_validation_worktree_side_effects(
                 cleanup_stderr=(restore.stderr or "")[:1000],
             )
 
-    ignored_paths = set(ignore_ignored_paths or ())
+    ignored_paths = {_normalize_porcelain_path(path) for path in (ignore_ignored_paths or ())}
     cleanup_untracked_paths = tuple(
-        path for path in check.untracked_paths if path not in ignored_paths
+        path
+        for path in check.untracked_paths
+        if _normalize_porcelain_path(path) not in ignored_paths
     )
     if cleanup_untracked_paths:
         clean = await run_git(["clean", "-fdx", "--", *cleanup_untracked_paths])
