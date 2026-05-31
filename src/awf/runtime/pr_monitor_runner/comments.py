@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from awf.adapters.base import AgentRunError
+from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
@@ -56,14 +59,24 @@ async def _address_thread(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    owned_paths: Sequence[str] | None = None,
 ) -> Verdict:
-    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _defer_reason_state_key,
+        _sync_needs_human_reason,
+    )
 
+    prompt_owned_paths = (
+        owned_paths
+        if owned_paths is not None
+        else await _owned_paths_for_prompt(runner, workspace_id)
+    )
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
+        owned_paths=prompt_owned_paths,
     )
     result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -77,12 +90,14 @@ async def _address_thread(
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
     # On any defer, overwrite/clear the stored reason so a re-triage with a bare
     # DEFER (no reason) can't leave a stale reason from a prior pass.
-    if state is not None and result.verdict == "defer":
-        reason_key = _defer_reason_state_key(thread.thread_id)
-        if result.reason:
-            state.mark_addressed(reason_key, result.reason)
-        else:
-            state.threads_addressed_ids.pop(reason_key, None)
+    if state is not None:
+        _sync_needs_human_reason(state, thread.thread_id, result)
+        if result.verdict == "defer":
+            reason_key = _defer_reason_state_key(thread.thread_id)
+            if result.reason:
+                state.mark_addressed(reason_key, result.reason)
+            else:
+                state.threads_addressed_ids.pop(reason_key, None)
     return result.verdict
 
 
@@ -96,6 +111,7 @@ async def _address_review_comment(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    owned_paths: Sequence[str] | None = None,
 ) -> Verdict:
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
@@ -105,6 +121,7 @@ async def _address_review_comment(
         compose_project=compose_project,
         compose_file=compose_file,
         state=state,
+        owned_paths=owned_paths,
     )
     return result.verdict
 
@@ -119,12 +136,19 @@ async def _address_review_comment_result(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    owned_paths: Sequence[str] | None = None,
 ) -> VerdictResult:
+    prompt_owned_paths = (
+        owned_paths
+        if owned_paths is not None
+        else await _owned_paths_for_prompt(runner, workspace_id)
+    )
     prompt = address_review_comment_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         comment=comment,
         workspace_runtime_context=runner._workspace_runtime_context,
+        owned_paths=prompt_owned_paths,
     )
     return await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -134,6 +158,33 @@ async def _address_review_comment_result(
         compose_file=compose_file,
         state=state,
     )
+
+
+async def _owned_paths_for_prompt(
+    runner: PullRequestMonitorRunner,
+    workspace_id: str,
+) -> list[str]:
+    session_factory = runner._deps.session_factory
+    session_context = session_factory()
+    async with session_context as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        return list(workspace.owned_paths) if workspace is not None else []
+
+
+async def _owned_paths_for_prompt_or_empty(
+    runner: PullRequestMonitorRunner,
+    workspace_id: str,
+) -> list[str]:
+    try:
+        return await _owned_paths_for_prompt(runner, workspace_id)
+    except Exception as exc:
+        _log.warning(
+            "monitor.owned_paths_prompt_unavailable",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+            error=redact_audit_text(str(exc), limit=240),
+        )
+        return []
 
 
 async def _invoke_cli_for_verdict(

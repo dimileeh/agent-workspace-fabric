@@ -1028,6 +1028,7 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 base_ref=base_commit,
                 changed_paths=fix_staged_paths,
+                owned_paths=list(ws.owned_paths),
             )
             violations = find_protected_quality_gate_changes(
                 changed_paths=fix_staged_paths,
