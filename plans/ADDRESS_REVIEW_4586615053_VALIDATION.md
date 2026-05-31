@@ -1,60 +1,53 @@
 # Address Review Comment 4586615053 Validation
 
-Plan reference: `ADDRESS_REVIEW_4586615053_PLAN.md`
+Plan reference: `plans/ADDRESS_REVIEW_4586615053_PLAN.md`
 
 ## Requirement Status
 
-- Confirm `_cursor_selected_model` has no callers before removing it:
-  Complete.
-- Remove only the dead Cursor adapter wrapper and preserve
-  `_cursor_model_for_effort`: Complete.
-- Do not change Dockerfile behavior when existing regression assertions require
-  the current hard `cursor-agent --version` check and `command -v node` symlink
-  source: Complete.
-- Run focused checks only; leave broad validation to AWF/GitHub after agent
-  completion: Complete. The repository's automatic commit hooks also ran
-  during `git commit`.
-- Commit scoped local changes with a conventional commit message: Complete.
-
-## Review Feedback Disposition
-
-- Issue 1, unused `_cursor_selected_model`: Fixed by deleting the private
-  wrapper from `src/awf/adapters/cursor.py`.
-- Issue 2, softening `cursor-agent --version`: Deferred. The current
-  `tests/unit/test_agent_runtime_dockerfile.py` regression explicitly asserts
-  that `"cursor-agent --version || true"` is absent.
-- Issue 3, hardcoding `/usr/bin/node`: Deferred. The current
-  `tests/unit/test_agent_runtime_dockerfile.py` regression explicitly asserts
-  the `ln -sf "$(command -v node)" /usr/local/bin/node` form and order.
+- Preserve the soft root-level Cursor version smoke check:
+  `cursor-agent --version || true`.
+  - Complete. `docker/agent-runtime.Dockerfile` keeps the npm-block smoke
+    check tolerant of version-command failure.
+- Preserve the strict non-root Cursor version check after `USER agent`.
+  - Complete. The Dockerfile contract test still asserts the final non-root
+    `cursor-agent --version` check without `|| true`.
+- Canonicalize the Node binary source before symlinking it into
+  `/usr/local/bin/node`.
+  - Complete. The Dockerfile now symlinks from
+    `$(readlink -f "$(command -v node)")`.
+- Remove the unused private `_cursor_model_for_effort` wrapper.
+  - Complete. `src/awf/adapters/cursor.py` no longer defines or imports the
+    delegating wrapper.
+- Keep Cursor effort-mapping tests pointed at the shared model-selection helper.
+  - Complete. `tests/unit/adapters/test_adapters.py` imports
+    `cursor_model_for_effort` from `awf.adapters.model_selection`.
+- Do not run broad AWF/GitHub-owned validation.
+  - Complete. Only focused unit and lint checks listed below were run. Full
+    AWF/GitHub validation is managed by AWF after agent completion.
 
 ## Evidence
 
 Files changed:
 
+- `docker/agent-runtime.Dockerfile`
 - `src/awf/adapters/cursor.py`
+- `tests/unit/test_agent_runtime_dockerfile.py`
+- `tests/unit/adapters/test_adapters.py`
 - `plans/ADDRESS_REVIEW_4586615053_PLAN.md`
 - `plans/ADDRESS_REVIEW_4586615053_VALIDATION.md`
 
-Commands run:
+Focused checks:
 
-- `rg -n "_cursor_selected_model" src tests docker`
-  - Result: no matches.
-- `uv run --python 3.12 --extra dev ruff check src/awf/adapters/cursor.py`
-  - Result: passed.
-- `uv run --python 3.12 --extra dev pytest tests/unit/adapters/test_adapters.py::TestCursorAdapter tests/unit/test_agent_runtime_dockerfile.py::test_agent_runtime_installs_all_supported_coding_clis -q`
-  - Result: `10 passed in 0.57s`.
-
-The repository's automatic commit hooks ran during `git commit` and passed:
-trim trailing whitespace, end-of-file fix, YAML/TOML checks, large-file check,
-merge-conflict check, private-key detection, ruff check, ruff format check, and
-mypy.
-
-Broad repository validation, full coverage, frontend builds, and CI-equivalent
-checks were not manually run in the agent phase; AWF/GitHub own those gates
-after completion.
+- `uv run --python 3.12 --extra dev pytest tests/unit/test_agent_runtime_dockerfile.py::test_agent_runtime_installs_all_supported_coding_clis -q`
+  - Failed after the test-only edit, before the Dockerfile fix, because the
+    Dockerfile still used `ln -sf "$(command -v node)" /usr/local/bin/node`.
+  - Passed after the Dockerfile fix: `1 passed in 0.37s`.
+- `uv run --python 3.12 --extra dev pytest tests/unit/adapters/test_adapters.py::TestCursorAdapter::test_effort_mapping_uses_documented_models_not_extra_flags -q`
+  - Passed: `1 passed in 0.44s`.
+- `uv run --python 3.12 --extra dev ruff check src/awf/adapters/cursor.py tests/unit/adapters/test_adapters.py tests/unit/test_agent_runtime_dockerfile.py`
+  - Passed: `All checks passed!`.
 
 ## Remaining Gaps
 
-No gaps against the saved plan. The Dockerfile hardening suggestions remain
-deferred because they conflict with existing regression assertions and are
-reviewer-described defensive hardening rather than correctness blockers.
+None for the scoped review comment. Full image-build and CI-equivalent
+validation were intentionally not run in the agent phase.

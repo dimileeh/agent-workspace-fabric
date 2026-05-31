@@ -17,10 +17,7 @@ from awf.adapters.base import AgentAdapter, register_adapter
 from awf.adapters.model_selection import (
     CURSOR_DEFAULT_THINKING_MODEL as CURSOR_DEFAULT_THINKING_MODEL,
 )
-from awf.adapters.model_selection import (
-    cursor_model_for_effort,
-    cursor_selected_model,
-)
+from awf.adapters.model_selection import cursor_selected_model
 from awf.db.enums import AgentRuntime
 
 
@@ -56,14 +53,3 @@ class CursorAdapter(AgentAdapter):
             default_model=self._default_model,
             effort=self._default_effort,
         )
-
-
-def _cursor_model_for_effort(*, model: str | None, effort: str | None) -> str | None:
-    """Map AWF effort to Cursor's documented portable controls.
-
-    Cursor documents model selection but no portable reasoning-effort flag.
-    AWF therefore never emits an undocumented thinking flag: explicit models are
-    respected unchanged, and high/xhigh/max without a model select the
-    documented thinking-capable default model variant.
-    """
-    return cursor_model_for_effort(model=model, effort=effort)

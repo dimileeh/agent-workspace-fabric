@@ -135,7 +135,7 @@ RUN set -eux; \
 ARG NODE_VERSION
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && ln -sf "$(command -v node)" /usr/local/bin/node \
+    && ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/local/bin/node \
     && node --version \

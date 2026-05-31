@@ -27,11 +27,12 @@ from awf.adapters import get_adapter  # noqa: F401 - populates registry via __in
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_effort
 from awf.adapters.codex import CodexAdapter
-from awf.adapters.cursor import CursorAdapter, _cursor_model_for_effort
+from awf.adapters.cursor import CursorAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
 from awf.adapters.gemini import _settings_for_effort as gemini_settings_for_effort
 from awf.adapters.gemini import _thinking_level_for_effort as gemini_thinking_level_for_effort
+from awf.adapters.model_selection import cursor_model_for_effort
 from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
@@ -1174,13 +1175,13 @@ class TestCursorAdapter:
     @pytest.mark.unit
     def test_effort_mapping_uses_documented_models_not_extra_flags(self) -> None:
         """Effort mapping selects models instead of undocumented Cursor flags."""
-        assert _cursor_model_for_effort(model="gpt-5", effort="xhigh") == "gpt-5"
-        assert _cursor_model_for_effort(model="sonnet-4", effort="high") == "sonnet-4"
-        assert _cursor_model_for_effort(model=None, effort=None) is None
-        assert _cursor_model_for_effort(model=None, effort="medium") is None
-        assert _cursor_model_for_effort(model=None, effort="high") == "sonnet-4-thinking"
-        assert _cursor_model_for_effort(model=None, effort="xhigh") == "sonnet-4-thinking"
-        assert _cursor_model_for_effort(model=None, effort="max") == "sonnet-4-thinking"
+        assert cursor_model_for_effort(model="gpt-5", effort="xhigh") == "gpt-5"
+        assert cursor_model_for_effort(model="sonnet-4", effort="high") == "sonnet-4"
+        assert cursor_model_for_effort(model=None, effort=None) is None
+        assert cursor_model_for_effort(model=None, effort="medium") is None
+        assert cursor_model_for_effort(model=None, effort="high") == "sonnet-4-thinking"
+        assert cursor_model_for_effort(model=None, effort="xhigh") == "sonnet-4-thinking"
+        assert cursor_model_for_effort(model=None, effort="max") == "sonnet-4-thinking"
 
 
 @pytest.mark.unit
