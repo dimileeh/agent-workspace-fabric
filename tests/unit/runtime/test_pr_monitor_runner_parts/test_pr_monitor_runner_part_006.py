@@ -281,6 +281,18 @@ def test_workflow_scope_push_block_ignores_unrelated_workflow_output() -> None:
 
 
 @pytest.mark.unit
+def test_workflow_scope_push_block_ignores_remote_rejected_without_workflow_file_context() -> None:
+    """Verify generic push rejection footers do not provide workflow-file context."""
+    block = _workflow_scope_push_block(
+        "remote: protected branch hook declined\n"
+        "remote: runbook note: publishing workflows requires workflow scope\n"
+        " ! [remote rejected] HEAD -> awf/ws (protected branch hook declined)"
+    )
+
+    assert block.blocked is False
+
+
+@pytest.mark.unit
 async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

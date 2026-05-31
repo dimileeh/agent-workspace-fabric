@@ -65,7 +65,7 @@ _MISSING_WORKFLOW_SCOPE_PATTERNS = (
     ),
 )
 _WORKFLOW_SCOPE_PUSH_CONTEXT_RE = re.compile(
-    r"refusing to allow|remote rejected|create or update workflow|workflow(?:-|\s+)file|"
+    r"refusing to allow|create or update workflow|workflow(?:-|\s+)file|"
     r"\.github/workflows/",
     re.IGNORECASE,
 )

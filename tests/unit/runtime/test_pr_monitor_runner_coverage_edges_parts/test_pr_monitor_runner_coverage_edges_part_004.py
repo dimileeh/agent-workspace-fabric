@@ -368,6 +368,7 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
             "`.github/workflows/publish.yml` without `workflow` scope"
         ),
     )
+    cmd.queue_result(returncode=0)  # gh pr comment notification
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -417,6 +418,11 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
     assert push_events[0].payload["action"] == "sync_base_push"
     assert push_events[0].payload["outcome"] == "failed"
     assert push_events[0].payload["evidence"]["reason_code"] == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
+    assert len(comment_calls) == 1
+    body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
+    assert "GitHub rejected the workflow-file push" in body
+    assert "`workflow` scope for .github/workflows/publish.yml" in body
 
 
 @pytest.mark.unit

@@ -373,6 +373,14 @@ async def _execute(
                 monitor_log=monitor_log,
                 evidence=push_result.failure_evidence(),
             )
+            if push_result.workflow_scope_required:
+                await self._post_human_notification_once(
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    blocker_reason=push_result.error_message or push_result.reason_code,
+                )
             if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
                 await self._terminate_failed(
                     workspace_id,
@@ -784,6 +792,14 @@ async def _execute(
                 monitor_log=monitor_log,
                 evidence=push_result.failure_evidence(),
             )
+            if push_result.workflow_scope_required:
+                await self._post_human_notification_once(
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    blocker_reason=push_result.error_message or push_result.reason_code,
+                )
             if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
                 await self._terminate_failed(
                     workspace_id,
