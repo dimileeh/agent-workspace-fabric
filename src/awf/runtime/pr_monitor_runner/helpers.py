@@ -854,6 +854,23 @@ def _non_check_reviewer_activity_settle_decision(
             seconds=config.non_check_reviewer_settle_seconds
         )
         if remaining_seconds <= 0:
+            head_done_key = _non_check_reviewer_settle_done_key(
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+            )
+            freeze_cleared = (
+                state.threads_addressed_ids.pop(
+                    _non_check_reviewer_settle_freeze_key(
+                        pr_number=pr_number,
+                        head_sha=status.head_sha,
+                    ),
+                    None,
+                )
+                is not None
+            )
+            head_done_recorded = state.threads_addressed_ids.get(head_done_key) == "elapsed"
+            if not head_done_recorded:
+                state.mark_addressed(head_done_key, "elapsed")
             if state.threads_addressed_ids.get(done_key) == "elapsed":
                 return _NonCheckReviewerSettleDecision(
                     action="already_elapsed",
@@ -870,6 +887,7 @@ def _non_check_reviewer_activity_settle_decision(
                         status.latest_external_review_activity_source
                     ),
                     activity_signature=signature,
+                    state_changed=(freeze_cleared or not head_done_recorded),
                 )
             state.mark_addressed(done_key, "elapsed")
             return _NonCheckReviewerSettleDecision(

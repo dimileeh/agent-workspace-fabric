@@ -32,6 +32,7 @@ from awf.runtime.pr_monitor_runner import merge_loop as runner_merge_loop
 from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_decision,
     _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_freeze_key,
     _non_check_reviewer_settle_skip_visible_key,
     _non_check_reviewer_settle_started_key,
     _non_check_reviewer_settle_state_for_runtime,
@@ -585,6 +586,74 @@ def test_remonitor_freeze_rearms_activity_anchored_elapsed_settle() -> None:
     assert rechecked.wait_seconds == 60
     assert rechecked.elapsed_seconds == 0
     assert rechecked.remaining_seconds == 900
+
+
+@pytest.mark.unit
+def test_activity_anchored_freeze_elapsed_clears_head_freeze_marker() -> None:
+    anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
+    remonitored_at = anchor + timedelta(seconds=901)
+    head_sha = "head-a"
+    status = _ready_status(
+        head_sha=head_sha,
+        quiet_period_anchor_at=anchor,
+        quiet_period_anchor_source="review_thread_comment",
+        latest_external_review_activity_at=anchor,
+        latest_external_review_activity_source="review_thread_comment",
+    )
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    first_elapsed = _non_check_reviewer_settle_decision(
+        status,
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+        now_wall=remonitored_at,
+    )
+    arm_operator_hint_freeze(
+        state.threads_addressed_ids,
+        pr_number=93,
+        head_sha=head_sha,
+        now=remonitored_at,
+    )
+    _non_check_reviewer_settle_state_for_runtime(
+        state.threads_addressed_ids,
+        pr_number=93,
+        now_monotonic=1000.0,
+        now_wall_seconds=remonitored_at.timestamp(),
+    )
+    freeze_key = _non_check_reviewer_settle_freeze_key(
+        pr_number=93,
+        head_sha=head_sha,
+    )
+    head_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=93,
+        head_sha=head_sha,
+    )
+
+    freeze_elapsed = _non_check_reviewer_settle_decision(
+        status,
+        state,
+        cfg,
+        pr_number=93,
+        now=1901.0,
+        now_wall=remonitored_at + timedelta(seconds=901),
+    )
+
+    assert first_elapsed.action == "elapsed"
+    assert freeze_elapsed.action == "elapsed"
+    assert freeze_key not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[head_done_key] == "elapsed"
+    assert any(
+        key.startswith(head_done_key) and key != head_done_key and value == "elapsed"
+        for key, value in state.threads_addressed_ids.items()
+    )
 
 
 @pytest.mark.unit
