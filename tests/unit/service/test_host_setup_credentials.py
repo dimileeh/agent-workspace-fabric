@@ -520,6 +520,24 @@ def test_env_ref_missing_variable_is_interactive_input_required() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("env_var", ["", "   ", "\t\n"])
+def test_env_ref_blank_variable_is_interactive_input_required(env_var: str) -> None:
+    """Verify a blank/whitespace-only env var name is treated as missing input.
+
+    A whitespace-only name strips to ``""``, which is semantically "no name
+    provided", so it must raise ``INTERACTIVE_INPUT_REQUIRED`` (missing input)
+    rather than the ``CREDENTIAL_REF_INVALID`` an empty post-strip identifier
+    would otherwise hit.
+    """
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(CredentialRequest(provider="openai", env_var=env_var))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "env_var"
+
+
+@pytest.mark.unit
 def test_env_ref_missing_variable_redacts_token_shaped_provider() -> None:
     """Verify a token-shaped provider never surfaces when env input is missing.
 

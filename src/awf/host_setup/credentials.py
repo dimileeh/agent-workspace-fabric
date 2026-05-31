@@ -284,7 +284,10 @@ class EnvRefCredentialBackend:
     def create_ref(self, request: CredentialRequest) -> CredentialRef:
         """Validate the env var name and return an ``env://NAME`` ref."""
         env_var = request.env_var
-        if not env_var:
+        # A whitespace-only name strips to ``""`` and is semantically "no name
+        # provided", so treat it as missing input rather than letting the empty
+        # post-strip identifier fall through to ``CREDENTIAL_REF_INVALID``.
+        if not env_var or not env_var.strip():
             raise _interactive_input_required(request, missing="env_var")
         name = env_var.strip()
         if _TOKEN_SHAPE_RE.search(name) is not None:
