@@ -77,7 +77,7 @@ async def _run_operator_hint_cycle(
             state=state,
         )
     except ProtectedScopeDiffError as exc:
-        return cast(
+        push_result = cast(
             _GitPushResult,
             await self._protected_scope_diff_unavailable_push_result(
                 workspace_id=workspace_id,
@@ -85,6 +85,11 @@ async def _run_operator_hint_cycle(
                 exc=exc,
             ),
         )
+        reason = (
+            push_result.stderr or str(exc)
+        ).strip() or "protected-scope policy could not verify the operator hint repair push"
+        mark_operator_hint_needs_human(state, reason)
+        return push_result
     except _MonitorPolicyBlockedError as exc:
         reason = str(exc) or "monitor policy blocked the operator hint repair"
         mark_operator_hint_needs_human(state, reason)

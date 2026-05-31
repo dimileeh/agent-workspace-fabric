@@ -256,7 +256,13 @@ async def test_operator_hint_repair_converts_protected_scope_diff_error_to_push_
     assert captured["workspace_id"] == "ws_operator_hint_scope"
     assert captured["remote_branch"] == "awf/ws_operator_hint_scope"
     assert isinstance(captured["exc"], ProtectedScopeDiffError)
-    assert state.pending_operator_hint == hint
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="needs_human",
+        status_reason="agent touched protected workflow",
+    )
 
 
 @pytest.mark.unit
