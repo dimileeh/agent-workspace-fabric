@@ -38,6 +38,7 @@ def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
 
 
 def _monitor_precommit_autofix_repair_paths(commit_result: CommandResult) -> tuple[str, ...]:
+    """Thin shim kept for targeted test-import isolation; do not add logic here."""
     return monitor_precommit_autofix_repair_paths(commit_result)
 
 

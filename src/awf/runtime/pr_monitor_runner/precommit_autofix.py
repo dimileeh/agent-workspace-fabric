@@ -47,6 +47,9 @@ def monitor_precommit_autofix_repair_paths(commit_result: CommandResult) -> tupl
         )
     )
     format_repair_files = tuple(
-        match.group("path").strip() for match in _PRE_COMMIT_WOULD_REFORMAT_PATTERN.finditer(output)
+        dict.fromkeys(
+            match.group("path").strip()
+            for match in _PRE_COMMIT_WOULD_REFORMAT_PATTERN.finditer(output)
+        )
     )
     return tuple(dict.fromkeys((*normalizer_repair_files, *format_repair_files)))
