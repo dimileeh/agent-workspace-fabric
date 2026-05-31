@@ -226,6 +226,53 @@ def test_check_shell_path_off_path_warns_with_shell_fix() -> None:
     assert "zshrc" in result.fix
 
 
+@pytest.mark.unit
+def test_check_shell_path_resolves_symlinked_entries(tmp_path: Path) -> None:
+    """Verify a symlinked PATH entry pointing at the script dir reports OK.
+
+    Comparing unresolved paths would treat ``link_bin`` and ``real_bin`` as
+    different and emit a false-negative warning even though ``awf`` is reachable.
+    """
+    real_bin = tmp_path / "real_bin"
+    real_bin.mkdir()
+    link_bin = tmp_path / "link_bin"
+    link_bin.symlink_to(real_bin, target_is_directory=True)
+    result = check_shell_path(
+        script_dir=real_bin,
+        path_value=str(link_bin),
+        shell="/bin/zsh",
+    )
+    assert result.level is SetupCheckLevel.OK
+
+
+@pytest.mark.unit
+def test_check_shell_path_derives_script_dir_from_executable(tmp_path: Path) -> None:
+    """Verify the script dir defaults to the executable's parent when omitted."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable = bin_dir / "python"
+    executable.touch()
+    result = check_shell_path(
+        executable=str(executable),
+        path_value=str(bin_dir),
+        shell="/bin/zsh",
+    )
+    assert result.level is SetupCheckLevel.OK
+    assert result.data["script_dir"] == str(bin_dir.resolve())
+
+
+@pytest.mark.unit
+def test_resolve_path_tolerates_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify path resolution falls back to the raw path on a filesystem error."""
+
+    def boom(self: Path, *args: object, **kwargs: object) -> Path:
+        raise OSError("resolve failed")
+
+    monkeypatch.setattr(Path, "resolve", boom)
+    raw = Path("/usr/local/bin")
+    assert system_checks._resolve_path(raw) == raw
+
+
 # --- Local capacity -------------------------------------------------------
 
 

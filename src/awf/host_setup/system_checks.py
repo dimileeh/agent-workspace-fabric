@@ -385,6 +385,19 @@ def check_disk(
     )
 
 
+def _resolve_path(value: Path) -> Path:
+    """Resolve a path for PATH comparison, tolerating filesystem errors.
+
+    ``Path.resolve`` can raise ``OSError`` for unreadable symlinks or other OS
+    level failures; fall back to the unresolved path so the advisory PATH check
+    never aborts the readiness probe.
+    """
+    try:
+        return value.resolve()
+    except OSError:
+        return value
+
+
 def check_shell_path(
     *,
     script_dir: Path | None = None,
@@ -394,13 +407,17 @@ def check_shell_path(
 ) -> SetupCheckResult:
     """Check the AWF script directory is reachable on PATH (advisory)."""
     resolved_executable = executable if executable is not None else sys.executable
-    resolved_script_dir = (
-        script_dir if script_dir is not None else Path(resolved_executable).resolve().parent
-    )
+    if script_dir is not None:
+        resolved_script_dir = _resolve_path(script_dir)
+    else:
+        resolved_script_dir = _resolve_path(Path(resolved_executable)).parent
     path_text = os.environ.get("PATH", "") if path_value is None else path_value
     shell_text = os.environ.get("SHELL", "") if shell is None else shell
     entries = [entry for entry in path_text.split(os.pathsep) if entry]
-    on_path = any(Path(entry) == resolved_script_dir for entry in entries)
+    # Resolve both sides before comparing so symlinked PATH entries (e.g.
+    # /bin -> /usr/bin), relative paths, or trailing slashes do not cause a
+    # false-negative "not on PATH" warning for an advisory check.
+    on_path = any(_resolve_path(Path(entry)) == resolved_script_dir for entry in entries)
     if on_path:
         return SetupCheckResult(
             name="shell_path",
