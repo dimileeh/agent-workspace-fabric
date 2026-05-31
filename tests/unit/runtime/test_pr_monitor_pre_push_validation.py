@@ -820,6 +820,8 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
     cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -837,7 +839,10 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
         """Assert validation did cleanup worktree state before starting a fix pass."""
         nonlocal fix_called
         fix_called = True
-        assert cmd.calls[-1].args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]
+        assert any(
+            call.args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]
+            for call in cmd.calls
+        )
         return False, None
 
     monkeypatch.setattr(
@@ -854,9 +859,54 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert fix_called is True
     assert result.failed is True
     assert result.reason_code == "PRE_PUSH_VALIDATION_FIX_FAILED"
+    assert fix_called is True
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_untracked_cleanup_allows_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A failed validation with removable untracked artifacts should still run fix passes."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "d" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="?? validation-artifact.log\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FIX_FAILED"
+    assert "fix pass failed" in str(result.stderr)
+    assert adapter.calls
 
 
 @pytest.mark.unit

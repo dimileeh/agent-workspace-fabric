@@ -384,7 +384,6 @@ async def cleanup_validation_worktree_side_effects(
         )
 
     tracked_paths = check.tracked_paths
-    untracked_paths = check.untracked_paths
     if restore_ref is None and tracked_paths:
         return ValidationWorktreeCleanup(
             cleaned=False,
@@ -457,20 +456,6 @@ async def cleanup_validation_worktree_side_effects(
         head_check = await _verify_head_unchanged(restore_ref=restore_ref)
         if head_check is not None:
             return head_check
-
-    if untracked_paths:
-        return ValidationWorktreeCleanup(
-            cleaned=False,
-            check=check,
-            restore_ref=restore_ref,
-            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-            message=(
-                "AWF validation generated untracked files, then removed them. "
-                "Result was validated on a working tree that is no longer "
-                "present in the workspace."
-            ),
-            verify_check=verify,
-        )
 
     return ValidationWorktreeCleanup(
         cleaned=True,

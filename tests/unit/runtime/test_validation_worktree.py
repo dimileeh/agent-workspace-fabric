@@ -375,10 +375,10 @@ async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_cle
 
 
 @pytest.mark.unit
-async def test_cleanup_validation_worktree_marks_untracked_files_as_failure(
+async def test_cleanup_validation_worktree_marks_untracked_files_as_clean_after_cleanup(
     tmp_path: Path,
 ) -> None:
-    """Untracked validation artifacts that are cleaned up after execution should fail cleanup."""
+    """Untracked validation artifacts that are cleaned up after execution should be non-fatal."""
     worktree = _init_fake_worktree(tmp_path)
     status_calls: int = 0
 
@@ -399,9 +399,10 @@ async def test_cleanup_validation_worktree_marks_untracked_files_as_failure(
         worktree_path=worktree,
     )
 
-    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert cleanup.message == ""
     assert cleanup.cleanup_command is None
-    assert "AWF validation generated untracked files, then removed them." in cleanup.message
     assert cleanup.verify_check is not None
     assert cleanup.verify_check.clean
 
