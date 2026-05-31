@@ -676,6 +676,7 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
         "ports",
         "postgres_port",
         "disk",
+        "host_home",
         "shell_path",
         "local_capacity",
     ]
@@ -745,6 +746,7 @@ def test_run_system_checks_omits_compose_when_docker_binary_absent(
         "ports",
         "postgres_port",
         "disk",
+        "host_home",
         "shell_path",
         "local_capacity",
     ]
@@ -2244,3 +2246,137 @@ def test_run_system_checks_default_work_dir_expands_home_when_unset(
     )
 
     assert captured["disk_path"] == Path("~/.awf/service").expanduser()
+
+
+# --- AWF_HOST_HOME override validation ------------------------------------
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_non_absolute_host_home_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative or ``~``-prefixed ``AWF_HOST_HOME`` blocks readiness.
+
+    The local-service Compose file uses ``${AWF_HOST_HOME:-${HOME}}`` as *both*
+    the host source and the container target for every auth mount (for example
+    ``${AWF_HOST_HOME:-${HOME}}/.config/gh:${AWF_HOST_HOME:-${HOME}}/.config/gh:ro``),
+    and Docker's mount target must be an absolute path. Compose does not expand a
+    leading ``~`` or resolve a relative path, so a value such as ``home/op`` or
+    ``~`` is mounted verbatim and ``awf start`` fails — even though the readiness
+    probe could resolve it. The probe must block on it instead of declaring the
+    machine ready.
+    """
+    for non_absolute in ("home/op", "./home/op", "~", "~/home", "~op/home"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": "/home/op", "AWF_HOST_HOME": non_absolute},
+        )
+
+        host_home = next(result for result in results if result.name == "host_home")
+        assert host_home.level is SetupCheckLevel.BLOCKED, repr(non_absolute)
+        assert host_home.data["env_value"] == non_absolute
+        assert "absolute" in host_home.summary
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_whitespace_only_host_home_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only ``AWF_HOST_HOME`` blocks; it is not a blank fall-back.
+
+    ``${AWF_HOST_HOME:-${HOME}}`` substitutes the ``${HOME}`` default only when
+    the variable is *unset or empty* (a zero-length string). A whitespace-only
+    value such as ``"   "`` is a non-empty string, so Compose interpolates it
+    verbatim into the auth mounts and ``awf start`` mounts (or fails on) that path
+    instead of the default. The readiness probe must block on it rather than strip
+    it to blank and report the machine ready.
+    """
+    for whitespace in ("   ", "\t", " \t "):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": "/home/op", "AWF_HOST_HOME": whitespace},
+        )
+
+        host_home = next(result for result in results if result.name == "host_home")
+        assert host_home.level is SetupCheckLevel.BLOCKED, repr(whitespace)
+        assert host_home.data["env_value"] == whitespace
+        assert "whitespace" in host_home.summary
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_padded_host_home_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A surrounding-whitespace ``AWF_HOST_HOME`` blocks; it is not stripped-then-passed.
+
+    Compose interpolates ``${AWF_HOST_HOME}`` verbatim, so a padded value such as
+    ``" /home/op"`` reaches Docker with its surrounding whitespace and ``awf
+    start`` mounts (or fails on) the spaced path. The readiness probe must block
+    on the surrounding whitespace instead of silently reporting readiness for the
+    stripped path.
+    """
+    for padded in (" /home/op", "/home/op ", "\t/home/op", "/home/op\n"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": "/home/op", "AWF_HOST_HOME": padded},
+        )
+
+        host_home = next(result for result in results if result.name == "host_home")
+        assert host_home.level is SetupCheckLevel.BLOCKED, repr(padded)
+        assert host_home.data["env_value"] == padded
+        assert "whitespace" in host_home.summary
+
+
+@pytest.mark.unit
+def test_run_system_checks_host_home_ok_when_absolute_or_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absolute, unset, or empty ``AWF_HOST_HOME`` passes readiness.
+
+    ``${AWF_HOST_HOME:-${HOME}}`` mounts an absolute override verbatim (usable) and
+    falls back to ``${HOME}`` when the variable is unset or empty, so every auth
+    mount resolves to an absolute target ``awf start`` can bind.
+    """
+    for value in ("/home/op", "/Users/op", None, ""):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        environ = {"HOME": "/home/op"}
+        if value is not None:
+            environ["AWF_HOST_HOME"] = value
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ=environ,
+        )
+
+        host_home = next(result for result in results if result.name == "host_home")
+        assert host_home.level is SetupCheckLevel.OK, repr(value)
+
+
+@pytest.mark.unit
+def test_check_host_home_override_blocks_with_value_in_data() -> None:
+    """``check_host_home_override`` distinguishes non-absolute vs. padded values.
+
+    Both branches BLOCK and echo the raw ``AWF_HOST_HOME`` in ``data`` so the
+    readiness payload can name the offending value, and the summary names the
+    specific defect (absoluteness vs. surrounding whitespace).
+    """
+    non_absolute = system_checks.check_host_home_override("~/home")
+    assert non_absolute.name == "host_home"
+    assert non_absolute.level is SetupCheckLevel.BLOCKED
+    assert non_absolute.data["env_value"] == "~/home"
+    assert "absolute" in non_absolute.summary
+
+    padded = system_checks.check_host_home_override(" /home/op")
+    assert padded.level is SetupCheckLevel.BLOCKED
+    assert padded.data["env_value"] == " /home/op"
+    assert "whitespace" in padded.summary

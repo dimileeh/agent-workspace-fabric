@@ -1321,6 +1321,130 @@ def check_host_work_dir_override(raw: str) -> SetupCheckResult:
     )
 
 
+def _invalid_host_home_override(
+    *,
+    environ: Mapping[str, str] | None,
+) -> str | None:
+    """Return the raw ``AWF_HOST_HOME`` when it is set to a value Compose can't mount.
+
+    Returns ``None`` (no configuration error) when the override is unset or
+    *genuinely empty* (a zero-length string) — ``${AWF_HOST_HOME:-${HOME}}``
+    substitutes the ``${HOME}`` default only when the variable is unset or empty —
+    or when it is an absolute path with no surrounding whitespace. A
+    whitespace-only, *surrounding-whitespace* (padded), *or non-absolute*
+    (relative or ``~``-prefixed) value is returned instead.
+
+    The local-service Compose stack uses ``${AWF_HOST_HOME:-${HOME}}`` as *both*
+    the host source and the container target for every auth mount (for example
+    ``${AWF_HOST_HOME:-${HOME}}/.config/gh:${AWF_HOST_HOME:-${HOME}}/.config/gh:ro``
+    in ``docker/compose/local-service.yml``). Docker requires the mount target to
+    be absolute and Compose interpolates the value verbatim — no ``~`` expansion,
+    no relative resolution, no stripping — so ``awf start`` fails to mount the
+    auth directories even though the readiness probe could resolve the value
+    (expanding ``~`` or reading it relative to the current process). The probe
+    must block on it instead of reporting readiness for auth mounts that
+    ``awf start`` can never bind. The ``not raw`` guard mirrors the same
+    empty-vs-whitespace split as ``_invalid_host_work_dir_override`` so the two
+    host-path overrides agree.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get("AWF_HOST_HOME")
+    if not raw:
+        return None
+    candidate = raw.strip()
+    if candidate and candidate == raw and Path(candidate).is_absolute():
+        return None
+    return raw
+
+
+def check_host_home_override(raw: str) -> SetupCheckResult:
+    """Report a set-but-unusable ``AWF_HOST_HOME`` as a startup blocker.
+
+    The local-service Compose stack uses ``${AWF_HOST_HOME:-${HOME}}`` as *both*
+    the host source and the container target for every auth mount (gh, gcloud,
+    git, ssh, and the agent CLI directories), verbatim. Docker requires the mount
+    target to be absolute and Compose neither strips surrounding whitespace nor
+    expands ``~`` nor resolves a relative path, so two classes of value reach
+    Docker exactly as written rather than as the readiness probe would normalize
+    them:
+
+    * whitespace-only or surrounding-whitespace values, which Compose keeps
+      unstripped; and
+    * non-absolute values (a relative path or a leading ``~``), which Docker
+      rejects because a mount target must be absolute.
+
+    Either way ``awf start`` mounts (or fails on) the literal value, so the probe
+    blocks rather than reporting readiness for auth mounts that are never bound.
+    """
+    candidate = raw.strip()
+    if candidate and candidate == raw:
+        # Non-empty with no surrounding whitespace, but not an absolute path: a
+        # relative path or a leading ``~`` Compose mounts verbatim.
+        summary = f"AWF_HOST_HOME={raw!r} is not an absolute path, not a usable auth-mount root."
+        detail = (
+            "AWF_HOST_HOME must be an absolute directory path. The local-service Compose "
+            "stack uses ${AWF_HOST_HOME:-${HOME}} as both the host source and the container "
+            "target for the auth mounts (for example "
+            "${AWF_HOST_HOME:-${HOME}}/.config/gh:${AWF_HOST_HOME:-${HOME}}/.config/gh:ro), "
+            "verbatim. Docker's bind mount target must be absolute and Compose does not "
+            "expand a leading ~ or resolve a relative path, so awf start fails to mount the "
+            "auth directories even though the readiness probe could resolve it (expanding ~ "
+            "or reading it relative to the current process)."
+        )
+        fix = (
+            "Set AWF_HOST_HOME to an absolute directory path (for example /home/you rather "
+            "than ~ or home/you), or unset it to use the default ${HOME}, then re-run "
+            "awf setup --dry-run."
+        )
+    else:
+        summary = (
+            f"AWF_HOST_HOME={raw!r} has leading or trailing whitespace, "
+            "not a usable auth-mount root."
+        )
+        detail = (
+            "AWF_HOST_HOME must be a real directory path with no surrounding whitespace. "
+            "The local-service Compose stack bind-mounts ${AWF_HOST_HOME:-${HOME}} as both "
+            "the host source and the container target for the auth mounts and interpolates "
+            "it verbatim — with its surrounding whitespace — so awf start mounts (or fails "
+            "on) the spaced path instead of the stripped path the readiness probe would "
+            "otherwise report."
+        )
+        fix = (
+            "Set AWF_HOST_HOME to a real directory path with no leading or trailing "
+            "whitespace, or unset it to use the default ${HOME}, then re-run "
+            "awf setup --dry-run."
+        )
+    return SetupCheckResult(
+        name="host_home",
+        level=SetupCheckLevel.BLOCKED,
+        summary=summary,
+        detail=detail,
+        fix=fix,
+        data={"env_value": raw},
+    )
+
+
+def check_host_home() -> SetupCheckResult:
+    """Confirm ``AWF_HOST_HOME`` is usable as the Compose auth-mount root.
+
+    Reached only when :func:`_invalid_host_home_override` finds no blocker: the
+    override is unset or empty (Compose falls back to ``${HOME}``) or an absolute
+    path with no surrounding whitespace, so every ``${AWF_HOST_HOME:-${HOME}}``
+    auth mount resolves to an absolute target ``awf start`` can bind.
+    """
+    return SetupCheckResult(
+        name="host_home",
+        level=SetupCheckLevel.OK,
+        summary="AWF_HOST_HOME resolves to an absolute auth-mount root.",
+        detail=(
+            "AWF_HOST_HOME is unset (the local-service Compose stack falls back to ${HOME}) "
+            "or an absolute path, so the auth mounts (${AWF_HOST_HOME:-${HOME}}/.config/gh, "
+            "/.ssh, the agent CLI directories, ...) resolve to absolute targets awf start "
+            "can bind."
+        ),
+    )
+
+
 def run_system_checks(
     *,
     config: HostSetupConfig,  # noqa: ARG001 - retained as the canonical host-setup input; no probe reads the persisted config (awf start resolves port/work dir from the Compose env only)
@@ -1364,6 +1488,18 @@ def run_system_checks(
     else:
         resolved_work_dir = _resolve_work_dir(work_dir=work_dir, environ=environ)
         disk_check = check_disk(resolved_work_dir)
+    # ``AWF_HOST_HOME`` feeds the same verbatim-interpolation trap as the work
+    # dir: the local-service Compose stack uses ${AWF_HOST_HOME:-${HOME}} as both
+    # the host source and the absolute-required container target for every auth
+    # mount, so a relative, ~-prefixed, or whitespace-padded value passes the
+    # readiness probe yet makes ``awf start`` fail to mount the auth directories.
+    # Block on it here rather than declaring the machine ready.
+    invalid_host_home = _invalid_host_home_override(environ=environ)
+    host_home_check = (
+        check_host_home_override(invalid_host_home)
+        if invalid_host_home is not None
+        else check_host_home()
+    )
     # Probe the daemon ``awf start`` will use: the resolved service env can point
     # Docker at a different host (``AWF_DOCKER_HOST``) or blank an inherited
     # ``DOCKER_HOST``, so feed that selection into both the docker and compose
@@ -1390,6 +1526,7 @@ def run_system_checks(
         postgres_port_check,
         *([port_conflict_check] if port_conflict_check is not None else []),
         disk_check,
+        host_home_check,
         check_shell_path(),
         check_local_capacity(),
     ]
@@ -1571,6 +1708,8 @@ __all__ = [
     "check_docker",
     "check_gh",
     "check_git",
+    "check_host_home",
+    "check_host_home_override",
     "check_host_port_conflict",
     "check_host_work_dir_override",
     "check_local_capacity",
