@@ -830,7 +830,15 @@ def _redacted_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _capture_error_detail(exc: ComposeOperationError) -> str:
-    """Summarize a docker capture failure for a diagnostics marker (redacted later)."""
+    """Summarize a docker capture failure for a diagnostics marker.
+
+    WARNING: the returned string is UNREDACTED — it embeds ``exc.stderr``/
+    ``exc.stdout``, which can contain credential material from docker output. It
+    MUST pass through ``redact_audit_value`` (via ``_redacted_diagnostics``)
+    before being persisted, returned to a caller, or logged directly. Every
+    current caller stores it in a payload that is redacted unconditionally before
+    return; new callers must preserve that contract.
+    """
     detail = exc.stderr.strip() or exc.stdout.strip() or "<no output>"
     return f"{exc.reason_code}: {detail}"
 
