@@ -1034,6 +1034,32 @@ class TestRender:
         assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
 
     @pytest.mark.unit
+    async def test_docker_capture_translates_non_filenotfound_oserror(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``PermissionError`` (docker binary present but not executable) is an
+        # ``OSError`` subclass that is *not* ``FileNotFoundError``; it must still be
+        # translated to a structured ``DOCKER_UNAVAILABLE`` error so best-effort
+        # callers like ``capture_companion_diagnostics`` never leak a raw ``OSError``.
+        async def _raise_permission(*_args: object, **_kwargs: object) -> _FakeProcess:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(
+            compose_module.asyncio,
+            "create_subprocess_exec",
+            _raise_permission,
+        )
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
+
+        assert exc.value.returncode == 127
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+        assert "Permission denied" in exc.value.stderr
+
+    @pytest.mark.unit
     async def test_docker_capture_times_out_and_kills_hung_process(
         self,
         manager: ComposeManager,

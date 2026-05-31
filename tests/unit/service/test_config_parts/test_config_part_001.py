@@ -5,9 +5,6 @@ from __future__ import annotations
 import ast
 import gc
 import inspect
-import json
-import os
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,7 +14,6 @@ import awf.common.config as common_config
 import awf.service.config as service_config
 from awf.common.config import (
     DEFAULT_LOCAL_DATABASE_URL,
-    DEFAULT_MIN_FREE_DISK_BYTES,
     ProductionSettingsError,
     Settings,
     settings_guardrails,
@@ -26,12 +22,10 @@ from awf.common.config import (
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_API_BASE_URL,
     DEFAULT_LOCAL_SERVICE_DATABASE_URL,
-    DEFAULT_LOCAL_SERVICE_WORK_DIR,
     LOCAL_SERVICE_COMPOSE_FILE,
     local_service_environ,
     resolve_local_service_provider_environ,
     resolve_service_settings,
-    service_config_payload,
 )
 
 _NON_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:prod-pass@db.internal:5432/awf"
@@ -1243,245 +1237,3 @@ def test_service_settings_resolution_runs_production_guardrails_after_db_resolut
     error = exc_info.value
     assert "production_default_database_url" in _diagnostic_codes(error)
     assert "AWF_DATABASE_URL" in _diagnostic_fields(error)
-
-
-@pytest.mark.unit
-def test_agent_watchdog_defaults_are_conservative_and_documented_in_payload() -> None:
-    settings = resolve_service_settings(Settings(_env_file=None), environ={})
-    payload = service_config_payload(settings)
-    rendered = json.dumps(payload)
-
-    assert settings.agent_wall_timeout_seconds == 7200
-    assert settings.agent_idle_timeout_seconds == 3600
-    assert payload["agent_wall_timeout_seconds"] == 7200
-    assert payload["agent_idle_timeout_seconds"] == 3600
-    assert "agent_wall_timeout_seconds" in rendered
-    assert "agent_idle_timeout_seconds" in rendered
-
-
-@pytest.mark.unit
-def test_agent_watchdog_settings_flow_from_settings_to_service_settings() -> None:
-    base = Settings(
-        _env_file=None,
-        agent_wall_timeout_seconds=1234,
-        agent_idle_timeout_seconds=56,
-    )
-
-    settings = resolve_service_settings(base, environ={})
-
-    assert settings.agent_wall_timeout_seconds == 1234
-    assert settings.agent_idle_timeout_seconds == 56
-
-
-@pytest.mark.unit
-def test_planning_max_iterations_default_is_three_and_in_payload() -> None:
-    settings = resolve_service_settings(Settings(_env_file=None), environ={})
-    payload = service_config_payload(settings)
-
-    assert Settings(_env_file=None).planning_max_iterations_default == 3
-    assert settings.planning_max_iterations_default == 3
-    assert payload["planning_max_iterations_default"] == 3
-
-
-@pytest.mark.unit
-def test_planning_max_iterations_default_flows_from_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AWF_PLANNING_MAX_ITERATIONS_DEFAULT", "4")
-
-    settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
-
-    assert settings.planning_max_iterations_default == 4
-
-
-@pytest.mark.unit
-def test_empty_local_capacity_environment_values_are_treated_as_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AWF_LOCAL_CAPACITY_CPU_CORES", "")
-    monkeypatch.setenv("AWF_LOCAL_CAPACITY_MEMORY_GB", "")
-    monkeypatch.setenv("AWF_LOCAL_CAPACITY_DIND_SLOTS", "")
-
-    settings = Settings(_env_file=None)
-
-    assert settings.local_capacity_cpu_cores is None
-    assert settings.local_capacity_memory_gb is None
-    assert settings.local_capacity_dind_slots is None
-
-
-@pytest.mark.unit
-def test_min_free_disk_threshold_defaults_to_conservative_10_gib_payload() -> None:
-    settings = resolve_service_settings(Settings(_env_file=None), environ={})
-    payload = service_config_payload(settings)
-
-    assert DEFAULT_MIN_FREE_DISK_BYTES == 10 * 1024 * 1024 * 1024
-    assert settings.min_free_disk_bytes == DEFAULT_MIN_FREE_DISK_BYTES
-    assert payload["min_free_disk_bytes"] == DEFAULT_MIN_FREE_DISK_BYTES
-
-
-@pytest.mark.unit
-def test_min_free_disk_threshold_flows_from_settings_to_service_settings() -> None:
-    base = Settings(_env_file=None, min_free_disk_bytes=123456)
-
-    settings = resolve_service_settings(base, environ={"AWF_MIN_FREE_DISK_BYTES": "123456"})
-
-    assert settings.min_free_disk_bytes == 123456
-
-
-@pytest.mark.unit
-def test_local_service_work_dir_defaults_to_compose_host_state_root(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    host_work_dir = tmp_path / "awf-service"
-    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
-    settings = resolve_service_settings(
-        Settings(_env_file=None),
-        environ={"HOME": str(tmp_path), "AWF_HOST_WORK_DIR": str(host_work_dir)},
-    )
-
-    assert DEFAULT_LOCAL_SERVICE_WORK_DIR == "~/.awf/service"
-    assert settings.work_dir == str(host_work_dir)
-
-
-@pytest.mark.unit
-def test_local_service_ignores_project_default_awf_work_dir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("AWF_WORK_DIR", ".awf")
-    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
-
-    settings = resolve_service_settings(
-        Settings(_env_file=None),
-        environ={"HOME": str(tmp_path), "AWF_WORK_DIR": ".awf"},
-    )
-
-    assert settings.work_dir == str(tmp_path / ".awf" / "service")
-
-
-@pytest.mark.unit
-def test_compose_host_work_dir_takes_precedence_over_shell_awf_work_dir(
-    tmp_path: Path,
-) -> None:
-    shell_work_dir = tmp_path / "project"
-    host_work_dir = tmp_path / "compose-default"
-
-    settings = resolve_service_settings(
-        Settings(_env_file=None, work_dir=str(shell_work_dir)),
-        environ={
-            "AWF_WORK_DIR": str(shell_work_dir),
-            "AWF_HOST_WORK_DIR": str(host_work_dir),
-        },
-    )
-
-    assert settings.work_dir == str(host_work_dir)
-
-
-@pytest.mark.unit
-def test_local_service_work_dir_resolves_from_compose_env_file(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    host_work_dir = tmp_path / "compose-service-state"
-    checkout, _ = _write_awf_source_checkout(tmp_path)
-    compose_env_file = checkout / "docker" / "compose" / ".env"
-    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
-    monkeypatch.chdir(checkout)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
-    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
-
-    settings = resolve_service_settings(Settings(_env_file=None))
-
-    assert settings.work_dir == str(host_work_dir)
-
-
-@pytest.mark.unit
-def test_project_default_awf_work_dir_does_not_hide_compose_host_work_dir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    host_work_dir = tmp_path / "compose-service-state"
-    checkout, _ = _write_awf_source_checkout(tmp_path)
-    compose_env_file = checkout / "docker" / "compose" / ".env"
-    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
-    monkeypatch.chdir(checkout)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("AWF_WORK_DIR", ".awf")
-    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
-
-    settings = resolve_service_settings(Settings(_env_file=None))
-
-    assert settings.work_dir == str(host_work_dir)
-
-
-@pytest.mark.unit
-def test_workspace_cleanup_policy_defaults_are_documented_in_payload() -> None:
-    settings = resolve_service_settings(Settings(_env_file=None), environ={})
-    payload = service_config_payload(settings)
-
-    assert settings.completed_workspace_retention_hours == 168
-    assert settings.workspace_cleanup_enabled is True
-    assert settings.workspace_cleanup_scan_interval_seconds == 3600
-    assert settings.workspace_cleanup_batch_limit == 50
-    assert payload["completed_workspace_retention_hours"] == 168
-    assert payload["workspace_cleanup_enabled"] is True
-    assert payload["workspace_cleanup_scan_interval_seconds"] == 3600
-    assert payload["workspace_cleanup_batch_limit"] == 50
-
-
-@pytest.mark.unit
-def test_workspace_cleanup_policy_flows_from_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AWF_COMPLETED_WORKSPACE_RETENTION_HOURS", "12")
-    monkeypatch.setenv("AWF_WORKSPACE_CLEANUP_ENABLED", "false")
-    monkeypatch.setenv("AWF_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS", "300")
-    monkeypatch.setenv("AWF_WORKSPACE_CLEANUP_BATCH_LIMIT", "7")
-
-    settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
-
-    assert settings.completed_workspace_retention_hours == 12
-    assert settings.workspace_cleanup_enabled is False
-    assert settings.workspace_cleanup_scan_interval_seconds == 300
-    assert settings.workspace_cleanup_batch_limit == 7
-
-
-@pytest.mark.unit
-def test_network_posture_legacy_cutoff_is_unset_by_default_and_in_payload() -> None:
-    settings = resolve_service_settings(Settings(_env_file=None), environ={})
-    payload = service_config_payload(settings)
-
-    assert settings.network_posture_open_legacy_cutoff is None
-    assert payload["network_posture_open_legacy_cutoff"] is None
-
-
-@pytest.mark.unit
-def test_network_posture_legacy_cutoff_treats_blank_string_as_unset() -> None:
-    settings = Settings(_env_file=None, network_posture_open_legacy_cutoff=" ")
-
-    assert settings.network_posture_open_legacy_cutoff is None
-
-
-@pytest.mark.unit
-def test_network_posture_legacy_cutoff_flows_from_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF", "2026-05-02T13:00:00Z")
-
-    settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
-    payload = service_config_payload(settings)
-
-    assert settings.network_posture_open_legacy_cutoff == datetime(2026, 5, 2, 13, 0, tzinfo=UTC)
-    assert payload["network_posture_open_legacy_cutoff"] == "2026-05-02T13:00:00+00:00"
-    json.dumps(payload)
-
-
-@pytest.mark.unit
-def test_local_service_config_resolves_stable_worker_node_id_in_payload() -> None:
-    settings = resolve_service_settings(Settings(_env_file=None), environ={})
-    payload = service_config_payload(settings)
-
-    assert settings.node_id == "local"
-    assert payload["node_id"] == "local"

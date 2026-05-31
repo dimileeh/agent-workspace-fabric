@@ -400,6 +400,15 @@ class Settings(BaseSettings):
     worker_max_concurrent_executions: int = Field(default=3, gt=0)
     worker_node_id: str | None = Field(default=None)
     worker_branch_prefix: str = Field(default="awf")
+    worker_service_startup_log_tail_lines: int = Field(
+        default=200,
+        gt=0,
+        description=(
+            "How many companion container log lines to capture into the persisted "
+            "SERVICE_STARTUP_FAILURE event when a service healthcheck fails to go "
+            "green. Default: 200."
+        ),
+    )
     agent_wall_timeout_seconds: float = Field(
         default=7200,
         gt=0,
