@@ -7,6 +7,7 @@ import gc
 import inspect
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1342,6 +1343,15 @@ def test_service_startup_log_tail_lines_flows_from_settings_to_service_settings(
     settings = resolve_service_settings(base, environ={})
 
     assert settings.service_startup_log_tail_lines == 75
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tail_lines", [0, -1, -200])
+def test_service_settings_rejects_non_positive_tail_lines(tail_lines: int) -> None:
+    base = resolve_service_settings(Settings(_env_file=None), environ={})
+
+    with pytest.raises(ValueError, match="service_startup_log_tail_lines must be > 0"):
+        replace(base, service_startup_log_tail_lines=tail_lines)
 
 
 @pytest.mark.unit

@@ -101,6 +101,21 @@ class ServiceSettings:
     local_capacity_memory_gb: float | None = None
     local_capacity_dind_slots: int | None = None
 
+    def __post_init__(self) -> None:
+        """Catch a non-positive tail at settings resolution, not worker startup.
+
+        ``Settings.worker_service_startup_log_tail_lines`` enforces ``gt=0`` and
+        ``ProvisionerConfig.__post_init__`` re-checks, but a bad value assigned
+        directly to this dataclass would otherwise only fail later when
+        ``build_worker_runtime`` constructs the ``ProvisionerConfig``. Mirror the
+        guard here so it surfaces at the layer that converts the env-var setting.
+        """
+        if self.service_startup_log_tail_lines <= 0:
+            raise ValueError(
+                "service_startup_log_tail_lines must be > 0, "
+                f"got {self.service_startup_log_tail_lines}"
+            )
+
 
 @dataclass
 class _ProjectDotenvLookup:
