@@ -287,7 +287,9 @@ need_download_tool() {
 # HTTP — or one whose artifact url is http:// — lets a network-adjacent attacker
 # swap both the manifest and a matching-sha256 malicious wheel before the gate
 # runs. file:// stays allowed as the hermetic test seam; https:// and local
-# paths are the production sources.
+# paths are the production sources. https:// downloads additionally pin every
+# redirect hop to https (curl --proto-redir, wget --https-only) so a redirect
+# cannot quietly downgrade the transfer to plain http past the scheme guard.
 fetch() {
     local src="$1"
     local dest="$2"
@@ -303,9 +305,17 @@ fetch() {
         https://*)
             need_download_tool
             if command -v curl >/dev/null 2>&1; then
-                curl -fsSL "$src" -o "$dest" || return 1
+                # -L follows redirects; --proto/--proto-redir pin the initial
+                # request and every redirect hop to https, so a 30x bounce to
+                # plain http:// cannot smuggle manifest/wheel bytes past the
+                # INSECURE_URL guard above (which only sees the initial scheme).
+                # Legitimate https:// -> https:// CDN redirects still follow.
+                curl -fsSL --proto '=https' --proto-redir '=https' "$src" -o "$dest" || return 1
             else
-                wget -q -O "$dest" "$src" || return 1
+                # wget follows redirects by default; --https-only refuses any
+                # redirect hop that downgrades to plain http:// for the same
+                # reason (it fails closed if the redirect target is not https).
+                wget -q --https-only -O "$dest" "$src" || return 1
             fi
             ;;
         *)

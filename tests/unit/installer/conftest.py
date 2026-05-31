@@ -160,6 +160,16 @@ class InstallerHarness:
         """Place an ``awf`` stub on ``PATH`` or in ``directory`` (exits ``rc``)."""
         return self._write_stub("awf", f"exit {rc}", directory=directory)
 
+    def add_curl(self, *, rc: int = 0) -> None:
+        """Stub ``curl`` to record its argv (download flags) then exit ``rc``.
+
+        Placed first on ``PATH``, this shadows the system ``curl`` so a test can
+        assert which flags the installer hands the downloader — e.g. the
+        redirect-protocol pins that keep an ``https://`` fetch from being bounced
+        to plain ``http://`` past the ``INSECURE_URL`` guard.
+        """
+        self._write_stub("curl", f"exit {rc}")
+
     def add_head(self, *, rc: int = 0) -> None:
         """Stub ``head`` to echo only its first input line then exit ``rc``.
 
