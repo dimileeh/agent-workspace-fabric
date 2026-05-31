@@ -771,6 +771,19 @@ def test_normalize_local_url_returns_input_on_invalid_url() -> None:
 
 
 @pytest.mark.unit
+def test_normalize_local_url_returns_input_on_invalid_port() -> None:
+    """A local-alias host with a non-numeric port is returned unchanged, not raising.
+
+    ``urlsplit`` accepts a malformed port lazily; ``parsed.port`` only raises on
+    access, so the guard must treat it the same as an unparseable URL.
+    """
+    assert (
+        start_commands._normalize_local_url("http://localhost:bad")  # noqa: SLF001
+        == "http://localhost:bad"
+    )
+
+
+@pytest.mark.unit
 def test_normalize_local_url_handles_local_host_without_port() -> None:
     """A local-alias host without a port is rewritten to the loopback display host."""
     assert (

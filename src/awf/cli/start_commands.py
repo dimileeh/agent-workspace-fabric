@@ -406,13 +406,16 @@ def _normalize_local_url(url: str) -> str:
     """Return ``url`` with a local-loopback host rewritten to 127.0.0.1 for display."""
     try:
         parsed = urlsplit(url)
+        # ``urlsplit`` accepts a malformed port lazily; ``parsed.port`` only
+        # validates (and may raise ValueError) on access, so read it here.
+        port = parsed.port
     except ValueError:
         return url
     if parsed.hostname is None or parsed.hostname not in _LOCAL_HOST_ALIASES:
         return url
     netloc = _LOCAL_DISPLAY_HOST
-    if parsed.port is not None:
-        netloc = f"{_LOCAL_DISPLAY_HOST}:{parsed.port}"
+    if port is not None:
+        netloc = f"{_LOCAL_DISPLAY_HOST}:{port}"
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
