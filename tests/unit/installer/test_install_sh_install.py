@@ -335,6 +335,45 @@ def test_invalid_channel_is_a_bad_usage_error(harness: InstallerHarness) -> None
 
 
 @pytest.mark.unit
+def test_empty_version_equals_form_is_a_bad_usage_error(harness: InstallerHarness) -> None:
+    """``--version=`` must not silently degrade a pinned install to latest.
+
+    ``--version`` is the trust-boundary pin that selects a specific manifest/tag.
+    An empty value (e.g. ``--version=`` or an empty wrapper variable) would leave
+    ``VERSION`` empty and resolve ``releases/latest`` — a mutable install the user
+    did not ask for. Reject it with ``BAD_USAGE`` before resolving the manifest.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--version="], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "BAD_USAGE" in result.stderr
+    assert "--version" in result.stderr
+    # Rejected during arg parsing: no platform probe, manifest fetch, or install.
+    assert harness.calls() == []
+
+
+@pytest.mark.unit
+def test_empty_version_space_form_is_a_bad_usage_error(harness: InstallerHarness) -> None:
+    """``--version ""`` (empty wrapper variable) is rejected the same way."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--version", ""], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "BAD_USAGE" in result.stderr
+    assert "--version" in result.stderr
+    assert harness.calls() == []
+
+
+@pytest.mark.unit
 def test_manifest_without_wheel_artifact_is_invalid(harness: InstallerHarness) -> None:
     """A manifest missing a wheel artifact fails with ``MANIFEST_INVALID``."""
     harness.add_uname("Linux", "x86_64")

@@ -116,16 +116,30 @@ require_value() {
     fi
 }
 
+require_version() {
+    # An empty --version (e.g. `--version=` or an empty wrapper variable) would
+    # leave VERSION unset and make resolve_manifest fetch releases/latest — the
+    # exact mutable install the caller asked to pin away from. --version is the
+    # trust boundary (it selects a specific manifest/tag), so reject an explicit
+    # empty value before resolving the manifest instead of silently degrading the
+    # pin to latest. Omitting --version entirely is still valid (installs latest).
+    if [ -z "$1" ]; then
+        bad_usage "empty value for --version; pass --version <X.Y.Z> or omit it to install the latest release"
+    fi
+}
+
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version)
                 require_value "$1" "$#"
                 VERSION="$2"
+                require_version "$VERSION"
                 shift 2
                 ;;
             --version=*)
                 VERSION="${1#*=}"
+                require_version "$VERSION"
                 shift
                 ;;
             --channel)
