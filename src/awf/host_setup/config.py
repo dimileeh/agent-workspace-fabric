@@ -36,6 +36,10 @@ DEFAULT_API_HOST_PORT = 8000
 DEFAULT_HOST_SETUP_WORK_DIR = "~/.awf/service"
 
 _SAFE_CREDENTIAL_REF_PREFIXES = ("keyring://", "env://", "plain-file://")
+# Backend kinds recorded as non-secret provider metadata. Kept in lockstep with
+# ``awf.host_setup.credentials.CREDENTIAL_BACKENDS`` (config must not import that
+# module to avoid an import cycle; a test guards the two against drift).
+_CREDENTIAL_BACKEND_KINDS = ("keyring", "env_ref", "plain_file")
 _SECRET_VALUE_PREFIXES = (
     "ghp_",
     "gho_",
@@ -241,6 +245,7 @@ class ProviderConfig(_HostSetupBaseModel):
     """Provider setup state with a credential reference, never a credential value."""
 
     credential_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    backend: str | None = Field(default=None, min_length=1, max_length=32)
     source: str | None = Field(default=None, min_length=1, max_length=128)
     status: str = Field(default="missing", min_length=1, max_length=128)
 
@@ -256,6 +261,16 @@ class ProviderConfig(_HostSetupBaseModel):
             raise ValueError(
                 "credential_ref must use keyring://, env://, or plain-file:// references"
             )
+        return value
+
+    @field_validator("backend")
+    @classmethod
+    def _validate_backend(cls, value: str | None) -> str | None:
+        """Record only known credential backend kinds as provider metadata."""
+        if value is None:
+            return None
+        if value not in _CREDENTIAL_BACKEND_KINDS:
+            raise ValueError("backend must be one of: " + ", ".join(_CREDENTIAL_BACKEND_KINDS))
         return value
 
 
