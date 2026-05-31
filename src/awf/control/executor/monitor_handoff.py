@@ -890,6 +890,9 @@ async def _build_handoff_pr_monitor(
 
     Shared by the ``sync_feature_pr`` and ``sync_release_pr`` handoffs. Returns
     ``None`` (after transitioning to ``failed``) when no monitor can be built.
+    A caller that supplies ``profile`` is handing in an already prepared handoff
+    profile and must also set ``run_profile_setup=False`` so setup is not run
+    a second time.
     """
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     if monitor is None and self._pr_monitor_factory is None:
@@ -903,6 +906,8 @@ async def _build_handoff_pr_monitor(
         return None
 
     try:
+        if profile is not None and run_profile_setup:
+            raise ValueError("pre-resolved handoff profiles must pass run_profile_setup=False")
         if profile is None:
             profile = _profile_for_workspace(
                 workspace,

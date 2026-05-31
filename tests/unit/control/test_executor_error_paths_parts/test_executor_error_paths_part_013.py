@@ -15,6 +15,7 @@ from awf.control.executor.constants import (
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
 )
+from awf.control.executor.monitor_handoff import _build_handoff_pr_monitor
 from awf.control.executor.monitor_handoff_audit import _record_setup_dependency_network_events
 from awf.control.executor.monitor_handoff_setup import _run_monitor_handoff_profile_setup
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -144,6 +145,46 @@ class _EventRecordingValidation(_RecordingValidation):
 
 
 class TestExecutorMonitorHandoffSetup:
+    @pytest.mark.unit
+    async def test_handoff_monitor_rejects_prepared_profile_with_setup_enabled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        setup_calls: list[str] = []
+        mark_failed_calls: list[dict[str, Any]] = []
+        monitor = object()
+
+        class _Executor:
+            _pr_monitor = monitor
+            _pr_monitor_factory = None
+
+            async def _run_monitor_handoff_profile_setup(self, **_kwargs: object) -> bool:
+                setup_calls.append("setup")
+                return True
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        result = await _build_handoff_pr_monitor(
+            _Executor(),
+            workspace_id="ws-contract",
+            workspace=object(),
+            worktree_path=tmp_path,
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            build_failed_log_event="test.handoff_monitor_build_failed",
+            build_failed_message_prefix="handoff failed: ",
+            profile=object(),
+            run_profile_setup=True,
+        )
+
+        assert result is None
+        assert setup_calls == []
+        assert mark_failed_calls
+        failure = mark_failed_calls[-1]
+        assert failure["reason_code"] == "PR_ADOPTION_MONITOR_UNAVAILABLE"
+        assert "run_profile_setup=False" in failure["message"]
+
     @pytest.mark.unit
     async def test_setup_dependency_exhausted_event_without_retry_event_when_count_zero(
         self,
