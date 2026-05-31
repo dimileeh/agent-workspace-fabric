@@ -98,6 +98,7 @@ from awf.service.workspaces import (
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
     _egress_audit_response,
+    check_host_port_conflicts,
     create_workspace_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
@@ -309,16 +310,7 @@ async def create_workspace(
         return _insufficient_disk_response(disk_check)
 
     try:
-        host_ports = [hp for c in payload.companions for _, hp in c.ports]
-        if host_ports:
-            conflicts = await repo.find_host_port_conflicts(
-                host_ports=host_ports,
-            )
-            if conflicts:
-                raise WorkspaceCreateHostPortConflictError(
-                    host_port=conflicts[0].host_port,
-                    conflicting_workspace_id=conflicts[0].workspace_id,
-                )
+        await check_host_port_conflicts(repo, payload.companions)
 
         ws = await create_workspace_row(
             session,

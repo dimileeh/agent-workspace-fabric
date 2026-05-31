@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,6 +26,7 @@ from awf.api.schemas import (
     WorkspaceRuntimeHealthResponse,
     WorkspaceRuntimeResponse,
 )
+from awf.api.schemas_companions import WorkspaceCompanionRequest
 from awf.common.config import Settings
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskKind, WorkspaceStatus
@@ -309,6 +310,34 @@ class WorkspaceCreateHostPortConflictError(Exception):
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 
 
+async def check_host_port_conflicts(
+    repo: WorkspaceRepository,
+    companions: Sequence[WorkspaceCompanionRequest],
+) -> None:
+    """Check for host-port conflicts among companion ports and raise if found.
+
+    Shared by the REST route handler and ``WorkspaceService.create`` so that
+    the conflict-detection logic stays in one place.  Callers that need to
+    translate the exception into an HTTP response should catch
+    ``WorkspaceCreateHostPortConflictError``.
+    """
+    host_ports = [hp for c in companions for _, hp in c.ports]
+    if host_ports:
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=host_ports,
+        )
+        if conflicts:
+            raise WorkspaceCreateHostPortConflictError(
+                host_port=conflicts[0].host_port,
+                conflicting_workspace_id=conflicts[0].workspace_id,
+            )
+        if conflicts:
+            raise WorkspaceCreateHostPortConflictError(
+                host_port=conflicts[0].host_port,
+                conflicting_workspace_id=conflicts[0].workspace_id,
+            )
+
+
 async def _resolve_disk_check_factory(factory: DiskCheckFactory) -> DiskCheck:
     """Invoke a sync-or-async disk-check factory and await the result if needed."""
     result = factory()
@@ -470,16 +499,7 @@ class WorkspaceService:
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
-            host_ports = [hp for c in req.companions for _, hp in c.ports]
-            if host_ports:
-                conflicts = await repo.find_host_port_conflicts(
-                    host_ports=host_ports,
-                )
-                if conflicts:
-                    raise WorkspaceCreateHostPortConflictError(
-                        host_port=conflicts[0].host_port,
-                        conflicting_workspace_id=conflicts[0].workspace_id,
-                    )
+            await check_host_port_conflicts(repo, req.companions)
 
             ws = await create_workspace_row(
                 s,
@@ -1172,6 +1192,7 @@ __all__ = [
     "WorkspaceCreateIdempotencyConflictError",
     "HostPortConflict",
     "WorkspaceCreateHostPortConflictError",
+    "check_host_port_conflicts",
     "WorkspaceCreateInsufficientDiskError",
     "WorkspaceRetryResult",
     "create_workspace_row",
