@@ -63,7 +63,7 @@ async def _address_thread(
     from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
 
     prompt_owned_paths = (
-        list(owned_paths)
+        owned_paths
         if owned_paths is not None
         else await _owned_paths_for_prompt(runner, workspace_id)
     )
@@ -133,7 +133,7 @@ async def _address_review_comment_result(
     owned_paths: Sequence[str] | None = None,
 ) -> VerdictResult:
     prompt_owned_paths = (
-        list(owned_paths)
+        owned_paths
         if owned_paths is not None
         else await _owned_paths_for_prompt(runner, workspace_id)
     )
