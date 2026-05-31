@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -44,12 +45,14 @@ class _RecordingBuilder:
         return self.tag
 
 
-def _materialized(root: Path, *, commit_sha: str = "abc123def456") -> MaterializedCompanionService:
+def _materialized(
+    root: Path, *, name: str = "backend", commit_sha: str = "abc123def456"
+) -> MaterializedCompanionService:
     root.mkdir(parents=True, exist_ok=True)
     return MaterializedCompanionService(
-        spec=WorkspaceCompanionSpec(name="backend", repo_url="git@example.com:backend.git"),
+        spec=WorkspaceCompanionSpec(name=name, repo_url=f"git@example.com:{name}.git"),
         layout=WorktreeLayout(
-            mirror_path=root.parent / "mirror.git",
+            mirror_path=root.parent / f"{name}-mirror.git",
             worktree_path=root,
             branch_name="awf/companion",
         ),
@@ -95,6 +98,55 @@ async def test_failed_prebuild_falls_back_to_build(tmp_path: Path) -> None:
 
     assert services[0].image is None
     assert builder.calls  # builder was consulted
+
+
+@pytest.mark.unit
+async def test_companion_prebuilds_run_concurrently(tmp_path: Path) -> None:
+    # Regression for PRRT_kwDOSJAM6s6F506n: independent companion pre-builds are
+    # dispatched concurrently, so a multi-companion workspace's provisioning
+    # latency is the slowest single build rather than the sum of all builds. A
+    # sequential loop would never let the second `ensure` start before the first
+    # returns, deadlocking the barrier below and tripping the wait_for timeout.
+    both_entered = asyncio.Event()
+    entered = 0
+
+    class _BarrierBuilder:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def ensure(
+            self,
+            *,
+            name: str,
+            commit_sha: str,
+            build_context: str,
+            dockerfile: str,
+            capture_timeout_seconds: float,
+        ) -> str | None:
+            nonlocal entered
+            del commit_sha, build_context, dockerfile, capture_timeout_seconds
+            self.calls.append(name)
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await both_entered.wait()
+            return None
+
+    builder = _BarrierBuilder()
+    launcher = _launcher(builder)  # type: ignore[arg-type]
+    backend = _materialized(tmp_path / "backend", name="backend")
+    frontend = _materialized(tmp_path / "frontend", name="frontend")
+
+    services = await asyncio.wait_for(
+        launcher._build_companion_services(  # noqa: SLF001
+            (backend, frontend), capture_timeout_seconds=660.0
+        ),
+        timeout=1.0,
+    )
+
+    assert both_entered.is_set()
+    assert [service.name for service in services] == ["backend", "frontend"]
+    assert sorted(builder.calls) == ["backend", "frontend"]
 
 
 @pytest.mark.unit

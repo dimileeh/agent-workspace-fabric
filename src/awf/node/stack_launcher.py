@@ -228,14 +228,22 @@ class ComposeStackLauncher:
         reference it via ``image:``. A failed or skipped pre-build leaves the
         service as ``build:`` -- identical to the prior behavior.
 
+        Companions are independent, so their pre-builds are dispatched
+        concurrently: a multi-companion workspace's provisioning latency is the
+        slowest single build rather than the sum of all builds. The builder
+        already collapses same-tag waves to one ``docker build`` (see
+        :class:`~awf.node.companion_images.CompanionImageBuilder`), so concurrent
+        dispatch is safe; ``gather`` preserves input order, keeping the rendered
+        services aligned with ``companions``.
+
         ``capture_timeout_seconds`` is the effective compose-up subprocess cap used
         by the inline ``docker compose up`` build; passing it to the pre-build keeps
         the cache path's build budget aligned with the configured
         ``compose_up_timeout_seconds`` knob so it never times out earlier than the
         inline build it replaces.
         """
-        services: list[CompanionService] = []
-        for companion in companions:
+
+        async def _build_single(companion: MaterializedCompanionService) -> CompanionService:
             service = await asyncio.to_thread(companion_service_from_materialized, companion)
             if self._companion_image_builder is not None:
                 tag = await self._companion_image_builder.ensure(
@@ -247,7 +255,9 @@ class ComposeStackLauncher:
                 )
                 if tag is not None:
                     service = replace(service, image=tag)
-            services.append(service)
+            return service
+
+        services = await asyncio.gather(*(_build_single(companion) for companion in companions))
         return tuple(services)
 
 
