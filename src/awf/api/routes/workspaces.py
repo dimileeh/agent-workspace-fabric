@@ -92,6 +92,7 @@ from awf.service.workspace_observability import (
     list_workspace_stale_reasons_response,
 )
 from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
     WorkspaceCreateHostPortConflictError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
@@ -363,6 +364,16 @@ async def create_workspace(
             ).model_dump(),
         )
     except WorkspaceCreateHostPortConflictError as exc:
+        await session.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorResponse(
+                error_code=exc.error_code,
+                message=exc.message,
+                detail=exc.detail,
+            ).model_dump(),
+        )
+    except WorkspaceCreateDuplicateHostPortError as exc:
         await session.rollback()
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
@@ -716,6 +727,16 @@ async def retry_workspace(
             provider_readiness_override_reason=provider_readiness_override_reason,
         )
     except WorkspaceCreateHostPortConflictError as exc:
+        await session.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorResponse(
+                error_code=exc.error_code,
+                message=exc.message,
+                detail=exc.detail,
+            ).model_dump(),
+        )
+    except WorkspaceCreateDuplicateHostPortError as exc:
         await session.rollback()
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,

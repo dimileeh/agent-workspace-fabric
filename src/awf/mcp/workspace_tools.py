@@ -93,6 +93,7 @@ from awf.service.workspace_observability import (
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
     WorkspaceCreateHostPortConflictError,
     WorkspaceCreateIdempotencyConflictError,
     WorkspaceCreateInsufficientDiskError,
@@ -452,6 +453,8 @@ def register_workspace_tools(
             return _workspace_error_result(exc)
         except WorkspaceCreateHostPortConflictError as exc:
             return _workspace_error_result(exc)
+        except WorkspaceCreateDuplicateHostPortError as exc:
+            return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(
                 error_code="INVALID_PROFILE",
@@ -488,6 +491,8 @@ def register_workspace_tools(
         except WorkspaceProviderReadinessBlockedError as exc:
             return _provider_readiness_blocked_result(exc)
         except WorkspaceCreateHostPortConflictError as exc:
+            return _workspace_error_result(exc)
+        except WorkspaceCreateDuplicateHostPortError as exc:
             return _workspace_error_result(exc)
         except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
             return _workspace_error_result(exc)

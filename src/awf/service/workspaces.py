@@ -281,6 +281,27 @@ class WorkspaceCreateInsufficientDiskError(Exception):
         super().__init__(self.message)
 
 
+class WorkspaceCreateDuplicateHostPortError(Exception):
+    """Raised when the same host port appears more than once within a single request.
+
+    This can happen when a companion and a profile service, or two profile
+    services, claim the same host-side port.  The database conflict check
+    cannot detect this because the new workspace is not persisted yet.
+    """
+
+    error_code = "DUPLICATE_HOST_PORT"
+
+    def __init__(self, *, host_port: int) -> None:
+        self.host_port = host_port
+        self.message = (
+            f"Host port {host_port} is claimed by more than one service"
+            f" or companion in the same request"
+        )
+        detail: dict[str, Any] | None = {"host_port": host_port}
+        self.detail = detail
+        super().__init__(self.message)
+
+
 class WorkspaceCreateHostPortConflictError(Exception):
     """Raised when a companion host_port is already mapped by a non-terminal workspace.
 
@@ -357,12 +378,19 @@ async def check_host_port_conflicts(
     Shared by the REST route handler and ``WorkspaceService.create`` so that
     the conflict-detection logic stays in one place.  Callers that need to
     translate the exception into an HTTP response should catch
-    ``WorkspaceCreateHostPortConflictError``.
+    ``WorkspaceCreateHostPortConflictError`` and
+    ``WorkspaceCreateDuplicateHostPortError``.
 
     ``resolved_profile`` is the already-resolved profile snapshot of the
     *incoming* workspace request.  Its ``services[].ports`` host-side entries
     are included in the conflict check so that a profile-service port on the
     new workspace is caught before Docker Compose provisioning starts.
+
+    Intra-request duplicates — the same host port claimed by more than one
+    companion and/or profile service within the same request — are rejected
+    before the database query, because the new workspace is not yet persisted
+    and ``find_host_port_conflicts`` would not see it.  Raises
+    ``WorkspaceCreateDuplicateHostPortError`` for this case.
 
     When *node_id* is provided, only workspaces on that node (or with a null
     ``node_id``) are checked.  Host ports are Docker host ports scoped to the
@@ -376,6 +404,11 @@ async def check_host_port_conflicts(
     """
     host_ports = [hp for c in companions for _, hp in c.ports]
     host_ports.extend(host_ports_from_resolved_profile(resolved_profile))
+    seen: set[int] = set()
+    for hp in host_ports:
+        if hp in seen:
+            raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
+        seen.add(hp)
     if host_ports:
         await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
@@ -1275,6 +1308,7 @@ __all__ = [
     "WorkspaceCreateIdempotencyConflictError",
     "HostPortConflict",
     "WorkspaceCreateHostPortConflictError",
+    "WorkspaceCreateDuplicateHostPortError",
     "WorkspaceRetrySourceRuntimeNotReleasedError",
     "host_ports_from_task_policy_companions",
     "host_ports_from_resolved_profile",

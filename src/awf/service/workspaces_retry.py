@@ -295,6 +295,11 @@ async def retry_workspace_row(
     host_ports.extend(
         workspaces.host_ports_from_resolved_profile(source.resolved_profile),
     )
+    _seen: set[int] = set()
+    for _hp in host_ports:
+        if _hp in _seen:
+            raise workspaces.WorkspaceCreateDuplicateHostPortError(host_port=_hp)
+        _seen.add(_hp)
     latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
         source.id, limit=1
     )

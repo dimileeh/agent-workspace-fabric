@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
 
 from awf.db.repositories.base import (
     host_ports_from_resolved_profile as _host_ports_from_resolved_profile,
 )
 from awf.db.repositories.base import (
     host_ports_from_task_policy_companions as _host_ports_from_task_policy_companions,
+)
+from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
+    check_host_port_conflicts,
 )
 
 
@@ -176,3 +183,64 @@ class TestHostPortsFromTaskPolicyCompanions:
         }
         result = _host_ports_from_task_policy_companions(policy)
         assert result == [8080, 8080]
+
+
+class TestCheckHostPortConflictsIntraRequestDuplicate:
+    """Pure-unit tests for intra-request duplicate host-port rejection in check_host_port_conflicts."""
+
+    @staticmethod
+    def _make_companion(name: str, ports: list[tuple[int, int]]) -> Any:
+        from awf.api.schemas_companions import WorkspaceCompanionRequest
+
+        return WorkspaceCompanionRequest(
+            name=name,
+            repo_url="https://github.com/example/repo",
+            ports=ports,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_ports_passes(self) -> None:
+        repo = AsyncMock()
+        repo.find_host_port_conflicts.return_value = []
+        companions = [self._make_companion("a", [(5432, 5432)])]
+        profile: dict[str, Any] = {"services": [{"name": "redis", "ports": [[6379, 6379]]}]}
+        await check_host_port_conflicts(repo, companions, resolved_profile=profile)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_between_companion_and_profile(self) -> None:
+        repo = AsyncMock()
+        companions = [self._make_companion("a", [(5432, 5432)])]
+        profile: dict[str, Any] = {"services": [{"name": "pg", "ports": [[5432, 5432]]}]}
+        with pytest.raises(WorkspaceCreateDuplicateHostPortError) as exc_info:
+            await check_host_port_conflicts(repo, companions, resolved_profile=profile)
+        assert exc_info.value.host_port == 5432
+
+    @pytest.mark.asyncio
+    async def test_duplicate_within_profile_services(self) -> None:
+        repo = AsyncMock()
+        profile: dict[str, Any] = {
+            "services": [
+                {"name": "pg1", "ports": [[5432, 5432]]},
+                {"name": "pg2", "ports": [[5432, 5432]]},
+            ]
+        }
+        with pytest.raises(WorkspaceCreateDuplicateHostPortError) as exc_info:
+            await check_host_port_conflicts(repo, [], resolved_profile=profile)
+        assert exc_info.value.host_port == 5432
+
+    @pytest.mark.asyncio
+    async def test_duplicate_between_two_companions(self) -> None:
+        repo = AsyncMock()
+        companions = [
+            self._make_companion("a", [(8080, 8080)]),
+            self._make_companion("b", [(9090, 8080)]),
+        ]
+        with pytest.raises(WorkspaceCreateDuplicateHostPortError) as exc_info:
+            await check_host_port_conflicts(repo, companions, resolved_profile=None)
+        assert exc_info.value.host_port == 8080
+
+    @pytest.mark.asyncio
+    async def test_no_ports_no_error(self) -> None:
+        repo = AsyncMock()
+        await check_host_port_conflicts(repo, [], resolved_profile=None)
+        repo.acquire_host_port_admission_lock.assert_not_called()

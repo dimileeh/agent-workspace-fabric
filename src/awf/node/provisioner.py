@@ -72,7 +72,10 @@ from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
     SecretLeaseService,
 )
-from awf.service.workspaces import WorkspaceCreateHostPortConflictError
+from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
+    WorkspaceCreateHostPortConflictError,
+)
 
 _log = get_logger(__name__)
 
@@ -351,6 +354,19 @@ class Provisioner:
                 workspace_id=workspace_id,
                 host_port=exc.host_port,
                 conflicting_workspace_id=exc.conflicting_workspace_id,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=str(exc)[:2000],
+                from_status=WorkspaceStatus.provisioning,
+            )
+            return
+        except WorkspaceCreateDuplicateHostPortError as exc:
+            _log.error(
+                "provisioner.duplicate_host_port",
+                workspace_id=workspace_id,
+                host_port=exc.host_port,
             )
             await self._mark_failed(
                 workspace_id=workspace_id,
