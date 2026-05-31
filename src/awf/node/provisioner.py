@@ -935,7 +935,6 @@ class Provisioner:
             if (
                 ws is not None
                 and profile_resolution is not None
-                and ws.resolved_profile is None
                 and ws.status == WorkspaceStatus.provisioning.value
             ):
                 ws.resolved_profile = resolved_profile_dict
