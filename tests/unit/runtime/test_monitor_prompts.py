@@ -473,7 +473,8 @@ class TestOperatorHintPrompt:
             "An operator manually requested re-monitoring this PR with the following hint:"
             in prompt
         )
-        assert "Address what the hint says, push a fix commit" in prompt
+        assert "Address what the hint says, commit any code changes locally" in prompt
+        assert "push a fix commit" not in prompt
         assert "reply to any relevant unresolved review threads" in prompt
         assert "op_rehint" in prompt
         assert "Workspace runtime context" in prompt
