@@ -43,6 +43,14 @@ def parse_dotenv_file(path: Path) -> dict[str, str]:
         raise PermissionError(
             f"--companion-env-from file is unreadable (permission denied): {path!r}"
         ) from exc
+    except UnicodeDecodeError as exc:
+        raise UnicodeDecodeError(
+            exc.encoding,
+            exc.object,
+            exc.start,
+            exc.end,
+            f"--companion-env-from file is not valid UTF-8: {path!r}",
+        ) from exc
     result: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()

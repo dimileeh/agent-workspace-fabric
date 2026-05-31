@@ -245,7 +245,7 @@ def workspace_create(
                 env_from=env_from_pairs,
                 env_exclude=env_exclude_parsed,
             )
-        except (ValueError, FileNotFoundError, PermissionError) as exc:
+        except (ValueError, FileNotFoundError, PermissionError, UnicodeDecodeError) as exc:
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(code=2) from None
 
