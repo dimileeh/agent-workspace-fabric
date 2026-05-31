@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapters
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -391,6 +392,67 @@ class _ValidationSideEffectRunner:
         )
 
 
+class _StaleValidationFailureRunner:
+    """Validation runner that dirties the worktree before exiting with stale status."""
+
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        terminal_status: WorkspaceStatus,
+        raise_cleanup_exception: bool,
+    ) -> None:
+        self._factory = factory
+        self._terminal_status = terminal_status
+        self._raise_cleanup_exception = raise_cleanup_exception
+
+    async def run_profile_coverage(self, **_kwargs: object) -> None:
+        return None
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...] | list[str],
+        worktree_path: Path | None = None,
+        **_kwargs: object,
+    ) -> ValidationResult:
+        if tuple(phase_names) == ("setup", "pre_agent"):
+            return ValidationResult()
+
+        assert worktree_path is not None
+        generated = worktree_path / "apps" / "console" / "next-env.d.ts"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text(
+            '/// <reference types="next" />\nimport "./.next/types/routes.d.ts";\n',
+            encoding="utf-8",
+        )
+
+        async with self._factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            if self._terminal_status == WorkspaceStatus.cancelled:
+                await repo.transition(
+                    ws, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_CANCEL"
+                )
+            else:
+                # The destroy path can race in from the control plane while
+                # the executor is between awaits; set the observed status
+                # directly to model that stale read.
+                ws.status = WorkspaceStatus.destroying.value
+            await session.commit()
+
+        if self._raise_cleanup_exception:
+            raise ComposeExecCleanupError(
+                invocation_id="awf-stale-validation",
+                source="validation",
+                label="validation",
+                message="cleanup failed in stale test",
+            )
+        raise RuntimeError("validation crashed unexpectedly in stale test")
+
+
 def _mark_git_worktree(worktree_path: Path) -> None:
     worktree_path.mkdir(parents=True, exist_ok=True)
     (worktree_path / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
@@ -543,6 +605,53 @@ class TestValidationSideEffectCleanup:
         assert runs[-1].reason_code == VALIDATION_WORKTREE_STATUS_FAILED
         assert "Dirty paths" not in (ws.failure_message or "")
         assert "pre-existing uncommitted changes" not in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "raise_cleanup_exception",
+        [True, False],
+    )
+    async def test_executor_stale_callback_still_cleans_side_effects(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        raise_cleanup_exception: bool,
+    ) -> None:
+        validation = _StaleValidationFailureRunner(
+            factory=factory,
+            terminal_status=WorkspaceStatus.cancelled,
+            raise_cleanup_exception=raise_cleanup_exception,
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        _mark_git_worktree(worktree_path)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=0, stdout="")  # clean before validation
+        fake.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+        fake.queue_result(returncode=0)  # restore tracked side effect
+        fake.queue_result(returncode=0, stdout="")  # clean after cleanup
+
+        await executor.execute(ws_id)
+
+        joined_calls = [" ".join(call.args) for call in fake.calls]
+        assert any(
+            "restore --source deadbeef01 --staged --worktree -- apps/console/next-env.d.ts" in call
+            for call in joined_calls
+        )
+        assert all("push" not in call for call in joined_calls)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
 
 
 class TestFixCycleRecoversAfterOneFailure:
