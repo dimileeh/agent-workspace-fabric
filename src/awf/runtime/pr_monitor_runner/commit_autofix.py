@@ -91,7 +91,7 @@ async def _retry_monitor_precommit_autofix_commit_once(
         )
         return None
 
-    restage_paths = tuple(path for path in dirty_paths if path in repair_path_set)
+    restage_paths = tuple(path for path in worktree_modified_paths if path in repair_path_set)
     if not restage_paths:
         _log.info(
             "monitor.dirty_commit_autofix_retry_skipped_no_repair_paths",

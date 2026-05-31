@@ -120,7 +120,7 @@ async def test_monitor_precommit_autofix_retry_returns_none_when_worktree_is_cle
 
 
 @pytest.mark.unit
-async def test_monitor_precommit_autofix_retry_allows_unaffected_staged_paths(
+async def test_monitor_precommit_autofix_retry_does_not_restage_staged_only_repair_paths(
     tmp_path: Path,
 ) -> None:
     fixed_path = "src/awf/fixed.py"
@@ -130,6 +130,7 @@ async def test_monitor_precommit_autofix_retry_allows_unaffected_staged_paths(
         "- hook id: end-of-file-fixer\n"
         "- exit code: 1\n"
         "- files were modified by this hook\n\n"
+        f"Fixing {staged_path}\n"
         f"Fixing {fixed_path}\n"
     )
     runner = FakeCommandRunner()
