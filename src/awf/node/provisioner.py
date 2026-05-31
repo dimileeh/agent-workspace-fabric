@@ -39,6 +39,7 @@ from awf.db.repositories import (
 from awf.db.repositories.base import (
     PROVISIONING_LAUNCHING_EVENT_TYPE,
     PROVISIONING_LAUNCHING_REASON_CODE,
+    has_terminal_runtime_released_event,
     host_ports_from_resolved_profile,
 )
 from awf.node.companion_services import (
@@ -64,6 +65,7 @@ from awf.profiles.resolver import (
     ProfileResolutionError,
     resolve_workspace_profile,
 )
+from awf.service.controls_helpers import stop_project_containers
 from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
     SecretLeaseService,
@@ -323,6 +325,8 @@ class Provisioner:
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
+                if await self._launch_lost_to_terminal_cleanup(workspace_id):
+                    return
         except GitOperationError as exc:
             _log.error(
                 "provisioner.git_failed",
@@ -949,6 +953,63 @@ class Provisioner:
             )
             await session.commit()
             return True
+
+    async def _launch_lost_to_terminal_cleanup(self, workspace_id: str) -> bool:
+        """Check whether terminal cleanup won while the stack was launching.
+
+        When an operator force-destroys the workspace after
+        ``_recheck_before_launch`` commits its ``provisioning_launching``
+        guard but before ``_stack_launcher.launch`` actually starts,
+        ``destroy_workspace(force=True)`` can see the pre-published
+        ``compose_project_name``, run cleanup before any containers exist,
+        transition to ``destroyed``, and record
+        ``workspace.terminal_runtime_released``.  The provisioner then
+        still launches the stack, leaving running containers that future
+        host-port admission ignores because the release event exists.
+
+        This method detects that outcome: if ``terminal_runtime_released``
+        was recorded while we were launching, stop the just-launched
+        containers and return ``True`` so the caller aborts without
+        transitioning to ``ready``.
+
+        Returns ``True`` when terminal cleanup won and containers were
+        stopped; ``False`` when the workspace is still clear to proceed.
+        """
+        compose_project = f"awf_{workspace_id}"
+        async with self._session_factory() as session:
+            released = await has_terminal_runtime_released_event(session, workspace_id)
+        if not released:
+            return False
+        _log.warning(
+            "provisioner.launch_lost_to_terminal_cleanup",
+            workspace_id=workspace_id,
+            reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
+        )
+        try:
+            await stop_project_containers(compose_project)
+        except Exception:
+            _log.exception(
+                "provisioner.orphan_container_stop_failed",
+                workspace_id=workspace_id,
+                reason_code="ORPHAN_STOP_NON_FATAL",
+            )
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is not None:
+                await repo.add_event(
+                    ws,
+                    event_type="workspace.stale_action_skipped",
+                    reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
+                    payload={
+                        "action": "provision",
+                        "expected_status": WorkspaceStatus.provisioning.value,
+                        "actual_status": ws.status,
+                        "orphan_containers_stopped": True,
+                    },
+                )
+                await session.commit()
+        return True
 
     async def _record_stale_action_skip(
         self,
