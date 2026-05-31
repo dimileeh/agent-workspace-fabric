@@ -69,6 +69,7 @@ from awf.runtime.validation import ValidationCoverageResult, profile_phase_comma
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     validation_worktree_cleanup_failure_message,
@@ -230,7 +231,11 @@ async def run_validation_and_fix_cycle(
         )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-            message = validation_worktree_preexisting_dirty_message(pre_validation_check)
+            message = (
+                pre_validation_check.message
+                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                else validation_worktree_preexisting_dirty_message(pre_validation_check)
+            )
             return await _fail_validation_worktree_guard(
                 self,
                 workspace_id=workspace_id,

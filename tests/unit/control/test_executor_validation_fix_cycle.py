@@ -48,6 +48,7 @@ from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationCommandResult, ValidationResult, ValidationRunner
+from awf.runtime.validation_worktree import VALIDATION_WORKTREE_STATUS_FAILED
 from awf.service.supply_chain_policy import SupplyChainFinding
 from tests.postgres import postgres_test_engine
 
@@ -506,6 +507,42 @@ class TestValidationSideEffectCleanup:
         assert runs[-1].status == "failed"
         assert runs[-1].reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
         assert not any("git push" in " ".join(call.args) for call in fake.calls)
+
+    @pytest.mark.unit
+    async def test_executor_git_status_failure_preserves_status_error_message(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        _mark_git_worktree(worktree_path)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="git status failed")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert ws.failure_message == (
+            f"{VALIDATION_WORKTREE_STATUS_FAILED}: "
+            "Could not inspect validation worktree cleanliness with `git status --porcelain`."
+        )
+        assert runs[-1].status == "failed"
+        assert runs[-1].reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+        assert "Dirty paths" not in (ws.failure_message or "")
+        assert "pre-existing uncommitted changes" not in (ws.failure_message or "")
 
 
 class TestFixCycleRecoversAfterOneFailure:
