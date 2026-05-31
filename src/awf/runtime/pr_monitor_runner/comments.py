@@ -60,7 +60,10 @@ async def _address_thread(
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
 ) -> Verdict:
-    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _defer_reason_state_key,
+        _sync_needs_human_reason,
+    )
 
     prompt_owned_paths = (
         owned_paths
@@ -86,12 +89,14 @@ async def _address_thread(
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
     # On any defer, overwrite/clear the stored reason so a re-triage with a bare
     # DEFER (no reason) can't leave a stale reason from a prior pass.
-    if state is not None and result.verdict == "defer":
-        reason_key = _defer_reason_state_key(thread.thread_id)
-        if result.reason:
-            state.mark_addressed(reason_key, result.reason)
-        else:
-            state.threads_addressed_ids.pop(reason_key, None)
+    if state is not None:
+        _sync_needs_human_reason(state, thread.thread_id, result)
+        if result.verdict == "defer":
+            reason_key = _defer_reason_state_key(thread.thread_id)
+            if result.reason:
+                state.mark_addressed(reason_key, result.reason)
+            else:
+                state.threads_addressed_ids.pop(reason_key, None)
     return result.verdict
 
 

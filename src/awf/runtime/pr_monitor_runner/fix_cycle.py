@@ -45,6 +45,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _mark_review_comment_addressed,
     _redact_and_truncate_github_error,
     _review_comment_needs_attention,
+    _sync_needs_human_reason,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -263,6 +264,7 @@ async def _run_fix_cycle(
                     reason_code=exc.reason_code,
                 )
             verdict = verdict_result.verdict
+            _sync_needs_human_reason(state, c.comment_id, verdict_result)
             _mark_review_comment_addressed(state, c, verdict)
             if verdict in {"false_positive", "defer"}:
                 await self._record_pr_feedback_resolution(

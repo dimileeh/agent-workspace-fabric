@@ -1157,20 +1157,26 @@ async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
 
 
 @pytest.mark.unit
-async def test_address_thread_stashes_only_defer_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify thread handling stashes only actionable defer reasons."""
-    # _address_thread stashes the agent's DEFER reason in state (for the
-    # deferred-capture issue) only when there is a reason, the verdict is defer,
-    # and state is present — never otherwise.
+async def test_address_thread_stashes_agent_verdict_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify thread handling stashes only actionable agent verdict reasons."""
+    # _address_thread stashes the agent's DEFER reason in state for the
+    # deferred-capture issue and the NEEDS_HUMAN reason for operator handoff.
+    # Bare verdicts clear stale reasons from prior passes.
     from types import SimpleNamespace
 
     from awf.common.github_client import RepoRef
     from awf.runtime.pr_monitor_runner import comments
     from awf.runtime.pr_monitor_runner.comments import VerdictResult, _address_thread
-    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _defer_reason_state_key,
+        _needs_human_reason_state_key,
+    )
 
     thread = ReviewThread(thread_id="T1", path="x", line=1, body_excerpt="?")
     reason_key = _defer_reason_state_key("T1")
+    needs_human_reason_key = _needs_human_reason_state_key("T1")
 
     async def _empty_owned_paths(_runner: object, _workspace_id: str) -> list[str]:
         return []
@@ -1227,3 +1233,29 @@ async def test_address_thread_stashes_only_defer_reason(monkeypatch: pytest.Monk
     assert s4.threads_addressed_ids[reason_key] == "old reason"
     await _call(_runner(VerdictResult(verdict="defer", reason=None)), s4)
     assert reason_key not in s4.threads_addressed_ids
+
+    # needs_human + reason + state -> stashed for NotifyHuman/defer reporting.
+    s5 = MonitorState()
+    assert (
+        await _call(
+            _runner(VerdictResult(verdict="needs_human", reason="requires approval")),
+            s5,
+        )
+        == "needs_human"
+    )
+    assert s5.threads_addressed_ids[needs_human_reason_key] == "requires approval"
+
+    # A re-triage with a bare needs_human CLEARS a stale reason from a prior pass.
+    s6 = MonitorState()
+    await _call(_runner(VerdictResult(verdict="needs_human", reason="old reason")), s6)
+    assert s6.threads_addressed_ids[needs_human_reason_key] == "old reason"
+    await _call(_runner(VerdictResult(verdict="needs_human", reason=None)), s6)
+    assert needs_human_reason_key not in s6.threads_addressed_ids
+
+    # A later non-needs-human verdict also clears a stale needs-human reason.
+    s7 = MonitorState(threads_addressed_ids={needs_human_reason_key: "old reason"})
+    assert (
+        await _call(_runner(VerdictResult(verdict="fix_committed", reason="done")), s7)
+        == "fix_committed"
+    )
+    assert needs_human_reason_key not in s7.threads_addressed_ids

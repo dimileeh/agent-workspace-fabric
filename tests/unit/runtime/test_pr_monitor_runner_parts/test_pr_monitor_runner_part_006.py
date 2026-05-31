@@ -23,7 +23,10 @@ from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, fix_cycle
 from awf.runtime.pr_monitor_runner.fix_cycle import (
     _requeue_workflow_scope_publish_dependent_items,
 )
-from awf.runtime.pr_monitor_runner.helpers import _notify_human_reason
+from awf.runtime.pr_monitor_runner.helpers import (
+    _needs_human_reason_state_key,
+    _notify_human_reason,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _workflow_scope_push_block
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -278,6 +281,65 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
     assert load_count == 1
     assert len(adapter.calls) == 4
     assert all(".github/workflows/publish.yml" in prompt for prompt in adapter.calls)
+
+
+@pytest.mark.unit
+async def test_fix_cycle_stores_needs_human_reasons_for_threads_and_reviews(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify needs-human verdict reasons survive comment repair state."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: thread requires workflow scope")
+    adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: review needs operator approval")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[], reviews=[]))
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_needs",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="please update workflow publishing",
+        author="reviewer",
+    )
+    review = ReviewComment(
+        comment_id="issue:needs",
+        body_excerpt="review-level workflow concern",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(review,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert state.threads_addressed_ids["T_needs"] == "needs_human"
+    assert (
+        state.threads_addressed_ids[_needs_human_reason_state_key("T_needs")]
+        == "thread requires workflow scope"
+    )
+    assert state.threads_addressed_ids["issue:needs"] == "needs_human"
+    assert (
+        state.threads_addressed_ids[_needs_human_reason_state_key("issue:needs")]
+        == "review needs operator approval"
+    )
 
 
 @pytest.mark.unit

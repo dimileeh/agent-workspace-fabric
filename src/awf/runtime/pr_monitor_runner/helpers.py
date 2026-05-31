@@ -201,6 +201,19 @@ def _needs_human_reason_state_key(item_id: str) -> str:
     return f"__needs_human_reason__:{item_id}"
 
 
+def _sync_needs_human_reason(
+    state: MonitorState,
+    item_id: str,
+    result: VerdictResult,
+) -> None:
+    """Persist or clear the agent's needs-human reason for a review item."""
+    reason_key = _needs_human_reason_state_key(item_id)
+    if result.verdict == "needs_human" and result.reason:
+        state.mark_addressed(reason_key, result.reason)
+    else:
+        state.threads_addressed_ids.pop(reason_key, None)
+
+
 def _review_comment_body_hash(comment: ReviewComment) -> str:
     return pr_feedback_body_hash(_review_comment_resolution_body(comment))
 
