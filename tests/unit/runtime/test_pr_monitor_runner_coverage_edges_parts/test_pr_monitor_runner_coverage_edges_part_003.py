@@ -1210,11 +1210,11 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
 
 
 @pytest.mark.unit
-async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_without_terminating(
+async def test_monitor_comment_repair_workflow_scope_failure_requeues_without_terminating(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope comment repair failures mark review items needs-human."""
+    """Verify workflow-scope comment repair failures requeue review items."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed locally")
@@ -1260,10 +1260,9 @@ async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_w
 
     assert terminal is False
     assert state.iter_count == 1
-    assert state.threads_addressed_ids["T_workflow_scope"] == "needs_human"
-    reason = state.threads_addressed_ids["__needs_human_reason__:T_workflow_scope"]
-    assert ".github/workflows/publish.yml" in reason
-    assert "`workflow` scope" in reason
+    assert "T_workflow_scope" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow_scope" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_workflow_scope" not in state.threads_addressed_ids
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)

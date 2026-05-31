@@ -11,9 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
+from awf.runtime.pr_monitor import (
+    AddressComments,
+    MonitorConfig,
+    MonitorState,
+    ReviewComment,
+    ReviewThread,
+    decide,
+)
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, fix_cycle
-from awf.runtime.pr_monitor_runner.fix_cycle import _mark_publish_dependent_items_needs_human
+from awf.runtime.pr_monitor_runner.fix_cycle import (
+    _requeue_workflow_scope_publish_dependent_items,
+)
 from awf.runtime.pr_monitor_runner.helpers import _notify_human_reason
 from awf.runtime.pr_monitor_runner.remote_ops import _workflow_scope_push_block
 from tests.postgres import postgres_test_engine
@@ -272,11 +281,11 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_preserves_needs_human_thread_state(
+async def test_workflow_scope_push_failure_requeues_fix_committed_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope push failures preserve needs-human thread state."""
+    """Verify workflow-scope push failures keep committed fixes retryable."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
@@ -320,11 +329,15 @@ async def test_workflow_scope_push_failure_preserves_needs_human_thread_state(
 
     assert result.failed is True
     assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert state.threads_addressed_ids["T_workflow"] == "needs_human"
-    reason = state.threads_addressed_ids["__needs_human_reason__:T_workflow"]
-    assert ".github/workflows/publish.yml" in reason
-    assert "`workflow` scope" in reason
-    assert "protected file approval required" not in reason
+    assert "T_workflow" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
+
+    action = decide(_status(inline=(thread,)), state, MonitorConfig())
+
+    assert isinstance(action, AddressComments)
+    assert action.threads == (thread,)
+    assert action.review_comments == ()
 
 
 @pytest.mark.unit
@@ -386,37 +399,50 @@ async def test_workflow_scope_push_failure_preserves_false_positive_thread_state
     assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
     assert state.threads_addressed_ids["T_false_positive"] == "false_positive"
     assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids["T_workflow"] == "needs_human"
-    reason = state.threads_addressed_ids["__needs_human_reason__:T_workflow"]
-    assert ".github/workflows/publish.yml" in reason
-    assert "`workflow` scope" in reason
+    assert "T_workflow" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
+
+    action = decide(
+        _status(inline=(false_positive_thread, workflow_thread)),
+        state,
+        MonitorConfig(),
+    )
+
+    assert isinstance(action, AddressComments)
+    assert action.threads == (workflow_thread,)
+    assert action.review_comments == ()
 
 
 @pytest.mark.unit
-def test_workflow_scope_needs_human_marking_preserves_non_fix_verdicts() -> None:
-    """Verify workflow-scope marking preserves non-fix verdicts."""
+def test_workflow_scope_requeue_preserves_non_fix_verdicts() -> None:
+    """Verify workflow-scope requeue preserves non-fix verdicts."""
     state = MonitorState(
         threads_addressed_ids={
             "T_false_positive": "false_positive",
+            "__review_thread_body_hash__:T_false_positive": "fp-hash",
             "T_defer": "defer",
+            "__review_thread_body_hash__:T_defer": "defer-hash",
             "T_workflow": "fix_committed",
+            "__review_thread_body_hash__:T_workflow": "workflow-hash",
+            "__needs_human_reason__:T_workflow": "old reason",
         }
     )
 
-    _mark_publish_dependent_items_needs_human(
+    _requeue_workflow_scope_publish_dependent_items(
         state,
         ["T_false_positive", "T_defer", "T_workflow"],
-        "GitHub rejected the workflow push because the token lacks `workflow` scope.",
     )
 
     assert state.threads_addressed_ids["T_false_positive"] == "false_positive"
+    assert state.threads_addressed_ids["__review_thread_body_hash__:T_false_positive"] == "fp-hash"
     assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["T_defer"] == "defer"
+    assert state.threads_addressed_ids["__review_thread_body_hash__:T_defer"] == "defer-hash"
     assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
-    assert state.threads_addressed_ids["T_workflow"] == "needs_human"
-    assert state.threads_addressed_ids["__needs_human_reason__:T_workflow"] == (
-        "GitHub rejected the workflow push because the token lacks `workflow` scope."
-    )
+    assert "T_workflow" not in state.threads_addressed_ids
+    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
+    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
 
 
 @pytest.mark.unit

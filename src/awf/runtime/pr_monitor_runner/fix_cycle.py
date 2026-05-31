@@ -43,7 +43,6 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
     _mark_review_comment_addressed,
-    _needs_human_reason_state_key,
     _redact_and_truncate_github_error,
     _review_comment_needs_attention,
 )
@@ -349,11 +348,7 @@ async def _run_fix_cycle(
     if push_result.failed:
         reason_code = push_result.reason_code
         if reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON:
-            _mark_publish_dependent_items_needs_human(
-                state,
-                publish_dependent_ids,
-                push_result.error_message or reason_code,
-            )
+            _requeue_workflow_scope_publish_dependent_items(state, publish_dependent_ids)
         else:
             for item_id in publish_dependent_ids:
                 _clear_addressed_state_by_id(state, item_id)
@@ -524,16 +519,22 @@ async def _run_fix_cycle(
     return cast(_GitPushResult, push_result)
 
 
-def _mark_publish_dependent_items_needs_human(
+def _requeue_workflow_scope_publish_dependent_items(
     state: MonitorState,
     item_ids: list[str],
-    reason: str,
 ) -> None:
+    """Clear unpublished committed fixes so a later workflow-scope repair retries.
+
+    GitHub rejects workflow-file pushes before the local commits reach the PR.
+    Keep non-fix verdicts such as ``false_positive``/``defer`` intact, but drop
+    ``fix_committed`` state so unresolved review items route back through
+    ``AddressComments`` after the operator grants a token with workflow scope.
+    """
+
     for item_id in item_ids:
         if state.threads_addressed_ids.get(item_id) != "fix_committed":
             continue
-        state.mark_addressed(item_id, "needs_human")
-        state.mark_addressed(_needs_human_reason_state_key(item_id), reason)
+        _clear_addressed_state_by_id(state, item_id)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
