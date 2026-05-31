@@ -33,6 +33,7 @@ from awf.host_setup.source_assets import (
     SourceCheckoutError,
     VerifiedSourceCheckout,
     validate_source_checkout,
+    verified_source_from_metadata,
 )
 from awf.host_setup.system_checks import (
     SetupCheckError,
@@ -107,30 +108,27 @@ def _run_setup(
     selected_providers = normalize_providers(providers)
     config = read_host_setup_config()
 
-    verified_source: VerifiedSourceCheckout | None = None
-    source_error: SourceCheckoutError | None = None
-    if source_checkout is not None:
-        try:
-            verified_source = validate_source_checkout(source_checkout)
-        except SourceCheckoutError as exc:
-            source_error = exc
+    probe_source, source_error, explicit_source = _resolve_setup_source_checkout(
+        source_checkout, config
+    )
 
     # Probe the port/disk ``awf start`` will actually use. The documented
     # local-service flow keeps ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` in
     # ``docker/compose/.env`` for Compose interpolation; ``_readiness_environ``
-    # merges that file (the selected ``--source-checkout``'s copy when one is
-    # verified) so setup probes the same values ``awf start`` will honor instead
-    # of the default 8000/work dir.
+    # merges that file (the resolved source checkout's copy when one is in play —
+    # the ``--source-checkout`` selection or the revalidated persisted checkout)
+    # so setup probes the same values ``awf start`` will honor instead of the
+    # default 8000/work dir.
     results = run_system_checks(
         config=config,
-        environ=_readiness_environ(verified_source),
+        environ=_readiness_environ(probe_source),
     )
     payload = build_setup_readiness_payload(
         results,
         selected_providers=selected_providers,
         allow_plain_secrets=allow_plain_secrets,
         dry_run=dry_run,
-        source_checkout=verified_source,
+        source_checkout=probe_source,
         source_checkout_error=source_error,
     )
 
@@ -149,7 +147,7 @@ def _run_setup(
         try:
             _persist_safe_config(
                 config,
-                source_checkout=verified_source,
+                source_checkout=explicit_source,
                 allow_plain_secrets=allow_plain_secrets,
             )
         except HostSetupConfigError as error:
@@ -162,6 +160,43 @@ def _run_setup(
     return payload
 
 
+def _resolve_setup_source_checkout(
+    source_checkout: Path | None,
+    config: HostSetupConfig,
+) -> tuple[
+    VerifiedSourceCheckout | None, SourceCheckoutError | None, VerifiedSourceCheckout | None
+]:
+    """Resolve the source checkout whose env the readiness probe should honor.
+
+    Returns ``(probe_source, source_error, explicit_source)``. ``probe_source``
+    drives the readiness env probe and the rendered payload; ``explicit_source``
+    is only set for an explicit ``--source-checkout`` selection and drives
+    metadata persistence, so re-running ``awf setup`` without the flag never
+    rewrites or refreshes the persisted metadata.
+
+    The resolution mirrors ``awf start``'s ``_resolve_start_source_checkout`` so
+    setup probes the same port/work dir ``awf start`` will use: an explicit
+    ``--source-checkout`` is validated directly, otherwise persisted host-config
+    metadata is revalidated when present. A stale or invalid checkout surfaces as
+    a blocked readiness issue — the same failure ``awf start`` would hit — instead
+    of silently falling back to default discovery and clearing/blocking on a port
+    or disk path the matching ``awf start`` would not use.
+    """
+    if source_checkout is not None:
+        try:
+            explicit = validate_source_checkout(source_checkout)
+        except SourceCheckoutError as exc:
+            return None, exc, None
+        return explicit, None, explicit
+
+    if config.source_checkout is None:
+        return None, None, None
+    try:
+        return verified_source_from_metadata(config.source_checkout), None, None
+    except SourceCheckoutError as exc:
+        return None, exc, None
+
+
 def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[str, str]:
     """Resolve the merged environment the read-only host probes should see.
 
@@ -169,11 +204,13 @@ def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[s
     dir when an operator moved ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` into
     ``docker/compose/.env``, so merge that file like the service path does.
 
-    When ``--source-checkout`` selected a verified checkout, read *that*
-    checkout's ``docker/compose/.env`` (with the checkout-root ``.env`` fallback,
-    exactly like ``awf start``'s ``_resolve_start_bootstrap_inputs``). Otherwise
-    setup would probe the default-discovered ``.env`` while ``awf start`` later
-    honors the persisted checkout's values, so a checkout-local
+    When a verified source checkout is in play — selected via ``--source-checkout``
+    or revalidated from persisted host config (see
+    ``_resolve_setup_source_checkout``) — read *that* checkout's
+    ``docker/compose/.env`` (with the checkout-root ``.env`` fallback, exactly like
+    ``awf start``'s ``_resolve_start_bootstrap_inputs``). Otherwise setup would
+    probe the default-discovered ``.env`` while ``awf start`` later honors the
+    selected/persisted checkout's values, so a checkout-local
     ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` could make setup block on a port
     or disk path the matching start would not use. ``local_service_environ``
     falls back to the process env when no ``.env`` exists yet (true first run).

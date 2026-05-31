@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -13,7 +14,11 @@ from typer.testing import CliRunner
 from awf.cli import setup_commands
 from awf.cli.main import app
 from awf.host_setup.config import HostSetupConfig, HostSetupConfigError
-from awf.host_setup.source_assets import SOURCE_CHECKOUT_MARKERS
+from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_MARKERS,
+    SourceCheckoutAssetMetadata,
+    validate_source_checkout,
+)
 from awf.host_setup.system_checks import SetupCheckLevel, SetupCheckResult
 
 _runner = CliRunner()
@@ -194,6 +199,94 @@ def test_setup_probes_selected_source_checkout_env(
     environ = captured["environ"]
     assert isinstance(environ, dict)
     assert environ["AWF_API_HOST_PORT"] == "9100"
+
+
+@pytest.mark.unit
+def test_setup_probes_persisted_source_checkout_env(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ``--source-checkout``: the probe honors the *persisted* checkout's env.
+
+    Regression for PRRT_kwDOSJAM6s6F6Wjh: after a prior run stores source-checkout
+    metadata in host config, ``awf setup`` without ``--source-checkout`` must
+    resolve ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` from that persisted
+    checkout's ``docker/compose/.env`` — the file ``awf start`` revalidates and
+    honors via ``_resolve_start_source_checkout`` — instead of default discovery,
+    so setup never probes/clears on a port or disk path the matching ``awf start``
+    would not use.
+    """
+    root = _make_source_checkout(tmp_path / "awf")
+    compose_env = root / "docker" / "compose" / ".env"
+    compose_env.parent.mkdir(parents=True, exist_ok=True)
+    compose_env.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+
+    persisted = HostSetupConfig(source_checkout=validate_source_checkout(root).to_metadata())
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: persisted)
+
+    captured: dict[str, object] = {}
+
+    def fake_checks(**kwargs: object) -> list[SetupCheckResult]:
+        captured["environ"] = kwargs.get("environ")
+        return _all_ok()
+
+    monkeypatch.setattr(setup_commands, "run_system_checks", fake_checks)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    environ = captured["environ"]
+    assert isinstance(environ, dict)
+    assert environ["AWF_API_HOST_PORT"] == "9100"
+
+
+@pytest.mark.unit
+def test_setup_persisted_source_checkout_stale_blocks(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ``--source-checkout``: stale persisted metadata blocks like ``awf start``.
+
+    When a stored checkout has moved or lost required assets, ``awf start``
+    revalidates it and fails with SOURCE_CHECKOUT_ASSETS_STALE rather than
+    silently falling back to package discovery. ``awf setup`` must surface the
+    same blocker instead of probing default discovery and reporting ready, so the
+    readiness pass predicts the start failure rather than masking it.
+    """
+    persisted = HostSetupConfig(
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=tmp_path / "gone",
+            verified_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+    )
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: persisted)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert "SOURCE_CHECKOUT_ASSETS_STALE" in reason_codes
+
+
+@pytest.mark.unit
+def test_setup_no_flag_preserves_persisted_source_metadata(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A no-flag non-dry-run run preserves persisted source metadata untouched.
+
+    Only an explicit ``--source-checkout`` selection writes/refreshes source
+    metadata; re-running ``awf setup`` without the flag must round-trip the
+    persisted metadata (and its ``verified_at``) unchanged rather than silently
+    rewriting it.
+    """
+    root = _make_source_checkout(tmp_path / "awf")
+    metadata = validate_source_checkout(root).to_metadata()
+    persisted = HostSetupConfig(source_checkout=metadata)
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: persisted)
+
+    result = _runner.invoke(app, ["setup", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    written = harness.writes[-1]
+    assert written.source_checkout == metadata
 
 
 # --- Provider selectors ---------------------------------------------------
