@@ -27,7 +27,7 @@ from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from awf.common.audit import redact_audit_text
+from awf.common.audit import REDACTION_MARKER, redact_audit_text
 from awf.common.token_patterns import compile_known_token_re
 from awf.host_setup.rendering import (
     CREDENTIAL_BACKEND_UNAVAILABLE,
@@ -516,7 +516,7 @@ def _interactive_input_required(
             # ``_require_safe_identifier``, since env_ref never interpolates it.
             # Redact token-shaped substrings so a provider accidentally populated
             # with a raw secret never surfaces in these diagnostics or ``to_dict``.
-            "provider": redact_audit_text(request.provider),
+            "provider": _redact_token_shaped(request.provider),
             "missing": missing,
             "non_interactive": request.non_interactive,
         },
@@ -568,6 +568,20 @@ def _require_safe_identifier(value: str, *, field: str) -> str:
 def _looks_like_secret(value: str) -> bool:
     """Return whether a value contains a token-shaped substring."""
     return _TOKEN_SHAPE_RE.search(value) is not None
+
+
+def _redact_token_shaped(value: str) -> str:
+    """Redact token-shaped substrings from a value bound for error diagnostics.
+
+    ``redact_audit_text`` uses a *case-sensitive* known-token recognizer, but
+    this module's own token-shape checks (``_TOKEN_SHAPE_RE``) are
+    case-insensitive. Fold case here first via ``_TOKEN_SHAPE_RE`` so a
+    case-variant token-shaped value (e.g. ``SK-PROJ-...``) is redacted rather
+    than slipping past the audit helper and surfacing verbatim; then defer to
+    ``redact_audit_text`` for its other redactions (URL/bearer/assignment) and
+    the length cap.
+    """
+    return redact_audit_text(_TOKEN_SHAPE_RE.sub(REDACTION_MARKER, value))
 
 
 def _default_secrets_dir() -> Path:

@@ -676,6 +676,34 @@ def test_env_ref_missing_variable_redacts_token_shaped_provider() -> None:
     assert _FAKE_TOKEN not in str(error.to_dict())
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "provider",
+    [
+        _FAKE_TOKEN.upper(),
+        _FAKE_GH_TOKEN.upper(),
+        "sK-pRoJ-" + ("a" * 48),
+    ],
+)
+def test_env_ref_missing_variable_redacts_case_variant_token_provider(provider: str) -> None:
+    """Verify a case-variant token-shaped provider is redacted, not echoed verbatim.
+
+    This module's own token-shape checks (``_TOKEN_SHAPE_RE``) are
+    case-insensitive, so the diagnostic redaction on the unvalidated env_ref
+    missing-input path must fold case too. A case-variant token-shaped provider
+    (e.g. ``SK-PROJ-...``) must not slip past the case-sensitive audit helper and
+    surface verbatim in the error ``details``/``to_dict()``.
+    """
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(CredentialRequest(provider=provider, env_var=None))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "env_var"
+    assert provider not in str(error.details["provider"])
+    assert provider not in str(error.to_dict())
+
+
 # --------------------------------------------------------------------------- #
 # 9. Redaction: token-shaped inputs never surface.
 # --------------------------------------------------------------------------- #
