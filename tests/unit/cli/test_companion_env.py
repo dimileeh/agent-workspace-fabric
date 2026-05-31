@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -118,6 +119,10 @@ def test_missing_env_file_raises() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(
+    os.getuid() == 0,
+    reason="root bypasses file permissions, so chmod(0o000) does not make the file unreadable",
+)
 def test_unreadable_env_file_raises(tmp_path: Path) -> None:
     """An unreadable .env file (permission denied) raises PermissionError."""
     env_file = tmp_path / ".env"

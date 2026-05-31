@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -147,6 +148,10 @@ def test_parsed_file_not_found_raises() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(
+    os.getuid() == 0,
+    reason="root bypasses file permissions, so chmod(0o000) does not make the file unreadable",
+)
 def test_parsed_file_permission_denied_raises(tmp_path: Path) -> None:
     """An unreadable file (chmod 0) raises PermissionError."""
     env = tmp_path / ".env"
