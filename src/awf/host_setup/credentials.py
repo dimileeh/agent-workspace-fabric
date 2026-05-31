@@ -398,7 +398,17 @@ class EnvRefCredentialBackend:
                 )
             raise CredentialError(
                 reason_code=CREDENTIAL_REF_INVALID,
-                message="Environment variable name is not a valid identifier.",
+                # Spell out the accepted shape: ``_ENV_VAR_NAME_RE`` deliberately
+                # narrows to ``[A-Z]``-initial uppercase identifiers, so a
+                # POSIX-valid but lowercase or underscore-prefixed name (e.g.
+                # ``_OPENAI_KEY``) is rejected. Naming the requirement here lets an
+                # operator self-diagnose instead of guessing why ``_FOO`` failed.
+                message=(
+                    "Environment variable name must be an uppercase identifier: "
+                    "start with a letter A-Z, then letters A-Z, digits, or "
+                    "underscores (e.g. OPENAI_API_KEY). A leading underscore or "
+                    "lowercase letter is not accepted."
+                ),
                 details={"field": "env_var"},
             )
         return _build_credential_ref("env_ref", f"env://{name}")
@@ -766,8 +776,28 @@ def _pull_secret(request: CredentialRequest) -> str:
     # its identifier (``name = env_var.strip()``) before use.
     stripped = secret.strip() if secret else None
     if not stripped:
-        raise _interactive_input_required(request, missing="secret")
+        # Distinguish a genuinely absent secret from a non-empty value that was
+        # *all* whitespace. The latter strips to empty and would otherwise read as
+        # plain "missing input", giving the operator no hint that their non-empty
+        # paste was normalised away (and would have silently failed auth). Never
+        # echo the value — it is a secret — but the whitespace-only discriminator
+        # is safe (it reveals only that every character was whitespace) and makes
+        # the failure self-diagnosable.
+        missing = "secret_whitespace_only" if secret else "secret"
+        raise _interactive_input_required(request, missing=missing)
     return stripped
+
+
+# Maps a ``missing`` discriminator to a more specific, secret-free message when the
+# generic "input unavailable" wording would hide an actionable cause (e.g. a
+# non-empty secret that normalised away to whitespace). Unmapped discriminators
+# fall back to the generic message below.
+_MISSING_INPUT_MESSAGES: Mapping[str, str] = {
+    "secret_whitespace_only": (
+        "The supplied credential secret was only whitespace; a non-empty value is "
+        "required in a non-interactive run."
+    ),
+}
 
 
 def _interactive_input_required(
@@ -778,7 +808,10 @@ def _interactive_input_required(
     """Build the non-interactive missing-input error with secret-free details."""
     return CredentialError(
         reason_code=INTERACTIVE_INPUT_REQUIRED,
-        message="A required credential input is unavailable in a non-interactive run.",
+        message=_MISSING_INPUT_MESSAGES.get(
+            missing,
+            "A required credential input is unavailable in a non-interactive run.",
+        ),
         details={
             # ``provider`` reaches this builder unvalidated on the env_ref path:
             # ``EnvRefCredentialBackend`` raises here for a missing env var name

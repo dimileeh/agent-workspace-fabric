@@ -76,6 +76,50 @@ def test_keyring_whitespace_only_secret_is_interactive_input_required(secret: st
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("secret", ["   ", "\t\n", " \t "])
+def test_keyring_whitespace_only_secret_signals_whitespace_normalisation(secret: str) -> None:
+    """Verify a whitespace-only secret reports a distinct, actionable discriminator.
+
+    A non-empty but all-whitespace secret strips to ``""`` and is rejected as
+    missing input. Reporting the same ``missing="secret"`` an absent secret yields
+    leaves the operator no hint that their non-empty paste was normalised away. The
+    whitespace-only case must instead surface ``missing="secret_whitespace_only"``
+    and a message that names whitespace, while never echoing the value itself.
+    """
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule())
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="github", secret_source=_secret(secret)))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "secret_whitespace_only"
+    assert "whitespace" in error.message.lower()
+    # The (whitespace) value must never be echoed into the diagnostic payload.
+    assert secret not in str(error.to_dict())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("secret_source", [None, ""])
+def test_keyring_absent_secret_uses_plain_missing_discriminator(
+    secret_source: str | None,
+) -> None:
+    """Verify a genuinely absent secret keeps the plain ``missing="secret"`` signal.
+
+    Only a non-empty whitespace-only value earns the ``secret_whitespace_only``
+    discriminator; an unset or empty secret stays ``missing="secret"`` so the two
+    failure modes remain distinguishable to operators.
+    """
+    source = None if secret_source is None else _secret(secret_source)
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule())
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="github", secret_source=source))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "secret"
+
+
+@pytest.mark.unit
 def test_keyring_strips_secret_whitespace_before_storage() -> None:
     """Verify a whitespace-padded secret is stripped before the keychain write.
 

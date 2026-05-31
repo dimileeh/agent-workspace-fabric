@@ -490,6 +490,27 @@ def test_env_ref_allows_descriptive_github_pat_names(env_var: str) -> None:
     assert ref.ref == f"env://{env_var}"
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("env_var", ["_OPENAI_KEY", "_MY_SECRET", "_API_KEY"])
+def test_env_ref_underscore_prefixed_name_rejected_with_format_hint(env_var: str) -> None:
+    """Verify a leading-underscore env-var name is rejected with a self-diagnosable hint.
+
+    ``_ENV_VAR_NAME_RE`` deliberately narrows to ``[A-Z]``-initial uppercase
+    identifiers, so a POSIX-valid but underscore-prefixed name (e.g. ``_OPENAI_KEY``)
+    is rejected. The generic "not a valid identifier" wording gave no clue that the
+    leading ``_`` was the cause, so the message must spell out the accepted shape
+    (an uppercase letter first) to let an operator self-diagnose.
+    """
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(CredentialRequest(provider="openai", env_var=env_var))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    message = error.message.lower()
+    assert "uppercase" in message
+    assert "letter" in message
+
+
 # --------------------------------------------------------------------------- #
 # 4. Plain-file consent / flag gating.
 # --------------------------------------------------------------------------- #
