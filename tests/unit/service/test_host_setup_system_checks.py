@@ -796,6 +796,24 @@ def test_default_command_runner_returns_none_when_unlaunchable(
 
 
 @pytest.mark.unit
+def test_default_command_runner_returns_none_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a probe that times out returns None (no raise).
+
+    ``subprocess.TimeoutExpired`` is not an ``OSError`` subclass, so it must be
+    listed explicitly in the ``except`` clause alongside ``OSError``.
+    """
+    import subprocess
+
+    def slow(*_a: object, **_k: object) -> _FakeCompleted:
+        raise subprocess.TimeoutExpired(cmd="probe", timeout=5.0)
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    assert system_checks._default_command_runner(["probe"]) is None
+
+
+@pytest.mark.unit
 def test_default_command_runner_decodes_with_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -131,7 +131,9 @@ def _default_command_runner(
             errors="replace",
             timeout=timeout,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError):
+        # ``FileNotFoundError`` (missing binary) is an ``OSError`` subclass, so it
+        # is already covered; ``TimeoutExpired`` is the only non-``OSError`` case.
         return None
     return CommandResult(
         returncode=completed.returncode,
