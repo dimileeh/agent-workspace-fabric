@@ -152,6 +152,24 @@ def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
     assert infer_provider(model=None, output="cursor-agent: unauthorized") == "cursor"
 
 
+def test_cursor_provider_inference_requires_specific_cursor_marker() -> None:
+    assert infer_provider(model=None, output="cursor pagination failed") is None
+    assert infer_provider(model=None, output="cursor auth failed") == "cursor"
+    assert infer_provider(model=None, output="cursor api key was rejected") == "cursor"
+
+
+def test_generic_auth_prompt_with_cursor_word_is_not_provider_failure() -> None:
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="Please authenticate before using the cursor pagination endpoint.",
+        provider=None,
+        model=None,
+    )
+
+    assert classification is None
+
+
 def test_failure_fingerprint_truncates_long_output_after_redaction() -> None:
     fingerprint = failure_fingerprint(
         reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,

@@ -41,7 +41,6 @@ _AUTH_FAILURE_MARKERS = (
     "cursor api key",
     "cursor auth",
     "cursor authentication",
-    "please authenticate",
     "gemini_api_key",
     "google_api_key",
     "google_genai_use_vertexai",
@@ -87,7 +86,13 @@ _GOOGLE_MARKERS = (
     "retryablequotaerror",
 )
 _OPENAI_MARKERS = ("codex", "openai", "gpt-", "o3", "o4")
-_CURSOR_MARKERS = ("cursor", "cursor-agent", "cursor_api_key")
+_CURSOR_MARKERS = (
+    "cursor-agent",
+    "cursor_api_key",
+    "cursor api key",
+    "cursor auth",
+    "cursor authentication",
+)
 _ANTHROPIC_MARKERS = ("claude", "anthropic", "sonnet", "opus", "haiku")
 _OLLAMA_MARKERS = ("ollama",)
 
