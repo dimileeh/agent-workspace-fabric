@@ -594,13 +594,21 @@ def check_local_capacity(
             )
         else:
             summary = "Detected less memory than recommended for AWF workspaces."
-        # Point operators at host CPU introspection only when an unknown CPU
-        # count is the sole issue; otherwise the generic provisioning hint
-        # covers the (possibly combined) low-capacity case.
-        if unknown_cpu and not low_cpu and not low_memory:
+        # Narrow the remediation hint to the dimension(s) actually below floor,
+        # the way the summary already does. Telling an operator to provision
+        # "more CPU or memory" when only one is short implies both need
+        # attention. An unknown CPU count is not a confirmed shortfall, so it
+        # never widens the hint: with adequate memory the only action is to
+        # expose CPU info; with low memory the hint names memory alone.
+        # (low_cpu and unknown_cpu are mutually exclusive, so no branch is dead.)
+        if unknown_cpu and not low_memory:
             fix = "Verify the host environment exposes CPU information."
-        else:
+        elif low_cpu and low_memory:
             fix = "Provision more CPU or memory or expect slower, lower-concurrency workspaces."
+        elif low_cpu:
+            fix = "Provision more CPU or expect slower, lower-concurrency workspaces."
+        else:
+            fix = "Provision more memory or expect slower, lower-concurrency workspaces."
         return SetupCheckResult(
             name="local_capacity",
             level=SetupCheckLevel.WARNING,

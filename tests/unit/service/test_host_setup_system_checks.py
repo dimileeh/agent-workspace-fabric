@@ -390,6 +390,54 @@ def test_check_local_capacity_unknown_cpu_and_low_memory_names_both() -> None:
     assert "fewer CPUs" not in result.summary
 
 
+@pytest.mark.unit
+def test_check_local_capacity_fix_names_only_the_starved_resource() -> None:
+    """The remediation hint must name only the resource(s) actually below floor.
+
+    Regression for PR #332 review (comment issue:4585200251): the fix message
+    read "Provision more CPU or memory ..." even when a single resource was
+    short, telling an operator to provision both when only one needed attention.
+    The narrowed wording must track the affected dimension(s) the way the
+    summary already does.
+    """
+    enough_memory = 16 * 1024**3
+    starved_memory = 1 * 1024**3
+
+    low_cpu_only = check_local_capacity(
+        cpu_count=lambda: 1, total_memory_bytes=lambda: enough_memory
+    )
+    low_memory_only = check_local_capacity(
+        cpu_count=lambda: 8, total_memory_bytes=lambda: starved_memory
+    )
+    both_low = check_local_capacity(cpu_count=lambda: 1, total_memory_bytes=lambda: starved_memory)
+    unknown_cpu_low_memory = check_local_capacity(
+        cpu_count=lambda: None, total_memory_bytes=lambda: starved_memory
+    )
+    unknown_cpu_only = check_local_capacity(
+        cpu_count=lambda: None, total_memory_bytes=lambda: enough_memory
+    )
+
+    assert low_cpu_only.fix == (
+        "Provision more CPU or expect slower, lower-concurrency workspaces."
+    )
+    assert low_memory_only.fix == (
+        "Provision more memory or expect slower, lower-concurrency workspaces."
+    )
+    # Both starved keeps the combined wording — provisioning either helps.
+    assert both_low.fix == (
+        "Provision more CPU or memory or expect slower, lower-concurrency workspaces."
+    )
+    # An unknown CPU count is not a confirmed CPU shortfall: when memory is the
+    # only thing below floor, the fix must point at memory alone, not "CPU or
+    # memory".
+    assert unknown_cpu_low_memory.fix == (
+        "Provision more memory or expect slower, lower-concurrency workspaces."
+    )
+    # CPU count unknown with adequate memory: the only actionable step is to
+    # expose CPU info, not to provision anything.
+    assert unknown_cpu_only.fix == "Verify the host environment exposes CPU information."
+
+
 # --- run_system_checks wiring --------------------------------------------
 
 
