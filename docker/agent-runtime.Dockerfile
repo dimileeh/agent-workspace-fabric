@@ -164,6 +164,7 @@ RUN set -eux; \
         @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
         @google/gemini-cli@${GEMINI_VERSION} \
         opencode-ai@${OPENCODE_VERSION} \
+        @xai-official/grok@${GROK_VERSION} \
         ccusage@${CCUSAGE_VERSION}; then \
         break; \
       fi; \
@@ -180,16 +181,8 @@ RUN set -eux; \
     && claude --version || true \
     && gemini --version || true \
     && opencode --version || true \
+    && grok --version || true \
     && ccusage --version
-
-# Official xAI Grok Build installer. The installer accepts a version argument;
-# keep this pinned like the npm-based CLI args above. It installs the standalone
-# `grok` binary, not the unrelated community npm `grok-cli` package.
-RUN set -eux; \
-    export GROK_BIN_DIR=/usr/local/bin; \
-    curl -fsSL https://x.ai/cli/install.sh | bash -s "${GROK_VERSION}"; \
-    command -v grok; \
-    grok --version || true
 
 # Gemini CLI 0.42.0 only enables its ripgrep-backed search tool when a bundled
 # platform-specific rg binary exists; it does not fall back to the system rg on

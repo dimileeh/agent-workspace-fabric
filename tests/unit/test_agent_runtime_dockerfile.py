@@ -101,9 +101,10 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in dockerfile
     assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile
     assert "opencode-ai@${OPENCODE_VERSION}" in dockerfile
-    assert "https://x.ai/cli/install.sh" in dockerfile
-    assert "GROK_BIN_DIR=/usr/local/bin" in dockerfile
-    assert 'bash -s "${GROK_VERSION}"' in dockerfile
+    assert "@xai-official/grok@${GROK_VERSION}" in dockerfile
+    assert "https://x.ai/cli/install.sh" not in dockerfile
+    assert "GROK_BIN_DIR=/usr/local/bin" not in dockerfile
+    assert 'bash -s "${GROK_VERSION}"' not in dockerfile
     assert "superagent-ai/grok-cli" not in dockerfile
     assert "npm install -g grok" not in dockerfile
     assert "codex --version" in dockerfile
