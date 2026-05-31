@@ -26,7 +26,7 @@ No files owned by other tasks were touched (no `cli/*`, no `providers.py`, no
 
 ```text
 ruff check src/awf tests                                         → All checks passed!
-ruff format --check src/awf/host_setup <new test>               → 6 files already formatted
+ruff format --check src/awf/host_setup tests/unit/service/test_host_setup_credentials.py → 6 files already formatted
 mypy (pyproject files=["src/"], 289 files)                       → Success: no issues found
 pytest tests/unit/service/test_host_setup_credentials.py -q      → 61 passed
 pytest .../test_host_setup_config.py .../test_host_setup_rendering.py → 125 passed
