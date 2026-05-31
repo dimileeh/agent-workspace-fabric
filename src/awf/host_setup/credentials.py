@@ -772,14 +772,14 @@ def _write_secret_file(target: Path, secret: str) -> None:
         # secrets dir and 8-byte random suffix already make that extremely
         # unlikely, but ``O_EXCL`` is cheap defence-in-depth for a secrets write.
         # A pre-existing temp path then raises ``FileExistsError`` (an ``OSError``),
-        # cleaned up and reason-coded by the ``except OSError`` below.
+        # cleaned up and reason-coded by the outer handler below.
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_EXCL, 0o600)
         # ``os.fdopen`` takes ownership of ``fd`` only once it returns; if it
         # raises (e.g. an invalid mode or an implementation-level error) the raw
         # descriptor would leak. CPython closes it internally on an ``os.fdopen``
         # failure, but that is undocumented and not guaranteed across Python
         # implementations, so close it explicitly to keep the cleanup contract
-        # portable. The outer ``except OSError`` still unlinks the temp file.
+        # portable. The outer handler still unlinks the temp file.
         try:
             handle = os.fdopen(fd, "w", encoding="utf-8")
         except Exception:
@@ -803,7 +803,12 @@ def _write_secret_file(target: Path, secret: str) -> None:
         # write already succeeded, so a dir-sync failure must not be reported as
         # a write failure (which would discard a credential that is on disk).
         _fsync_dir_best_effort(secrets_dir)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - normalize any write failure to CredentialError
+        # Cleanup + reason-coding must cover non-``OSError`` failures too: a
+        # secret that cannot be UTF-8 encoded raises ``UnicodeEncodeError`` from
+        # ``handle.write``, which would otherwise orphan the 0600 temp file in
+        # the 0700 secrets dir and escape this backend's "only raises
+        # ``CredentialError``" contract with a raw ``ValueError``.
         if tmp_path is not None:
             with suppress(OSError):
                 tmp_path.unlink()
