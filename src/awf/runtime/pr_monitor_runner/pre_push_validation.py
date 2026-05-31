@@ -572,6 +572,8 @@ async def _run_pre_push_validation(
             else PRE_PUSH_VALIDATION_FAILED_REASON
         )
     )
+    # Persist the most specific validation/toolchain code for operator triage,
+    # while returning the outer pre-push code that drives push orchestration.
     persisted_reason_code = (
         pre_push_reason_code if toolchain_missing_failure is not None else validation_reason_code
     )

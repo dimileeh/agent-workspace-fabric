@@ -16,7 +16,11 @@ from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
 )
-from awf.runtime.validation import SETUP_DEPENDENCY_NETWORK_FAILURE, ValidationResult
+from awf.runtime.validation import (
+    SETUP_DEPENDENCY_NETWORK_FAILURE,
+    ValidationCommandResult,
+    ValidationResult,
+)
 from tests.unit.control.executor_paths import _test_worktrees_root
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
@@ -29,6 +33,22 @@ from tests.unit.control.test_executor_error_paths_parts.test_executor_error_path
 )
 
 _IMPORTED_FIXTURES = (factory, fake)
+
+
+def _plain_setup_command_failure(tmp_path: Path) -> ValidationCommandResult:
+    stdout_path = tmp_path / "plain_setup_failure.stdout"
+    stderr_path = tmp_path / "plain_setup_failure.stderr"
+    stdout_path.write_text("setup stdout\n", encoding="utf-8")
+    stderr_path.write_text("local install failed\n", encoding="utf-8")
+    return ValidationCommandResult(
+        command="npm ci",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="setup",
+        reason_code="COMMAND_FAILED",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -323,6 +343,60 @@ class TestExecutorMonitorHandoffSetup:
             assert ws.failure_reason == "service_startup_failure"
             assert "profile setup failed: uv sync --extra dev" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_plain_setup_failure_records_named_reason_code(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        validation = _SetupDependencyValidation(
+            ValidationResult(commands=[_plain_setup_command_failure(tmp_path)])
+        )
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "service_startup_failure"
+            assert "profile setup failed: npm ci" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_setup_exception_records_named_reason_code(

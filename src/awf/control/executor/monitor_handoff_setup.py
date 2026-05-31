@@ -98,7 +98,9 @@ async def _run_monitor_handoff_profile_setup(
     first_fail = setup_result.first_failure
     setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
     setup_failure_reason_code = (
-        SETUP_DEPENDENCY_NETWORK_FAILURE if setup_dependency_details is not None else None
+        SETUP_DEPENDENCY_NETWORK_FAILURE
+        if setup_dependency_details is not None
+        else PR_MONITOR_SETUP_FAILED_REASON_CODE
     )
     await self._mark_failed(
         workspace_id=workspace_id,
