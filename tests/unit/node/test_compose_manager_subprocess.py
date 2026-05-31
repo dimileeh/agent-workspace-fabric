@@ -432,7 +432,13 @@ def _docker_dispatch(
             container_id = cmd[-1]
             body = (logs_by_container or {}).get(container_id)
             if body is None:
-                return _mock_proc(returncode=1, stderr=b"Error: No such container")
+                # docker logs runs with combine_stderr=True, so an error (e.g. a
+                # "No such container" race) is folded into stdout and the stderr
+                # stream yields ``None`` — mirror that here rather than putting the
+                # error in stderr, so the failure path exercises the same
+                # stdout-fallback (``stderr=""`` → ``_capture_error_detail_raw``
+                # reads ``exc.stdout``) that production hits.
+                return _mock_proc(returncode=1, stdout=b"Error: No such container", stderr=None)
             # docker logs combines stderr into stdout (combine_stderr=True), so
             # the captured process yields ``None`` for the stderr stream.
             return _mock_proc(returncode=0, stdout=body, stderr=None)
