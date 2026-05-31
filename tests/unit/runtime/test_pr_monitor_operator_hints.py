@@ -514,6 +514,80 @@ async def test_operator_hint_terminal_failure_persists_needs_human_status(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("terminal_status", ["needs_human", "agent_failed"])
+async def test_operator_hint_non_pushed_terminal_status_is_persisted_before_return(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: Literal["needs_human", "agent_failed"],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair cannot produce a safe fix commit",
+        operation_id=f"op_non_pushed_{terminal_status}",
+        requested_at="2026-05-31T03:20:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
+        await session.commit()
+
+    state = MonitorState(pending_operator_hint=hint)
+    status_reason = f"operator hint ended as {terminal_status}"
+
+    async def _non_pushed_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        state_arg = kwargs["state"]
+        assert isinstance(state_arg, MonitorState)
+        if terminal_status == "needs_human":
+            operator_hints.mark_operator_hint_needs_human(state_arg, status_reason)
+        else:
+            operator_hints.mark_operator_hint_agent_failed(state_arg, status_reason)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _non_pushed_operator_hint_cycle)
+
+    handled = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert handled is False
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert persisted is not None
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+    assert persisted_hint == {
+        "operation_id": f"op_non_pushed_{terminal_status}",
+        "reason": "operator hint repair cannot produce a safe fix commit",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": "2026-05-31T03:20:00+00:00",
+        "status": terminal_status,
+        "status_reason": status_reason,
+    }
+
+
+@pytest.mark.unit
 async def test_operator_hint_repair_records_agent_failed_verdict_as_agent_failed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

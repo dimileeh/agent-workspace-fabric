@@ -1062,6 +1062,14 @@ async def _execute(
                 return True
             state.iter_count += 1
             return False
+        if (
+            not push_result.pushed
+            and state.pending_operator_hint is not None
+            and state.pending_operator_hint.status in {"needs_human", "agent_failed"}
+        ):
+            # Persist terminal hint status before returning to the outer loop so
+            # a restart cannot re-run the same blocked operator hint as pending.
+            await self._persist_state(workspace_id, state)
         await self._finish_monitor_operation(
             operation,
             status=OperationStatus.succeeded,
