@@ -862,9 +862,19 @@ class Provisioner:
 
         To close the TOCTOU window between the conflict check and the later
         pre-launch commit, this method publishes the workspace's
-        ``resolved_profile`` and ``compose_project_name`` inside the same
-        transaction (and therefore under the same advisory lock) so that
-        concurrent provisioners can see the claim before the lock is released.
+        ``resolved_profile`` inside the same transaction (and therefore
+        under the same advisory lock) so that concurrent provisioners can
+        see the port claim before the lock is released.
+
+        ``compose_project_name`` is intentionally **not** set here.  Setting
+        it before ``_recheck_before_launch`` records its
+        ``provisioning_launching`` guard creates a race: a
+        ``stop_stack=False`` cancel that wins between this method and
+        the recheck would leave the workspace in a terminal state with a
+        non-null ``compose_project_name`` but no
+        ``workspace.terminal_runtime_released`` event, causing
+        ``find_host_port_conflicts`` to treat the profile ports as
+        permanently occupied (a false ``HOST_PORT_CONFLICT``).
 
         Raises :class:`WorkspaceCreateHostPortConflictError` on conflict so the
         caller can mark the workspace as failed.
@@ -892,13 +902,10 @@ class Provisioner:
                     conflicting_workspace_id=conflicts[0].workspace_id,
                 )
             ws = await repo.get(workspace_id)
-            if ws is not None:
-                if ws.compose_project_name is None:
-                    ws.compose_project_name = f"awf_{workspace_id}"
-                if profile_resolution is not None and ws.resolved_profile is None:
-                    ws.resolved_profile = profile_resolution.profile.model_dump(
-                        mode="json", by_alias=True
-                    )
+            if ws is not None and profile_resolution is not None and ws.resolved_profile is None:
+                ws.resolved_profile = profile_resolution.profile.model_dump(
+                    mode="json", by_alias=True
+                )
             await session.commit()
 
     async def _recheck_before_launch(self, workspace_id: str) -> bool:
