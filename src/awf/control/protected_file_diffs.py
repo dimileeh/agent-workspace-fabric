@@ -188,10 +188,11 @@ async def protected_file_diffs_for_committed_paths(
     worktree_path: Path,
     base_ref: str,
     changed_paths: Sequence[str],
+    owned_paths: Sequence[str] = (),
 ) -> dict[str, ProtectedFileDiff]:
     """Load old/new content for committed protected files changed since `base_ref`."""
     diffs: dict[str, ProtectedFileDiff] = {}
-    for path in diff_classified_protected_paths(changed_paths):
+    for path in diff_classified_protected_paths(changed_paths, owned_paths=owned_paths):
         old_text = await git_show_text(
             runner,
             worktree_path=worktree_path,

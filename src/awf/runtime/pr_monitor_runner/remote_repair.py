@@ -1082,6 +1082,7 @@ async def _protected_scope_violations_for_status(
         protected_file_diffs = await self._protected_file_diffs_for_status_paths(
             worktree_path=self._worktrees_root / workspace_id,
             changed_paths=changed_paths,
+            owned_paths=owned_paths,
         )
     except RuntimeError as exc:
         raise ProtectedScopeDiffError(
@@ -1126,6 +1127,7 @@ async def _protected_scope_violations_for_unpushed_commits(
             worktree_path=worktree_path,
             base_ref=local_base,
             changed_paths=changed_paths,
+            owned_paths=owned_paths,
         )
     except RuntimeError as exc:
         raise ProtectedScopeDiffError(
@@ -1267,9 +1269,10 @@ async def _protected_file_diffs_for_status_paths(
     *,
     worktree_path: Path,
     changed_paths: Sequence[str],
+    owned_paths: Sequence[str] = (),
 ) -> dict[str, ProtectedFileDiff]:
     diffs: dict[str, ProtectedFileDiff] = {}
-    for path in diff_classified_protected_paths(changed_paths):
+    for path in diff_classified_protected_paths(changed_paths, owned_paths=owned_paths):
         worktree_file = worktree_path / path
         old_text = await git_show_text(
             self._deps.runner, worktree_path=worktree_path, refspec=f"HEAD:{path}"
@@ -1352,6 +1355,7 @@ async def _protected_scope_violations_for_sync_base_push(
             worktree_path=worktree_path,
             base_ref=remote_branch_base,
             changed_paths=sync_base_authored_paths,
+            owned_paths=owned_paths,
         )
     except RuntimeError as exc:
         raise ProtectedScopeDiffError(
