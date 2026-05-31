@@ -132,12 +132,16 @@ def test_wheel_distribution_metadata_matches_pyproject(built: BuiltDistributions
     version = pyproject_project_version()
     with zipfile.ZipFile(built.wheel) as archive:
         metadata_name = next(
-            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+            (name for name in archive.namelist() if name.endswith(".dist-info/METADATA")),
+            None,
         )
+        assert metadata_name is not None, "METADATA not found in wheel"
         metadata = email.message_from_bytes(archive.read(metadata_name))
         entry_points_name = next(
-            name for name in archive.namelist() if name.endswith(".dist-info/entry_points.txt")
+            (name for name in archive.namelist() if name.endswith(".dist-info/entry_points.txt")),
+            None,
         )
+        assert entry_points_name is not None, "entry_points.txt not found in wheel"
         entry_points = archive.read(entry_points_name).decode("utf-8")
 
     assert metadata["Name"] == "agent-workspace-fabric"
