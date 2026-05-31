@@ -547,9 +547,10 @@ async def _protected_file_diffs_for_staged_paths(
     worktree_path: Path,
     base_ref: str,
     changed_paths: Sequence[str],
+    owned_paths: Sequence[str] = (),
 ) -> dict[str, ProtectedFileDiff]:
     diffs: dict[str, ProtectedFileDiff] = {}
-    for path in diff_classified_protected_paths(changed_paths):
+    for path in diff_classified_protected_paths(changed_paths, owned_paths=owned_paths):
         old_text = await git_show_text(
             self._runner,
             worktree_path=worktree_path,
