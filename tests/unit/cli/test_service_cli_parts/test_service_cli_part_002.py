@@ -119,6 +119,14 @@ async def _mock_worktree_remover_succeeded(
     )
 
 
+async def _mock_companion_image_prune_succeeded(_retention_hours: int) -> dict[str, object]:
+    return {
+        "status": "succeeded",
+        "reason_code": "COMPANION_IMAGE_PRUNE_SUCCEEDED",
+        "output": "",
+    }
+
+
 def _mock_compose_teardown_failed(_candidate: object) -> WorkspaceGCComposeTeardownResult:
     return WorkspaceGCComposeTeardownResult(
         status="failed",
@@ -233,6 +241,11 @@ def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
             cli_main,
             "_run_terminal_workspace_worktree_remove",
             _mock_worktree_remover_succeeded,
+        )
+        monkeypatch.setattr(
+            cli_main,
+            "_run_companion_image_prune",
+            _mock_companion_image_prune_succeeded,
         )
 
         result = _runner.invoke(
