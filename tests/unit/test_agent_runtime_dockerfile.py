@@ -101,11 +101,23 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile
     assert "opencode-ai@${OPENCODE_VERSION}" in dockerfile
     assert "cursor-agent" in dockerfile
-    assert "curl https://cursor.com/install -fsS | bash" in dockerfile
-    assert 'cp "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
+    assert "install -d -m 0755 /opt/cursor" in dockerfile
+    assert "curl https://cursor.com/install -fsS | HOME=/opt/cursor bash" in dockerfile
+    assert 'cursor_path="/opt/cursor/.local/bin/cursor-agent"' in dockerfile
+    assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
+    assert "chmod -R a+rX /opt/cursor" in dockerfile
+    assert 'cp "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
     assert "chmod +x /usr/local/bin/cursor-agent" in dockerfile
-    assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
     assert "test -x /usr/local/bin/cursor-agent" in dockerfile
+    assert "cursor-agent --version || true" not in dockerfile
+    assert (
+        "USER agent\n"
+        "WORKDIR /workspace\n\n"
+        "RUN set -eux; \\\n"
+        "    command -v cursor-agent; \\\n"
+        "    test -x /usr/local/bin/cursor-agent; \\\n"
+        "    cursor-agent --version"
+    ) in dockerfile
     assert "npm install -g cursor-agent" not in dockerfile
     assert "codex --version" in dockerfile
     assert "claude --version" in dockerfile

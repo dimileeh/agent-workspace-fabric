@@ -157,22 +157,17 @@ ARG CCUSAGE_VERSION=20.0.3
 # Cursor CLI tracks the official installer because Cursor does not document a
 # stable standalone version pin for the Linux installer.
 RUN set -eux; \
-    curl https://cursor.com/install -fsS | bash; \
-    cursor_path="$(command -v cursor-agent || true)"; \
-    if [ -z "$cursor_path" ] && [ -x "$HOME/.local/bin/cursor-agent" ]; then \
-      cursor_path="$HOME/.local/bin/cursor-agent"; \
-    fi; \
-    if [ -z "$cursor_path" ]; then \
+    install -d -m 0755 /opt/cursor; \
+    curl https://cursor.com/install -fsS | HOME=/opt/cursor bash; \
+    cursor_path="/opt/cursor/.local/bin/cursor-agent"; \
+    if [ ! -e "$cursor_path" ]; then \
       echo "cursor-agent was not installed by the Cursor installer" >&2; \
       exit 1; \
     fi; \
-    if [ "$cursor_path" != "/usr/local/bin/cursor-agent" ]; then \
-      cp "$cursor_path" /usr/local/bin/cursor-agent; \
-      chmod +x /usr/local/bin/cursor-agent; \
-    fi; \
-    command -v cursor-agent; \
-    test -x /usr/local/bin/cursor-agent; \
-    cursor-agent --version || true
+    ln -sf "$cursor_path" /usr/local/bin/cursor-agent; \
+    chmod -R a+rX /opt/cursor; \
+    chmod +x /usr/local/bin/cursor-agent; \
+    test -x /usr/local/bin/cursor-agent
 
 RUN set -eux; \
     max_attempts=3; \
@@ -194,13 +189,13 @@ RUN set -eux; \
       sleep 10; \
       attempt=$((attempt + 1)); \
     done; \
-    npm cache clean --force \
-    && codex --version || true \
-    && claude --version || true \
-    && cursor-agent --version || true \
-    && gemini --version || true \
-    && opencode --version || true \
-    && ccusage --version
+    npm cache clean --force; \
+    codex --version || true; \
+    claude --version || true; \
+    cursor-agent --version; \
+    gemini --version || true; \
+    opencode --version || true; \
+    ccusage --version
 
 # Gemini CLI 0.42.0 only enables its ripgrep-backed search tool when a bundled
 # platform-specific rg binary exists; it does not fall back to the system rg on
@@ -239,6 +234,11 @@ RUN useradd --create-home --shell /bin/bash agent \
 
 USER agent
 WORKDIR /workspace
+
+RUN set -eux; \
+    command -v cursor-agent; \
+    test -x /usr/local/bin/cursor-agent; \
+    cursor-agent --version
 
 # tini reaps zombies when the CLI forks subprocesses (common in test runs).
 ENTRYPOINT ["/usr/bin/tini", "--"]
