@@ -10,7 +10,7 @@ import pytest_mock
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
 from awf.control.quality_gates_common import QualityGateViolation
@@ -330,6 +330,83 @@ async def test_commit_dirty_worktree_stops_when_protected_scope_repair_fails(
         compose_file=tmp_path / "compose.yml",
     )
     assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_uses_refreshed_paths_for_protected_repair_autofix_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    initial_path = ".github/workflows/ci.yml"
+    repaired_path = "src/awf/example.py"
+    hook_stderr = (
+        "fix end of files................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        f"Fixing {repaired_path}\n"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f" M {initial_path}\n")
+    cmd.queue_result(returncode=0)  # initial git add -A after protected-scope repair
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=1, stderr=hook_stderr)
+    cmd.queue_result(returncode=0, stdout=f" M {repaired_path}\n")
+    cmd.queue_result(returncode=0)  # bounded restage of the autofixed repaired path
+    cmd.queue_result(returncode=0)  # retry git commit
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    repair_inputs: list[str] = []
+
+    async def _repair_protected_scope_changes_before_commit(**kwargs: object) -> CommandResult:
+        repair_inputs.append(str(kwargs["status_stdout"]))
+        return CommandResult(returncode=0, stdout=f" M {repaired_path}\n", stderr="")
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, reason, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_changes_before_commit",
+        _repair_protected_scope_changes_before_commit,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: repair protected scope",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result is True
+    assert repair_inputs == [f" M {initial_path}\n"]
+    assert [call.args[-3:] for call in cmd.calls if call.args[-3:-2] == ["commit"]] == [
+        ["commit", "-m", "fix: repair protected scope"],
+        ["commit", "-m", "fix: repair protected scope"],
+    ]
+    assert any(call.args[-3:] == ["add", "--", repaired_path] for call in cmd.calls)
 
 
 @pytest.mark.unit

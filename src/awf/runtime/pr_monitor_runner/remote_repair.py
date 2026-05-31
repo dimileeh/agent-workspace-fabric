@@ -283,6 +283,7 @@ async def _commit_dirty_worktree(
         if repaired_status is None:
             return False
         status = repaired_status
+        changed_paths = tuple(_changed_paths_from_porcelain(status.stdout))
 
     add = await self._deps.runner.run(_git_worktree_command(worktree_path, "add", "-A"))
     if not add.ok:
