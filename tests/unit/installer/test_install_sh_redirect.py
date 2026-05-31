@@ -55,3 +55,30 @@ def test_downloaders_refuse_http_redirect_downgrade_in_source() -> None:
     assert "--proto '=https'" in text
     assert "--proto-redir '=https'" in text
     assert "--https-only" in text
+
+
+@pytest.mark.unit
+def test_wget_branch_probes_https_only_support_before_use() -> None:
+    """The wget fallback fails closed with MISSING_DEPENDENCY on stale wget.
+
+    ``--https-only`` was added in GNU wget 1.18 and is absent from busybox wget
+    and older GNU wget. Without curl, such a host would otherwise hit a generic
+    ``DOWNLOAD_FAILED``/``MANIFEST_UNAVAILABLE`` with no actionable cause, so the
+    installer probes for the flag (a no-network ``--version`` invocation) before
+    using it and emits a ``MISSING_DEPENDENCY`` naming the exact gap. The wget
+    fallback only runs when curl is absent, which the hermetic harness (system
+    curl always on PATH) cannot force, so the guard is asserted statically here.
+    Removing the probe — or downgrading to a plain ``wget`` without the pin to
+    "support" old wget, which would reopen the http:// redirect-downgrade hole —
+    trips this test.
+    """
+    text = INSTALLER.read_text(encoding="utf-8")
+    # The capability probe runs before the real download in the wget branch.
+    probe = "wget --https-only --version"
+    download = 'wget -q --https-only -O "$dest" "$src"'
+    assert probe in text, text
+    assert download in text, text
+    assert text.index(probe) < text.index(download), "probe must precede the download"
+    # A missing flag fails closed with the actionable reason token, not a generic
+    # download error.
+    assert 'fail MISSING_DEPENDENCY "wget does not support --https-only' in text

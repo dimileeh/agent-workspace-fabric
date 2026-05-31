@@ -42,6 +42,12 @@ WORK_DIR=""
 MANIFEST_SOURCE=""
 MANIFEST_FILE=""
 MANIFEST_CHANNEL=""
+# Cache for extract_manifest_version: both verify_version (pinned installs) and
+# verify_artifact_name read the manifest's top-level "version", so the value is
+# extracted once and reused. The *_LOADED flag distinguishes "not yet computed"
+# from "computed and legitimately empty" (a manifest that omits the field).
+MANIFEST_VERSION=""
+MANIFEST_VERSION_LOADED=0
 ARTIFACT_NAME=""
 ARTIFACT_SHA256=""
 ARTIFACT_URL=""
@@ -354,6 +360,17 @@ fetch() {
                 # wget follows redirects by default; --https-only refuses any
                 # redirect hop that downgrades to plain http:// for the same
                 # reason (it fails closed if the redirect target is not https).
+                # --https-only was added in GNU wget 1.18; busybox wget and older
+                # GNU wget (e.g. Ubuntu 16.04 ships 1.17.1) do not support it and
+                # abort with "unrecognized option" — a generic DOWNLOAD_FAILED /
+                # MANIFEST_UNAVAILABLE with no actionable cause. Probe for the flag
+                # first (a no-network `--version` invocation) so a curl-less host
+                # with such a wget gets a MISSING_DEPENDENCY naming the exact gap
+                # instead. We never downgrade to a plain `wget` without the pin:
+                # dropping it would reopen the http:// redirect-downgrade hole.
+                if ! wget --https-only --version >/dev/null 2>&1; then
+                    fail MISSING_DEPENDENCY "wget does not support --https-only (GNU wget >= 1.18 or curl is required for secure https:// downloads)"
+                fi
                 wget -q --https-only -O "$dest" "$src" || return 1
             fi
             ;;
@@ -473,6 +490,26 @@ extract_manifest_version() {
         | head -n 1
 }
 
+# Populate MANIFEST_VERSION once and reuse it. verify_version (pinned installs)
+# and verify_artifact_name both need the manifest's top-level "version", and a
+# pinned install runs both, so without this the field is extracted twice. The
+# cache is set HERE, in a function the callers invoke in their own (main-shell)
+# scope — mirroring how verify_channel sets MANIFEST_CHANNEL. Caching inside
+# extract_manifest_version would not work: the callers run it inside `$(...)`, a
+# subshell whose global writes are discarded on exit, so the second caller would
+# still re-run sed. The *_LOADED flag distinguishes "not yet computed" from
+# "computed and legitimately empty" (a legacy manifest that omits the field), so
+# an absent version is cached too and not re-extracted. extract_manifest_version
+# pipes sed into `head -n 1`, which under pipefail can leave sed taking SIGPIPE
+# and exit non-zero; `|| true` degrades that to the captured value (empty if the
+# field is absent) instead of letting set -e abort with no reason token — the
+# same tolerance the callers previously applied at each `$(... || true)` site.
+load_manifest_version() {
+    [ "$MANIFEST_VERSION_LOADED" -eq 0 ] || return 0
+    MANIFEST_VERSION="$(extract_manifest_version || true)"
+    MANIFEST_VERSION_LOADED=1
+}
+
 # Extract the manifest's source.tag string (jq-free). "tag" is a quoted key only
 # inside the top-level "source" object (no artifact carries a "tag" key), so the
 # first match is the release tag the manifest attributes itself to.
@@ -526,16 +563,18 @@ verify_channel() {
 # guards the wheel artifact's shape.
 verify_version() {
     [ -n "$VERSION" ] || return 0
-    # extract_manifest_version/_tag pipe sed into `head -n 1`; as in
-    # verify_channel, head can close the pipe before sed finishes and leave sed
-    # taking SIGPIPE, so under pipefail the pipeline may exit non-zero. `|| true`
-    # degrades that to an empty value, which the guards below treat as "field
-    # absent" rather than letting set -e abort the install with no reason token.
-    local manifest_version manifest_tag
-    manifest_version="$(extract_manifest_version || true)"
+    # load_manifest_version caches MANIFEST_VERSION so verify_artifact_name reuses
+    # it without a second sed pass. extract_manifest_tag pipes sed into `head -n
+    # 1`; as in verify_channel, head can close the pipe before sed finishes and
+    # leave sed taking SIGPIPE, so under pipefail the pipeline may exit non-zero.
+    # `|| true` degrades that to an empty value, which the guards below treat as
+    # "field absent" rather than letting set -e abort the install with no reason
+    # token (load_manifest_version applies the same tolerance to the version).
+    load_manifest_version
+    local manifest_tag
     manifest_tag="$(extract_manifest_tag || true)"
-    if [ -n "$manifest_version" ] && [ "$manifest_version" != "$VERSION" ]; then
-        fail VERSION_MISMATCH "requested version ${VERSION} but the resolved manifest declares version ${manifest_version} (${MANIFEST_SOURCE}); the pinned release asset or mirror is serving a manifest for a different release"
+    if [ -n "$MANIFEST_VERSION" ] && [ "$MANIFEST_VERSION" != "$VERSION" ]; then
+        fail VERSION_MISMATCH "requested version ${VERSION} but the resolved manifest declares version ${MANIFEST_VERSION} (${MANIFEST_SOURCE}); the pinned release asset or mirror is serving a manifest for a different release"
     fi
     if [ -n "$manifest_tag" ] && [ "$manifest_tag" != "v${VERSION}" ]; then
         fail VERSION_MISMATCH "requested version ${VERSION} but the resolved manifest is tagged ${manifest_tag} (${MANIFEST_SOURCE}); the pinned release asset or mirror is serving a manifest for a different release"
@@ -624,13 +663,13 @@ verify_artifact_name() {
         fail PACKAGE_MISMATCH "manifest wheel artifact ${ARTIFACT_NAME} is for distribution '${dist}', not ${PACKAGE} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest whose wheel is for a different package"
     fi
 
-    # extract_manifest_version pipes sed into `head -n 1`; as in verify_version, head
-    # can close the pipe before sed finishes and leave sed taking SIGPIPE, so under
-    # pipefail the pipeline may exit non-zero. `|| true` degrades that to an empty
-    # value, which the guard below treats as "field absent" rather than letting
-    # set -e abort the install with no reason token.
-    local manifest_version
-    manifest_version="$(extract_manifest_version || true)"
+    # load_manifest_version reuses the MANIFEST_VERSION cached by verify_version on
+    # a pinned install (and populates it here on the unpinned path, where
+    # verify_version short-circuits before extracting), so the manifest's version
+    # is read with a single sed pass across both callers. It tolerates the same
+    # SIGPIPE-under-pipefail race as the other extractors, leaving MANIFEST_VERSION
+    # empty (treated as "field absent" below) rather than aborting set -e.
+    load_manifest_version
 
     # Choose the version the wheel must match. The manifest's declared top-level
     # version is authoritative when present (verify_version already proved it equals
@@ -643,9 +682,9 @@ verify_artifact_name() {
     # neither a declared manifest version nor a pin there is nothing to compare
     # against, so accept the wheel version as the version of record.
     local expected_version expected_source
-    if [ -n "$manifest_version" ]; then
-        expected_version="$manifest_version"
-        expected_source="the manifest declares version ${manifest_version}"
+    if [ -n "$MANIFEST_VERSION" ]; then
+        expected_version="$MANIFEST_VERSION"
+        expected_source="the manifest declares version ${MANIFEST_VERSION}"
     elif [ -n "$VERSION" ]; then
         expected_version="$VERSION"
         expected_source="the pinned --version is ${VERSION}"
