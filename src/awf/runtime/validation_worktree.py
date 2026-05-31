@@ -153,7 +153,7 @@ async def cleanup_validation_worktree_side_effects(
                     "could not restore them."
                 ),
                 cleanup_command="git restore",
-                cleanup_stderr=restore.stderr[:1000],
+                cleanup_stderr=(restore.stderr or "")[:1000],
             )
 
     if check.untracked_paths:
@@ -168,7 +168,7 @@ async def cleanup_validation_worktree_side_effects(
                     "AWF validation left untracked files and `git clean` could not remove them."
                 ),
                 cleanup_command="git clean",
-                cleanup_stderr=clean.stderr[:1000],
+                cleanup_stderr=(clean.stderr or "")[:1000],
             )
 
     verify = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree_path)
