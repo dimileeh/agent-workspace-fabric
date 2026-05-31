@@ -74,6 +74,16 @@ def test_agent_runtime_installs_docker_compose_plugin() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_installs_pinned_docker_buildx_plugin() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "ARG DOCKER_BUILDX_PLUGIN_VERSION=" in dockerfile
+    assert "ARG DOCKER_BUILDX_PLUGIN_VERSION=latest" not in dockerfile
+    assert '"docker-buildx-plugin=${DOCKER_BUILDX_PLUGIN_VERSION}"' in dockerfile
+    assert "docker buildx version" in dockerfile
+
+
+@pytest.mark.unit
 def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
@@ -112,5 +122,6 @@ def test_readme_notes_agent_runtime_rebuild_for_docker_tooling_changes() -> None
 
     assert "Docker CLI" in section
     assert "Docker Compose plugin" in section
+    assert "buildx" in section.lower()
     assert "rebuild" in section.lower()
     assert "docker build -t awf-agent-runtime:latest" in section
