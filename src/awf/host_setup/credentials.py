@@ -27,6 +27,7 @@ from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from awf.common.audit import redact_audit_text
 from awf.common.token_patterns import compile_known_token_re
 from awf.host_setup.rendering import (
     CREDENTIAL_BACKEND_UNAVAILABLE,
@@ -481,7 +482,13 @@ def _interactive_input_required(
         reason_code=INTERACTIVE_INPUT_REQUIRED,
         message="A required credential input is unavailable in a non-interactive run.",
         details={
-            "provider": request.provider,
+            # ``provider`` reaches this builder unvalidated on the env_ref path:
+            # ``EnvRefCredentialBackend`` raises here for a missing env var name
+            # before (and instead of) routing ``provider`` through
+            # ``_require_safe_identifier``, since env_ref never interpolates it.
+            # Redact token-shaped substrings so a provider accidentally populated
+            # with a raw secret never surfaces in these diagnostics or ``to_dict``.
+            "provider": redact_audit_text(request.provider),
             "missing": missing,
             "non_interactive": request.non_interactive,
         },

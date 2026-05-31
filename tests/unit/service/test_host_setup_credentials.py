@@ -513,7 +513,30 @@ def test_env_ref_missing_variable_is_interactive_input_required() -> None:
     with pytest.raises(CredentialError) as exc_info:
         EnvRefCredentialBackend().create_ref(CredentialRequest(provider="openai", env_var=None))
 
-    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    # A legitimate provider name is preserved verbatim in the diagnostic.
+    assert error.details["provider"] == "openai"
+
+
+@pytest.mark.unit
+def test_env_ref_missing_variable_redacts_token_shaped_provider() -> None:
+    """Verify a token-shaped provider never surfaces when env input is missing.
+
+    The env_ref backend raises ``INTERACTIVE_INPUT_REQUIRED`` for a missing env
+    var name without first routing ``provider`` through ``_require_safe_identifier``
+    (env_ref never interpolates the provider, so it has no other validation). A
+    provider accidentally populated with a raw secret must therefore be redacted
+    out of the error ``details``/``to_dict()`` rather than echoed verbatim.
+    """
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(CredentialRequest(provider=_FAKE_TOKEN, env_var=None))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "env_var"
+    assert _FAKE_TOKEN not in str(error.details["provider"])
+    assert _FAKE_TOKEN not in str(error.to_dict())
 
 
 # --------------------------------------------------------------------------- #
