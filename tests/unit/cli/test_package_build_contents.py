@@ -74,7 +74,8 @@ def _control_plane_copy_sources() -> list[str]:
         if not stripped.startswith("COPY "):
             continue
         tokens = stripped[len("COPY ") :].split()
-        sources.extend(tokens[:-1])  # drop the destination token
+        # Drop the destination (last token) and any option flags (--from=, --chown=, …).
+        sources.extend(t for t in tokens[:-1] if not t.startswith("--"))
     return sources
 
 
