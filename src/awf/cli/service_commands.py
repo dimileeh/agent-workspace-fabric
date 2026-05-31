@@ -11,6 +11,7 @@ import typer
 from awf.cli.common import (
     OutputFormat,
     _emit,
+    _run_companion_image_prune,
     _run_terminal_workspace_compose_teardown,
     _run_terminal_workspace_worktree_remove,
 )
@@ -23,8 +24,9 @@ from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 _DX_FIRST_PATH_HELP = """
 For first-time users: the current runnable first path is
-`awf service bootstrap`, then `awf init <path>` to prepare your project
-repository. `awf setup` and `awf start` are reserved future command surfaces.
+`awf service bootstrap` (or the friendly `awf start` wrapper), then
+`awf init <path>` to prepare your project repository. `awf setup` is a
+reserved future command surface.
 """
 _PROVIDER_HELP = (
     "Repeatable provider strictness check: github, codex, claude_code, gemini, opencode, or docker."
@@ -470,6 +472,14 @@ def service_gc(
                 worktree_remover=partial(
                     _run_terminal_workspace_worktree_remove,
                     session_factory=session_factory,
+                ),
+                companion_image_prune=(
+                    partial(
+                        _run_companion_image_prune,
+                        settings.companion_image_retention_hours,
+                    )
+                    if settings.companion_image_cache_enabled
+                    else None
                 ),
             )
             return result.to_dict()

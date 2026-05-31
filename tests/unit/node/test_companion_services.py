@@ -1271,3 +1271,62 @@ def test_validate_companion_service_graph_rejects_companion_dependency_cycle(
 
     assert exc.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_CYCLE"
     assert "api->worker->api" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_materialized_companion_service_records_commit_sha(tmp_path: Path) -> None:
+    """MaterializedCompanionService stores the provided commit SHA."""
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    materialized = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(name="backend", repo_url="git@example.com:backend.git"),
+        layout=_layout(companion_root),
+        commit_sha="abc123def456",
+    )
+
+    assert materialized.commit_sha == "abc123def456"
+
+
+@pytest.mark.unit
+def test_materialized_companion_service_commit_sha_defaults_empty(tmp_path: Path) -> None:
+    """MaterializedCompanionService defaults the commit SHA to empty."""
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    materialized = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(name="backend", repo_url="git@example.com:backend.git"),
+        layout=_layout(companion_root),
+    )
+
+    assert materialized.commit_sha == ""
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_applies_prebuilt_image(tmp_path: Path) -> None:
+    """companion_service_from_materialized applies the prebuilt image override."""
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    materialized = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(name="backend", repo_url="git@example.com:backend.git"),
+        layout=_layout(companion_root),
+    )
+
+    service = companion_service_from_materialized(
+        materialized, image="awf-companion-backend:abc123"
+    )
+
+    assert service.image == "awf-companion-backend:abc123"
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_defaults_image_to_none(tmp_path: Path) -> None:
+    """companion_service_from_materialized defaults the image to None."""
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    materialized = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(name="backend", repo_url="git@example.com:backend.git"),
+        layout=_layout(companion_root),
+    )
+
+    service = companion_service_from_materialized(materialized)
+
+    assert service.image is None

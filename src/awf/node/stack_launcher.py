@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
+from awf.node.companion_images import CompanionImageBuilder
 from awf.node.companion_services import (
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
@@ -17,10 +18,12 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import (
     AuthMount,
+    CompanionService,
     ComposeManager,
     ComposeOperationError,
     ComposeProjectPaths,
     WorkspaceComposeSpec,
+    compose_up_capture_timeout_seconds,
 )
 from awf.node.egress_policy import local_egress_plan
 from awf.node.git_manager import WorktreeLayout
@@ -82,12 +85,14 @@ class ComposeStackLauncher:
         agent_runtime_image: str,
         auth_mount_resolver: WorkspaceAuthMountResolver | None = None,
         secret_lease_resolver: WorkspaceSecretLeaseResolver | None = None,
+        companion_image_builder: CompanionImageBuilder | None = None,
     ) -> None:
         """Wire stack launch dependencies and optional credential resolvers."""
         self._compose = compose
         self._agent_runtime_image = agent_runtime_image
         self._auth_mount_resolver = auth_mount_resolver
         self._secret_lease_resolver = secret_lease_resolver
+        self._companion_image_builder = companion_image_builder
 
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
         """Render and start the profile stack, including companions and secret metadata."""
@@ -147,14 +152,18 @@ class ComposeStackLauncher:
                 companions=request.companions,
                 docker_mode=profile.docker.mode,
             )
-        companions = await asyncio.to_thread(
-            lambda: tuple(
-                companion_service_from_materialized(companion) for companion in request.companions
-            )
-        )
+        # Resolve the effective compose-up budget before pre-building companions so
+        # the cache pre-build shares the same subprocess cap the inline `docker
+        # compose up` build uses (see _build_companion_services).
         compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
             profile=profile,
             companions=request.companions,
+        )
+        companions = await self._build_companion_services(
+            request.companions,
+            capture_timeout_seconds=compose_up_capture_timeout_seconds(
+                compose_up_timeout_seconds, wait=True
+            ),
         )
         companion_secret_metadata = companion_env_secret_stack_metadata(companions)
         agent_environment = profile_agent_environment(profile)
@@ -170,6 +179,7 @@ class ComposeStackLauncher:
             agent_runtime_image=self._agent_runtime_image,
             agent_environment=agent_environment,
             docker_mode=profile.docker.mode.value,
+            dind_image=profile.docker.dind_image,
             services=services,
             companions=companions,
             auth_mounts=tuple(auth_mounts),
@@ -205,6 +215,52 @@ class ComposeStackLauncher:
             compose_file=paths.compose_file,
             secret_lease_mount_metadata=secret_metadata,
         )
+
+    async def _build_companion_services(
+        self,
+        companions: tuple[MaterializedCompanionService, ...],
+        *,
+        capture_timeout_seconds: float,
+    ) -> tuple[CompanionService, ...]:
+        """Render companions, pre-building a cached image per companion when possible.
+
+        Each companion is resolved to a Compose service; when an image builder is
+        configured it pre-builds (or reuses) a tagged image so the service can
+        reference it via ``image:``. A failed or skipped pre-build leaves the
+        service as ``build:`` -- identical to the prior behavior.
+
+        Companions are independent, so their pre-builds are dispatched
+        concurrently: a multi-companion workspace's provisioning latency is the
+        slowest single build rather than the sum of all builds. The builder
+        already collapses same-tag waves to one ``docker build`` (see
+        :class:`~awf.node.companion_images.CompanionImageBuilder`), so concurrent
+        dispatch is safe; ``gather`` preserves input order, keeping the rendered
+        services aligned with ``companions``.
+
+        ``capture_timeout_seconds`` is the effective compose-up subprocess cap used
+        by the inline ``docker compose up`` build; passing it to the pre-build keeps
+        the cache path's build budget aligned with the configured
+        ``compose_up_timeout_seconds`` knob so it never times out earlier than the
+        inline build it replaces.
+        """
+
+        async def _build_single(companion: MaterializedCompanionService) -> CompanionService:
+            service = await asyncio.to_thread(companion_service_from_materialized, companion)
+            if self._companion_image_builder is not None:
+                tag = await self._companion_image_builder.ensure(
+                    name=service.name,
+                    commit_sha=companion.commit_sha,
+                    build_context=service.build_context,
+                    dockerfile=service.dockerfile,
+                    relative_build_context=companion.spec.build_context,
+                    capture_timeout_seconds=capture_timeout_seconds,
+                )
+                if tag is not None:
+                    service = replace(service, image=tag)
+            return service
+
+        services = await asyncio.gather(*(_build_single(companion) for companion in companions))
+        return tuple(services)
 
 
 def _stack_secret_metadata(
