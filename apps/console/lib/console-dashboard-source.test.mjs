@@ -49,6 +49,16 @@ test("operator controls block renders success warnings", () => {
   assert.match(blockSource, /warning\.message \|\| warning\.warning_code/);
 });
 
+test("operator action state is guarded by current workspace selection", () => {
+  const dashboard = dashboardSource.dashboard;
+
+  assert.match(dashboard, /const selectedIdRef = useRef<string \| null>\(selectedId\);/);
+  assert.match(dashboard, /const workspaceId = selectedId;/);
+  assert.match(dashboard, /operatorIdempotencyKey\(action, workspaceId\)/);
+  assert.match(dashboard, /operatorActionPath\(action, workspaceId\)/);
+  assert.match(dashboard, /selectedIdRef\.current !== workspaceId/);
+});
+
 function extractFunctionSource(functionName) {
   const markers = [`export function ${functionName}(`, `function ${functionName}(`];
   let matchSource = null;
