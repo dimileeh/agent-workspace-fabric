@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1034,6 +1034,40 @@ async def test_pre_push_validation_fix_pass_rollback_failure_is_bubbled_as_pre_p
 
     assert result.failed is True
     assert result.reason_code == "PRE_PUSH_VALIDATION_ROLLBACK_FAILED"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_rollback_does_not_clean_when_reset_fails(
+    tmp_path: Path,
+) -> None:
+    """A failed rollback reset should preserve untracked files for manual recovery."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    runner = make_runner(
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    cmd = cast(FakeCommandRunner, runner._deps.runner)
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    restore_ref = "b" * 40
+    cmd.queue_result(returncode=1, stdout="")
+
+    rolled_back = await pre_push_validation._rollback_failed_pre_push_validation_fix_pass(
+        runner,
+        workspace_id="workspace",
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        pass_number=1,
+        reason="reset_failed",
+    )
+
+    assert rolled_back is False
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert f"reset --hard {restore_ref}" in joined_calls
+    assert not any("clean -fd" in call for call in joined_calls)
 
 
 @pytest.mark.unit

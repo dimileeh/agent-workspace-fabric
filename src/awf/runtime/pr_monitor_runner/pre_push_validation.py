@@ -517,8 +517,23 @@ async def _rollback_failed_pre_push_validation_fix_pass(
     reset = await self._deps.runner.run(
         _git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
     )
+    if not reset.ok:
+        log = _log.warning
+        log(
+            "monitor.pre_push_validation_fix_rollback",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            reason=reason,
+            restore_ref=restore_ref,
+            reset_returncode=reset.returncode,
+            clean_returncode=None,
+            reset_stderr=(reset.stderr or "")[:400],
+            clean_stderr=None,
+        )
+        return False
+
     clean = await self._deps.runner.run(_git_worktree_command(worktree_path, "clean", "-fd"))
-    ok = bool(reset.ok and clean.ok)
+    ok = bool(clean.ok)
     log = _log.info if ok else _log.warning
     log(
         "monitor.pre_push_validation_fix_rollback",
