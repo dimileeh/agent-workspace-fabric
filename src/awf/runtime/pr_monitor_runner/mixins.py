@@ -11,6 +11,7 @@ from awf.runtime.pr_monitor_runner import gates as _gates
 from awf.runtime.pr_monitor_runner import lifecycle as _lifecycle
 from awf.runtime.pr_monitor_runner import loop as _loop
 from awf.runtime.pr_monitor_runner import operations as _operations
+from awf.runtime.pr_monitor_runner import operator_hints as _operator_hints
 from awf.runtime.pr_monitor_runner import pre_push_validation as _pre_push_validation
 from awf.runtime.pr_monitor_runner import provider_ops as _provider_ops
 from awf.runtime.pr_monitor_runner import remote_ops as _remote_ops
@@ -36,6 +37,7 @@ class RunnerDelegatesMixin:
     _apply_pr_feedback_resolution_state = _feedback_state._apply_pr_feedback_resolution_state
 
     _run_fix_cycle = _fix_cycle._run_fix_cycle
+    _run_operator_hint_cycle = _operator_hints._run_operator_hint_cycle
 
     _active_policy_block_message = _gate_events._active_policy_block_message
     _record_merge_coordination_event = _gate_events._record_merge_coordination_event
@@ -53,6 +55,7 @@ class RunnerDelegatesMixin:
 
     _load_workspace = _lifecycle._load_workspace
     _load_state = _lifecycle._load_state
+    _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
     _terminate_completed = _lifecycle._terminate_completed
     _reconcile_target_branch_after_merge = _lifecycle._reconcile_target_branch_after_merge

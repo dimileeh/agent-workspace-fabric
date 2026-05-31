@@ -30,6 +30,7 @@ from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     Abort,
     AddressComments,
+    AddressOperatorHint,
     MonitorAction,
     MonitorState,
     NotifyHuman,
@@ -1010,6 +1011,150 @@ async def _execute(
         state.iter_count += 1
         return False
 
+    if isinstance(action, AddressOperatorHint):
+        operation = await self._begin_monitor_operation(
+            workspace_id=workspace_id,
+            operation_type=OperationType.comment_repair,
+            action="operator_hint_repair",
+            requested_action="address_operator_hint",
+            reason="Operator remonitor hint required repair before merge.",
+            reason_code=action.hint.reason_code,
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+            extra_payload={
+                "operator_hint_operation_id": action.hint.operation_id,
+                "operator_hint_status": action.hint.status,
+            },
+            extra_identity=(action.hint.operation_id, action.hint.reason),
+        )
+        try:
+            push_result = await self._run_operator_hint_cycle(
+                workspace_id=workspace_id,
+                repo=repo,
+                pr_number=pr_number,
+                pr_head_sha=status.head_sha,
+                hint=action.hint,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                _monitor_log=monitor_log,
+                _operation_id=operation.operation_id if operation is not None else None,
+                _operation_type=OperationType.comment_repair.value,
+            )
+        except ProviderRecoveryRetryError:
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "outcome": "provider_retry",
+                    "reason_code": "PROVIDER_OUTAGE",
+                    "pushed": False,
+                },
+                error_code="PROVIDER_OUTAGE",
+                error_message="Provider recovery requested retry",
+            )
+            raise
+        except ProviderRecoveryFallbackError:
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "outcome": "provider_fallback",
+                    "reason_code": "PROVIDER_FALLBACK",
+                    "pushed": False,
+                },
+                error_code="PROVIDER_FALLBACK",
+                error_message="Provider recovery triggered fallback",
+            )
+            raise
+        except ProviderRecoveryAuthError:
+            await self._finish_provider_auth_failed_operation(operation)
+            raise
+        except ComposeExecCleanupError as exc:
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
+                },
+                error_code=EXEC_PROCESS_CLEANUP_FAILED,
+                error_message=cleanup_failure_message(exc),
+            )
+            await self._terminate_failed(
+                workspace_id,
+                message=cleanup_failure_message(exc),
+                reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+            )
+            return True
+        if push_result.failed:
+            reason_code = push_result.reason_code
+            outcome = _git_push_failure_outcome(push_result)
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "outcome": outcome,
+                    "reason_code": reason_code,
+                    "pushed": False,
+                    "failure_evidence": push_result.failure_evidence(),
+                },
+                error_code=reason_code,
+                error_message=push_result.error_message,
+            )
+            if push_result.terminal_monitor_failure:
+                await self._persist_state(workspace_id, state)
+                await self._terminate_failed(
+                    workspace_id,
+                    message=push_result.error_message or push_result.reason_code,
+                    reason_code=push_result.reason_code,
+                )
+                return True
+            state.iter_count += 1
+            return False
+        if push_result.pushed or (
+            not push_result.pushed
+            and (
+                state.pending_operator_hint is None
+                or state.pending_operator_hint.status in {"needs_human", "agent_failed"}
+            )
+        ):
+            # Persist terminal, processed no-op, or pushed hint status before
+            # returning to the outer loop so a restart cannot re-run the same
+            # hint as pending.
+            await self._persist_state(workspace_id, state)
+        if push_result.pushed:
+            outcome = "operator_hint_pushed"
+        elif state.pending_operator_hint is None:
+            outcome = "operator_hint_processed"
+        elif (
+            state.pending_operator_hint is not None
+            and state.pending_operator_hint.status == "agent_failed"
+        ):
+            outcome = "operator_hint_agent_failed"
+        else:
+            outcome = "operator_hint_needs_human"
+        await self._finish_monitor_operation(
+            operation,
+            status=OperationStatus.succeeded,
+            result={
+                "status": "succeeded",
+                "outcome": outcome,
+                "pushed": push_result.pushed,
+            },
+        )
+        state.iter_count += 1
+        return False
+
     merge_result = await _merge_loop.handle_merge_action(
         self,
         action=action,
@@ -1021,6 +1166,7 @@ async def _execute(
         state=state,
         base_branch=base_branch,
         remote_branch=remote_branch,
+        remote_push_url=remote_push_url,
         compose_project=compose_project,
         compose_file=compose_file,
         monitor_log=monitor_log,

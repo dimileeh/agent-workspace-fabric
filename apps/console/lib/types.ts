@@ -583,12 +583,18 @@ export interface Operation {
 
 export type WorkspaceOperatorAction = "remonitor" | "refresh" | "revalidate";
 
+export interface WorkspaceControlWarning {
+  warning_code: string;
+  message: string;
+}
+
 export interface WorkspaceControlResponse {
   workspace_id: string;
   operation_id: string;
   operation_status: string;
   status: WorkspaceStatus;
   message: string;
+  warnings: WorkspaceControlWarning[];
 }
 
 export interface WorkspaceOperatorRequest {

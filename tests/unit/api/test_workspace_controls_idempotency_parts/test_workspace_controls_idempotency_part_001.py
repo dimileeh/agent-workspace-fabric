@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,13 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY
+from awf.runtime.pr_monitor_runner.helpers import (
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
+    _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_started_key,
+)
 
 _BODY = {
     "repo_url": "git@github.com:example/controls.git",
@@ -681,9 +689,17 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
     assert remonitor_event.event_type == "workspace.remonitor_requested"
     assert remonitor_event.old_state == WorkspaceStatus.monitoring_pr.value
     assert remonitor_event.new_state == WorkspaceStatus.monitoring_pr.value
+    pending_hint = remonitor_event.payload["pending_operator_hint"]
     assert remonitor_event.payload == {
         "reason": "operator recovery",
         "operation_id": payload["operation_id"],
+        "pending_operator_hint": {
+            "reason": "operator recovery",
+            "operation_id": payload["operation_id"],
+            "reason_code": "OPERATOR_REMONITOR",
+            "requested_at": pending_hint["requested_at"],
+            "status": "pending",
+        },
         "claims_reset": {
             "monitor_claimed_by": "dead-monitor-worker",
             "monitor_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,
@@ -692,6 +708,170 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
         },
         "expected_version": 7,
     }
+    datetime.fromisoformat(pending_hint["requested_at"])
+
+
+@pytest.mark.unit
+async def test_remonitor_past_settle_persists_operator_hint_and_warns(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+    hint = "the docs CTA URL 404s; correct URL is https://example.test/docs"
+    head_sha = "b" * 40
+    initial_done_key = _initial_review_grace_done_key(42)
+    initial_started_key = _initial_review_grace_started_key(42)
+    settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            initial_done_key: "elapsed",
+            settle_done_key: "elapsed",
+        }
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": hint},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-past-settle"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["warnings"] == [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        operation = await session.get(Operation, payload["operation_id"])
+        event = (
+            (
+                await session.execute(
+                    select(WorkspaceEvent)
+                    .where(
+                        WorkspaceEvent.workspace_id == workspace_id,
+                        WorkspaceEvent.reason_code == "OPERATOR_REMONITOR",
+                    )
+                    .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    assert workspace is not None
+    state = workspace.monitor_threads_addressed
+    assert initial_done_key not in state
+    assert settle_done_key not in state
+    assert float(state[initial_started_key]) >= 1_000_000_000
+    assert float(state[settle_started_key]) >= 1_000_000_000
+    stored_hint = json.loads(state[OPERATOR_HINT_STATE_KEY])
+    assert stored_hint["reason"] == hint
+    assert stored_hint["status"] == "pending"
+    assert stored_hint["operation_id"] == payload["operation_id"]
+    assert stored_hint["reason_code"] == "OPERATOR_REMONITOR"
+    assert operation is not None
+    assert operation.result is not None
+    assert operation.result["warnings"] == payload["warnings"]
+    assert event is not None
+    assert event.payload["pending_operator_hint"]["operation_id"] == payload["operation_id"]
+    assert event.payload["pending_operator_hint"]["reason"] == hint
+    assert event.payload["warnings"] == payload["warnings"]
+
+
+@pytest.mark.unit
+async def test_remonitor_reopens_failed_candidate_with_latest_head_when_monitor_sha_lags(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_monitor_head = "b" * 40
+    latest_candidate_head = "c" * 40
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+        with_open_candidate=True,
+    )
+    initial_done_key = _initial_review_grace_done_key(42)
+    latest_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=latest_candidate_head,
+    )
+    latest_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=latest_candidate_head,
+    )
+    stale_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=stale_monitor_head,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        candidate = (
+            await session.execute(
+                select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        workspace.monitor_last_commit_sha = stale_monitor_head
+        workspace.monitor_threads_addressed = {
+            initial_done_key: "elapsed",
+            latest_settle_done_key: "elapsed",
+        }
+        candidate.head_sha = latest_candidate_head
+        candidate.status = "closed"
+        candidate.close_reason = "MONITOR_FAILED"
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach latest PR head"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-latest-head"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        candidate = (
+            await session.execute(
+                select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+    assert candidate.status == "open"
+    assert candidate.head_sha == latest_candidate_head
+    state = workspace.monitor_threads_addressed
+    assert latest_settle_done_key not in state
+    assert stale_settle_started_key not in state
+    assert float(state[latest_settle_started_key]) >= 1_000_000_000
 
 
 @pytest.mark.unit
@@ -1240,241 +1420,3 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
         "requested_tier": 2,
         "expected_version": 7,
     }
-
-
-@pytest.mark.unit
-async def test_rebase_endpoint_returns_operation_response_and_replays_exact_key(
-    client: AsyncClient,
-    engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace_id = await _seed_monitoring_workspace(
-        engine,
-        with_open_candidate=True,
-    )
-
-    first = await client.post(
-        f"/v1/workspaces/{workspace_id}/rebase",
-        json={"reason": "base branch advanced"},
-        headers={
-            **_auth(monkeypatch),
-            "Idempotency-Key": "rebase-first",
-            "If-Match": "7",
-        },
-    )
-    replay = await client.post(
-        f"/v1/workspaces/{workspace_id}/rebase",
-        json={"reason": "base branch advanced"},
-        headers={
-            **_auth(monkeypatch),
-            "Idempotency-Key": "rebase-first",
-            "If-Match": "7",
-        },
-    )
-    fresh_key = await client.post(
-        f"/v1/workspaces/{workspace_id}/rebase",
-        json={"reason": "base branch advanced"},
-        headers={**_auth(monkeypatch), "Idempotency-Key": "rebase-second"},
-    )
-
-    assert first.status_code == 202
-    assert replay.status_code == 202
-    payload = first.json()
-    assert replay.json()["id"] == payload["id"]
-    assert fresh_key.status_code == 409
-    assert fresh_key.json()["detail"] == {
-        "error_code": "WORKSPACE_STATE_NOT_REBASEABLE",
-        "message": "Workspace is not in a state eligible for rebase recovery.",
-        "detail": {
-            "status": WorkspaceStatus.ready.value,
-            "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
-        },
-    }
-    assert payload["workspace_id"] == workspace_id
-    assert payload["type"] == "rebase"
-    assert payload["status"] == "pending"
-    assert payload["idempotency_key"] == "rebase-first"
-    assert payload["owner"] == "operator_api"
-    assert payload["source"] == "operator_api"
-    assert payload["reason"] == "base branch advanced"
-    assert payload["reason_code"] == "OPERATOR_REBASE"
-
-    factory = make_session_factory(engine)
-    async with factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        operations = (
-            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
-            .scalars()
-            .all()
-        )
-        candidate = (
-            await session.execute(
-                select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
-            )
-        ).scalar_one()
-        rebase_event = (
-            await session.execute(
-                select(WorkspaceEvent).where(
-                    WorkspaceEvent.workspace_id == workspace_id,
-                    WorkspaceEvent.event_type == "workspace.rebase_requested",
-                )
-            )
-        ).scalar_one()
-
-    assert workspace is not None
-    assert workspace.status == WorkspaceStatus.ready.value
-    assert workspace.version == 8
-    assert [operation.id for operation in operations] == [payload["id"]]
-    assert operations[0].payload == {
-        "owner": "operator_api",
-        "source": "operator_api",
-        "reason": "base branch advanced",
-        "reason_code": "OPERATOR_REBASE",
-        "requested_action": "rebase",
-        "recovery_mode": "rebase_only",
-        "candidate_id": candidate.id,
-        "attempt_id": candidate.attempt_id,
-        "task_id": candidate.task_id,
-        "pr_number": 42,
-        "pr_url": "https://github.com/example/remonitor/pull/42",
-        "source_head_sha": "b" * 40,
-        "source_base_sha": "a" * 40,
-        "target_branch": "development",
-        "remote_branch": f"awf/{workspace_id}",
-        "expected_version": 7,
-    }
-    assert rebase_event.reason_code == "OPERATOR_REBASE"
-    assert rebase_event.payload == {
-        "source": "operator_api",
-        "reason": "base branch advanced",
-        "operation_id": payload["id"],
-        "recovery_mode": "rebase_only",
-        "candidate_id": candidate.id,
-        "expected_version": 7,
-    }
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("action", "first_status", "body", "changed_body"),
-    [
-        (
-            "refresh",
-            WorkspaceStatus.ready,
-            {"reason": "stale policy"},
-            {"reason": "different stale policy"},
-        ),
-        (
-            "validate",
-            WorkspaceStatus.monitoring_pr,
-            {"reason": "rerun required validation", "requested_tier": 2},
-            {"reason": "rerun required validation", "requested_tier": 3},
-        ),
-    ],
-)
-async def test_recovery_same_key_replay_and_conflicting_payloads(
-    client: AsyncClient,
-    engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
-    action: str,
-    first_status: WorkspaceStatus,
-    body: dict[str, object],
-    changed_body: dict[str, object],
-) -> None:
-    workspace_id = await _seed_monitoring_workspace(engine, final_status=first_status)
-    headers = {**_auth(monkeypatch), "Idempotency-Key": f"{action}-same-key"}
-
-    first = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=body,
-        headers=headers,
-    )
-    before_counts = await _counts(engine, workspace_id)
-    replay = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=body,
-        headers=headers,
-    )
-    conflict = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=changed_body,
-        headers=headers,
-    )
-    after_counts = await _counts(engine, workspace_id)
-
-    assert first.status_code == 202
-    assert replay.status_code == 202
-    assert replay.json()["id"] == first.json()["id"]
-    assert conflict.status_code == 409
-    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
-    assert after_counts == before_counts
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("action", "first_status", "if_match", "body"),
-    [
-        ("refresh", WorkspaceStatus.ready, "3", {"reason": "stale policy"}),
-        (
-            "validate",
-            WorkspaceStatus.monitoring_pr,
-            "7",
-            {"reason": "rerun required validation", "requested_tier": 2},
-        ),
-    ],
-)
-async def test_recovery_fresh_key_stale_if_match_rejects_before_active_coalesce(
-    client: AsyncClient,
-    engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
-    action: str,
-    first_status: WorkspaceStatus,
-    if_match: str,
-    body: dict[str, object],
-) -> None:
-    workspace_id = await _seed_monitoring_workspace(engine, final_status=first_status)
-    headers = {
-        **_auth(monkeypatch),
-        "Idempotency-Key": f"{action}-original",
-        "If-Match": if_match,
-    }
-
-    first = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=body,
-        headers=headers,
-    )
-    if action == "refresh":
-        factory = make_session_factory(engine)
-        async with factory() as session:
-            workspace = await session.get(Workspace, workspace_id)
-            assert workspace is not None
-            workspace.version += 1
-            await session.commit()
-    replay = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=body,
-        headers=headers,
-    )
-    before_counts = await _counts(engine, workspace_id)
-    conflict = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=body,
-        headers={
-            **_auth(monkeypatch),
-            "Idempotency-Key": f"{action}-fresh-stale-version",
-            "If-Match": if_match,
-        },
-    )
-    after_counts = await _counts(engine, workspace_id)
-
-    assert first.status_code == 202
-    assert replay.status_code == 202
-    assert replay.json()["id"] == first.json()["id"]
-    assert conflict.status_code == 409
-    assert conflict.json()["detail"]["error_code"] == "VERSION_CONFLICT"
-    assert conflict.json()["detail"]["detail"] == {
-        "expected_version": int(if_match),
-        "actual_version": int(if_match) + 1,
-    }
-    assert after_counts == before_counts
