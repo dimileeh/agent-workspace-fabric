@@ -39,6 +39,8 @@ from awf.db.repositories import (
 from awf.db.repositories.base import (
     PROVISIONING_LAUNCHING_EVENT_TYPE,
     PROVISIONING_LAUNCHING_REASON_CODE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     has_terminal_runtime_released_event,
     host_ports_from_resolved_profile,
 )
@@ -280,17 +282,18 @@ class Provisioner:
                 try:
                     async with self._session_factory() as pre_launch_session:
                         pre_launch_repo = WorkspaceRepository(pre_launch_session)
-                        pre_launch_ws = await pre_launch_repo.get(workspace_id)
+                        pre_launch_ws = await pre_launch_repo.get_for_update(workspace_id)
                         if (
                             pre_launch_ws is not None
                             and pre_launch_ws.compose_project_name is None
                             and pre_launch_ws.status == WorkspaceStatus.provisioning.value
-                            # Guard: a cancel/stop that won the race between
-                            # _check_auto_resolved_profile_host_ports (advisory
-                            # lock released on commit) and this commit will have
-                            # transitioned the workspace to a terminal state,
-                            # causing this branch to be skipped and leaving
-                            # compose_project_name null — the correct outcome.
+                            # Guard (row-locked): a cancel/stop that wins the race
+                            # is serialized behind this SELECT FOR UPDATE, so it
+                            # cannot commit a terminal transition between our read
+                            # and commit.  If it already committed before we
+                            # acquired the lock, the status will be terminal and
+                            # this branch is skipped, leaving compose_project_name
+                            # null — the correct outcome.
                             # Do not weaken or reorder this guard.
                         ):
                             pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
@@ -1009,6 +1012,15 @@ class Provisioner:
                 }
                 if orphan_stop_error is not None:
                     payload["orphan_stop_error"] = orphan_stop_error
+                    await repo.add_event(
+                        ws,
+                        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                        payload={
+                            "workspace_id": workspace_id,
+                            "orphan_stop_error": orphan_stop_error,
+                        },
+                    )
                 await repo.add_event(
                     ws,
                     event_type="workspace.stale_action_skipped",

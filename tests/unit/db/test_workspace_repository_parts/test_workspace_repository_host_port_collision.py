@@ -110,6 +110,118 @@ class TestFindHostPortConflicts:
         assert conflicts == []
 
     @pytest.mark.asyncio
+    async def test_revoked_terminal_runtime_release_blocks_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A terminal workspace whose runtime release was revoked still blocks host ports.
+
+        When ``stop_project_containers`` fails during orphan cleanup after a
+        ``terminal_runtime_released`` event was already committed, the
+        provisioner records a ``terminal_runtime_release_revoked`` event.
+        Until the background cleanup sweep removes the orphan containers,
+        ``find_host_port_conflicts`` must still treat those ports as occupied
+        so that a new workspace does not claim them only to collide at
+        ``compose up`` time.
+        """
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        )
+
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.destroyed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            compose_project_name="awf_test_revoked_release",
+        )
+        await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        await session.commit()
+
+        conflicts_before = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert conflicts_before == [], "after genuine release, ports should be free"
+
+        await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+            payload={"orphan_stop_error": "docker stop failed"},
+        )
+        await session.commit()
+
+        conflicts_after = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts_after) == 1, (
+            "after revocation, ports must be treated as still occupied"
+        )
+        assert conflicts_after[0].host_port == 8080
+        assert conflicts_after[0].workspace_id == ws.id
+
+
+@pytest.mark.asyncio
+async def test_has_terminal_runtime_released_event_revoked(
+    session: AsyncSession,
+) -> None:
+    """has_terminal_runtime_released_event returns False when release is revoked."""
+    from awf.db.repositories.base import (
+        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        has_terminal_runtime_released_event,
+    )
+
+    repo = WorkspaceRepository(session)
+    ws = await _make_workspace(
+        session,
+        repo,
+        status=WorkspaceStatus.destroyed,
+        task_policy={},
+        compose_project_name="awf_test_has_revoked",
+    )
+    await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    )
+    await session.commit()
+
+    assert await has_terminal_runtime_released_event(session, ws.id) is True
+
+    await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        payload={"orphan_stop_error": "docker stop failed"},
+    )
+    await session.commit()
+
+    assert await has_terminal_runtime_released_event(session, ws.id) is False, (
+        "revoked release must cause has_terminal_runtime_released_event to return False"
+    )
+
+    @pytest.mark.asyncio
     async def test_queued_workspace_not_cross_node_port_holder(
         self,
         session: AsyncSession,

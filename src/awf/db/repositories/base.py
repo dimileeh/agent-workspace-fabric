@@ -639,14 +639,22 @@ TERMINAL_RUNTIME_RELEASE_EVENT_TYPE: Final = "workspace.terminal_runtime_release
 TERMINAL_RUNTIME_RELEASE_REASON_CODE: Final = "TERMINAL_RUNTIME_RELEASED"
 """Reason code accompanying the ``workspace.terminal_runtime_released`` event."""
 
+TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE: Final = "workspace.terminal_runtime_release_revoked"
+"""Event type recorded when a terminal-runtime release is revoked because orphan containers could not be stopped."""
+
+TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE: Final = (
+    "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_PORT_BOUND"
+)
+"""Reason code accompanying the ``workspace.terminal_runtime_release_revoked`` event."""
+
 
 async def has_terminal_runtime_released_event(
     session: AsyncSession,
     workspace_id: str,
 ) -> bool:
-    """Return True if a ``terminal_runtime_released`` event exists for *workspace_id*."""
-    stmt = (
-        select(WorkspaceEvent.id)
+    """Return True if a ``terminal_runtime_released`` event exists for *workspace_id* and has not been revoked."""
+    released_stmt = (
+        select(WorkspaceEvent.occurred_at)
         .where(
             WorkspaceEvent.workspace_id == workspace_id,
             WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
@@ -654,7 +662,20 @@ async def has_terminal_runtime_released_event(
         )
         .limit(1)
     )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
+    revoked_stmt = (
+        select(WorkspaceEvent.occurred_at)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        )
+        .limit(1)
+    )
+    released_at = (await session.execute(released_stmt)).scalar_one_or_none()
+    if released_at is None:
+        return False
+    revoked_at = (await session.execute(revoked_stmt)).scalar_one_or_none()
+    return not (revoked_at is not None and revoked_at >= released_at)
 
 
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"

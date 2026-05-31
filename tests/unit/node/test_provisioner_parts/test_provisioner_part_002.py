@@ -1013,6 +1013,15 @@ class TestOperatorControlRaces:
             assert len(stale_skip_events) == 1
             assert stale_skip_events[0].payload["orphan_containers_stopped"] is False
             assert "orphan_stop_error" in stale_skip_events[0].payload
+            revoked_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.terminal_runtime_release_revoked"
+                and e.reason_code == "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_PORT_BOUND"
+            ]
+            assert len(revoked_events) == 1, (
+                "orphan stop failure must record a terminal_runtime_release_revoked event"
+            )
 
 
 class TestSecretLeaseIssueEdges:

@@ -50,6 +50,8 @@ from awf.db.repositories.base import (
     HOST_PORT_TERMINAL_RELEASE_STATUSES,
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
@@ -604,6 +606,19 @@ class WorkspaceRepository:
             .exists()
         )
 
+        terminal_runtime_release_revoked_exists = (
+            select(WorkspaceEvent.id)
+            .where(WorkspaceEvent.workspace_id == Workspace.id)
+            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+            .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
+            .exists()
+        )
+
+        terminal_runtime_effectively_released = and_(
+            terminal_runtime_released_exists,
+            ~terminal_runtime_release_revoked_exists,
+        )
+
         host_ports_set = set(host_ports)
         stmt = select(Workspace.id, Workspace.task_policy, Workspace.resolved_profile).where(
             or_(
@@ -611,7 +626,7 @@ class WorkspaceRepository:
                 and_(
                     Workspace.status.in_(HOST_PORT_TERMINAL_RELEASE_STATUSES),
                     Workspace.compose_project_name.isnot(None),
-                    ~terminal_runtime_released_exists,
+                    ~terminal_runtime_effectively_released,
                 ),
             )
         )
