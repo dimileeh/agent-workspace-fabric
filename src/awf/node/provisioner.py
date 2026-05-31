@@ -226,6 +226,11 @@ class Provisioner:
                 profile = profile_resolution.profile
             else:
                 profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+            resolved_profile_dict = (
+                profile_resolution.profile.model_dump(mode="json", by_alias=True)
+                if profile_resolution is not None
+                else None
+            )
             egress_plan = local_egress_plan(profile.security.egress)
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
@@ -288,14 +293,10 @@ class Provisioner:
                         ):
                             pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
                             if (
-                                profile_resolution is not None
+                                resolved_profile_dict is not None
                                 and pre_launch_ws.resolved_profile is None
                             ):
-                                pre_launch_ws.resolved_profile = (
-                                    profile_resolution.profile.model_dump(
-                                        mode="json", by_alias=True
-                                    )
-                                )
+                                pre_launch_ws.resolved_profile = resolved_profile_dict
                             await pre_launch_session.commit()
                 except Exception:
                     _log.warning(
@@ -394,12 +395,10 @@ class Provisioner:
                     if compose_fail_ws is not None and compose_fail_ws.compose_project_name is None:
                         compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
                         if (
-                            profile_resolution is not None
+                            resolved_profile_dict is not None
                             and compose_fail_ws.resolved_profile is None
                         ):
-                            compose_fail_ws.resolved_profile = (
-                                profile_resolution.profile.model_dump(mode="json", by_alias=True)
-                            )
+                            compose_fail_ws.resolved_profile = resolved_profile_dict
                     await compose_fail_session.commit()
             except Exception:
                 _log.warning(
@@ -903,9 +902,7 @@ class Provisioner:
                 )
             ws = await repo.get(workspace_id)
             if ws is not None and profile_resolution is not None and ws.resolved_profile is None:
-                ws.resolved_profile = profile_resolution.profile.model_dump(
-                    mode="json", by_alias=True
-                )
+                ws.resolved_profile = resolved_profile_dict
             await session.commit()
 
     async def _recheck_before_launch(self, workspace_id: str) -> bool:
