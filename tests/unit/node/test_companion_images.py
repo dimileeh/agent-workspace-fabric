@@ -256,6 +256,54 @@ async def test_ensure_deduplicates_concurrent_builds_for_same_tag() -> None:
 
 
 @pytest.mark.unit
+async def test_ensure_does_not_bind_larger_budget_joiner_to_shorter_cap() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F6dsw: concurrent dispatches that share a
+    # companion tag but carry different effective compose-up budgets must each
+    # build under their own capture_timeout_seconds. Keying the in-flight registry
+    # by tag alone made a slower stack join (and inherit the shorter cap of) the
+    # faster stack's build, timing the cache pre-build out earlier than that
+    # stack's own inline `docker compose up` build would -- the invariant the
+    # per-stack budget is meant to guarantee. Dedup is keyed by (tag, budget).
+    """A larger-budget caller must not inherit a shorter in-flight build cap."""
+    gate = asyncio.Event()
+    compose = _FakeCompose(exists=False, build_gate=gate)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    def _ensure(timeout: float) -> asyncio.Task[str | None]:
+        return asyncio.create_task(
+            builder.ensure(
+                name="backend",
+                commit_sha="abc123def456",
+                build_context="/ctx",
+                dockerfile="Dockerfile",
+                relative_build_context=".",
+                capture_timeout_seconds=timeout,
+            )
+        )
+
+    short = _ensure(60.0)
+    long = _ensure(600.0)
+    # Let both dispatches pass the existence check and block on the gate before
+    # releasing, so neither short-circuits on the other's cache write. Bounded so
+    # the buggy single-build path proceeds (and fails the cap assertion) instead
+    # of hanging.
+    for _ in range(100):
+        if len(compose.exists_calls) >= 2:
+            break
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(short, long)
+
+    expected = companion_image_tag(
+        "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
+    )
+    assert results == [expected, expected]
+    # Each stack built under its own budget rather than sharing the first cap.
+    assert sorted(call["capture_timeout_seconds"] for call in compose.build_calls) == [60.0, 600.0]
+
+
+@pytest.mark.unit
 async def test_ensure_forwards_capture_timeout_to_build() -> None:
     # Regression for PRRT_kwDOSJAM6s6F504S: the pre-build must honor the caller's
     # compose-up build budget rather than the fixed 1800s default, so the cache

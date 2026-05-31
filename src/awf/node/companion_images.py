@@ -5,15 +5,18 @@ Companions build on the shared host Docker daemon (the control plane runs
 locally is reusable by every workspace via an ``image:`` reference -- no
 registry is required. This builder derives a deterministic tag per
 ``(companion name, commit sha)``, builds it once (deduping concurrent dispatch
-waves by sharing a single in-flight build task per tag), and skips the build
-when the tag already exists. The tag also folds in a digest of the resolved
-build inputs (``build_context`` and ``dockerfile``), so two workspaces that
-request the same companion name at the same commit but with different build
-definitions never collide on a tag and reuse the wrong image.
+waves by sharing a single in-flight build task per tag and build budget), and
+skips the build when the tag already exists. The tag also folds in a digest of
+the resolved build inputs (``build_context`` and ``dockerfile``), so two
+workspaces that request the same companion name at the same commit but with
+different build definitions never collide on a tag and reuse the wrong image.
 
 Coordination is in-process only: the single-node local Core runs one worker, so
-sharing one :class:`asyncio.Task` per tag is sufficient. The shared task is
-dropped as soon as it finishes, so the registry only ever holds in-flight
+sharing one :class:`asyncio.Task` per ``(tag, build budget)`` is sufficient. The
+in-flight registry is keyed by both so a slower stack never inherits a faster
+stack's shorter subprocess cap; the cached image is still keyed by ``tag`` alone,
+so the cross-workspace cache hit is shared regardless of budget. The shared task
+is dropped as soon as it finishes, so the registry only ever holds in-flight
 builds: a failed build is retried by the next dispatch wave instead of being
 cached as a permanent failure, and the registry cannot grow without bound. A
 future multi-node deployment would need a registry plus a distributed lock; that
@@ -114,7 +117,7 @@ class CompanionImageBuilder:
     def __init__(self, compose: ComposeManager) -> None:
         """Store the compose manager used to run host-daemon docker commands."""
         self._compose = compose
-        self._builds: dict[str, asyncio.Task[str | None]] = {}
+        self._builds: dict[tuple[str, float], asyncio.Task[str | None]] = {}
 
     async def ensure(
         self,
@@ -139,12 +142,14 @@ class CompanionImageBuilder:
         ``capture_timeout_seconds`` is the build's subprocess budget; callers pass
         the same effective compose-up cap the inline ``docker compose up`` build
         uses, so the cache pre-build can never time out earlier than the inline
-        build it replaces.
+        build it replaces. The in-flight registry is keyed by this budget too, so
+        a waiter only shares a build started with the same cap and never inherits a
+        shorter one -- the invariant holds for every waiter, not just the first.
 
-        Concurrent dispatches for the same tag share one in-flight build task, so
-        the underlying ``docker build`` runs (and any failure is logged) exactly
-        once per wave instead of once per waiter -- a broken companion can no
-        longer block the worker queue with N sequential rebuild attempts. The
+        Concurrent dispatches for the same tag and budget share one in-flight build
+        task, so the underlying ``docker build`` runs (and any failure is logged)
+        exactly once per wave instead of once per waiter -- a broken companion can
+        no longer block the worker queue with N sequential rebuild attempts. The
         shared task is dropped when it finishes, so the registry only holds
         in-flight builds: a success is re-checked cheaply by the next wave and a
         failure is retried, and the registry never grows without bound.
@@ -161,10 +166,20 @@ class CompanionImageBuilder:
             build_context=relative_build_context,
             dockerfile=dockerfile,
         )
-        # No ``await`` between get and set, so registering the shared task is
-        # atomic on the event loop: a concurrent wave for the same tag awaits the
-        # one task and builds once.
-        task = self._builds.get(tag)
+        # Dedup is keyed by ``(tag, capture_timeout_seconds)`` rather than ``tag``
+        # alone: concurrent dispatches share one in-flight build only when they
+        # also share a build budget, so a stack with a larger effective
+        # ``compose_up_timeout_seconds`` never inherits a shorter cap from whichever
+        # caller happened to start the build first -- which would time the cache
+        # pre-build out earlier than that stack's own inline ``docker compose up``
+        # build would. Distinct budgets each get their own build; the resulting
+        # image is still content-addressed by ``tag``, so a later dispatch under any
+        # budget reuses the cached image via the existence check in _ensure_build.
+        # No ``await`` between get and set, so registering the shared task is atomic
+        # on the event loop: a concurrent wave with the same key awaits the one task
+        # and builds once.
+        key = (tag, capture_timeout_seconds)
+        task = self._builds.get(key)
         if task is None:
             task = asyncio.create_task(
                 self._ensure_build(
@@ -175,12 +190,12 @@ class CompanionImageBuilder:
                     capture_timeout_seconds=capture_timeout_seconds,
                 )
             )
-            self._builds[tag] = task
+            self._builds[key] = task
             # Drop the finished task either way: a failure must be retriable by
             # the next wave rather than cached forever, and a success need not
             # linger (the next wave re-checks the tag cheaply), so the registry
             # only ever holds in-flight builds.
-            task.add_done_callback(lambda _task: self._builds.pop(tag, None))
+            task.add_done_callback(lambda _task: self._builds.pop(key, None))
         # ``asyncio.shield`` isolates the shared build from any single waiter's
         # cancellation. Awaiting the Task directly would propagate a cancelled
         # waiter's ``CancelledError`` into the shared Task (an awaiter becomes the
