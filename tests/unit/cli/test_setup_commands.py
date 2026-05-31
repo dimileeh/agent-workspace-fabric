@@ -813,6 +813,41 @@ def test_setup_corrupt_config_blocks(harness: _Harness, monkeypatch: pytest.Monk
 
 
 @pytest.mark.unit
+def test_setup_secret_config_preserves_field_path(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a field-level diagnostic path survives the config-file-path merge.
+
+    Regression for PRRT_kwDOSJAM6s6F8eOX: when a secret-bearing (or recursive)
+    config error already reports the offending YAML field under ``details.path``
+    (for example ``providers.github.token``), merging the config file path must
+    not clobber it -- the file path moves to ``config_path`` so the operator is
+    still told which field to remove.
+    """
+
+    def raise_secret(**_kw: object) -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_SECRET_VALUE",
+            message="Host setup config contains a secret value or secret-bearing key.",
+            path=Path("/tmp/.awf/config.yml"),
+            details={"issue": "secret-bearing key", "path": "providers.github.token"},
+        )
+
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", raise_secret)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "HOST_SETUP_CONFIG_SECRET_VALUE"
+    details = payload["issues"][0]["details"]
+    # The offending YAML field path is preserved, not overwritten.
+    assert details["path"] == "providers.github.token"
+    assert details["issue"] == "secret-bearing key"
+    # The config file path is still surfaced, under a distinct key.
+    assert details["config_path"] == "/tmp/.awf/config.yml"
+
+
+@pytest.mark.unit
 def test_setup_write_failure_blocks_includes_path(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -878,6 +913,41 @@ def test_setup_write_failure_preserves_readiness_report_json(
     assert write_issues[0]["details"]["error_type"] == "PermissionError"
     # The host-check provenance (the per-check levels) stays in the payload.
     assert payload["details"]["checks"]
+
+
+@pytest.mark.unit
+def test_setup_write_failure_preserves_field_path(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify the folded write-failure issue keeps a field-level diagnostic path.
+
+    Regression for PRRT_kwDOSJAM6s6F8eOX on the non-dry-run write path: when the
+    write error already reports the offending YAML field under ``details.path``,
+    folding the config file path in must not clobber it.
+    """
+
+    def raise_secret_write(_config: HostSetupConfig, **_kw: object) -> None:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_SECRET_VALUE",
+            message="Host setup config contains a secret value or secret-bearing key.",
+            path=Path("/tmp/.awf/config.yml"),
+            details={"issue": "secret-bearing key", "path": "providers.github.token"},
+        )
+
+    monkeypatch.setattr(setup_commands, "write_host_setup_config", raise_secret_write)
+    result = _runner.invoke(app, ["setup", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    write_issues = [
+        issue
+        for issue in payload["issues"]
+        if issue["reason_code"] == "HOST_SETUP_CONFIG_SECRET_VALUE"
+    ]
+    details = write_issues[0]["details"]
+    # The offending YAML field path is preserved; the file path uses config_path.
+    assert details["path"] == "providers.github.token"
+    assert details["config_path"] == "/tmp/.awf/config.yml"
 
 
 @pytest.mark.unit

@@ -65,6 +65,21 @@ _FORMAT_HELP = (
 )
 
 
+def _config_error_details(error: HostSetupConfigError) -> dict[str, Any]:
+    """Merge the config file path into a config error's diagnostic details.
+
+    The config file path operators need to fix the failure lives on
+    ``error.path``, not in ``error.details``, so it would otherwise be dropped
+    from both JSON and pretty output. Surface it under ``config_path`` when the
+    details already carry a field-level ``path`` (for example a secret-bearing
+    key or recursive alias reporting ``providers.github.token``) so the merge
+    never clobbers the diagnostic that tells the operator which field to fix;
+    otherwise keep the established ``path`` key for the config file path.
+    """
+    file_path_key = "config_path" if "path" in error.details else "path"
+    return {**error.details, file_path_key: str(error.path)}
+
+
 def setup_command(
     provider: list[str] = typer.Option([], "--provider", help=_PROVIDER_HELP),
     dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help=_DRY_RUN_HELP),
@@ -90,10 +105,7 @@ def setup_command(
         _emit_payload(_reason_coded_payload(error.reason_code, str(error), error.details), fmt)
         raise typer.Exit(code=2) from error
     except HostSetupConfigError as error:
-        # Merge the config file path operators need to fix the failure; it lives
-        # on error.path, not in error.details, so it would otherwise be dropped
-        # from both JSON and pretty output.
-        details = {**error.details, "path": str(error.path)}
+        details = _config_error_details(error)
         _emit_payload(_reason_coded_payload(error.reason_code, error.message, details), fmt)
         raise typer.Exit(code=1) from error
 
@@ -313,14 +325,15 @@ def _readiness_with_config_write_failure(
     """Fold a config-write failure into the readiness payload as a blocked issue.
 
     The write error path lives on ``error.path`` (not ``error.details``), so it
-    is merged in alongside the existing diagnostic details; the readiness
-    issues, check provenance, and details are preserved so a failed write never
-    hides the host-check report.
+    is merged in via ``_config_error_details`` alongside the existing diagnostic
+    details (without clobbering a field-level ``path``); the readiness issues,
+    check provenance, and details are preserved so a failed write never hides the
+    host-check report.
     """
     write_issue = first_run_issue_from_reason_code(
         error.reason_code,
         severity="blocked",
-        details={**error.details, "path": str(error.path)},
+        details=_config_error_details(error),
     )
     return first_run_report_payload(
         command=SETUP_COMMAND,
