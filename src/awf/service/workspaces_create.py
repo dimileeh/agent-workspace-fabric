@@ -86,6 +86,7 @@ class _ProfileNotProvided:
 
 
 PROFILE_NOT_PROVIDED = _ProfileNotProvided()
+"""Sentinel indicating no precomputed profile snapshot was supplied; the profile should be computed from the request payload at create time."""
 
 
 async def create_workspace_row(

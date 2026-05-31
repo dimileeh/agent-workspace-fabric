@@ -234,11 +234,16 @@ _CAPACITY_BLOCKER_SIGNATURE_FIELDS: tuple[str, ...] = (
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 
 _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = TERMINAL_RUNTIME_RELEASE_EVENT_TYPE
+"""Module-local alias used by the worker to emit ``terminal_runtime_released`` events."""
+
 _TERMINAL_RUNTIME_RELEASE_REASON_CODE = TERMINAL_RUNTIME_RELEASE_REASON_CODE
+"""Module-local alias for the reason code paired with ``terminal_runtime_released`` events."""
 
 _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_release_failed"
+"""Event type recorded when a terminal-status workspace fails to release its runtime resources."""
 
 _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
+"""Reason code accompanying the ``terminal_runtime_release_failed`` event."""
 
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,

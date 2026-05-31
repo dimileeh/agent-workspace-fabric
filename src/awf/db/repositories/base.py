@@ -628,9 +628,16 @@ async def _fetch_resource_reservation_totals(
 
 
 PROVISIONING_LAUNCHING_EVENT_TYPE: Final = "workspace.provisioning_launching"
+"""Event type recorded when a workspace enters the launching phase of provisioning."""
+
 PROVISIONING_LAUNCHING_REASON_CODE: Final = "PROVISIONING_LAUNCHING"
+"""Reason code accompanying the ``workspace.provisioning_launching`` event."""
+
 TERMINAL_RUNTIME_RELEASE_EVENT_TYPE: Final = "workspace.terminal_runtime_released"
+"""Event type recorded when a terminal-status workspace releases its runtime resources (containers, host ports)."""
+
 TERMINAL_RUNTIME_RELEASE_REASON_CODE: Final = "TERMINAL_RUNTIME_RELEASED"
+"""Reason code accompanying the ``workspace.terminal_runtime_released`` event."""
 
 
 async def has_terminal_runtime_released_event(
