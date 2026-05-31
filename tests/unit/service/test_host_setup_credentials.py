@@ -397,6 +397,44 @@ def test_plain_file_writes_secret_with_conservative_permissions(
 
 
 @pytest.mark.unit
+def test_plain_file_fsyncs_secret_before_atomic_rename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the secret bytes are fsynced to disk before the atomic rename.
+
+    Without an ``fsync`` before the ``rename``, a power failure after the temp
+    write but before the OS flushes its write-back cache could leave the
+    renamed ``plain-file://`` target present-but-empty, silently breaking
+    authentication later. Force durability while the temp fd is still open, and
+    prove the sync lands before the final target appears.
+    """
+    secrets_dir = tmp_path / "secrets"
+    target = secrets_dir / "openai.default"
+    real_fsync = os.fsync
+    sync_state: dict[str, bool] = {}
+
+    def _recording_fsync(fd: int) -> None:
+        """Record that the temp file is synced while the target is still absent."""
+        sync_state["called"] = True
+        sync_state["target_absent_at_sync"] = not target.exists()
+        real_fsync(fd)
+
+    monkeypatch.setattr(credentials.os, "fsync", _recording_fsync)
+
+    PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    ).create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    assert sync_state.get("called") is True
+    assert sync_state.get("target_absent_at_sync") is True
+    assert target.read_text(encoding="utf-8") == _FAKE_TOKEN
+
+
+@pytest.mark.unit
 def test_plain_file_scopes_secret_file_by_account(tmp_path: Path) -> None:
     """Verify plain-file storage scopes the secret file/ref by account.
 

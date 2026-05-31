@@ -723,6 +723,10 @@ def _write_secret_file(target: Path, secret: str) -> None:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(secret)
+            # Force the secret bytes to disk before the atomic rename so a power
+            # failure cannot leave a renamed-but-empty target behind.
+            handle.flush()
+            os.fsync(handle.fileno())
         _chmod_best_effort(tmp_path, 0o600)
         tmp_path.replace(target)
         _chmod_best_effort(target, 0o600)
