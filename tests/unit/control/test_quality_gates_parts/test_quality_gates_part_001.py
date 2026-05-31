@@ -71,6 +71,21 @@ def test_diff_classified_protected_paths_normalizes_and_deduplicates() -> None:
 
 
 @pytest.mark.unit
+def test_diff_classified_protected_paths_excludes_owned_protected_paths() -> None:
+    """Verify owned protected paths are omitted from diff-classified paths."""
+    paths = diff_classified_protected_paths(
+        [
+            ".github/workflows/publish.yml",
+            ".github/workflows/ci.yml",
+            "pyproject.toml",
+        ],
+        owned_paths=[".github/workflows/publish.yml"],
+    )
+
+    assert paths == (".github/workflows/ci.yml", "pyproject.toml")
+
+
+@pytest.mark.unit
 def test_pyproject_dependency_addition_is_allowed() -> None:
     old_text = """
 [project]
