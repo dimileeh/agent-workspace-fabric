@@ -99,3 +99,39 @@ def test_dry_run_pipx_plan_uses_valid_pipx_install_command(
     assert f"pipx install {wheel.name}" in result.stdout
     # The invalid ``pipx tool install`` must never appear in the dry-run plan.
     assert "pipx tool install" not in result.stdout
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method", "command"),
+    [("uv", "uv tool install"), ("pipx", "pipx install")],
+)
+def test_real_install_plan_matches_dry_run_command(
+    harness: InstallerHarness,
+    method: str,
+    command: str,
+) -> None:
+    """The real-install plan prints the same command form as the dry-run plan.
+
+    The dry-run preview shows the exact command each method runs; a user comparing
+    that preview to a real run log must see the identical ``install via`` plan
+    line, not a divergent artifact-name-only string. Both paths render the same
+    method-specific command so the preview and the live log read consistently.
+    """
+    harness.add_uname("Linux", "x86_64")
+    if method == "uv":
+        harness.add_uv()
+    else:
+        harness.add_pipx()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    dry = harness.run(["--dry-run", "--method", method], manifest=manifest)
+    real = harness.run(["--method", method], manifest=manifest)
+
+    assert dry.returncode == 0, dry.stderr
+    assert real.returncode == 0, real.stderr
+    plan_line = f"install via {method}: {command} {wheel.name}"
+    assert plan_line in dry.stdout
+    assert plan_line in real.stdout

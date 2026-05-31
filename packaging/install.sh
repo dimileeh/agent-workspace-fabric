@@ -126,6 +126,20 @@ require_version() {
     if [ -z "$1" ]; then
         bad_usage "empty value for --version; pass --version <X.Y.Z> or omit it to install the latest release"
     fi
+    # VERSION is interpolated directly into the manifest URL path segment
+    # (resolve_manifest builds .../releases/download/v${VERSION}/...). A value
+    # carrying a slash or a path-traversal sequence (e.g. ../../../evil) would
+    # escape that segment; against a file:// base (the AWF_INSTALL_BASE_URL test
+    # seam) it could redirect the manifest fetch to an arbitrary local path before
+    # the sha256 gate runs. Constrain --version to a plain version token (must
+    # start alphanumeric; only letters, digits, '.', '-', '_', '+' thereafter) so
+    # the fetch stays confined to the expected v<VERSION> segment. This still
+    # admits PEP 440 release tags such as 1.2.3 or 1.2.3rc1.
+    case "$1" in
+        [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*)
+            bad_usage "invalid --version '$1'; expected a version like X.Y.Z (letters, digits, '.', '-', '_', '+' only)"
+            ;;
+    esac
 }
 
 parse_args() {
@@ -474,6 +488,19 @@ verify_checksum() {
 # Install
 # --------------------------------------------------------------------------
 
+# The exact command the chosen method runs, rendered identically in the dry-run
+# plan and the real-install plan so a dry-run preview and a live run log show the
+# same "install via <method>: <command>" line. uv and pipx diverge: the real
+# commands are `uv tool install` and `pipx install` (pipx has no `tool`
+# subcommand), so the plan must not template a single `${METHOD} tool install`
+# string for both.
+install_command() {
+    case "$METHOD" in
+        uv) printf 'uv tool install %s' "$ARTIFACT_NAME" ;;
+        pipx) printf 'pipx install %s' "$ARTIFACT_NAME" ;;
+    esac
+}
+
 install_artifact() {
     case "$METHOD" in
         uv) install_uv ;;
@@ -761,20 +788,13 @@ run_install() {
     say "Checksum verified for ${ARTIFACT_NAME}."
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        # uv and pipx diverge: the real commands are `uv tool install` and
-        # `pipx install` (pipx has no `tool` subcommand), so the plan must not
-        # template a single `${METHOD} tool install` string for both.
-        if [ "$METHOD" = "uv" ]; then
-            plan "install via ${METHOD}: uv tool install ${ARTIFACT_NAME}"
-        else
-            plan "install via ${METHOD}: pipx install ${ARTIFACT_NAME}"
-        fi
+        plan "install via ${METHOD}: $(install_command)"
         plan "verify awf reachability"
         say "Dry run complete; no changes were made."
         return 0
     fi
 
-    plan "install via ${METHOD}: ${ARTIFACT_NAME}"
+    plan "install via ${METHOD}: $(install_command)"
     install_artifact
 
     plan "verify awf reachability"

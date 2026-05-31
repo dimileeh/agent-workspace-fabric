@@ -374,6 +374,89 @@ def test_empty_version_space_form_is_a_bad_usage_error(harness: InstallerHarness
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_version",
+    ["../../../evil", "1.2.3/../../etc", "/etc/passwd", "..", "v1 2"],
+)
+def test_version_with_path_traversal_is_a_bad_usage_error(
+    harness: InstallerHarness, bad_version: str
+) -> None:
+    """A ``--version`` carrying a slash/traversal is rejected before any fetch.
+
+    ``VERSION`` is interpolated directly into the manifest URL path segment
+    (``resolve_manifest`` builds ``.../releases/download/v${VERSION}/...``). A
+    value with a slash or ``..`` would escape that segment; against a ``file://``
+    base (the ``AWF_INSTALL_BASE_URL`` test seam) it could redirect the manifest
+    fetch to an arbitrary local path before the sha256 gate runs. The installer
+    constrains ``--version`` to a plain version token, rejecting such values with
+    ``BAD_USAGE`` during arg parsing — before the platform probe or any fetch.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--version", bad_version], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "BAD_USAGE" in result.stderr
+    assert "--version" in result.stderr
+    # Rejected during arg parsing: no platform probe, manifest fetch, or install.
+    assert harness.calls() == []
+
+
+@pytest.mark.unit
+def test_traversal_version_rejected_before_file_base_url_fetch(
+    harness: InstallerHarness,
+) -> None:
+    """A traversal ``--version`` is refused before any ``file://`` manifest fetch.
+
+    This exercises the exact seam the reviewer named: with ``AWF_INSTALL_BASE_URL``
+    set to a ``file://`` base and no ``AWF_INSTALL_MANIFEST`` override,
+    ``resolve_manifest`` builds ``<base>/releases/download/v${VERSION}/...`` and
+    ``fetch`` ``cp``s from that local path — so a traversal ``${VERSION}`` could
+    otherwise redirect the read outside the base. The parse-time guard rejects it
+    with ``BAD_USAGE`` before the platform probe or any fetch, so the ``file://``
+    read never happens: no manifest is resolved and no subprocess is invoked.
+    """
+    base = harness.root / "seam"
+    base.mkdir(parents=True, exist_ok=True)
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+
+    result = harness.run(
+        ["--version", "../../../evil"],
+        extra_env={"AWF_INSTALL_BASE_URL": f"file://{base}"},
+    )
+
+    assert result.returncode != 0
+    assert "BAD_USAGE" in result.stderr
+    assert "--version" in result.stderr
+    # Rejected at parse time: the file:// manifest fetch never runs.
+    assert harness.calls() == []
+    assert "Resolved manifest" not in result.stdout
+
+
+@pytest.mark.unit
+def test_prerelease_style_version_is_accepted(harness: InstallerHarness) -> None:
+    """A PEP 440 pre-release token (letters + digits + dots) is a valid pin.
+
+    The path-traversal guard must constrain ``--version`` without rejecting
+    legitimate release tags such as ``1.2.3rc1``.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel(version="1.2.3rc1")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="1.2.3rc1")
+
+    result = harness.run(["--version", "1.2.3rc1"], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "uv tool install" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
 def test_manifest_without_wheel_artifact_is_invalid(harness: InstallerHarness) -> None:
     """A manifest missing a wheel artifact fails with ``MANIFEST_INVALID``."""
     harness.add_uname("Linux", "x86_64")
