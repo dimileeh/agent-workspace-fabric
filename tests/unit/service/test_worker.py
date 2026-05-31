@@ -107,6 +107,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
             created["compose_work_dir"] = work_dir
             created["compose_template_path"] = template_path
+            created["compose_instance"] = self
 
     class _LocalSecretLeaseMountResolver:
         def __init__(
@@ -142,11 +143,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             git: object,
             stack_launcher: object,
             config: object,
+            service_diagnostics: object = None,
         ) -> None:
             created["provisioner_session_factory"] = session_factory
             created["provisioner_git"] = git
             created["provisioner_stack_launcher"] = stack_launcher
             created["provisioner_config"] = config
+            created["provisioner_service_diagnostics"] = service_diagnostics
 
     class _WorkspaceExecutor:
         def __init__(
@@ -274,6 +277,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].max_concurrent_provisions == 2
     assert created["worker_config"].max_concurrent_executions == 4
     assert created["worker_config"].node_id == "node-1"
+    # Issue #299: the provisioner receives the ComposeManager as its
+    # service-startup diagnostics capturer so companion logs/healthcheck state
+    # are captured into the SERVICE_STARTUP_FAILURE event before teardown.
+    assert created["provisioner_service_diagnostics"] is created["compose_instance"]
 
     default_monitor = created["executor_monitor_factory"](
         object(),
@@ -658,6 +665,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             git: object,
             stack_launcher: object,
             config: object,
+            service_diagnostics: object = None,
         ) -> None:
             created["provisioner_config"] = config
 

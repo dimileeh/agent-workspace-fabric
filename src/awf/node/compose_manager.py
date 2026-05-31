@@ -18,17 +18,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from awf.common.audit import redact_audit_value
 from awf.common.immutability import frozen_mapping
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 
 _log = get_logger(__name__)
 
@@ -40,6 +43,15 @@ _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown shorthand flag: 'd' in -d",
     "unknown flag: --remove-orphans",
 )
+
+DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES = 200
+"""Default number of companion log lines captured on a service-startup failure."""
+
+SERVICE_STARTUP_DIAGNOSTICS_SCHEMA = "service_startup_diagnostics.v1"
+"""Schema marker for the persisted ``SERVICE_STARTUP_FAILURE`` diagnostics payload."""
+
+_SERVICE_STARTUP_HEALTH_LOG_TAIL_ENTRIES = 5
+"""How many trailing ``.State.Health.Log`` entries to persist per companion."""
 
 
 class ComposeOperationError(Exception):
@@ -452,6 +464,150 @@ class ComposeManager:
             volumes=len(volume_names),
         )
 
+    async def capture_companion_diagnostics(
+        self,
+        *,
+        project_name: str,
+        workspace_id: str,
+        tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES,
+    ) -> dict[str, Any]:
+        """Capture redacted diagnostics for unhealthy companions in a project.
+
+        Called on the service-startup failure path *before* the stack is torn
+        down, so the failed companion containers and their logs still exist.
+        The returned payload is **already redacted** (every captured string is
+        passed through :func:`redact_audit_value`) and is safe to persist into a
+        ``WorkspaceEvent``.
+
+        This is **best-effort and never raises**: any docker error (daemon gone,
+        container already removed, timeout, unparseable inspect output) is caught
+        and recorded as a ``companion_logs_capture_error`` marker so the caller
+        can still re-raise the original ``ComposeOperationError`` unchanged.
+
+        Per-companion diagnostics are emitted as a ``unhealthy_companions`` *list
+        of records* — each record carries the compose service name under a
+        ``"service"`` field rather than using it as a mapping key. Compose
+        service names are arbitrary, operator-controlled strings; were they used
+        as dict keys, :func:`redact_audit_value`'s key-sensitive redaction would
+        replace the **entire** value with ``"[redacted]"`` for any service whose
+        name contains ``secret``/``token``/``api-key``/etc. (e.g.
+        ``secret-backend``), silently blanking diagnostics for exactly the
+        services where debugging matters most. As a *value*, the name only goes
+        through scalar token redaction and survives intact.
+
+        Top-level capture failures (``ps``/``inspect``/JSON) — where no
+        per-companion record exists yet — are still recorded under
+        ``companion_logs_capture_error`` keyed by the fixed ``"_top_level"``
+        scope; per-companion ``docker logs`` failures live on the record itself
+        under ``"logs_capture_error"``.
+        """
+        compose_file = self._projects_dir / workspace_id / "compose.yml"
+        payload: dict[str, Any] = {
+            "schema": SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
+            "compose_project": project_name,
+            "compose_file": str(compose_file),
+            "tail_lines": tail_lines,
+            "containers_inspected": 0,
+        }
+        label_filter = f"label=com.docker.compose.project={project_name}"
+
+        try:
+            container_ids = await self._docker_resource_ids(
+                ["ps", "-aq", "--filter", label_filter],
+                operation="ps",
+            )
+        except ComposeOperationError as exc:
+            return self._diagnostics_with_capture_error(payload, operation="ps", exc=exc)
+
+        if not container_ids:
+            return _redacted_diagnostics(payload)
+
+        try:
+            inspect_raw = await self._docker_capture(
+                ["inspect", *container_ids],
+                operation="inspect",
+            )
+            inspected = json.loads(inspect_raw)
+        except ComposeOperationError as exc:
+            return self._diagnostics_with_capture_error(payload, operation="inspect", exc=exc)
+        except json.JSONDecodeError as exc:
+            payload["companion_logs_capture_error"] = {
+                "_top_level": f"inspect: unparseable JSON ({exc})"
+            }
+            return _redacted_diagnostics(payload)
+
+        if not isinstance(inspected, list):
+            _log.warning(
+                "compose.companion_diagnostics_unexpected_inspect_shape",
+                compose_project=payload.get("compose_project"),
+                inspect_type=type(inspected).__name__,
+            )
+        containers = inspected if isinstance(inspected, list) else []
+        payload["containers_inspected"] = len(containers)
+
+        unhealthy_companions: list[dict[str, Any]] = []
+
+        for idx, container in enumerate(containers):
+            if not _container_is_unhealthy(container):
+                continue
+            service = _compose_service_name(container) or str(
+                container.get("Id") or f"<unknown-{idx}>"
+            )
+            # NB: ``service`` is stored as a *value*, never a mapping key —
+            # otherwise audit key-sensitive redaction would blank diagnostics
+            # for services named like ``secret-backend``. See the docstring.
+            entry: dict[str, Any] = {
+                "service": service,
+                "health": _container_health_summary(container),
+            }
+            test = _container_healthcheck_test(container)
+            if test is not None:
+                entry["healthcheck_test"] = test
+            container_id = container.get("Id")
+            if container_id:
+                try:
+                    logs_raw = await self._docker_capture(
+                        ["logs", "--tail", str(tail_lines), str(container_id)],
+                        operation="logs",
+                        combine_stderr=True,
+                    )
+                    entry["logs"] = logs_raw.splitlines()
+                except ComposeOperationError as exc:
+                    entry["logs_capture_error"] = _capture_error_detail_raw(exc)
+                    _log.warning(
+                        "compose.companion_logs_capture_failed",
+                        workspace_id=workspace_id,
+                        service=service,
+                        reason_code=exc.reason_code,
+                        error=redact_secrets(str(exc)),
+                    )
+            unhealthy_companions.append(entry)
+
+        if unhealthy_companions:
+            payload["unhealthy_companions"] = unhealthy_companions
+
+        return _redacted_diagnostics(payload)
+
+    def _diagnostics_with_capture_error(
+        self,
+        payload: dict[str, Any],
+        *,
+        operation: str,
+        exc: ComposeOperationError,
+    ) -> dict[str, Any]:
+        """Attach a top-level capture-error marker and return a redacted payload."""
+        _log.warning(
+            "compose.companion_diagnostics_capture_failed",
+            compose_project=payload.get("compose_project"),
+            operation=operation,
+            reason_code=exc.reason_code,
+            error=redact_secrets(str(exc)),
+        )
+        payload["companion_logs_capture_error"] = {
+            "_top_level": f"{operation}: {_capture_error_detail_raw(exc)}"
+        }
+        return _redacted_diagnostics(payload)
+
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _paths_for(self, spec: WorkspaceComposeSpec) -> ComposeProjectPaths:
@@ -555,28 +711,30 @@ class ComposeManager:
     async def _docker(self, args: list[str], *, operation: str) -> None:
         await self._docker_capture(args, operation=operation)
 
-    async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+    async def _docker_capture(
+        self, args: list[str], *, operation: str, combine_stderr: bool = False
+    ) -> str:
         cmd = ["docker", *args]
         _log.debug("docker.exec", operation=operation, cmd=cmd)
+        # ``docker logs`` writes a container's stderr to the CLI's stderr. The
+        # default/primary AWF companion (postgres) logs entirely to stderr, so
+        # diagnostics capture folds stderr into stdout to avoid empty logs on
+        # exactly the failing-companion case we care about.
+        stderr_target = asyncio.subprocess.STDOUT if combine_stderr else asyncio.subprocess.PIPE
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=stderr_target,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),
                 timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
             )
-        except FileNotFoundError as e:
-            raise ComposeOperationError(
-                operation=operation,
-                returncode=127,
-                stdout="",
-                stderr=str(e),
-                reason_code="DOCKER_UNAVAILABLE",
-            ) from e
         except TimeoutError as e:
+            # ``TimeoutError`` is itself an ``OSError`` subclass, so this clause must
+            # stay *above* the broad ``except OSError`` below or timeouts would be
+            # misclassified as ``DOCKER_UNAVAILABLE`` and skip the kill/reap cleanup.
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(ProcessLookupError, TimeoutError):
@@ -591,13 +749,32 @@ class ComposeManager:
                 stderr=(f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"),
                 reason_code="DOCKER_COMMAND_TIMEOUT",
             ) from e
+        except OSError as e:
+            # ``FileNotFoundError`` (docker binary absent) is the common case, but
+            # ``create_subprocess_exec`` can raise other ``OSError`` subclasses too —
+            # notably ``PermissionError`` (docker present but not executable). They all
+            # mean docker is unusable here, so translate them to a structured
+            # ``DOCKER_UNAVAILABLE`` error rather than letting a raw ``OSError`` escape
+            # and break the best-effort "never raises" contract that
+            # ``capture_companion_diagnostics`` depends on.
+            raise ComposeOperationError(
+                operation=operation,
+                returncode=127,
+                stdout="",
+                stderr=str(e),
+                reason_code="DOCKER_UNAVAILABLE",
+            ) from e
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        # With ``combine_stderr`` the child's stderr is folded into stdout, so
+        # ``communicate()`` returns ``None`` for the stderr stream.
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes is not None else ""
         assert proc.returncode is not None
         if proc.returncode != 0:
             reason_code = "COMPOSE_COMMAND_FAILED"
-            err_lower = stderr.lower()
+            # With ``combine_stderr`` the child's stderr is folded into stdout, so a
+            # daemon-unavailability message surfaces there; otherwise it is in stderr.
+            err_lower = (stdout if combine_stderr else stderr).lower()
             if (
                 "daemon" in err_lower
                 or "error during connect" in err_lower
@@ -668,3 +845,87 @@ class ComposeManager:
         if postgres_password is None:
             return value
         return value.replace("${AWF_POSTGRES_PASSWORD}", postgres_password)
+
+
+def _redacted_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    """Redact every captured string in the diagnostics payload before persistence."""
+    return cast("dict[str, Any]", redact_audit_value(payload))
+
+
+def _capture_error_detail_raw(exc: ComposeOperationError) -> str:
+    """Summarize a docker capture failure for a diagnostics marker.
+
+    WARNING: the returned string is UNREDACTED — it embeds ``exc.stderr``/
+    ``exc.stdout``, which can contain credential material from docker output. It
+    MUST pass through ``redact_audit_value`` (via ``_redacted_diagnostics``)
+    before being persisted, returned to a caller, or logged directly. Every
+    current caller stores it in a payload that is redacted unconditionally before
+    return; new callers must preserve that contract.
+    """
+    detail = exc.stderr.strip() or exc.stdout.strip() or "<no output>"
+    return f"{exc.reason_code}: {detail}"
+
+
+def _container_is_unhealthy(container: Any) -> bool:
+    """Return whether an inspected container is worth capturing diagnostics for.
+
+    A container is interesting when its healthcheck is not ``healthy`` (failed,
+    starting, or still probing) or — absent a healthcheck — when it has exited
+    with a non-zero code.
+
+    Docker/Podman report the literal ``"none"`` (``types.NoHealthcheck``) status
+    for containers without a healthcheck; that is treated like an absent
+    ``Health`` block so running sidecars (e.g. the agent) are not flagged just
+    because a different companion failed startup.
+    """
+    if not isinstance(container, Mapping):
+        return False
+    state = container.get("State")
+    if not isinstance(state, Mapping):
+        return False
+    health = state.get("Health")
+    if isinstance(health, Mapping):
+        status = health.get("Status")
+        if isinstance(status, str) and status != "none":
+            return status != "healthy"
+    exit_code = state.get("ExitCode") or 0
+    return state.get("Status") == "exited" and exit_code != 0
+
+
+def _compose_service_name(container: Mapping[str, Any]) -> str | None:
+    """Return the compose service label for a container, if present."""
+    config = container.get("Config")
+    labels = config.get("Labels") if isinstance(config, Mapping) else None
+    if not isinstance(labels, Mapping):
+        return None
+    name = labels.get("com.docker.compose.service")
+    return name if isinstance(name, str) and name else None
+
+
+def _container_health_summary(container: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarize state + the trailing ``.State.Health.Log`` entries for a container."""
+    state = container.get("State")
+    state_map = state if isinstance(state, Mapping) else {}
+    health = state_map.get("Health")
+    health_map = health if isinstance(health, Mapping) else {}
+    raw_log = health_map.get("Log")
+    health_log: list[dict[str, Any]] = []
+    if isinstance(raw_log, list):
+        for entry in raw_log[-_SERVICE_STARTUP_HEALTH_LOG_TAIL_ENTRIES:]:
+            if not isinstance(entry, Mapping):
+                continue
+            health_log.append({"ExitCode": entry.get("ExitCode"), "Output": entry.get("Output")})
+    return {
+        "status": state_map.get("Status"),
+        "exit_code": state_map.get("ExitCode"),
+        "health_status": health_map.get("Status"),
+        "health_log": health_log,
+    }
+
+
+def _container_healthcheck_test(container: Mapping[str, Any]) -> list[Any] | None:
+    """Return the rendered healthcheck ``Test`` array as parsed by compose, if any."""
+    config = container.get("Config")
+    healthcheck = config.get("Healthcheck") if isinstance(config, Mapping) else None
+    test = healthcheck.get("Test") if isinstance(healthcheck, Mapping) else None
+    return test if isinstance(test, list) else None
