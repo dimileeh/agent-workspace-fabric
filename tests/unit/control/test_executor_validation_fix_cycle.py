@@ -239,6 +239,8 @@ async def _fetch_operation(
 
 
 class _CancelBeforeFixValidation:
+    """Validation fake that flips workspace state before returning failing phases."""
+
     def __init__(
         self,
         *,
@@ -246,13 +248,15 @@ class _CancelBeforeFixValidation:
         artifacts_dir: Path,
         terminal_status: WorkspaceStatus,
     ) -> None:
+        """Capture test dependencies and reset state for staged failure cases."""
         self._factory = factory
         self._artifacts_dir = artifacts_dir
         self._terminal_status = terminal_status
         self.calls = 0
 
     async def run_profile_coverage(self, **_kwargs: object) -> None:
-        return None
+        """No-op coverage phase for the cancellation-focused fake."""
+        ...
 
     async def run_profile_phases(
         self,
@@ -261,6 +265,7 @@ class _CancelBeforeFixValidation:
         phase_names: tuple[str, ...] | list[str],
         **_kwargs: object,
     ) -> ValidationResult:
+        """Return a validation failure and mutate workspace state to terminal."""
         self.calls += 1
         if tuple(phase_names) == ("setup", "pre_agent"):
             return ValidationResult()
@@ -299,6 +304,8 @@ class _CancelBeforeFixValidation:
 
 
 class _RemoveWorktreeOnCall(FakeCommandRunner):
+    """Command runner that removes the worktree when a predicate matches."""
+
     def __init__(
         self,
         worktree_path: Path,
@@ -306,6 +313,7 @@ class _RemoveWorktreeOnCall(FakeCommandRunner):
         predicate: Callable[[list[str], CommandResult], bool],
         occurrence: int = 1,
     ) -> None:
+        """Track a workspace path and predicate-triggered removal point."""
         super().__init__()
         self._worktree_path = worktree_path
         self._predicate = predicate
@@ -319,6 +327,7 @@ class _RemoveWorktreeOnCall(FakeCommandRunner):
         input_bytes: bytes | None = None,
         cwd: str | None = None,
     ) -> CommandResult:
+        """Execute command and delete the worktree when the predicate fires."""
         result = await super().run(args, input_bytes=input_bytes, cwd=cwd)
         if self._predicate(args, result):
             self._matches += 1
@@ -328,7 +337,10 @@ class _RemoveWorktreeOnCall(FakeCommandRunner):
 
 
 class _RemoveWorktreeAfterSecondAdapterRun(_RemoveWorktreeOnCall):
+    """Command runner that removes the worktree after second adapter run."""
+
     def __init__(self, worktree_path: Path) -> None:
+        """Configure removal when the second adapter-style invocation runs."""
         super().__init__(
             worktree_path,
             predicate=lambda args, _result: "exec" in args and "codex" in args,
@@ -340,12 +352,14 @@ class _ValidationSideEffectRunner:
     """Validation fake that mutates a tracked generated file."""
 
     def __init__(self, *, artifacts_dir: Path, results: list[bool]) -> None:
+        """Capture artifacts location and queued pass/fail outcomes."""
         self._artifacts_dir = artifacts_dir
         self._results = list(results)
         self.calls = 0
 
     async def run_profile_coverage(self, **_kwargs: object) -> None:
-        return None
+        """No-op coverage phase for side-effect validation simulation."""
+        ...
 
     async def run_profile_phases(
         self,
@@ -355,6 +369,7 @@ class _ValidationSideEffectRunner:
         worktree_path: Path | None = None,
         **_kwargs: object,
     ) -> ValidationResult:
+        """Mutate a tracked generated file and report queued validation output."""
         if tuple(phase_names) == ("setup", "pre_agent"):
             return ValidationResult()
         self.calls += 1
@@ -396,12 +411,14 @@ class _StaleValidationFailureRunner:
         terminal_status: WorkspaceStatus,
         raise_cleanup_exception: bool,
     ) -> None:
+        """Capture dependencies and terminal behavior for stale cleanup tests."""
         self._factory = factory
         self._terminal_status = terminal_status
         self._raise_cleanup_exception = raise_cleanup_exception
 
     async def run_profile_coverage(self, **_kwargs: object) -> None:
-        return None
+        """Skip coverage while staging stale-closure validation behavior."""
+        ...
 
     async def run_profile_phases(
         self,
@@ -411,6 +428,7 @@ class _StaleValidationFailureRunner:
         worktree_path: Path | None = None,
         **_kwargs: object,
     ) -> ValidationResult:
+        """Generate tracked dirt plus stale/cleanup-failing validation exit."""
         if tuple(phase_names) == ("setup", "pre_agent"):
             return ValidationResult()
 
@@ -456,11 +474,13 @@ class _StaleValidationSuccessRunner:
         factory: async_sessionmaker[AsyncSession],
         terminal_status: WorkspaceStatus,
     ) -> None:
+        """Capture dependencies and terminal status for stale success scenarios."""
         self._factory = factory
         self._terminal_status = terminal_status
 
     async def run_profile_coverage(self, **_kwargs: object) -> None:
-        return None
+        """No-op coverage hook for terminal-success stale worktree tests."""
+        ...
 
     async def run_profile_phases(
         self,
@@ -470,6 +490,7 @@ class _StaleValidationSuccessRunner:
         worktree_path: Path | None = None,
         **_kwargs: object,
     ) -> ValidationResult:
+        """Mutate worktree state and return success after terminal transition."""
         if tuple(phase_names) == ("setup", "pre_agent"):
             return ValidationResult()
 
@@ -510,6 +531,7 @@ class _StaleValidationSuccessRunner:
 
 
 def _mark_git_worktree(worktree_path: Path) -> None:
+    """Create a minimal `.git` control file at the worktree root."""
     worktree_path.mkdir(parents=True, exist_ok=True)
     (worktree_path / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
 

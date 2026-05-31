@@ -21,6 +21,8 @@ from awf.runtime.validation_worktree import (
 
 @dataclass
 class _CommandResultLike:
+    """Minimal command-result stand-in for status/revert command assertions."""
+
     returncode: int
     stdout: str | None
     stderr: str | None
@@ -28,6 +30,7 @@ class _CommandResultLike:
 
     @property
     def ok(self) -> bool:
+        """Return whether the simulated command completed successfully."""
         return self.returncode == 0
 
 
@@ -68,6 +71,7 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:
+    """Create a fake worktree path with a minimal `.git` marker."""
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
     (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
