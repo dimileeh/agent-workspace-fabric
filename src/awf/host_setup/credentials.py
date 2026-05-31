@@ -477,7 +477,34 @@ def store_provider_credential(
         env_backend=env_backend,
         plain_file_backend=plain_file_backend,
     )
-    return backend.create_ref(request)
+    try:
+        return backend.create_ref(request)
+    except CredentialError as exc:
+        # ``select_credential_backend`` returns the keyring backend whenever its
+        # ``is_available`` probe passes, but that probe is a cheap, side-effect-free
+        # pre-filter that only rejects the ``fail``/``null`` no-op backends. A
+        # headless-Linux ``ChainerBackend`` with no usable child passes it, so
+        # keyring is selected, yet only the write/read-back round-trip *inside*
+        # ``create_ref`` can prove it cannot durably store a secret
+        # (``CREDENTIAL_BACKEND_UNAVAILABLE``). The pre-``create_ref`` fallback to
+        # env_ref fires only for the backends the probe can reject up front, so
+        # degrade here too: a keyring proven unusable at write time must reach the
+        # same env-ref offer as one detected unusable beforehand (the documented
+        # headless-Linux default; plan R5), not fail setup. Only the default
+        # keyring selection degrades — an explicit ``plain_file``/``env_ref``
+        # preference yields a non-keyring ``backend.kind`` and never enters this
+        # branch — and only the backend-unavailable signal degrades: a genuine
+        # input fault (``INTERACTIVE_INPUT_REQUIRED`` missing secret,
+        # ``CREDENTIAL_REF_INVALID`` token-shaped/over-long identifier) must
+        # propagate, since env_ref consumes only ``env_var`` and would otherwise
+        # silently mask the rejected provider/account or the missing secret.
+        if backend.kind != "keyring" or exc.reason_code != CREDENTIAL_BACKEND_UNAVAILABLE:
+            raise
+        # Mirror the pre-``create_ref`` path exactly: with an ``env_var`` this mints
+        # the ``env://NAME`` offer; without one it raises ``INTERACTIVE_INPUT_REQUIRED``
+        # (the actionable "provide an env var" signal), never the raw keyring error.
+        fallback = env_backend or EnvRefCredentialBackend()
+        return fallback.create_ref(request)
 
 
 def _import_keyring_module() -> KeyringModule | None:

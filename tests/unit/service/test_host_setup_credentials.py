@@ -236,6 +236,137 @@ def test_explicit_keyring_preference_falls_back_to_env_ref_when_unavailable() ->
     assert selected.kind == "env_ref"
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("preferred", [None, "keyring"])
+def test_store_falls_back_to_env_ref_when_keyring_unusable_at_write_time(
+    preferred: str | None,
+) -> None:
+    """Verify a keyring proven unusable in ``create_ref`` degrades to the env-ref offer.
+
+    ``is_available`` is a cheap pre-filter that only rejects the ``fail``/``null``
+    no-op backends, so a headless-Linux ``ChainerBackend`` with no usable child is
+    selected as the default keyring backend, yet its write/read-back round-trip in
+    ``create_ref`` proves it cannot durably store a secret
+    (``CREDENTIAL_BACKEND_UNAVAILABLE``). A keyring detected unusable up front
+    already degrades to env_ref; one detected unusable only at write time must
+    reach the same env-ref offer (plan R5) instead of failing setup — for both the
+    implicit (``None``) and explicit (``"keyring"``) best-effort selections.
+    """
+    module = FakeKeyringModule(backend=_ChainerBackend(), drop_writes=True)
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+    assert keyring_backend.is_available() is True
+
+    ref = store_provider_credential(
+        CredentialRequest(
+            provider="github",
+            env_var="GH_TOKEN",
+            secret_source=_secret(_FAKE_GH_TOKEN),
+        ),
+        preferred=preferred,
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=False,
+        plain_file_consent=False,
+        keyring_backend=keyring_backend,
+    )
+
+    assert ref.backend == "env_ref"
+    assert ref.ref == "env://GH_TOKEN"
+    # The keyring write was attempted (and proved non-durable) before the fallback,
+    # but the secret never reaches the env-ref offer.
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    assert _FAKE_GH_TOKEN not in ref.ref
+
+
+@pytest.mark.unit
+def test_store_keyring_unusable_without_env_var_surfaces_interactive_input() -> None:
+    """Verify a write-time-unusable keyring with no env_var mirrors the pre-create path.
+
+    When the keyring is proven unusable at write time and the request carries no
+    env_var, the env-ref fallback cannot mint a ref, so it must surface the same
+    ``INTERACTIVE_INPUT_REQUIRED`` (missing env_var) a keyring detected unusable up
+    front would — an actionable "provide an env var" signal — rather than failing
+    with the raw ``CREDENTIAL_BACKEND_UNAVAILABLE``.
+    """
+    module = FakeKeyringModule(backend=_ChainerBackend(), drop_writes=True)
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        store_provider_credential(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN)),
+            preferred=None,
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+            keyring_backend=keyring_backend,
+        )
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "env_var"
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_store_keyring_token_shaped_provider_is_not_masked_by_env_ref() -> None:
+    """Verify a rejected token-shaped identifier is never masked by the env-ref fallback.
+
+    The env-ref backend only consumes ``env_var`` (it never touches the provider or
+    secret), so a fallback that fired on ``CREDENTIAL_REF_INVALID`` would silently
+    emit ``env://NAME`` and hide a provider accidentally populated with a raw
+    secret. The fallback must trigger only on the keyring-unusable signal, so this
+    pre-write identifier rejection propagates unchanged and the keyring is never
+    even written.
+    """
+    module = FakeKeyringModule()
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        store_provider_credential(
+            CredentialRequest(
+                provider=_FAKE_TOKEN,
+                env_var="GH_TOKEN",
+                secret_source=_secret(_FAKE_GH_TOKEN),
+            ),
+            preferred=None,
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+            keyring_backend=keyring_backend,
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {"field": "provider"}
+    assert module.set_calls == []
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_store_keyring_missing_secret_is_not_masked_by_env_ref() -> None:
+    """Verify a usable keyring's missing-secret fault is not masked by the env-ref offer.
+
+    A usable keyring that simply lacks an inline secret raises
+    ``INTERACTIVE_INPUT_REQUIRED`` before any write; that is a genuine input fault,
+    not the keyring-unusable signal, so it must propagate unchanged even when an
+    env_var is present rather than being swapped for a silent ``env://NAME``.
+    """
+    module = FakeKeyringModule()
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        store_provider_credential(
+            CredentialRequest(provider="github", env_var="GH_TOKEN", secret_source=None),
+            preferred=None,
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+            keyring_backend=keyring_backend,
+        )
+
+    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert module.set_calls == []
+
+
 # --------------------------------------------------------------------------- #
 # 3. Env ref stores only a variable name.
 # --------------------------------------------------------------------------- #
