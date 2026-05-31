@@ -256,7 +256,7 @@ def check_docker(
 
 
 def check_compose(*, run: CommandRunner = _default_command_runner) -> SetupCheckResult:
-    """Check Docker Compose is available via the plugin or legacy binary."""
+    """Check the Docker Compose plugin that AWF startup actually uses is available."""
     plugin = run(["docker", "compose", "version"])
     if plugin is not None and plugin.returncode == 0:
         return SetupCheckResult(
@@ -266,25 +266,38 @@ def check_compose(*, run: CommandRunner = _default_command_runner) -> SetupCheck
             detail="`docker compose version` succeeded.",
             data={"variant": "docker compose"},
         )
+    # AWF's startup paths invoke the ``docker compose`` plugin directly with no fallback
+    # to the legacy ``docker-compose`` binary: service bootstrap builds commands with
+    # ("docker", "compose", ...) (service/bootstrap.py) and the per-workspace stack
+    # lifecycle does the same (node/compose_manager.py). A host that only ships the
+    # legacy binary would therefore pass readiness yet fail ``awf start`` / workspace
+    # operations, so legacy-only must block rather than report OK.
     legacy = run(["docker-compose", "version"])
-    if legacy is not None and legacy.returncode == 0:
+    legacy_available = legacy is not None and legacy.returncode == 0
+    if legacy_available:
         return SetupCheckResult(
             name="compose",
-            level=SetupCheckLevel.OK,
-            summary="Legacy docker-compose binary is available.",
-            detail="`docker-compose version` succeeded.",
-            data={"variant": "docker-compose"},
+            level=SetupCheckLevel.BLOCKED,
+            summary="Docker Compose plugin is missing (only legacy docker-compose found).",
+            detail="`docker compose version` did not succeed; only the legacy "
+            "`docker-compose` binary responded. AWF startup (service bootstrap and "
+            "per-workspace stacks) invokes the `docker compose` plugin directly, so the "
+            "legacy binary is insufficient and `awf start` would still fail.",
+            fix="Install the Docker Compose plugin (ships with Docker Desktop), "
+            "then re-run awf setup --dry-run.",
+            docs_link=_DOCKER_INSTALL_DOCS,
+            data={"variant": None, "legacy_docker_compose": True},
         )
     return SetupCheckResult(
         name="compose",
         level=SetupCheckLevel.BLOCKED,
         summary="Docker Compose is not available.",
         detail="Neither `docker compose` nor `docker-compose` responded; "
-        "AWF Core stacks need Compose.",
+        "AWF Core stacks need the Docker Compose plugin.",
         fix="Install the Docker Compose plugin (ships with Docker Desktop), "
         "then re-run awf setup --dry-run.",
         docs_link=_DOCKER_INSTALL_DOCS,
-        data={"variant": None},
+        data={"variant": None, "legacy_docker_compose": False},
     )
 
 

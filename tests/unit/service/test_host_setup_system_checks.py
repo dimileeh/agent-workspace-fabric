@@ -115,8 +115,14 @@ def test_check_compose_ok_via_plugin() -> None:
 
 
 @pytest.mark.unit
-def test_check_compose_ok_via_legacy_binary() -> None:
-    """Verify the legacy docker-compose binary satisfies the compose check."""
+def test_check_compose_blocked_when_only_legacy_binary() -> None:
+    """Verify legacy docker-compose alone blocks: startup uses the plugin only.
+
+    AWF's bootstrap and per-workspace stack lifecycle invoke the ``docker compose``
+    plugin with no fallback to the legacy ``docker-compose`` binary, so a host with
+    only the legacy binary would pass readiness yet fail ``awf start``. Readiness must
+    require the plugin startup actually uses.
+    """
     result = check_compose(
         run=_command_runner(
             {
@@ -125,8 +131,9 @@ def test_check_compose_ok_via_legacy_binary() -> None:
             }
         )
     )
-    assert result.level is SetupCheckLevel.OK
-    assert result.data["variant"] == "docker-compose"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["variant"] is None
+    assert result.data["legacy_docker_compose"] is True
 
 
 @pytest.mark.unit
@@ -134,6 +141,7 @@ def test_check_compose_blocked_when_neither_available() -> None:
     """Verify a missing compose plugin and binary block."""
     result = check_compose(run=_command_runner({}))
     assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["legacy_docker_compose"] is False
 
 
 # --- Git / gh -------------------------------------------------------------
