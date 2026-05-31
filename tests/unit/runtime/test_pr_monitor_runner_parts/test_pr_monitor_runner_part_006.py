@@ -24,7 +24,11 @@ from awf.runtime.pr_monitor import (
     decide,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, fix_cycle
-from awf.runtime.pr_monitor_runner.comments import VerdictResult, _address_thread
+from awf.runtime.pr_monitor_runner.comments import (
+    VerdictResult,
+    _address_review_comment_result,
+    _address_thread,
+)
 from awf.runtime.pr_monitor_runner.fix_cycle import (
     _requeue_workflow_scope_publish_dependent_items,
 )
@@ -1143,15 +1147,20 @@ def test_workflow_scope_requeue_clears_publish_dependent_fixes() -> None:
 
 
 @pytest.mark.unit
-async def test_address_thread_owned_paths_fallback_treats_prompt_lookup_failure_as_empty(
+async def test_direct_comment_repair_propagates_owned_path_lookup_failure_before_cli(
     tmp_path: Path,
 ) -> None:
-    """Verify secondary prompt callers do not fail when owned paths cannot load."""
+    """Verify direct comment-repair callers do not prompt without owned paths."""
     thread = ReviewThread(
         thread_id="T_owned_paths",
         path="src/awf/runtime/example.py",
         line=12,
         body_excerpt="please address this",
+        author="cursor[bot]",
+    )
+    review = ReviewComment(
+        comment_id="issue:owned_paths",
+        body_excerpt="please address this review comment",
         author="cursor[bot]",
     )
     prompts: list[str] = []
@@ -1169,19 +1178,30 @@ async def test_address_thread_owned_paths_fallback_treats_prompt_lookup_failure_
         _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
     )
 
-    verdict = await _address_thread(
-        runner,  # type: ignore[arg-type]
-        workspace_id="ws_prompt_fallback",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        thread=thread,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        state=MonitorState(),
-    )
+    with pytest.raises(TypeError, match="legacy test double"):
+        await _address_thread(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_prompt_fallback",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            thread=thread,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+    with pytest.raises(TypeError, match="legacy test double"):
+        await _address_review_comment_result(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_prompt_fallback",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            comment=review,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
 
-    assert verdict == "false_positive"
-    assert len(prompts) == 1
+    assert prompts == []
 
 
 @pytest.mark.unit
