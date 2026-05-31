@@ -393,6 +393,7 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
                 payload=event_payload,
             )
+        _cancel_final_status = workspace.status
         if (
             stop_stack
             and workspace.compose_project_name is not None
@@ -404,7 +405,7 @@ class WorkspaceControlService:
                 reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                 payload={
                     "compose_project_name": workspace.compose_project_name,
-                    "workspace_status": workspace.status,
+                    "workspace_status": _cancel_final_status,
                     "cleanup": {"stack_stopped": True, "source": "cancel_workspace"},
                 },
             )
