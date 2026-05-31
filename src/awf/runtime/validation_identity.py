@@ -56,6 +56,7 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
             "mode": str(profile.docker.mode),
             "compose_files": sorted(profile.docker.compose_files),
             "project_directory": profile.docker.project_directory,
+            "dind_image": profile.docker.dind_image,
             "startup_timeout_seconds": profile.docker.startup_timeout_seconds,
         },
         "services": [_service_identity(service) for service in _sorted_services(profile.services)],
