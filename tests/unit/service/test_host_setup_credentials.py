@@ -664,6 +664,26 @@ def test_credential_ref_rejects_secret_like_value() -> None:
 
 
 @pytest.mark.unit
+def test_credential_ref_validation_error_does_not_echo_input() -> None:
+    """Verify Pydantic never echoes the offending input into the error string.
+
+    Without ``hide_input_in_errors=True`` Pydantic appends an ``input_value=``
+    clause whose (truncated) repr leaks a recognizable suffix of the raw secret
+    into ``str(exc)`` — the value ``logger.exception`` formats. Guard against
+    that regression for any secret-bearing ref.
+    """
+    secret = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0PoNmLkJiHgFeDcBa"
+    with pytest.raises(ValidationError) as exc_info:
+        CredentialRef(backend="env_ref", ref=f"env://{secret}")
+
+    rendered = str(exc_info.value)
+    assert secret not in rendered
+    # The distinctive tail must not survive Pydantic's middle truncation either.
+    assert secret[-20:] not in rendered
+    assert "input_value" not in rendered
+
+
+@pytest.mark.unit
 def test_select_credential_backend_rejects_unknown_preference() -> None:
     """Verify an unknown backend preference is reason-coded, listing valid kinds."""
     with pytest.raises(CredentialError) as exc_info:

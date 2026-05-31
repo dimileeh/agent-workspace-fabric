@@ -106,7 +106,16 @@ class CredentialError(RuntimeError):
 class CredentialRef(BaseModel):
     """A safe provider credential reference and the backend that produced it."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    # ``hide_input_in_errors`` mirrors ``config._HostSetupBaseModel``: a ref that
+    # accidentally embeds a raw secret is rejected by ``_validate_ref``, and this
+    # flag stops Pydantic echoing that input into ``str(ValidationError)`` (which
+    # ``logger.exception`` formats), preventing a secret leak.
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        str_strip_whitespace=True,
+        hide_input_in_errors=True,
+    )
 
     backend: CredentialBackendKind
     ref: str = Field(min_length=1, max_length=MAX_CREDENTIAL_REF_LENGTH)
