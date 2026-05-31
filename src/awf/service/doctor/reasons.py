@@ -549,6 +549,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "",
         "",
     ),
+    "GROK_AUTH_OK": _ReasonText(
+        "Grok Build auth is usable for agent workspaces.",
+        "No action required.",
+        "",
+        "",
+        "",
+    ),
     "GITHUB_TOKEN_ENV_MISSING": _ReasonText(
         "No service-visible GitHub token was found.",
         "Set AWF_GITHUB_TOKEN from `gh auth token` before starting the service.",
@@ -738,6 +745,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Missing OpenCode/Ollama credentials.",
         "awf service doctor",
         "docs/REASON_CATALOG.md#opencode_ollama_auth_missing",
+    ),
+    "GROK_AUTH_MISSING": _ReasonText(
+        "No Grok Build auth signal was visible.",
+        "Set XAI_API_KEY in the AWF service environment.",
+        "Missing xAI API credentials for the official Grok Build CLI.",
+        "awf service doctor",
+        "https://docs.x.ai/build/enterprise",
     ),
     "PORT_OPEN": _ReasonText(
         "Required local port is accepting connections.",

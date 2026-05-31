@@ -1,5 +1,5 @@
 # AWF agent-runtime image — the container that holds the repo worktree and
-# the coding CLIs (Codex, Claude Code, Gemini, OpenCode). Built multi-arch
+# the coding CLIs (Codex, Claude Code, Gemini, OpenCode, Grok). Built multi-arch
 # for x86_64 and arm64 (DGX Spark target) via ``docker buildx build
 # --platform=...``.
 #
@@ -131,7 +131,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends "$gh_deb"; \
     gh --version
 
-# ── Stage 4: Node.js (for coding CLIs which are all npm packages) ──────────
+# ── Stage 4: Node.js (for npm-based coding CLIs) ──────────────────────────
 ARG NODE_VERSION
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -150,6 +150,7 @@ ARG CODEX_VERSION=0.130.0
 ARG CLAUDE_CODE_VERSION=2.1.158
 ARG GEMINI_VERSION=0.42.0
 ARG OPENCODE_VERSION=1.15.2
+ARG GROK_VERSION=0.2.14
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
@@ -180,6 +181,15 @@ RUN set -eux; \
     && gemini --version || true \
     && opencode --version || true \
     && ccusage --version
+
+# Official xAI Grok Build installer. The installer accepts a version argument;
+# keep this pinned like the npm-based CLI args above. It installs the standalone
+# `grok` binary, not the unrelated community npm `grok-cli` package.
+RUN set -eux; \
+    export GROK_BIN_DIR=/usr/local/bin; \
+    curl -fsSL https://x.ai/cli/install.sh | bash -s "${GROK_VERSION}"; \
+    command -v grok; \
+    grok --version || true
 
 # Gemini CLI 0.42.0 only enables its ripgrep-backed search tool when a bundled
 # platform-specific rg binary exists; it does not fall back to the system rg on

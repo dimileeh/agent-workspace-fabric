@@ -9,6 +9,6 @@ from __future__ import annotations
 
 # These imports have the side effect of registering each class in
 # awf.adapters.base._REGISTRY. Don't remove them — they're load-bearing.
-from awf.adapters import claude_code, codex, gemini, opencode  # noqa: F401
+from awf.adapters import claude_code, codex, gemini, grok, opencode  # noqa: F401
 
 __all__: list[str] = []

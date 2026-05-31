@@ -240,6 +240,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#git_fetch_base_failed](#git_fetch_base_failed)
 
+### GROK_AUTH_MISSING
+**Problem:** No Grok Build auth signal was visible.
+**Likely Cause:** Missing xAI API credentials for the official Grok Build CLI.
+**Operator Fix:** Set XAI_API_KEY in the AWF service environment.
+**Related Command:** `awf service doctor`
+**Docs Link:** [https://docs.x.ai/build/enterprise](https://docs.x.ai/build/enterprise)
+
 ### HOST_SETUP_CONFIG_CORRUPT
 **Problem:** AWF could not read the host setup config.
 **Likely Cause:** The config file is malformed, has duplicate keys, uses unsupported schema versions, or cannot be interpreted safely.
