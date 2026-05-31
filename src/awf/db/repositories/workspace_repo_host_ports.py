@@ -81,7 +81,11 @@ async def acquire_host_port_admission_lock(
     for hp in dict.fromkeys(host_ports):
         lock_key = lock_key_fn(hp)
         if lock_key in seen_keys:
-            continue
+            raise ValueError(
+                f"Advisory lock key collision for host port {hp}: "
+                f"lock key {lock_key} already acquired by a different port. "
+                f"Cannot safely skip the lock without risking a TOCTOU race."
+            )
         seen_keys.add(lock_key)
         distinct_keys.append(lock_key)
     distinct_keys.sort()
