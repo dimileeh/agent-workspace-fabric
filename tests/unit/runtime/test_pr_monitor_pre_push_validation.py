@@ -142,6 +142,26 @@ def _coverage_result(tmp_path: Path) -> ValidationCoverageResult:
     )
 
 
+def _failing_coverage_result(tmp_path: Path) -> ValidationCoverageResult:
+    """Build a failed coverage result whose command exited successfully."""
+    return ValidationCoverageResult(
+        provider="python",
+        percent=98.5,
+        minimum_percent=99.0,
+        enforce=True,
+        status="failed",
+        reason_code="COVERAGE_BELOW_THRESHOLD",
+        command_result=_command_result(
+            tmp_path,
+            ok=True,
+            reason_code="VALIDATION_OK",
+            command="coverage run -m pytest && coverage report",
+            artifact_name="coverage_below_threshold",
+        ),
+        gaps=[{"path": "src/awf/runtime/pr_monitor_runner/pre_push_validation.py"}],
+    )
+
+
 async def _set_resolved_profile(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -681,6 +701,56 @@ async def test_pre_push_validation_runs_profile_coverage_before_push(
     assert runs[-1].coverage is not None
     assert runs[-1].coverage["percent"] == 99.5
     assert runs[-1].coverage["reason_code"] == "COVERAGE_OK"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_coverage_failure_persists_coverage_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Coverage policy failures should not be reported as successful commands."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id, include_coverage=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "6" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    coverage = _failing_coverage_result(tmp_path)
+    validation = _FakeValidation(
+        _validation_result(tmp_path, ok=True),
+        coverage_result=coverage,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=0,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+    assert result.stderr.endswith("COVERAGE_BELOW_THRESHOLD")
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "failed"
+    assert runs[-1].reason_code == "COVERAGE_BELOW_THRESHOLD"
+    assert runs[-1].coverage is not None
+    assert runs[-1].coverage["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
 
 
 @pytest.mark.unit

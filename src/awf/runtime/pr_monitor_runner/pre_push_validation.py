@@ -109,10 +109,18 @@ def _preferred_pre_push_failure(result: ValidationResult) -> ValidationCommandRe
 
 def _pre_push_validation_reason_code(result: ValidationResult) -> str:
     """Return the underlying validation reason, honoring mixed-failure precedence."""
+    validation_reason_code = _validation_run_reason_code(result)
     preferred_failure = _preferred_pre_push_failure(result)
-    if preferred_failure is not None:
-        return preferred_failure.reason_code
-    return _validation_run_reason_code(result)
+    if preferred_failure is None:
+        return validation_reason_code
+    coverage_command = result.coverage.command_result if result.coverage is not None else None
+    if (
+        result.coverage is not None
+        and not result.coverage.ok
+        and preferred_failure is coverage_command
+    ):
+        return validation_reason_code
+    return preferred_failure.reason_code
 
 
 @dataclass(frozen=True)
