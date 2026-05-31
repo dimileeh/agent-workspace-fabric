@@ -9,12 +9,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace
+from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -79,8 +80,25 @@ _OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
+_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE = "workspace.terminal_runtime_released"
+_TERMINAL_RUNTIME_RELEASED_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
+
+
+async def _has_terminal_runtime_released_event(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 class _PreparedOperationKind(StrEnum):
@@ -1193,6 +1211,17 @@ class WorkspaceControlService:
                     to=WorkspaceStatus.destroyed,
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
+                )
+            if not await _has_terminal_runtime_released_event(self._session, workspace.id):
+                await repo.add_event(
+                    workspace,
+                    event_type=_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
+                    reason_code=_TERMINAL_RUNTIME_RELEASED_REASON_CODE,
+                    payload={
+                        "compose_project_name": workspace.compose_project_name,
+                        "workspace_status": WorkspaceStatus.destroyed.value,
+                        "cleanup": cleanup_payload,
+                    },
                 )
             operation_result = _with_secret_lease_result(
                 {"status": workspace.status, "cleanup": cleanup_payload},

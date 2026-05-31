@@ -1478,3 +1478,61 @@ async def test_validate_exact_idempotency_replay_survives_terminal_workspace_mov
     }
     assert after_operation_ids == before_operation_ids
     assert after_event_ids == before_event_ids
+
+
+@pytest.mark.unit
+async def test_destroy_workspace_records_terminal_runtime_released_after_cleanup(
+    engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """After successful destroy cleanup, the terminal_runtime_released event
+    is recorded so the destroyed workspace no longer blocks host ports."""
+    cleaner = _RecordingCleaner()
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.ready,
+            compose_project_name="awf_ws_destroy_release",
+            compose_file_path=str(compose_file),
+        )
+        workspace.task_policy = {
+            "companions": [
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "ports": [[80, 8080]],
+                }
+            ]
+        }
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+        )
+
+        response = await service.destroy_workspace(
+            workspace.id,
+            force=True,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-release-event",
+        )
+
+        assert response.status == WorkspaceStatus.destroyed
+        assert response.message == "workspace destroyed"
+        repo = WorkspaceRepository(session)
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 1
+        assert release_events[0].reason_code == "TERMINAL_RUNTIME_RELEASED"
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 0
