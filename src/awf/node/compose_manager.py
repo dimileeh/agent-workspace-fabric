@@ -731,15 +731,10 @@ class ComposeManager:
                 proc.communicate(),
                 timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
             )
-        except FileNotFoundError as e:
-            raise ComposeOperationError(
-                operation=operation,
-                returncode=127,
-                stdout="",
-                stderr=str(e),
-                reason_code="DOCKER_UNAVAILABLE",
-            ) from e
         except TimeoutError as e:
+            # ``TimeoutError`` is itself an ``OSError`` subclass, so this clause must
+            # stay *above* the broad ``except OSError`` below or timeouts would be
+            # misclassified as ``DOCKER_UNAVAILABLE`` and skip the kill/reap cleanup.
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(ProcessLookupError, TimeoutError):
@@ -753,6 +748,21 @@ class ComposeManager:
                 stdout="",
                 stderr=(f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"),
                 reason_code="DOCKER_COMMAND_TIMEOUT",
+            ) from e
+        except OSError as e:
+            # ``FileNotFoundError`` (docker binary absent) is the common case, but
+            # ``create_subprocess_exec`` can raise other ``OSError`` subclasses too —
+            # notably ``PermissionError`` (docker present but not executable). They all
+            # mean docker is unusable here, so translate them to a structured
+            # ``DOCKER_UNAVAILABLE`` error rather than letting a raw ``OSError`` escape
+            # and break the best-effort "never raises" contract that
+            # ``capture_companion_diagnostics`` depends on.
+            raise ComposeOperationError(
+                operation=operation,
+                returncode=127,
+                stdout="",
+                stderr=str(e),
+                reason_code="DOCKER_UNAVAILABLE",
             ) from e
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")

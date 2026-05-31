@@ -1095,3 +1095,25 @@ class TestCaptureCompanionDiagnostics:
         marker = payload["companion_logs_capture_error"]
         assert isinstance(marker, dict)
         assert marker["_top_level"].startswith("ps:")
+
+    @pytest.mark.unit
+    async def test_capture_never_raises_on_docker_permission_error(
+        self, manager: ComposeManager
+    ) -> None:
+        # ``PermissionError`` (docker binary present but not executable) is an
+        # ``OSError`` subclass that ``create_subprocess_exec`` can raise but that is
+        # *not* ``FileNotFoundError``. It must still be translated to a structured
+        # capture-error marker so the "best-effort, never raises" contract holds.
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_noexec",
+                workspace_id="ws_noexec",
+            )
+
+        marker = payload["companion_logs_capture_error"]
+        assert isinstance(marker, dict)
+        assert marker["_top_level"].startswith("ps:")
+        assert "DOCKER_UNAVAILABLE" in marker["_top_level"]
