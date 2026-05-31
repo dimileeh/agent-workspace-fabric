@@ -2140,8 +2140,8 @@ def check_host_home(*, environ: Mapping[str, str] | None = None) -> SetupCheckRe
         summary = f"AWF_HOST_HOME={env_value!r} is an absolute auth-mount root."
         detail = (
             f"AWF_HOST_HOME is set to the absolute path {env_value!r}, so the auth mounts "
-            f"({env_value}/.config/gh, /.ssh, the agent CLI directories, ...) resolve to "
-            "absolute targets awf start can bind."
+            f"({env_value}/.config/gh, {env_value}/.ssh, the agent CLI directories, ...) resolve "
+            "to absolute targets awf start can bind."
         )
     else:
         summary = (
@@ -2150,7 +2150,7 @@ def check_host_home(*, environ: Mapping[str, str] | None = None) -> SetupCheckRe
         detail = (
             "AWF_HOST_HOME is unset or empty, so the local-service Compose stack falls back "
             f"to ${{HOME}}={home!r} (an absolute path) as the auth-mount root; the auth mounts "
-            f"({home}/.config/gh, /.ssh, the agent CLI directories, ...) resolve to absolute "
+            f"({home}/.config/gh, {home}/.ssh, the agent CLI directories, ...) resolve to absolute "
             "targets awf start can bind."
         )
     return SetupCheckResult(

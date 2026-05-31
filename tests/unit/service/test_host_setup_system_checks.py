@@ -2656,12 +2656,20 @@ def test_check_host_home_ok_text_names_validated_root() -> None:
     assert "/mnt/auth" in override.detail
     assert "unset" not in override.summary
     assert "unset" not in override.detail
+    # Regression for PRRT_kwDOSJAM6s6F8vPe: every auth mount example must resolve
+    # under the validated root, not the filesystem root. Both the gh config and
+    # the ssh mount are anchored at the override.
+    assert "/mnt/auth/.config/gh" in override.detail
+    assert "/mnt/auth/.ssh" in override.detail
 
     fallback = system_checks.check_host_home(environ={"HOME": "/home/op"})
     assert fallback.level is SetupCheckLevel.OK
     # An unset override falls back to ${HOME}; name that as the validated root.
     assert "unset" in fallback.detail
     assert "/home/op" in fallback.detail
+    # The ssh mount is anchored at ${HOME} too, not the filesystem root.
+    assert "/home/op/.config/gh" in fallback.detail
+    assert "/home/op/.ssh" in fallback.detail
 
     empty_override = system_checks.check_host_home(
         environ={"AWF_HOST_HOME": "", "HOME": "/home/op"}
