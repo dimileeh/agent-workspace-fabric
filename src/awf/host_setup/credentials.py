@@ -52,6 +52,14 @@ _KEYRING_SERVICE_PREFIX = "awf"
 _DEFAULT_ACCOUNT = "default"
 _DEFAULT_SECRETS_DIR = "~/.awf/secrets"
 
+# A produced ref is ultimately persisted to ``ProviderConfig.credential_ref``,
+# so it must never exceed that field's ``max_length``. Provider/account/path
+# identifiers are otherwise unbounded, so a long one could mint a ref that passes
+# ``CredentialRef`` validation yet cannot be stored. Keep this cap in lockstep
+# with ``awf.host_setup.config.ProviderConfig.credential_ref`` (config must not
+# import this module to avoid a cycle; a test guards the two against drift).
+MAX_CREDENTIAL_REF_LENGTH = 512
+
 # Env var names follow POSIX-ish uppercase identifiers (e.g. ``OPENAI_API_KEY``,
 # ``GH_TOKEN``); provider/account identifiers stay filesystem- and ref-safe.
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -101,7 +109,7 @@ class CredentialRef(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     backend: CredentialBackendKind
-    ref: str = Field(min_length=1, max_length=4096)
+    ref: str = Field(min_length=1, max_length=MAX_CREDENTIAL_REF_LENGTH)
 
     @model_validator(mode="after")
     def _validate_ref(self) -> CredentialRef:
@@ -230,8 +238,11 @@ class KeyringCredentialBackend:
             )
         provider = _require_safe_identifier(request.provider, field="provider")
         account = _require_safe_identifier(request.account, field="account")
-        secret = _pull_secret(request)
         service = f"{self._service_prefix}/{provider}"
+        # Validate the ref before the keychain write so an over-long identifier
+        # never strands a secret the resulting ref could not be stored against.
+        ref = _build_credential_ref("keyring", f"keyring://{service}/{account}")
+        secret = _pull_secret(request)
         try:
             module.set_password(service, account, secret)
         except Exception as exc:
@@ -248,7 +259,7 @@ class KeyringCredentialBackend:
                 message="The keyring backend rejected the credential write.",
                 details={"backend": self.kind, "error_type": type(exc).__name__},
             ) from exc
-        return CredentialRef(backend="keyring", ref=f"keyring://{service}/{account}")
+        return ref
 
 
 class EnvRefCredentialBackend:
@@ -278,7 +289,7 @@ class EnvRefCredentialBackend:
                 message="Environment variable name is not a valid identifier.",
                 details={"field": "env_var"},
             )
-        return CredentialRef(backend="env_ref", ref=f"env://{name}")
+        return _build_credential_ref("env_ref", f"env://{name}")
 
 
 class PlainFileCredentialBackend:
@@ -334,10 +345,13 @@ class PlainFileCredentialBackend:
                 },
             )
         provider = _require_safe_identifier(request.provider, field="provider")
-        secret = _pull_secret(request)
         target = self._secrets_dir / provider
+        # Validate the ref before writing so an over-long path never leaves an
+        # orphaned secret file the resulting ref could not be stored against.
+        ref = _build_credential_ref("plain_file", f"plain-file://{target}")
+        secret = _pull_secret(request)
         _write_secret_file(target, secret)
-        return CredentialRef(backend="plain_file", ref=f"plain-file://{target}")
+        return ref
 
 
 def select_credential_backend(
@@ -466,6 +480,23 @@ def _interactive_input_required(
     )
 
 
+def _build_credential_ref(backend: CredentialBackendKind, ref: str) -> CredentialRef:
+    """Build a safe reference, rejecting any ref a ``ProviderConfig`` can't store.
+
+    Backends call this *before* their storage side effect: ``CredentialRef`` and
+    ``ProviderConfig.credential_ref`` share a length cap, but provider/account/
+    path identifiers are unbounded, so a long one would otherwise mint a ref that
+    passes ``CredentialRef`` validation yet overflows the field that stores it.
+    """
+    if len(ref) > MAX_CREDENTIAL_REF_LENGTH:
+        raise CredentialError(
+            reason_code=CREDENTIAL_REF_INVALID,
+            message="Credential reference exceeds the maximum storable length.",
+            details={"backend": backend, "max_length": MAX_CREDENTIAL_REF_LENGTH},
+        )
+    return CredentialRef(backend=backend, ref=ref)
+
+
 def _require_safe_identifier(value: str, *, field: str) -> str:
     """Return ``value`` if it is a safe ref/filename identifier, else reject it."""
     if not _SAFE_IDENTIFIER_RE.fullmatch(value):
@@ -526,6 +557,7 @@ __all__ = [
     "CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED",
     "CREDENTIAL_REF_INVALID",
     "INTERACTIVE_INPUT_REQUIRED",
+    "MAX_CREDENTIAL_REF_LENGTH",
     "CredentialBackend",
     "CredentialBackendKind",
     "CredentialError",

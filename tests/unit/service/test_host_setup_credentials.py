@@ -27,6 +27,7 @@ from awf.host_setup.credentials import (
     CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED,
     CREDENTIAL_REF_INVALID,
     INTERACTIVE_INPUT_REQUIRED,
+    MAX_CREDENTIAL_REF_LENGTH,
     CredentialError,
     CredentialRef,
     CredentialRequest,
@@ -894,6 +895,92 @@ def test_chmod_best_effort_skips_non_posix_hosts(
     monkeypatch.setattr(credentials.os, "name", "nt")
 
     credentials._chmod_best_effort(target, 0o600)
+
+
+# --------------------------------------------------------------------------- #
+# 12. Credential refs stay within the ProviderConfig storage cap.
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_credential_ref_cap_matches_provider_config_credential_ref() -> None:
+    """Verify a max-length ref stores in ``ProviderConfig`` and one char over fails.
+
+    ``CredentialRef.ref`` is the value later persisted to
+    ``ProviderConfig.credential_ref``; if its cap drifts above that field's a
+    backend can mint a ref that passes ``CredentialRef`` validation yet cannot be
+    stored. Pin both caps to the same boundary to keep them in lockstep.
+    """
+    cap = MAX_CREDENTIAL_REF_LENGTH
+    at_cap = "env://" + "A" * (cap - len("env://"))
+    assert len(at_cap) == cap
+    assert CredentialRef(backend="env_ref", ref=at_cap).ref == at_cap
+    assert ProviderConfig(credential_ref=at_cap, backend="env_ref").credential_ref == at_cap
+
+    over_cap = at_cap + "A"
+    with pytest.raises(ValidationError):
+        CredentialRef(backend="env_ref", ref=over_cap)
+    with pytest.raises(ValidationError):
+        ProviderConfig(credential_ref=over_cap, backend="env_ref")
+
+
+@pytest.mark.unit
+def test_plain_file_overlong_ref_fails_before_writing_secret(tmp_path: Path) -> None:
+    """Verify an over-long plain-file ref is rejected before any secret write.
+
+    A provider long enough to push ``plain-file://<dir>/<provider>`` past the
+    ProviderConfig cap must fail with no secret file — and no secrets dir — left
+    behind: the write must not happen before the ref is known to be storable.
+    """
+    secrets_dir = tmp_path / "secrets"
+    long_provider = "a" * (MAX_CREDENTIAL_REF_LENGTH + 50)
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider=long_provider, secret_source=_secret(_FAKE_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert not (secrets_dir / long_provider).exists()
+    assert not secrets_dir.exists()
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_overlong_ref_fails_before_storing_secret() -> None:
+    """Verify an over-long keyring ref is rejected before the keychain write."""
+    module = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=module)
+    long_provider = "a" * (MAX_CREDENTIAL_REF_LENGTH + 50)
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider=long_provider, secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert module.set_calls == []
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_env_ref_overlong_name_is_rejected() -> None:
+    """Verify a valid-but-over-long env var name is rejected at the storage cap.
+
+    The env-ref backend stores nothing, but its ref must still fit ProviderConfig;
+    a POSIX-valid name long enough to overflow the cap must be refused.
+    """
+    long_name = "A" * (MAX_CREDENTIAL_REF_LENGTH + 50)
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(
+            CredentialRequest(provider="openai", env_var=long_name)
+        )
+
+    assert exc_info.value.reason_code == CREDENTIAL_REF_INVALID
 
 
 @pytest.mark.unit
