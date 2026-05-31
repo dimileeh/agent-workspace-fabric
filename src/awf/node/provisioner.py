@@ -274,7 +274,11 @@ class Provisioner:
                     async with self._session_factory() as pre_launch_session:
                         pre_launch_repo = WorkspaceRepository(pre_launch_session)
                         pre_launch_ws = await pre_launch_repo.get(workspace_id)
-                        if pre_launch_ws is not None and pre_launch_ws.compose_project_name is None:
+                        if (
+                            pre_launch_ws is not None
+                            and pre_launch_ws.compose_project_name is None
+                            and pre_launch_ws.status == WorkspaceStatus.provisioning.value
+                        ):
                             pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
                             if (
                                 profile_resolution is not None
