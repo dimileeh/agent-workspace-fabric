@@ -346,6 +346,19 @@ def test_workflow_scope_push_block_handles_alternate_github_wording(stderr: str)
 
 
 @pytest.mark.unit
+def test_workflow_scope_push_block_handles_terse_hook_output_without_workflow_path() -> None:
+    """Verify terse GitHub hook output still maps to missing workflow scope."""
+    block = _workflow_scope_push_block(
+        "remote: error: workflow permissions required\n"
+        " ! [remote rejected] HEAD -> awf/ws (pre-receive hook declined)"
+    )
+
+    assert block.blocked is True
+    assert block.paths == ()
+    assert "`workflow` scope" in block.message
+
+
+@pytest.mark.unit
 def test_workflow_scope_push_block_ignores_unrelated_workflow_output() -> None:
     """Verify generic workflow text does not become a token-scope failure."""
     block = _workflow_scope_push_block(
@@ -874,6 +887,118 @@ async def test_workflow_scope_push_failure_preserves_captured_defer_thread_state
     action = decide(_status(inline=(deferred_thread,)), state, MonitorConfig())
 
     assert isinstance(action, NotifyHuman)
+
+
+@pytest.mark.unit
+async def test_later_generic_push_failure_keeps_workflow_scope_preserved_defer_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify preserved defer state is not re-addressed by a later push failure."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    deferred_thread = ReviewThread(
+        thread_id="T_defer",
+        path="src/awf/runtime/example.py",
+        line=3,
+        body_excerpt="defer this follow-up",
+        author="cursor[bot]",
+    )
+    workflow_thread = ReviewThread(
+        thread_id="T_workflow",
+        path=".github/workflows/publish.yml",
+        line=12,
+        body_excerpt="publish workflow still needs the reviewed fix",
+        author="cursor[bot]",
+    )
+    later_thread = ReviewThread(
+        thread_id="T_later",
+        path="src/awf/runtime/later.py",
+        line=9,
+        body_excerpt="new follow-up after credential rotation",
+        author="cursor[bot]",
+    )
+    state = MonitorState()
+    captured_threads: list[str] = []
+
+    async def _capture_deferred(*_args: object, **kwargs: object) -> bool:
+        captured_threads.append(kwargs["thread"].thread_id)
+        return True
+
+    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _capture_deferred)
+
+    workflow_scope_result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(deferred_thread, workflow_thread),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert workflow_scope_result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert captured_threads == ["T_defer"]
+    assert state.threads_addressed_ids["T_defer"] == "defer"
+    assert state.threads_addressed_ids["T_workflow"] == "needs_human"
+
+    action = decide(
+        _status(inline=(deferred_thread, workflow_thread, later_thread)),
+        state,
+        MonitorConfig(),
+    )
+
+    assert isinstance(action, AddressComments)
+    assert action.threads == (later_thread,)
+
+    adapter.queue(stdout="AWF-VERDICT: FIXED: handled later follow-up")
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    cmd.queue_result(returncode=1, stderr="remote: pre-receive hook declined")
+
+    generic_push_result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=action.threads,
+        initial_reviews=action.review_comments,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert generic_push_result.reason_code == "GIT_PUSH_FAILED"
+    assert captured_threads == ["T_defer"]
+    assert state.threads_addressed_ids["T_defer"] == "defer"
+    assert "__review_thread_body_hash__:T_defer" in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_defer_reason_state_key("T_defer")] == (
+        "track follow-up separately"
+    )
+    assert "T_later" not in state.threads_addressed_ids
+    assert len(adapter.calls) == 3
 
 
 @pytest.mark.unit

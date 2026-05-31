@@ -69,6 +69,16 @@ _WORKFLOW_SCOPE_PUSH_CONTEXT_RE = re.compile(
     r"\.github/workflows/",
     re.IGNORECASE,
 )
+_DIRECT_WORKFLOW_SCOPE_REQUIRED_RE = re.compile(
+    rf"\b(?:remote:\s*)?(?:error:\s*)?{_WORKFLOW_PERMISSION_TERM}\s+"
+    rf"(?:is\s+|are\s+)?required\b",
+    re.IGNORECASE,
+)
+_GIT_PUSH_OUTPUT_CONTEXT_RE = re.compile(
+    r"\bremote:|\bremote rejected\b|\bpre-receive hook\b|\bhook declined\b|"
+    r"\bfailed to push\b",
+    re.IGNORECASE,
+)
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
@@ -605,7 +615,12 @@ def _workflow_scope_push_block(output: str) -> _WorkflowScopePushBlock:
     normalized = " ".join(output.split())
     if not any(pattern.search(normalized) for pattern in _MISSING_WORKFLOW_SCOPE_PATTERNS):
         return _WorkflowScopePushBlock(blocked=False)
-    if _WORKFLOW_SCOPE_PUSH_CONTEXT_RE.search(normalized) is None:
+    has_workflow_file_context = _WORKFLOW_SCOPE_PUSH_CONTEXT_RE.search(normalized) is not None
+    has_direct_hook_context = (
+        _DIRECT_WORKFLOW_SCOPE_REQUIRED_RE.search(normalized) is not None
+        and _GIT_PUSH_OUTPUT_CONTEXT_RE.search(normalized) is not None
+    )
+    if not (has_workflow_file_context or has_direct_hook_context):
         return _WorkflowScopePushBlock(blocked=False)
     paths = tuple(
         dict.fromkeys(
