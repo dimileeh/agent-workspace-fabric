@@ -126,7 +126,13 @@ def _run_setup(
     )
 
     if not dry_run:
-        if selected_providers:
+        # Readiness blockers win over the interactive-input guard. When the host
+        # checks already failed (e.g. missing Docker), raising
+        # INTERACTIVE_INPUT_REQUIRED here would mask the SETUP_READINESS_FAILED
+        # issues the operator must fix first behind a misleading input-required
+        # exit, so only demand interactive provider input when the host is
+        # otherwise ready to proceed.
+        if selected_providers and payload.status not in ("blocked", "failed"):
             # Configuring a selected provider needs interactive credential entry,
             # which T04 forwards to provider setup (T07). Under --non-interactive
             # there is no way to collect it, so surface the machine-readable signal.

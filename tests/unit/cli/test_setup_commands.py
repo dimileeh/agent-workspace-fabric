@@ -343,6 +343,32 @@ def test_setup_non_interactive_provider_requires_input(harness: _Harness) -> Non
     assert harness.writes == []
 
 
+@pytest.mark.unit
+def test_setup_non_interactive_provider_surfaces_readiness_blockers(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify readiness blockers win over the interactive-input guard.
+
+    Regression for PRRT_kwDOSJAM6s6F6Jvu: a non-dry-run
+    ``--provider ... --non-interactive`` run must still surface
+    SETUP_READINESS_FAILED blockers (e.g. missing Docker) rather than masking
+    them behind INTERACTIVE_INPUT_REQUIRED, so the operator sees the host
+    problem they must fix first instead of a misleading input-required exit.
+    """
+    monkeypatch.setattr(setup_commands, "run_system_checks", _docker_blocked)
+    result = _runner.invoke(
+        app,
+        ["setup", "--provider", "github", "--non-interactive", "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert "SETUP_READINESS_FAILED" in reason_codes
+    assert "INTERACTIVE_INPUT_REQUIRED" not in reason_codes
+
+
 # --- Corrupt config defensive handling ------------------------------------
 
 
