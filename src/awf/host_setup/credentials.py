@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from awf.common.audit import REDACTION_MARKER, redact_audit_text
 from awf.common.token_patterns import compile_known_token_re
@@ -521,9 +521,14 @@ def _is_noop_keyring_backend(backend: object) -> bool:
     guarantee is the write/read-back round-trip in
     ``KeyringCredentialBackend.create_ref``, which refuses to mint a ref when the
     secret does not survive storage.
+
+    The leaf match is scoped to ``keyring``-rooted modules so a fully functional
+    third-party backend that merely shares the leaf name (e.g. ``myvault.null``)
+    is not silently treated as unavailable and degraded to env-ref.
     """
     backend_module = type(backend).__module__ or ""
-    return backend_module.rsplit(".", 1)[-1] in _NOOP_KEYRING_BACKEND_LEAVES
+    leaf = backend_module.rsplit(".", 1)[-1]
+    return leaf in _NOOP_KEYRING_BACKEND_LEAVES and backend_module.startswith("keyring.")
 
 
 def _pull_secret(request: CredentialRequest) -> str:
@@ -572,6 +577,13 @@ def _build_credential_ref(backend: CredentialBackendKind, ref: str) -> Credentia
     ``ProviderConfig.credential_ref`` share a length cap, but provider/account/
     path identifiers are unbounded, so a long one would otherwise mint a ref that
     passes ``CredentialRef`` validation yet overflows the field that stores it.
+
+    The final ``CredentialRef`` construction can also fail ``_validate_ref`` for
+    reasons the length check does not cover — e.g. an unsanitised ``secrets_dir``
+    path component that is token-shaped trips the raw-secret guard. Every backend
+    promises callers it raises only ``CredentialError``, so wrap that
+    ``ValidationError`` into a reason-coded error instead of letting Pydantic's
+    raw exception escape ``store_provider_credential``.
     """
     if len(ref) > MAX_CREDENTIAL_REF_LENGTH:
         raise CredentialError(
@@ -579,7 +591,16 @@ def _build_credential_ref(backend: CredentialBackendKind, ref: str) -> Credentia
             message="Credential reference exceeds the maximum storable length.",
             details={"backend": backend, "max_length": MAX_CREDENTIAL_REF_LENGTH},
         )
-    return CredentialRef(backend=backend, ref=ref)
+    try:
+        return CredentialRef(backend=backend, ref=ref)
+    except ValidationError as exc:
+        # ``CredentialRef`` sets ``hide_input_in_errors``, so ``exc`` carries no
+        # raw ref; surface only the secret-free backend kind in the reason code.
+        raise CredentialError(
+            reason_code=CREDENTIAL_REF_INVALID,
+            message="Credential reference failed internal validation.",
+            details={"backend": backend},
+        ) from exc
 
 
 def _require_safe_identifier(value: str, *, field: str) -> str:

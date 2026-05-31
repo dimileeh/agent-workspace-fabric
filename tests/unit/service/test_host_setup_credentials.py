@@ -1339,6 +1339,28 @@ def test_keyring_unavailable_when_backend_resolves_to_none() -> None:
 
 
 @pytest.mark.unit
+def test_third_party_backend_with_noop_named_module_stays_available() -> None:
+    """Verify a non-keyring backend whose module leaf is ``null``/``fail`` is usable.
+
+    The no-op probe must match only the ``fail``/``null`` backends ``keyring``
+    itself resolves to. A fully functional third-party backend from e.g.
+    ``myvault.null`` shares that leaf name but is not a keyring no-op, so scoping
+    the check to ``keyring``-rooted modules keeps it reporting available rather
+    than being silently rejected and degraded to env-ref.
+    """
+
+    class _ThirdPartyVaultBackend:
+        """Functional third-party backend whose module leaf collides with ``null``."""
+
+    _ThirdPartyVaultBackend.__module__ = "myvault.null"
+
+    backend = KeyringCredentialBackend(
+        keyring_module=FakeKeyringModule(backend=_ThirdPartyVaultBackend())
+    )
+    assert backend.is_available() is True
+
+
+@pytest.mark.unit
 def test_plain_file_dir_creation_failure_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1462,6 +1484,36 @@ def test_env_ref_overlong_name_is_rejected() -> None:
         )
 
     assert exc_info.value.reason_code == CREDENTIAL_REF_INVALID
+
+
+@pytest.mark.unit
+def test_plain_file_ref_validation_error_is_reason_coded(tmp_path: Path) -> None:
+    """Verify a ref that fails ``CredentialRef`` validation raises ``CredentialError``.
+
+    ``_build_credential_ref`` assembles the ref from a ``secrets_dir`` it does not
+    sanitise, so a secrets dir whose own path component is token-shaped makes the
+    assembled ``plain-file://`` ref trip ``CredentialRef``'s raw-secret guard,
+    which raises a Pydantic ``ValidationError``. Every backend promises to raise
+    only ``CredentialError``, so that internal validation failure must be wrapped
+    with a reason code rather than escaping ``store_provider_credential`` raw —
+    and the secret must never reach the keychain/file or the diagnostics.
+    """
+    token_shaped_dir = tmp_path / ("ghp_" + "c" * 36) / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=token_shaped_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert not token_shaped_dir.exists()
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 
 @pytest.mark.unit
