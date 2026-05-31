@@ -489,7 +489,14 @@ class ComposeManager:
         Raises :class:`ComposeOperationError` on failure so callers can fall
         back to an inline ``build:`` service and keep provisioning correct.
         """
-        args = ["build", "-t", tag, "-f", dockerfile]
+        # ``docker build`` resolves a ``-f`` path relative to the process working
+        # directory (the AWF service cwd), not the build context, so a
+        # context-relative value (e.g. ``Dockerfile``) would be looked up under
+        # the service cwd, fail, and fall back to an inline compose build. Anchor
+        # it to the absolute build context to reproduce Compose's own
+        # dockerfile-relative-to-context semantics, cwd-independently.
+        dockerfile_path = os.path.normpath(Path(build_context) / dockerfile)
+        args = ["build", "-t", tag, "-f", dockerfile_path]
         for key, value in (labels or {}).items():
             args.extend(["--label", f"{key}={value}"])
         args.append(build_context)

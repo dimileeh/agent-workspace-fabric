@@ -1019,7 +1019,7 @@ class TestCompanionImageCommands:
             "-t",
             "awf-companion-backend:abc",
             "-f",
-            "Dockerfile",
+            "/host/backend/Dockerfile",
             "--label",
             "awf.managed-companion=true",
             "--label",
@@ -1051,10 +1051,44 @@ class TestCompanionImageCommands:
             "-t",
             "awf-companion-backend:abc",
             "-f",
-            "Dockerfile",
+            "/host/backend/Dockerfile",
             "/host/backend",
         )
         assert "--label" not in calls[0]
+
+    @pytest.mark.unit
+    async def test_build_companion_image_anchors_dockerfile_to_build_context(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression for PRRT_kwDOSJAM6s6F5073: ``docker build`` resolves a ``-f``
+        # path relative to the process working directory (the AWF service cwd),
+        # not the build context. A context-relative ``dockerfile`` must be
+        # anchored to the absolute build context so the pre-build does not look
+        # for the Dockerfile under the service cwd, fail, and fall back to an
+        # inline compose build.
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.build_companion_image(
+            tag="awf-companion-backend:abc",
+            build_context="/host/aira-agent",
+            dockerfile="docker/backend.Dockerfile",
+        )
+
+        assert calls[0] == (
+            "docker",
+            "build",
+            "-t",
+            "awf-companion-backend:abc",
+            "-f",
+            "/host/aira-agent/docker/backend.Dockerfile",
+            "/host/aira-agent",
+        )
 
     @pytest.mark.unit
     async def test_build_companion_image_raises_on_failure(
