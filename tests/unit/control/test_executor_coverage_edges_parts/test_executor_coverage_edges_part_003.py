@@ -691,6 +691,7 @@ async def test_execution_validation_fails_when_workspace_head_sha_cannot_be_capt
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Ensure validation short-circuits when workspace head SHA cannot be captured."""
     profile = WorkspaceProfile.model_validate({"name": "validation-missing-head"})
     workspace = SimpleNamespace(
         resolved_profile={"name": "validation-missing-head"},
