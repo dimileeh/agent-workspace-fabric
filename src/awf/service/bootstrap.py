@@ -31,6 +31,13 @@ DEFAULT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
 AGENT_RUNTIME_DOCKERFILE = Path("docker/agent-runtime.Dockerfile")
 PACKAGED_BOOTSTRAP_ASSET_ROOT = Path("bootstrap_assets")
 
+# Bootstrap failure reason codes. Exposed as named constants so consumers (e.g.
+# ``awf start`` failure classification) reference one source of truth instead of
+# duplicating the literal strings, which would silently drift on a rename.
+SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND = "SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND"
+SERVICE_BOOTSTRAP_STAGE_FAILED = "SERVICE_BOOTSTRAP_STAGE_FAILED"
+SERVICE_BOOTSTRAP_TIMEOUT = "SERVICE_BOOTSTRAP_TIMEOUT"
+
 
 class CompletedProcessLike(Protocol):
     @property
@@ -92,6 +99,7 @@ class ServiceBootstrapOptions:
     timeout_seconds: float = DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS
     poll_interval_seconds: float = DEFAULT_BOOTSTRAP_POLL_INTERVAL_SECONDS
     skip_agent_runtime_build: bool = False
+    force_rebuild: bool = False
     strict_providers: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -197,6 +205,7 @@ async def run_service_bootstrap(
     options: ServiceBootstrapOptions | None = None,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
     env_file: Path | None = None,
+    asset_root: Path | None = None,
     run_subprocess: SubprocessRun | None = None,
     status_collector: StatusCollector | None = None,
     sleep: Sleep = asyncio.sleep,
@@ -204,7 +213,12 @@ async def run_service_bootstrap(
     service_environ: Mapping[str, str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
 ) -> ServiceBootstrapResult:
-    """Start local service dependencies and wait for healthy status."""
+    """Start local service dependencies and wait for healthy status.
+
+    ``asset_root`` pins compose, agent-runtime, and env-file resolution to an
+    explicitly selected bootstrap asset root (e.g. a verified source checkout)
+    instead of running discovery. ``None`` preserves discovery behavior.
+    """
 
     resolved_options = options or ServiceBootstrapOptions()
     runner = run_subprocess or _run_subprocess
@@ -213,6 +227,7 @@ async def run_service_bootstrap(
     assets = _resolve_bootstrap_assets(
         compose_file,
         require_agent_runtime=not resolved_options.skip_agent_runtime_build,
+        asset_root=asset_root,
     )
     if env_file is not None:
         assets = replace(assets, compose_env_file=env_file if env_file.exists() else None)
@@ -290,6 +305,7 @@ def _bootstrap_stages(
                 (
                     "docker",
                     "build",
+                    *(("--no-cache",) if options.force_rebuild else ()),
                     "-t",
                     settings.agent_runtime_image,
                     "-f",
@@ -375,8 +391,20 @@ def _resolve_bootstrap_assets(
     compose_file: Path,
     *,
     require_agent_runtime: bool,
+    asset_root: Path | None = None,
 ) -> _BootstrapAssets:
-    """Resolve compose, runtime Dockerfile, and env-file assets for bootstrap."""
+    """Resolve compose, runtime Dockerfile, and env-file assets for bootstrap.
+
+    When ``asset_root`` is provided, resolution is pinned to that root instead of
+    running discovery, so explicitly selected source-checkout assets are used.
+    """
+
+    if asset_root is not None:
+        return _resolve_pinned_bootstrap_assets(
+            compose_file,
+            require_agent_runtime=require_agent_runtime,
+            asset_root=asset_root,
+        )
 
     asset_root = _resolve_bootstrap_asset_root()
     default_compose = compose_file == LOCAL_SERVICE_COMPOSE_FILE or (
@@ -398,6 +426,42 @@ def _resolve_bootstrap_assets(
             raise _bootstrap_assets_not_found_error(compose_file)
         agent_runtime_dockerfile = asset_root / AGENT_RUNTIME_DOCKERFILE
 
+    return _BootstrapAssets(
+        root=asset_root,
+        agent_runtime_dockerfile=agent_runtime_dockerfile,
+        compose_file=resolved_compose_file,
+        compose_env_file=_resolve_compose_env_file(asset_root),
+    )
+
+
+def _resolve_pinned_bootstrap_assets(
+    compose_file: Path,
+    *,
+    require_agent_runtime: bool,
+    asset_root: Path,
+) -> _BootstrapAssets:
+    """Resolve bootstrap assets pinned to an explicitly selected asset root.
+
+    Used when start selects verified source-checkout assets. The root must be a
+    valid bootstrap asset root, otherwise the existing not-found error is raised
+    (start maps it to ``START_COMPOSE_ASSETS_MISSING``).
+    """
+
+    if not _is_bootstrap_asset_root(asset_root):
+        raise _bootstrap_assets_not_found_error(compose_file)
+
+    default_compose = compose_file == LOCAL_SERVICE_COMPOSE_FILE or (
+        compose_file.is_absolute()
+        and compose_file.resolve() == (asset_root / LOCAL_SERVICE_COMPOSE_FILE).resolve()
+    )
+    resolved_compose_file = (
+        asset_root / LOCAL_SERVICE_COMPOSE_FILE
+        if default_compose
+        else _resolve_user_path(compose_file)
+    )
+    agent_runtime_dockerfile = (
+        asset_root / AGENT_RUNTIME_DOCKERFILE if require_agent_runtime else None
+    )
     return _BootstrapAssets(
         root=asset_root,
         agent_runtime_dockerfile=agent_runtime_dockerfile,
@@ -511,7 +575,7 @@ def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
 
 def _bootstrap_assets_not_found_error(compose_file: Path) -> ServiceBootstrapError:
     return ServiceBootstrapError(
-        reason_code="SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND",
+        reason_code=SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND,
         message=(
             "Cannot resolve AWF bootstrap assets for local service startup. "
             "Run awf service bootstrap from an AWF source checkout that contains "
@@ -564,7 +628,7 @@ def _run_stage(
         )
     except FileNotFoundError as exc:
         raise ServiceBootstrapError(
-            reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+            reason_code=SERVICE_BOOTSTRAP_STAGE_FAILED,
             message=f"{stage.name} failed: docker binary not found on PATH",
             stage=stage.name,
             command=stage.command,
@@ -574,7 +638,7 @@ def _run_stage(
     except OSError as exc:
         detail = f"{type(exc).__name__}: {exc}"
         raise ServiceBootstrapError(
-            reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+            reason_code=SERVICE_BOOTSTRAP_STAGE_FAILED,
             message=f"{stage.name} failed: {detail}",
             stage=stage.name,
             command=stage.command,
@@ -586,7 +650,7 @@ def _run_stage(
     stderr = result.stderr or ""
     if result.returncode != 0:
         raise ServiceBootstrapError(
-            reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+            reason_code=SERVICE_BOOTSTRAP_STAGE_FAILED,
             message=f"{stage.name} failed with exit code {result.returncode}",
             stage=stage.name,
             command=stage.command,
@@ -642,7 +706,7 @@ async def _poll_status(
         remaining = deadline - monotonic()
         if remaining <= 0:
             error = ServiceBootstrapError(
-                reason_code="SERVICE_BOOTSTRAP_TIMEOUT",
+                reason_code=SERVICE_BOOTSTRAP_TIMEOUT,
                 message="timed out waiting for local service readiness",
                 last_status=last_status,
             )
