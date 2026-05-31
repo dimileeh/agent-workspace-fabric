@@ -269,6 +269,63 @@ async def test_monitor_precommit_autofix_retry_allows_untracked_operation_paths(
 
 
 @pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_allows_hook_modified_files_inside_untracked_operation_directory(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "docs/newdir/file.py"
+    operation_dir = "docs/newdir/"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f"AM {fixed_path}\n")
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0)
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(operation_dir,),
+    )
+
+    assert retry is not None
+    retry_result, restaged_paths = retry
+    assert retry_result.ok
+    assert restaged_paths == (fixed_path,)
+    assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
+
+
+@pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_rejects_paths_outside_untracked_operation_directory(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "docs/newdir-sibling/file.py"
+    operation_dir = "docs/newdir/"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f"AM {fixed_path}\n")
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(operation_dir,),
+    )
+
+    assert retry is None
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.unit
 async def test_monitor_precommit_autofix_retry_restages_normalizer_when_other_hook_cofails(
     tmp_path: Path,
 ) -> None:

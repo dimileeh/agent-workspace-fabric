@@ -42,6 +42,16 @@ def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _path_in_operation_dirty_scope(
+    path: str,
+    operation_dirty_path_set: set[str],
+    operation_dirty_dir_prefixes: Sequence[str],
+) -> bool:
+    if path in operation_dirty_path_set:
+        return True
+    return any(path.startswith(prefix) for prefix in operation_dirty_dir_prefixes)
+
+
 def _monitor_precommit_autofix_repair_paths(commit_result: CommandResult) -> tuple[str, ...]:
     """Thin shim kept for targeted test-import isolation; do not add logic here."""
     return monitor_precommit_autofix_repair_paths(commit_result)
@@ -81,16 +91,26 @@ async def _retry_monitor_precommit_autofix_commit_once(
     dirty_path_set = set(dirty_paths)
     repair_path_set = set(repair_paths)
     operation_dirty_path_set = set(operation_dirty_paths)
+    operation_dirty_dir_prefixes = tuple(
+        path for path in operation_dirty_path_set if path.endswith("/")
+    )
+    dirty_paths_outside_operation = {
+        path
+        for path in dirty_path_set
+        if not _path_in_operation_dirty_scope(
+            path,
+            operation_dirty_path_set,
+            operation_dirty_dir_prefixes,
+        )
+    }
     worktree_modified_paths = tuple(_worktree_modified_paths_from_porcelain(dirty_status.stdout))
     worktree_modified_path_set = set(worktree_modified_paths)
-    if (
-        not dirty_path_set <= operation_dirty_path_set
-        or not worktree_modified_path_set <= repair_path_set
-    ):
+    if dirty_paths_outside_operation or not worktree_modified_path_set <= repair_path_set:
         _log.warning(
             "monitor.dirty_commit_autofix_retry_skipped_unsafe",
             workspace_id=workspace_id,
             dirty_paths=sorted(dirty_path_set),
+            dirty_paths_outside_operation=sorted(dirty_paths_outside_operation),
             repair_paths=sorted(repair_path_set),
             operation_dirty_paths=sorted(operation_dirty_path_set),
             worktree_modified_paths=sorted(worktree_modified_path_set),
