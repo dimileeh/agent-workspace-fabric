@@ -269,6 +269,41 @@ async def test_cleanup_validation_worktree_rejects_clean_state_with_default_head
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_detects_head_change_after_dirty_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A clean tree after dirty cleanup should still fail if validation changed HEAD."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    current_head = "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        calls.append(tuple(args))
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            if len(calls) == 1:
+                return _CommandResultLike(0, "?? untracked.py\n", "")
+            return _CommandResultLike(0, "", None)
+        if args == ["clean", "-fd", "--", "untracked.py"]:
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{current_head}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleanup_command == "git rev-parse"
+    assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
+
+
+@pytest.mark.unit
 def test_validation_worktree_cleanup_failure_message_prefers_verify_paths() -> None:
     """Human-readable cleanup failures should report remaining dirty paths when verification runs."""
     cleanup = ValidationWorktreeCleanup(

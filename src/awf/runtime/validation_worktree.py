@@ -270,23 +270,8 @@ async def cleanup_validation_worktree_side_effects(
     restore_ref: str = "HEAD",
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
-    check = await check_validation_worktree_clean(
-        run_git=run_git,
-        worktree_path=worktree_path,
-    )
-    if check.clean:
-        if restore_ref == "HEAD":
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=(
-                    "Could not verify validation worktree HEAD after cleanup because "
-                    "`restore_ref` was not captured before validation."
-                ),
-            )
 
+    async def _verify_head_unchanged(*, restore_ref: str) -> ValidationWorktreeCleanup | None:
         restore_target = await run_git(["rev-parse", restore_ref])
         if not restore_target.ok:
             return ValidationWorktreeCleanup(
@@ -338,6 +323,7 @@ async def cleanup_validation_worktree_side_effects(
                     f"Could not verify validation worktree HEAD after cleanup: {current_message}"
                 ),
             )
+
         if current_head_sha != restore_ref_sha:
             return ValidationWorktreeCleanup(
                 cleaned=False,
@@ -350,6 +336,30 @@ async def cleanup_validation_worktree_side_effects(
                 ),
                 cleanup_command="git rev-parse",
             )
+
+        return None
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree_path,
+    )
+    if check.clean:
+        if restore_ref == "HEAD":
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=check,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=(
+                    "Could not verify validation worktree HEAD after cleanup because "
+                    "`restore_ref` was not captured before validation."
+                ),
+            )
+
+        if restore_ref != "HEAD":
+            head_check = await _verify_head_unchanged(restore_ref=restore_ref)
+            if head_check is not None:
+                return head_check
         return ValidationWorktreeCleanup(cleaned=False, check=check, restore_ref=restore_ref)
     if check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
         return ValidationWorktreeCleanup(
@@ -415,6 +425,11 @@ async def cleanup_validation_worktree_side_effects(
             cleanup_command=None,
             verify_check=verify,
         )
+
+    if restore_ref != "HEAD":
+        head_check = await _verify_head_unchanged(restore_ref=restore_ref)
+        if head_check is not None:
+            return head_check
 
     return ValidationWorktreeCleanup(
         cleaned=True,
