@@ -20,7 +20,6 @@ from awf.control.executor import quality_gates as executor_quality_gates
 from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
-    _agent_model_for_workspace,
     _agent_pr_identity,
     _call_pr_monitor_factory,
     _read_text_if_present,
@@ -571,29 +570,29 @@ async def test_planning_required_dirty_extra_file_still_rejected(tmp_path: Path)
 
 
 @pytest.mark.unit
-def test_agent_model_for_workspace_prefers_nonblank_policy_override() -> None:
+def test_agent_pr_identity_prefers_nonblank_policy_model_override() -> None:
     defaults = AgentDefaults(model="default-model")
 
     assert (
-        _agent_model_for_workspace(  # type: ignore[arg-type]
-            SimpleNamespace(task_policy={"agent_model": "  gpt-special  "}),
-            defaults,
+        _agent_pr_identity(  # type: ignore[arg-type]
+            SimpleNamespace(agent="codex", task_policy={"agent_model": "  gpt-special  "}),
+            defaults=defaults,
         )
-        == "gpt-special"
+        == "agent: `codex`, model: `gpt-special`"
     )
     assert (
-        _agent_model_for_workspace(  # type: ignore[arg-type]
-            SimpleNamespace(task_policy={"agent_model": "   "}),
-            defaults,
+        _agent_pr_identity(  # type: ignore[arg-type]
+            SimpleNamespace(agent="codex", task_policy={"agent_model": "   "}),
+            defaults=defaults,
         )
-        == "default-model"
+        == "agent: `codex`, model: `default-model`"
     )
     assert (
-        _agent_model_for_workspace(  # type: ignore[arg-type]
-            SimpleNamespace(task_policy=None),
-            None,
+        _agent_pr_identity(  # type: ignore[arg-type]
+            SimpleNamespace(agent="codex", task_policy=None),
+            defaults=None,
         )
-        is None
+        == "agent: `codex`"
     )
 
 
@@ -644,6 +643,19 @@ def test_agent_pr_identity_omits_missing_model_and_effort() -> None:
             defaults=None,
         )
         == "agent: `codex`"
+    )
+
+
+@pytest.mark.unit
+def test_agent_pr_identity_cursor_lower_effort_omits_thinking_model() -> None:
+    defaults = AgentDefaults(model="sonnet-4-thinking", effort="xhigh")
+
+    assert (
+        _agent_pr_identity(  # type: ignore[arg-type]
+            SimpleNamespace(agent="cursor", task_policy={"agent_effort": "medium"}),
+            defaults=defaults,
+        )
+        == "agent: `cursor`, effort: `medium`"
     )
 
 

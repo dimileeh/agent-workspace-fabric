@@ -70,6 +70,12 @@ def test_provider_ccusage_source_unknown_returns_none() -> None:
 
 
 @pytest.mark.unit
+def test_provider_ccusage_source_cursor_is_unsupported_until_ccusage_adds_source() -> None:
+    """Cursor remains unsupported until ccusage exposes a source name."""
+    assert provider_ccusage_source(AgentRuntime.cursor) is None
+
+
+@pytest.mark.unit
 def test_provider_ccusage_source_grok_is_explicitly_unsupported() -> None:
     assert provider_ccusage_source(AgentRuntime.grok) is None
 

@@ -163,6 +163,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf setup --provider <provider>`
 **Docs Link:** [docs/REASON_CATALOG.md#credential_ref_invalid](#credential_ref_invalid)
 
+### CURSOR_AUTH_MISSING
+**Problem:** No Cursor auth signal was visible.
+**Likely Cause:** Missing Cursor API credentials.
+**Operator Fix:** Set CURSOR_API_KEY before starting AWF.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#cursor_auth_missing](#cursor_auth_missing)
+
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
 **Likely Cause:** Permission denied or path does not exist.
