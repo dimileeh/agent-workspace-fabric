@@ -789,20 +789,27 @@ def check_api_host_port_override(raw: str) -> SetupCheckResult:
 def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
     """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unusable.
 
-    A missing, empty, or whitespace-only value yields ``None``. Whether that
-    ``None`` means a legitimate fall-back to Compose's ``${HOME}/.awf/service``
-    default (only an *unset or empty* override, mirroring
-    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``) or a startup blocker (a
-    whitespace-only value, which Compose keeps as a non-empty literal and
-    interpolates verbatim into the bind path) is decided by
+    A missing, empty, whitespace-only, *or surrounding-whitespace* (padded)
+    value yields ``None``. The override is "usable" only when AWF can honor it
+    identically across every layer, and a value with leading/trailing whitespace
+    cannot be: the readiness probe would ``strip`` it, but Compose interpolates
+    ``${AWF_HOST_WORK_DIR}`` verbatim and ``awf service``'s
+    ``_resolve_service_work_dir`` returns it *unstripped*, so a padded
+    ``" /data/awf"`` would pass disk readiness for the stripped ``/data/awf``
+    while ``awf start`` mounts (and the service resolves) the spaced path.
+    Whether that ``None`` means a legitimate fall-back to Compose's
+    ``${HOME}/.awf/service`` default (only an *unset or empty* override,
+    mirroring ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``) or a startup
+    blocker (a whitespace-only or padded value, which Compose keeps as a
+    non-empty literal and interpolates verbatim into the bind path) is decided by
     :func:`_invalid_host_work_dir_override`, which the readiness probe surfaces
-    as a blocker instead of silently probing the default work dir.
+    as a blocker instead of silently probing the stripped or default work dir.
     """
     raw = environ.get("AWF_HOST_WORK_DIR")
     if raw is None:
         return None
     candidate = raw.strip()
-    if not candidate:
+    if not candidate or candidate != raw:
         return None
     return candidate
 
@@ -867,15 +874,16 @@ def _invalid_host_work_dir_override(
     empty* (a zero-length string) — the empty case is a legitimate fall-back to
     Compose's ``${HOME}/.awf/service`` default because
     ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` substitutes the default only
-    when the variable is unset or empty. A whitespace-only value is returned
-    instead: Compose treats ``"   "`` as a non-empty literal and interpolates it
+    when the variable is unset or empty. A whitespace-only *or
+    surrounding-whitespace* (padded) value is returned instead: Compose treats
+    ``"   "`` and ``" /data/awf"`` as non-empty literals and interpolates them
     verbatim into the bind source/target, and ``awf service`` resolves the same
     override as its ``work_dir`` (``_resolve_service_work_dir`` returns it
-    unstripped), so ``awf start`` mounts (or fails on) that path rather than the
-    default. The readiness probe must block on it instead of silently probing
-    the default work dir and reporting readiness for the wrong directory. The
-    ``not raw`` guard mirrors the same empty-vs-whitespace split as the API-port
-    override so the two layers agree.
+    unstripped), so ``awf start`` mounts (or fails on) that exact path rather
+    than the stripped or default one. The readiness probe must block on it
+    instead of silently probing the stripped/default work dir and reporting
+    readiness for the wrong directory. The ``not raw`` guard mirrors the same
+    empty-vs-whitespace split as the API-port override so the two layers agree.
     """
     if work_dir is not None:
         return None
@@ -893,22 +901,26 @@ def check_host_work_dir_override(raw: str) -> SetupCheckResult:
 
     The local-service Compose stack bind-mounts
     ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` and ``awf service`` resolves
-    the same override as its work_dir, so a non-empty whitespace-only value is
-    used verbatim as the bind path and ``awf start`` mounts (or fails on) it
-    instead of the default. The readiness probe blocks on it rather than
-    silently probing the default work dir and reporting readiness for the wrong
+    the same override as its work_dir, so a non-empty value that is whitespace-
+    only or carries leading/trailing whitespace is used verbatim as the bind
+    path and ``awf start`` mounts (or fails on) it instead of the stripped or
+    default path. The readiness probe blocks on it rather than silently probing
+    the stripped/default work dir and reporting readiness for the wrong
     directory.
     """
     return SetupCheckResult(
         name="disk",
         level=SetupCheckLevel.BLOCKED,
-        summary=f"AWF_HOST_WORK_DIR={raw!r} is whitespace-only, not a usable work directory.",
-        detail="AWF_HOST_WORK_DIR must be a real directory path. The local-service Compose stack "
-        "bind-mounts ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service} and awf service resolves the same "
-        "override as its work_dir, so this non-empty whitespace value is used verbatim as the "
-        "bind path and awf start mounts (or fails on) it instead of the default.",
-        fix="Set AWF_HOST_WORK_DIR to a real directory path, or unset it to use the default "
-        "${HOME}/.awf/service, then re-run awf setup --dry-run.",
+        summary=f"AWF_HOST_WORK_DIR={raw!r} has leading or trailing whitespace, "
+        "not a usable work directory.",
+        detail="AWF_HOST_WORK_DIR must be a real directory path with no surrounding whitespace. "
+        "The local-service Compose stack bind-mounts ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service} "
+        "and awf service resolves the same override as its work_dir, so this value is used "
+        "verbatim — with its surrounding whitespace — as the bind path and awf start mounts (or "
+        "fails on) it instead of the stripped path the readiness probe would otherwise report.",
+        fix="Set AWF_HOST_WORK_DIR to a real directory path with no leading or trailing "
+        "whitespace, or unset it to use the default ${HOME}/.awf/service, then re-run "
+        "awf setup --dry-run.",
         data={
             "path": None,
             "free_bytes": None,

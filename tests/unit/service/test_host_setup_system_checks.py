@@ -1411,6 +1411,37 @@ def test_run_system_checks_blocks_on_whitespace_only_work_dir_override(
 
 
 @pytest.mark.unit
+def test_run_system_checks_blocks_on_padded_work_dir_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A surrounding-whitespace ``AWF_HOST_WORK_DIR`` blocks; it is not stripped-then-probed.
+
+    The disk probe used to ``strip`` the override before inspecting it, but
+    Compose interpolates ``${AWF_HOST_WORK_DIR}`` verbatim and ``awf service``'s
+    ``_resolve_service_work_dir`` returns the override *unstripped*. A padded
+    value such as ``" /data/awf"`` would therefore pass disk readiness for the
+    stripped ``/data/awf`` while ``awf start`` mounts (and the service resolves)
+    the spaced path — reporting readiness for a directory that is never mounted.
+    The readiness probe must block on the surrounding whitespace instead of
+    silently probing the stripped path.
+    """
+    for padded in (" /data/awf", "/data/awf ", "\t/data/awf", "/data/awf\n"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": "/home/op", "AWF_HOST_WORK_DIR": padded},
+        )
+
+        disk = next(result for result in results if result.name == "disk")
+        assert disk.level is SetupCheckLevel.BLOCKED, repr(padded)
+        assert disk.data["env_value"] == padded
+        # The disk probe must not run for a stripped path the operator never mounted.
+        assert "disk_path" not in captured, repr(padded)
+
+
+@pytest.mark.unit
 def test_run_system_checks_explicit_work_dir_suppresses_whitespace_override_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
