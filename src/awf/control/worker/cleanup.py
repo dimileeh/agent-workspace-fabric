@@ -41,6 +41,7 @@ from awf.db.models import (
     WorkspaceEvent,
 )
 from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories.base import has_terminal_runtime_released_event
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
     run_db_operation_with_retry,
@@ -535,21 +536,7 @@ async def _has_terminal_runtime_release_event(
     workspace_id: str,
 ) -> bool:
     _ = self
-    released_at_stmt = select(func.max(WorkspaceEvent.occurred_at)).where(
-        WorkspaceEvent.workspace_id == workspace_id,
-        WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-        WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-    )
-    released_at = (await session.execute(released_at_stmt)).scalar_one_or_none()
-    if released_at is None:
-        return False
-    revoked_at_stmt = select(func.max(WorkspaceEvent.occurred_at)).where(
-        WorkspaceEvent.workspace_id == workspace_id,
-        WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-        WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-    )
-    revoked_at = (await session.execute(revoked_at_stmt)).scalar_one_or_none()
-    return revoked_at is None or released_at > revoked_at
+    return await has_terminal_runtime_released_event(session, workspace_id)
 
 
 async def _has_terminal_runtime_release_failure_event(
