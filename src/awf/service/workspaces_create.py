@@ -91,9 +91,6 @@ class _ProfileNotProvided:
     def __repr__(self) -> str:
         return "PROFILE_NOT_PROVIDED"
 
-    def __bool__(self) -> bool:
-        return False
-
 
 PROFILE_NOT_PROVIDED = _ProfileNotProvided()
 
