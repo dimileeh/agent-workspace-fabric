@@ -913,8 +913,13 @@ class Provisioner:
                     host_port=conflicts[0].host_port,
                     conflicting_workspace_id=conflicts[0].workspace_id,
                 )
-            ws = await repo.get(workspace_id)
-            if ws is not None and profile_resolution is not None and ws.resolved_profile is None:
+            ws = await repo.get_for_update(workspace_id)
+            if (
+                ws is not None
+                and profile_resolution is not None
+                and ws.resolved_profile is None
+                and ws.status == WorkspaceStatus.provisioning.value
+            ):
                 ws.resolved_profile = resolved_profile_dict
             await session.commit()
 
