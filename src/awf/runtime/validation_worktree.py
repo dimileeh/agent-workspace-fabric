@@ -92,7 +92,7 @@ async def check_validation_worktree_clean(
 
     status = await run_git(["status", "--porcelain=v1", "--untracked-files=all"])
     if not status.ok:
-        stderr = status.stderr[:1000]
+        stderr = (status.stderr or "")[:1000]
         return ValidationWorktreeCheck(
             clean=False,
             reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
