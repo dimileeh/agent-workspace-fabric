@@ -100,6 +100,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in dockerfile
     assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile
     assert "opencode-ai@${OPENCODE_VERSION}" in dockerfile
+    assert 'ln -sf "$(command -v node)" /usr/local/bin/node' in dockerfile
     assert "cursor-agent" in dockerfile
     assert "install -d -m 0755 /opt/cursor" in dockerfile
     assert "curl https://cursor.com/install -fsS | HOME=/opt/cursor bash" in dockerfile
@@ -111,6 +112,9 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "chmod +x /usr/local/bin/cursor-agent" in dockerfile
     assert "test -x /usr/local/bin/cursor-agent" in dockerfile
     assert "cursor-agent --version || true" not in dockerfile
+    assert dockerfile.index('ln -sf "$(command -v node)" /usr/local/bin/node') < dockerfile.index(
+        "curl https://cursor.com/install -fsS"
+    )
     assert (
         "USER agent\n"
         "WORKDIR /workspace\n\n"
