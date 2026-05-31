@@ -313,6 +313,8 @@ DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 async def check_host_port_conflicts(
     repo: WorkspaceRepository,
     companions: Sequence[WorkspaceCompanionRequest],
+    *,
+    excluding_workspace_id: str | None = None,
 ) -> None:
     """Check for host-port conflicts among companion ports and raise if found.
 
@@ -325,12 +327,8 @@ async def check_host_port_conflicts(
     if host_ports:
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
+            excluding_workspace_id=excluding_workspace_id,
         )
-        if conflicts:
-            raise WorkspaceCreateHostPortConflictError(
-                host_port=conflicts[0].host_port,
-                conflicting_workspace_id=conflicts[0].workspace_id,
-            )
         if conflicts:
             raise WorkspaceCreateHostPortConflictError(
                 host_port=conflicts[0].host_port,
