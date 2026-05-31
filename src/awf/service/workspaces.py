@@ -281,7 +281,7 @@ class WorkspaceCreateInsufficientDiskError(Exception):
         super().__init__(self.message)
 
 
-class WorkspaceCreateHostPortConflictError(Exception):
+class WorkspaceCreateHostPortConflictError(WorkspaceRetryError):
     """Raised when a companion host_port is already mapped by a non-terminal workspace.
 
     TOCTOU note: the check-and-create sequence for host-port admission is
@@ -303,14 +303,15 @@ class WorkspaceCreateHostPortConflictError(Exception):
         self.message = (
             f"Host port {host_port} is already in use by workspace {conflicting_workspace_id}"
         )
-        self.detail: dict[str, Any] | None = {
+        detail: dict[str, Any] | None = {
             "host_port": host_port,
             "conflicting_workspace_id": conflicting_workspace_id,
         }
-        super().__init__(self.message)
+        self.detail = detail
+        super().__init__(self.message, detail=detail)
 
 
-class WorkspaceRetrySourceRuntimeNotReleasedError(Exception):
+class WorkspaceRetrySourceRuntimeNotReleasedError(WorkspaceRetryError):
     """Raised when a retry is attempted but the source workspace's compose
     runtime has not been released yet, meaning its host ports are still
     claimed and a new workspace would collide at Docker Compose time."""
@@ -326,10 +327,11 @@ class WorkspaceRetrySourceRuntimeNotReleasedError(Exception):
             f"Source workspace {source_workspace_id} runtime has not been "
             f"released yet; host ports may still be in use"
         )
-        self.detail: dict[str, Any] | None = {
+        detail: dict[str, Any] | None = {
             "source_workspace_id": source_workspace_id,
         }
-        super().__init__(self.message)
+        self.detail = detail
+        super().__init__(self.message, detail=detail)
 
 
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
