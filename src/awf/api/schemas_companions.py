@@ -19,10 +19,10 @@ ServiceName = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA
 CompanionPath = Annotated[str, Field(min_length=1, max_length=1024)]
 CompanionVolume = tuple[CompanionPath, CompanionPath]
 _ENVIRONMENT_KEY_PATTERN_TEXT = r"^[A-Za-z_][A-Za-z0-9_]*$"
+ENV_KEY_MAX_LENGTH = 256
 EnvironmentKey = Annotated[
-    str, Field(min_length=1, max_length=256, pattern=_ENVIRONMENT_KEY_PATTERN_TEXT)
+    str, Field(min_length=1, max_length=ENV_KEY_MAX_LENGTH, pattern=_ENVIRONMENT_KEY_PATTERN_TEXT)
 ]
-
 _ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
 _ENVIRONMENT_NAME_START_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
 _ENVIRONMENT_VALUE_INTERPOLATION_PATTERN_TEXT = r"(^|[^$])(?:\$\$)*\$(?:[A-Za-z_]|\{[A-Za-z_])"
@@ -30,7 +30,7 @@ _NAMED_VOLUME_SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _YAML_UNSAFE_COMPANION_PATH_PATTERN = re.compile(r'["\\\x00-\x1f\x7f-\x9f]')
 _ENVIRONMENT_SCHEMA: dict[str, Any] = {
     "propertyNames": {
-        "maxLength": 256,
+        "maxLength": ENV_KEY_MAX_LENGTH,
         "minLength": 1,
         "pattern": _ENVIRONMENT_KEY_PATTERN_TEXT,
     },
@@ -43,7 +43,7 @@ _ENVIRONMENT_SCHEMA: dict[str, Any] = {
 }
 _ENVIRONMENT_SECRETS_SCHEMA: dict[str, Any] = {
     "propertyNames": {
-        "maxLength": 256,
+        "maxLength": ENV_KEY_MAX_LENGTH,
         "minLength": 1,
         "pattern": _ENVIRONMENT_KEY_PATTERN_TEXT,
     },
@@ -62,18 +62,21 @@ class CompanionEnvironmentSecretRequest(BaseModel):
 
 
 def _validate_companion_repo_relative_path(field_name: str, value: str) -> None:
+    """Validate that a companion path is repo-relative and YAML-safe."""
     if _is_absolute_or_escaping_path(value):
         raise ValueError(f"companion {field_name} must be a repo-relative path")
     _validate_companion_yaml_safe_path(field_name, value)
 
 
 def _validate_companion_repo_relative_volume_source(value: str) -> None:
+    """Validate that a repo-relative volume source path contains no colons."""
     _validate_companion_repo_relative_path("volume source", value)
     if ":" in value:
         raise ValueError("companion volume source must not contain colon characters")
 
 
 def _validate_companion_volume_target(value: str) -> None:
+    """Validate that a volume target is an absolute container path without mount options."""
     if ":" in value or not PurePosixPath(value).is_absolute():
         raise ValueError(
             "companion volume target must be an absolute container path without mount options"
@@ -82,6 +85,7 @@ def _validate_companion_volume_target(value: str) -> None:
 
 
 def _validate_companion_named_volume_source(value: str) -> None:
+    """Validate that a named volume source matches the allowed character pattern."""
     if not _NAMED_VOLUME_SOURCE_PATTERN.fullmatch(value):
         raise ValueError(
             "companion volume source named volume must start with an ASCII letter or digit "
@@ -90,6 +94,7 @@ def _validate_companion_named_volume_source(value: str) -> None:
 
 
 def _validate_companion_yaml_safe_path(field_name: str, value: str) -> None:
+    """Validate that a companion path contains no control chars, quotes, backslashes, or dollar signs."""
     if _YAML_UNSAFE_COMPANION_PATH_PATTERN.search(value):
         raise ValueError(
             f"companion {field_name} must be a YAML-safe path without control, "
@@ -103,6 +108,7 @@ def _validate_companion_yaml_safe_path(field_name: str, value: str) -> None:
 
 
 def _value_has_compose_interpolation(value: str) -> bool:
+    """Return True if *value* contains Docker Compose interpolation syntax like $VAR or ${VAR}."""
     cursor = 0
     while cursor < len(value):
         dollar_index = value.find("$", cursor)
@@ -127,7 +133,12 @@ def _value_has_compose_interpolation(value: str) -> bool:
     return False
 
 
+ENVIRONMENT_KEY_PATTERN = _ENVIRONMENT_KEY_PATTERN
+value_has_compose_interpolation = _value_has_compose_interpolation
+
+
 def _is_absolute_or_escaping_path(value: str) -> bool:
+    """Return True if *value* is an absolute path or contains path-traversal components."""
     posix_path = PurePosixPath(value)
     windows_path = PureWindowsPath(value)
     return (
@@ -196,6 +207,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def _validate_companion_name(cls, value: str) -> str:
+        """Reject reserved names and names unusable as Git branch path components."""
         if value in RESERVED_COMPANION_SERVICE_NAMES:
             raise ValueError(f"companion name {value!r} is reserved")
         if not companion_name_is_git_branch_component(value):
@@ -205,6 +217,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("build_context", "dockerfile", "env_file")
     @classmethod
     def _validate_repo_relative_path(cls, value: str | None, info: Any) -> str | None:
+        """Validate build_context, dockerfile, and env_file are repo-relative paths."""
         if value is not None:
             _validate_companion_repo_relative_path(str(info.field_name), value)
         return value
@@ -212,6 +225,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("environment", mode="before")
     @classmethod
     def _validate_environment_keys(cls, value: Any) -> Any:
+        """Reject environment mapping keys that do not match the Docker-compatible pattern."""
         if isinstance(value, Mapping):
             for key in value:
                 if not isinstance(key, str) or not _ENVIRONMENT_KEY_PATTERN.fullmatch(key):
@@ -224,6 +238,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("environment")
     @classmethod
     def _validate_environment_values(cls, value: dict[str, str]) -> dict[str, str]:
+        """Reject environment values that contain Docker Compose interpolation syntax."""
         for environment_value in value.values():
             if _value_has_compose_interpolation(environment_value):
                 raise ValueError(
@@ -259,6 +274,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("healthcheck_cmd")
     @classmethod
     def _validate_healthcheck_cmd(cls, value: str | None) -> str | None:
+        """Reject healthcheck commands that contain Docker Compose interpolation syntax."""
         if value is not None and _value_has_compose_interpolation(value):
             raise ValueError(
                 "companion healthcheck command must not contain Docker Compose interpolation syntax"
@@ -268,6 +284,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("command")
     @classmethod
     def _validate_command(cls, value: str | None) -> str | None:
+        """Reject commands that contain Docker Compose interpolation syntax."""
         if value is not None and _value_has_compose_interpolation(value):
             raise ValueError(
                 "companion command must not contain Docker Compose interpolation syntax"
@@ -277,6 +294,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("ports")
     @classmethod
     def _validate_ports(cls, value: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Reject invalid or duplicate host ports in port mappings."""
         host_ports: set[int] = set()
         for container_port, host_port in value:
             if not (1 <= container_port <= 65535 and 1 <= host_port <= 65535):
@@ -289,6 +307,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("volumes")
     @classmethod
     def _validate_volume_sources(cls, value: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Validate each volume source/target pair for naming, path safety, and target format."""
         for source, target in value:
             if companion_volume_source_is_repo_relative(source):
                 _validate_companion_repo_relative_volume_source(source)
