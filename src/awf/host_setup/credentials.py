@@ -718,14 +718,7 @@ def _write_secret_file(target: Path, secret: str) -> None:
     secrets_dir = target.parent
     tmp_path: Path | None = None
     try:
-        # Create the leaf 0o700 at mkdir time, not loosened-then-tightened: a
-        # plain ``mkdir`` honours the caller's umask (often 0o755), briefly
-        # exposing the directory listing (provider names/structure) to other
-        # users on a multi-user host until the chmod below lands. The chmod is
-        # still needed for the ``exist_ok=True`` case, where ``mkdir`` leaves an
-        # already-present looser directory untouched.
-        secrets_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _chmod_best_effort(secrets_dir, 0o700)
+        _mkdir_secure(secrets_dir)
         tmp_path = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -742,6 +735,37 @@ def _write_secret_file(target: Path, secret: str) -> None:
             message="Unable to write the plain-file credential.",
             details={"error_type": type(exc).__name__},
         ) from exc
+
+
+def _mkdir_secure(directory: Path) -> None:
+    """Create ``directory`` and every ancestor we create with mode 0o700.
+
+    ``Path.mkdir(parents=True, mode=0o700)`` applies the restrictive mode only to
+    the leaf: intermediate parents (e.g. ``~/.awf`` beneath ``~/.awf/secrets``)
+    are created with umask-default permissions, which can leave the parent
+    world-traversable on a multi-user host. Walk the chain of not-yet-existing
+    ancestors and create each with a restrictive create-time mode so 0o700 lands
+    on every level we create, while leaving pre-existing ancestors (such as the
+    home directory) untouched.
+
+    The create-time mode (not a loosen-then-tighten chmod) closes the brief
+    TOCTOU window where a permissive umask would expose the directory listing
+    (provider names/structure) until a later chmod lands. The trailing
+    best-effort chmod still tightens the leaf for the ``exist_ok`` case, where
+    ``mkdir`` leaves an already-present looser directory untouched.
+    """
+    missing: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        missing.append(probe)
+        parent = probe.parent
+        if parent == probe:  # reached the filesystem root; defensive.
+            break
+        probe = parent
+    for path in reversed(missing):
+        path.mkdir(mode=0o700, exist_ok=True)
+        _chmod_best_effort(path, 0o700)
+    _chmod_best_effort(directory, 0o700)
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:

@@ -532,6 +532,49 @@ def test_plain_file_creates_secrets_dir_restrictively(
 
 
 @pytest.mark.unit
+def test_plain_file_creates_intermediate_parents_restrictively(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify intermediate parents (e.g. ``~/.awf``) are also *created* 0700.
+
+    ``Path.mkdir(parents=True, mode=0o700)`` applies the restrictive mode only to
+    the leaf; the intermediate parent of ``~/.awf/secrets`` would otherwise be
+    created with umask-default permissions, leaving ``~/.awf`` world-traversable
+    on a multi-user host. Use a not-yet-existing parent (``awf``) so the secrets
+    dir's creation must walk through it, neutralise the post-``mkdir`` chmod, and
+    use a fully permissive umask so the only thing that can yield a 0700 parent is
+    a restrictive create-time mode.
+    """
+    if os.name != "posix":
+        pytest.skip("directory permission semantics are POSIX-specific")
+
+    monkeypatch.setattr(credentials, "_chmod_best_effort", lambda *_a, **_k: None)
+    parent_dir = tmp_path / "awf"
+    secrets_dir = parent_dir / "secrets"
+    old_umask = os.umask(0o000)
+    try:
+        store_provider_credential(
+            CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)),
+            preferred="plain_file",
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=True,
+            plain_file_consent=True,
+            plain_file_backend=PlainFileCredentialBackend(
+                capabilities=_HEADLESS_LINUX,
+                allow_plain_secrets=True,
+                consent=True,
+                secrets_dir=secrets_dir,
+            ),
+        )
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(parent_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.unit
 def test_plain_file_backend_defaults_to_awf_secrets_dir() -> None:
     """Verify the default plain-file secrets directory is ``~/.awf/secrets``."""
     backend = PlainFileCredentialBackend(
