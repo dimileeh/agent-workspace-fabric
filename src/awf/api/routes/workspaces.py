@@ -236,6 +236,7 @@ async def create_workspace(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
+    """Create a new workspace, returning 202 on acceptance or 409 on host-port conflict."""
     repo = WorkspaceRepository(session)
     replay_key_cache = _workspace_create_idempotency_replay_key_cache(request)
     known_replay_key = False
@@ -559,6 +560,7 @@ async def list_workspace_overview(
     cursor: Annotated[str | None, Query(max_length=128)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceOverviewListResponse:
+    """List workspace overview records with optional filtering and cursor pagination."""
     try:
         return await list_workspace_overview_response(
             session,
@@ -585,6 +587,7 @@ async def list_workspace_events(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceEventListResponse:
+    """List events for a workspace, optionally filtered by event type."""
     repo = WorkspaceRepository(session)
     if not await repo.exists(workspace_id):
         raise HTTPException(
@@ -625,6 +628,7 @@ async def list_workspace_stale_reasons(
     cursor: Annotated[str | None, Query(max_length=64)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> StaleReasonListResponse:
+    """List stale reasons for a workspace with optional cursor pagination."""
     try:
         response = await list_workspace_stale_reasons_response(
             session,
@@ -667,6 +671,7 @@ async def adopt_pull_request_monitor(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> PullRequestMonitorAdoptionResponse | JSONResponse:
+    """Adopt an existing PR into a workspace and begin PR monitoring."""
     fetcher = getattr(request.app.state, "pr_adoption_metadata_fetcher", None)
     try:
         return await PullRequestMonitorAdoptionService(
@@ -702,6 +707,7 @@ async def retry_workspace(
     provider_readiness_override_reason: Annotated[str | None, Query(max_length=512)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceRetryResponse | JSONResponse:
+    """Retry a failed workspace, returning 202 on acceptance or 409 on host-port conflict."""
     try:
         result = await retry_workspace_row(
             session,
@@ -740,6 +746,7 @@ async def get_workspace(
     workspace_id: str,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceResponse:
+    """Retrieve a single workspace by ID, including validation runs and egress audit."""
     response = await run_db_operation_with_retry(
         session_factory,
         lambda retry_session: _get_workspace_response(
@@ -823,6 +830,7 @@ async def get_workspace_secret_leases(
     workspace_id: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceSecretLeaseListResponse:
+    """Retrieve secret lease statuses for a workspace."""
     repo = WorkspaceRepository(session)
     if not await repo.exists(workspace_id):
         raise HTTPException(
@@ -844,6 +852,7 @@ async def list_workspaces(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> list[WorkspaceResponse]:
+    """List workspaces with optional status, agent, and repo URL filters."""
     return await run_db_operation_with_retry(
         session_factory,
         lambda retry_session: _list_workspace_responses(

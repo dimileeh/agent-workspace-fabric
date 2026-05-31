@@ -408,6 +408,7 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> None:
+        """Acquire advisory locks for the given owned paths to serialize conflict checks."""
         return await acquire_owned_path_conflict_lock(
             self._session,
             self._dialect_name,
@@ -421,6 +422,7 @@ class WorkspaceRepository:
         *,
         host_ports: list[int],
     ) -> None:
+        """Acquire per-host-port advisory locks for workspace admission."""
         return await acquire_host_port_admission_lock(
             self._session, self._dialect_name, host_ports=host_ports
         )
@@ -434,6 +436,7 @@ class WorkspaceRepository:
         resolved_profile: Mapping[str, object] | None = None,
         workspace_id: str | None = None,
     ) -> list[OwnedPathConflict]:
+        """Find active workspaces whose owned paths conflict with the given set."""
         return await find_active_owned_path_conflicts(
             self._session,
             repo_url=repo_url,
@@ -452,6 +455,7 @@ class WorkspaceRepository:
         resolved_profile: Mapping[str, object] | None = None,
         workspace_id: str | None = None,
     ) -> list[OwnedPathOverlap]:
+        """Find active workspaces whose owned paths overlap with the given set."""
         return await find_active_owned_path_overlaps(
             self._session,
             repo_url=repo_url,
@@ -468,6 +472,7 @@ class WorkspaceRepository:
         excluding_workspace_id: str | None = None,
         node_id: str | None = None,
     ) -> builtins.list[HostPortConflict]:
+        """Find active workspaces whose host ports conflict with the given set."""
         return await find_host_port_conflicts(
             self._session,
             host_ports=host_ports,
