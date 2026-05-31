@@ -72,6 +72,7 @@ def _launcher(builder: _RecordingBuilder | None) -> ComposeStackLauncher:
 
 @pytest.mark.unit
 async def test_prebuilt_tag_is_applied_as_image(tmp_path: Path) -> None:
+    """A successful pre-build applies the resulting tag as the service image."""
     builder = _RecordingBuilder(tag="awf-companion-backend:abc123def456")
     launcher = _launcher(builder)
     materialized = _materialized(tmp_path / "backend")
@@ -93,6 +94,7 @@ async def test_prebuilt_tag_is_applied_as_image(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 async def test_failed_prebuild_falls_back_to_build(tmp_path: Path) -> None:
+    """A failed pre-build leaves the companion using an inline build:."""
     builder = _RecordingBuilder(tag=None)
     launcher = _launcher(builder)
     materialized = _materialized(tmp_path / "backend")
@@ -112,6 +114,7 @@ async def test_companion_prebuilds_run_concurrently(tmp_path: Path) -> None:
     # latency is the slowest single build rather than the sum of all builds. A
     # sequential loop would never let the second `ensure` start before the first
     # returns, deadlocking the barrier below and tripping the wait_for timeout.
+    """Multiple companion pre-builds run concurrently."""
     both_entered = asyncio.Event()
     entered = 0
 
@@ -158,6 +161,7 @@ async def test_companion_prebuilds_run_concurrently(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 async def test_no_builder_leaves_companion_as_build(tmp_path: Path) -> None:
+    """Without a builder the companion is left using an inline build:."""
     launcher = _launcher(None)
     materialized = _materialized(tmp_path / "backend")
 

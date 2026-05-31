@@ -19,6 +19,7 @@ class _Result:
 
 @pytest.mark.unit
 async def test_prune_success_reports_reclaimed_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful prune reports the space reclaimed from the docker output."""
     captured: dict[str, object] = {}
 
     def _run(cmd: list[str], **_kwargs: object) -> _Result:
@@ -58,6 +59,7 @@ async def test_prune_runs_subprocess_off_the_event_loop_thread(
 
 @pytest.mark.unit
 async def test_prune_nonzero_exit_is_reported_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-zero docker exit is surfaced as a failed prune result."""
     monkeypatch.setattr(
         cli_common.subprocess,
         "run",
@@ -73,6 +75,8 @@ async def test_prune_nonzero_exit_is_reported_as_failed(monkeypatch: pytest.Monk
 
 @pytest.mark.unit
 async def test_prune_timeout_is_reported_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A prune subprocess timeout is reported as a failed result."""
+
     def _run(*_a: object, **_k: object) -> _Result:
         raise subprocess.TimeoutExpired(cmd="docker image prune", timeout=120)
 
@@ -87,6 +91,8 @@ async def test_prune_timeout_is_reported_as_failed(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.unit
 async def test_prune_os_error_is_reported_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OSError launching the prune subprocess is reported as failed."""
+
     def _run(*_a: object, **_k: object) -> _Result:
         raise OSError("docker binary not found")
 

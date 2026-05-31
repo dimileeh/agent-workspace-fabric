@@ -1275,6 +1275,7 @@ def test_validate_companion_service_graph_rejects_companion_dependency_cycle(
 
 @pytest.mark.unit
 def test_materialized_companion_service_records_commit_sha(tmp_path: Path) -> None:
+    """MaterializedCompanionService stores the provided commit SHA."""
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
     materialized = MaterializedCompanionService(
@@ -1288,6 +1289,7 @@ def test_materialized_companion_service_records_commit_sha(tmp_path: Path) -> No
 
 @pytest.mark.unit
 def test_materialized_companion_service_commit_sha_defaults_empty(tmp_path: Path) -> None:
+    """MaterializedCompanionService defaults the commit SHA to empty."""
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
     materialized = MaterializedCompanionService(
@@ -1300,6 +1302,7 @@ def test_materialized_companion_service_commit_sha_defaults_empty(tmp_path: Path
 
 @pytest.mark.unit
 def test_companion_service_from_materialized_applies_prebuilt_image(tmp_path: Path) -> None:
+    """companion_service_from_materialized applies the prebuilt image override."""
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
     materialized = MaterializedCompanionService(
@@ -1316,6 +1319,7 @@ def test_companion_service_from_materialized_applies_prebuilt_image(tmp_path: Pa
 
 @pytest.mark.unit
 def test_companion_service_from_materialized_defaults_image_to_none(tmp_path: Path) -> None:
+    """companion_service_from_materialized defaults the image to None."""
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
     materialized = MaterializedCompanionService(

@@ -351,6 +351,7 @@ async def test_compose_stack_launcher_prebuilds_companion_with_effective_compose
     # budgeted with the same effective compose-up subprocess cap the inline
     # `docker compose up` uses (2*effective + buffer), not the fixed 1800s default,
     # so caching can never time out a build the inline path would have completed.
+    """The launcher pre-builds companions using the effective compose timeout budget."""
     compose = _RecordingCompose()
     builder = _RecordingCompanionImageBuilder()
     launcher = ComposeStackLauncher(

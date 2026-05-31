@@ -59,6 +59,7 @@ class _FakeCompose:
 
 @pytest.mark.unit
 def test_companion_image_tag_sanitizes_name_and_truncates_sha() -> None:
+    """Tag generation sanitizes the companion name and truncates the commit SHA."""
     tag = companion_image_tag(
         "Aira Agent/Backend",
         "ABCDEF0123456789deadbeef",
@@ -76,6 +77,7 @@ def test_companion_image_tag_sanitizes_name_and_truncates_sha() -> None:
 
 @pytest.mark.unit
 def test_companion_image_tag_falls_back_when_name_sanitizes_empty() -> None:
+    """Tag generation falls back to a default when the name sanitizes to empty."""
     tag = companion_image_tag("///", "abc123", build_context=".", dockerfile="Dockerfile")
     assert tag.startswith("awf-companion-companion:")
 
@@ -88,6 +90,7 @@ def test_companion_image_tag_varies_with_build_inputs() -> None:
     # never serves an image built from a different build definition; identical
     # build inputs must still resolve to the same tag so cross-workspace reuse
     # (issue #298) keeps working.
+    """The tag varies when the build context or Dockerfile inputs differ."""
     base = companion_image_tag(
         "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
     )
@@ -109,6 +112,7 @@ def test_companion_image_tag_varies_with_build_inputs() -> None:
 
 @pytest.mark.unit
 def test_companion_image_prune_command_scopes_to_managed_label_and_age() -> None:
+    """The prune command is scoped to the managed label and retention age."""
     command = companion_image_prune_command(72)
     assert command[:4] == ["docker", "image", "prune", "--all"]
     assert "--force" in command
@@ -118,6 +122,7 @@ def test_companion_image_prune_command_scopes_to_managed_label_and_age() -> None
 
 @pytest.mark.unit
 async def test_ensure_reuses_existing_image_without_building() -> None:
+    """ensure() reuses an existing tagged image without rebuilding."""
     compose = _FakeCompose(exists=True)
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 
@@ -138,6 +143,7 @@ async def test_ensure_reuses_existing_image_without_building() -> None:
 
 @pytest.mark.unit
 async def test_ensure_builds_with_managed_labels_when_missing() -> None:
+    """ensure() builds the image with managed labels when it is missing."""
     compose = _FakeCompose(exists=False)
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 
@@ -165,6 +171,7 @@ async def test_ensure_builds_with_managed_labels_when_missing() -> None:
 
 @pytest.mark.unit
 async def test_ensure_skips_caching_without_commit_sha() -> None:
+    """ensure() skips caching and returns None when no commit SHA is available."""
     compose = _FakeCompose()
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 
@@ -184,6 +191,7 @@ async def test_ensure_skips_caching_without_commit_sha() -> None:
 
 @pytest.mark.unit
 async def test_ensure_falls_back_to_none_on_build_failure() -> None:
+    """ensure() returns None to fall back to an inline build on build failure."""
     compose = _FakeCompose(
         exists=False,
         build_error=ComposeOperationError(
@@ -210,6 +218,7 @@ async def test_ensure_falls_back_to_none_on_build_failure() -> None:
 
 @pytest.mark.unit
 async def test_ensure_deduplicates_concurrent_builds_for_same_tag() -> None:
+    """Concurrent ensure() calls for the same tag share a single build."""
     compose = _FakeCompose(exists=False)
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 
@@ -239,6 +248,7 @@ async def test_ensure_forwards_capture_timeout_to_build() -> None:
     # Regression for PRRT_kwDOSJAM6s6F504S: the pre-build must honor the caller's
     # compose-up build budget rather than the fixed 1800s default, so the cache
     # path can never time out earlier than the inline `docker compose up` build.
+    """ensure() forwards the configured capture timeout to the build call."""
     compose = _FakeCompose(exists=False)
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 
@@ -260,6 +270,7 @@ async def test_ensure_shares_one_build_across_a_failing_concurrent_wave() -> Non
     # once per concurrent wave and propagated to every waiter, not retried
     # sequentially once per waiter -- a broken companion would otherwise block
     # the worker queue for N * timeout.
+    """A failing concurrent wave shares the single in-flight build task."""
     compose = _FakeCompose(
         exists=False,
         build_error=ComposeOperationError(
@@ -294,6 +305,7 @@ async def test_ensure_retries_build_after_a_failed_wave() -> None:
     # Regression for PRRT_kwDOSJAM6s6F506l: a failed build is dropped from the
     # in-flight registry so a later dispatch retries it instead of replaying a
     # cached failure forever.
+    """ensure() retries the build on a later call after a failed wave."""
     compose = _FakeCompose(
         exists=False,
         build_error=ComposeOperationError(
@@ -332,6 +344,7 @@ async def test_ensure_does_not_retain_finished_build_tasks() -> None:
     # Regression for PRRT_kwDOSJAM6s6F506l: the in-flight registry must not grow
     # without bound -- a finished build (here a success) is dropped so only
     # in-flight builds are ever held.
+    """Finished build tasks are dropped from the per-tag registry."""
     compose = _FakeCompose(exists=False)
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 
@@ -356,6 +369,7 @@ async def test_ensure_does_not_reuse_image_across_differing_build_inputs() -> No
     # via companion_image_exists() and run the wrong image. The resolved
     # build_context is a per-worktree absolute path, so the cache key keys on the
     # repo-relative build inputs (relative_build_context + dockerfile) instead.
+    """ensure() does not reuse an image when the build inputs differ."""
     compose = _FakeCompose(exists=False)
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 
@@ -386,6 +400,7 @@ async def test_ensure_reuses_image_across_workspaces_for_identical_build_inputs(
     # The cross-workspace cache (issue #298) must still hit: identical
     # repo-relative build inputs at the same commit resolve to the same tag even
     # though each workspace resolves build_context to a different absolute path.
+    """ensure() reuses the image across workspaces for identical build inputs."""
     compose = _FakeCompose(exists=False)
     builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
 

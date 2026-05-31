@@ -57,12 +57,14 @@ def _in_process_merge_coordinator(
 
 @pytest.mark.unit
 def test_companion_image_builder_enabled_by_default(tmp_path: Path) -> None:
+    """The worker constructs a companion image builder by default."""
     builder = worker_mod._companion_image_builder_for(_settings(tmp_path), object())  # type: ignore[arg-type]
     assert isinstance(builder, CompanionImageBuilder)
 
 
 @pytest.mark.unit
 def test_companion_image_builder_disabled_returns_none(tmp_path: Path) -> None:
+    """The worker returns no companion image builder when caching is disabled."""
     settings = dataclasses.replace(_settings(tmp_path), companion_image_cache_enabled=False)
     assert worker_mod._companion_image_builder_for(settings, object()) is None  # type: ignore[arg-type]
 

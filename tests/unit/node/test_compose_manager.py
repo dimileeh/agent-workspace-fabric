@@ -306,6 +306,7 @@ class TestRender:
     def test_companion_with_prebuilt_image_renders_image_not_build(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """A companion with a prebuilt image renders image: and suppresses build:."""
         spec = _spec(
             tmp_path,
             companions=(
@@ -327,6 +328,7 @@ class TestRender:
     def test_companion_without_image_still_renders_build(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """A companion without a prebuilt image still renders build:."""
         spec = _spec(
             tmp_path,
             companions=(CompanionService(name="backend", build_context="/host/backend"),),
@@ -1006,10 +1008,13 @@ class TestRender:
 
 
 class TestCompanionImageCommands:
+    """Tests for the ComposeManager companion image Docker commands."""
+
     @pytest.mark.unit
     async def test_companion_image_exists_true_on_zero_exit(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """companion_image_exists returns True on a zero-exit inspect."""
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
@@ -1025,6 +1030,8 @@ class TestCompanionImageCommands:
     async def test_companion_image_exists_false_when_inspect_fails(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """companion_image_exists returns False when the inspect fails."""
+
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
             return _FakeProcess(returncode=1, stderr=b"No such image")
 
@@ -1036,6 +1043,7 @@ class TestCompanionImageCommands:
     async def test_build_companion_image_passes_tag_dockerfile_and_labels(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """build_companion_image passes the tag, Dockerfile, and managed labels."""
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
@@ -1069,6 +1077,7 @@ class TestCompanionImageCommands:
     async def test_build_companion_image_without_labels_omits_label_flags(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """build_companion_image omits the label flags when no labels are given."""
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
@@ -1104,6 +1113,7 @@ class TestCompanionImageCommands:
         # anchored to the absolute build context so the pre-build does not look
         # for the Dockerfile under the service cwd, fail, and fall back to an
         # inline compose build.
+        """build_companion_image anchors the Dockerfile path to the build context."""
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
@@ -1132,6 +1142,8 @@ class TestCompanionImageCommands:
     async def test_build_companion_image_raises_on_failure(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """build_companion_image raises when the docker build fails."""
+
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
             return _FakeProcess(returncode=1, stderr=b"build failed")
 
@@ -1148,6 +1160,7 @@ class TestCompanionImageCommands:
     async def test_prune_companion_images_filters_by_label_and_age(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """prune_companion_images filters by managed label and retention age."""
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:

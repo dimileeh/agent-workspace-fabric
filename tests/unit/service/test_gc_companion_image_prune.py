@@ -16,6 +16,7 @@ from awf.service.gc import run_terminal_workspace_gc
 async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Provide an async session factory bound to the test engine."""
     yield make_session_factory(engine)
 
 
@@ -24,6 +25,7 @@ async def test_execute_invokes_companion_image_prune_and_reports_result(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """GC invokes the companion image prune callback and reports its result."""
     calls: list[bool] = []
 
     async def _prune() -> dict[str, object]:
@@ -55,6 +57,7 @@ async def test_execute_without_prune_callback_omits_report_key(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """GC omits the prune report key when no prune callback is provided."""
     result = await run_terminal_workspace_gc(
         session_factory,
         work_dir=tmp_path / "service",
@@ -69,6 +72,7 @@ async def test_dry_run_does_not_invoke_companion_image_prune(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A dry-run GC does not invoke the companion image prune callback."""
     calls: list[bool] = []
 
     async def _prune() -> dict[str, object]:
