@@ -108,8 +108,8 @@ async def create_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
-    requested_profile: dict[str, Any] | None = PROFILE_NOT_PROVIDED,  # type: ignore[assignment]
-    resolved_profile: dict[str, Any] | None = PROFILE_NOT_PROVIDED,  # type: ignore[assignment]
+    requested_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
+    resolved_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
 ) -> Workspace:
     """Persist one rich workspace create request without committing the session.
 
@@ -123,12 +123,14 @@ async def create_workspace_row(
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     base_task_policy = workspace_create_task_policy_snapshot(payload)
-    if requested_profile is PROFILE_NOT_PROVIDED or resolved_profile is PROFILE_NOT_PROVIDED:  # type: ignore[comparison-overlap]
-        _requested, _resolved = workspace_create_profile_snapshots(payload)  # type: ignore[unreachable]
+    if requested_profile is PROFILE_NOT_PROVIDED or resolved_profile is PROFILE_NOT_PROVIDED:
+        _requested, _resolved = workspace_create_profile_snapshots(payload)
         if requested_profile is PROFILE_NOT_PROVIDED:
             requested_profile = _requested
         if resolved_profile is PROFILE_NOT_PROVIDED:
             resolved_profile = _resolved
+    requested_profile = cast(dict[str, Any] | None, requested_profile)
+    resolved_profile = cast(dict[str, Any] | None, resolved_profile)
     preflight = await _selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=payload.task.agent,
