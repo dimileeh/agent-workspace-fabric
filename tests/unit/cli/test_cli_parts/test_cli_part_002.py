@@ -991,6 +991,23 @@ class TestBaseUrlResolution:
         assert self._DEPRECATION_NOTICE not in result.stderr
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("host_port", ["not-a-port", "0", "65536"])
+    def test_invalid_api_host_port_exits_before_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        host_port: str,
+    ) -> None:
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setenv("AWF_API_HOST_PORT", host_port)
+        with patch("awf.cli.main.httpx.request") as mock:
+            result = _runner.invoke(app, ["workspace", "list"])
+
+        assert result.exit_code == 2
+        assert mock.call_count == 0
+        assert "AWF_API_HOST_PORT must be an integer between 1 and 65535" in result.stderr
+        assert repr(host_port) in result.stderr
+
+    @pytest.mark.unit
     def test_no_base_url_env_uses_localhost_8000_fallback(
         self,
         monkeypatch: pytest.MonkeyPatch,

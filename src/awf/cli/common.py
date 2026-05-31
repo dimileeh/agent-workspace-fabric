@@ -78,8 +78,28 @@ def _base_url(override: str | None) -> str:
         return deprecated_base_url
     host_port = os.environ.get("AWF_API_HOST_PORT")
     if host_port:
-        return f"http://localhost:{host_port}"
+        return f"http://localhost:{_parse_api_host_port(host_port)}"
     return _DEFAULT_BASE_URL
+
+
+def _parse_api_host_port(host_port: str) -> int:
+    """Parse the CLI's host API port override."""
+
+    stripped_port = host_port.strip()
+    if not stripped_port.isdecimal():
+        _exit_invalid_api_host_port(host_port)
+    parsed_port = int(stripped_port)
+    if not 1 <= parsed_port <= 65535:
+        _exit_invalid_api_host_port(host_port)
+    return parsed_port
+
+
+def _exit_invalid_api_host_port(host_port: str) -> None:
+    typer.echo(
+        f"error: AWF_API_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 def _emit_deprecated_cli_base_url_notice() -> None:
