@@ -177,6 +177,32 @@ async def test_monitor_precommit_autofix_retry_returns_none_when_worktree_is_cle
 
 
 @pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_returns_none_when_only_staged_repair_paths_remain(
+    tmp_path: Path,
+) -> None:
+    fixed_path = "src/awf/fixed.py"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f"M  {fixed_path}\n")
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(fixed_path,),
+    )
+
+    assert retry is None
+    assert len(runner.calls) == 1
+    assert runner.calls[0].args[-2:] == ["status", "--porcelain"]
+
+
+@pytest.mark.unit
 async def test_monitor_precommit_autofix_retry_does_not_restage_staged_only_repair_paths(
     tmp_path: Path,
 ) -> None:
