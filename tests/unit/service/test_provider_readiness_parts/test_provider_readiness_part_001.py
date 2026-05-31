@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -84,8 +83,11 @@ def _runtime_cli_ok(expected_executable: str) -> Any:
 
 @pytest.mark.unit
 def test_provider_readiness_validates_aliases_and_rejects_unknown() -> None:
-    assert validate_provider_names(["claude", "opencode", "codex", "grok", "docker", ""]) == {
+    assert validate_provider_names(
+        ["claude", "cursor", "opencode", "codex", "grok", "docker", ""]
+    ) == {
         "claude_code",
+        "cursor",
         "opencode",
         "codex",
         "grok",
@@ -110,6 +112,7 @@ def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path)
         "github",
         "codex",
         "claude_code",
+        "cursor",
         "gemini",
         "opencode",
         "grok",
@@ -244,6 +247,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     (home / ".config" / "opencode").mkdir(parents=True)
     env = {
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+        "CURSOR_API_KEY": "cursor_secret",
         "XAI_API_KEY": "xai-selected-grok-secret",
     }
     probe_calls: list[list[str]] = []
@@ -255,6 +259,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     cases = [
         ("codex", "codex", "gpt-custom", "ok"),
         ("claude_code", "claude_code", "claude-opus-4-8", "ok"),
+        ("cursor", "cursor", "sonnet-4-thinking", "ok"),
         ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
         ("grok", "grok", "grok-build-0.1", "ok"),
@@ -304,6 +309,16 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         "sh",
         "awf-agent-runtime:latest",
         "-lc",
+        "command -v cursor-agent",
+    ] in probe_calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "awf-agent-runtime:latest",
+        "-lc",
         "command -v gemini",
     ] in probe_calls
     assert [
@@ -326,6 +341,160 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         "-lc",
         "command -v grok",
     ] in probe_calls
+
+
+@pytest.mark.unit
+def test_selected_cursor_preflight_requires_env_key_and_runtime_cli(
+    tmp_path: Path,
+) -> None:
+    """Cursor selected preflight requires both API-key auth and cursor-agent."""
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={},
+        environ={"CURSOR_API_KEY": "cursor_secret"},
+        run_subprocess=_runtime_cli_ok("cursor-agent"),
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["agent"] == "cursor"
+    assert result["model"] == "sonnet-4-thinking"
+    assert result["model_source"] == "default"
+    assert result["readiness_status"] == "ready"
+    assert result["auth_status"] == "ok"
+    assert result["auth_source"] == "CURSOR_API_KEY"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+    serialized = json.dumps(result, sort_keys=True)
+    assert "cursor_secret" not in serialized
+
+
+@pytest.mark.unit
+def test_selected_cursor_preflight_lower_effort_uses_implicit_runtime_model(
+    tmp_path: Path,
+) -> None:
+    """Lower Cursor effort without a model reports Cursor's implicit runtime model."""
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={"agent_effort": "medium"},
+        environ={"CURSOR_API_KEY": "cursor_secret"},
+        run_subprocess=_runtime_cli_ok("cursor-agent"),
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["agent"] == "cursor"
+    assert result["model"] is None
+    assert result["model_source"] == "default"
+    assert result["readiness_status"] == "ready"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_cursor_preflight_blocks_missing_env_key(tmp_path: Path) -> None:
+    """Cursor selected preflight blocks launch when API-key auth is absent."""
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["agent"] == "cursor"
+    assert result["model"] == "sonnet-4-thinking"
+    assert result["readiness_status"] == "blocked"
+    assert result["auth_status"] == "fail"
+    assert result["auth_source"] == "not_observed"
+    assert result["probe_status"] == "skipped"
+    assert result["reason_code"] == "CURSOR_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_cursor_preflight_blocks_missing_runtime_cli(tmp_path: Path) -> None:
+    """Cursor selected preflight blocks launch when cursor-agent is missing."""
+    secret = "cursor_missing_cli_secret"
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        """Simulate a missing cursor-agent executable."""
+        assert args[-1] == "command -v cursor-agent"
+        assert kwargs["env"]["CURSOR_API_KEY"] == secret
+        return _completed(returncode=1, stderr=f"cursor-agent missing with {secret}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={},
+        environ={"CURSOR_API_KEY": secret},
+        run_subprocess=_run,
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "CURSOR_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
+    serialized = json.dumps(result, sort_keys=True)
+    assert secret not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_cursor_env_auth_requires_runtime_cli(tmp_path: Path) -> None:
+    """Strict Cursor readiness reports a CLI probe failure after auth succeeds."""
+    secret = "cursor_provider_readiness_secret"
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        """Record the Cursor runtime probe and return a missing CLI result."""
+        calls.append(args)
+        assert args[-1] == "command -v cursor-agent"
+        assert kwargs["env"]["CURSOR_API_KEY"] == secret
+        return _completed(returncode=1, stderr=f"missing cursor-agent for {secret}")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"CURSOR_API_KEY": secret},
+        strict_providers=["cursor"],
+        run_subprocess=_run,
+    )
+
+    cursor = payload["providers"]["cursor"]
+    assert cursor["ok"] is False
+    assert cursor["status"] == "fail"
+    assert cursor["reason"] == "CURSOR_RUNTIME_CLI_NOT_FOUND"
+    assert cursor["credential_scope"] == "static_env_token"
+    assert cursor["isolation"] == "service_env"
+    assert cursor["credential_sources"] == [
+        {
+            "type": "env",
+            "signal": "CURSOR_API_KEY",
+            "credential_scope": "static_env_token",
+            "isolation": "service_env",
+        }
+    ]
+    assert cursor["runtime_cli_probe"]["status"] == "fail"
+    assert cursor["runtime_cli_probe"]["reason_code"] == "CURSOR_RUNTIME_CLI_NOT_FOUND"
+    assert calls == [
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v cursor-agent",
+        ]
+    ]
+    serialized = json.dumps(payload, sort_keys=True)
+    assert secret not in serialized
+    assert "<redacted>" in serialized
 
 
 @pytest.mark.unit
@@ -1036,12 +1205,14 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
     (home / ".ollama" / "config.json").write_text("ollama-file-secret")
     github_secret = "ghp_green_secret"
     anthropic_secret = "sk-ant-green-secret"
+    cursor_secret = "cursor_green_secret"
     gemini_secret = "gemini_green_secret"
     ollama_secret = "ollama_green_secret"
     xai_secret = "xai_green_secret"
     env = {
         "AWF_GITHUB_TOKEN": github_secret,
         "ANTHROPIC_API_KEY": anthropic_secret,
+        "CURSOR_API_KEY": cursor_secret,
         "GEMINI_API_KEY": gemini_secret,
         "OLLAMA_API_KEY": ollama_secret,
         "XAI_API_KEY": xai_secret,
@@ -1050,13 +1221,26 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
     subprocess_calls: list[list[str]] = []
 
     def _run(args: list[str], **kwargs: object) -> Any:
+        """Return successful auth and runtime probes for all providers."""
         subprocess_calls.append(args)
-        assert args == ["gh", "auth", "status", "--hostname", "github.com"]
-        assert github_secret not in args
-        subprocess_env = kwargs["env"]
-        assert isinstance(subprocess_env, dict)
-        assert subprocess_env["GH_TOKEN"] == github_secret
-        return _completed(stdout="logged in\n")
+        if args == ["gh", "auth", "status", "--hostname", "github.com"]:
+            assert github_secret not in args
+            subprocess_env = kwargs["env"]
+            assert isinstance(subprocess_env, dict)
+            assert subprocess_env["GH_TOKEN"] == github_secret
+            return _completed(stdout="logged in\n")
+        assert args == [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v cursor-agent",
+        ]
+        assert kwargs["env"]["CURSOR_API_KEY"] == cursor_secret
+        return _completed(stdout="/usr/local/bin/cursor-agent\n")
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -1071,6 +1255,7 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
         "github",
         "codex",
         "claude_code",
+        "cursor",
         "gemini",
         "opencode",
         "grok",
@@ -1078,12 +1263,25 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
     }
     assert all(provider["ok"] is True for provider in providers.values())
     assert providers["github"]["capabilities"] == ["pr_create", "comment", "merge"]
-    assert subprocess_calls == [["gh", "auth", "status", "--hostname", "github.com"]]
+    assert subprocess_calls == [
+        ["gh", "auth", "status", "--hostname", "github.com"],
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v cursor-agent",
+        ],
+    ]
     serialized = json.dumps(payload, sort_keys=True)
     for secret in (
         github_secret,
         "codex_file_secret",
         anthropic_secret,
+        cursor_secret,
         gemini_secret,
         ollama_secret,
         xai_secret,
@@ -1233,256 +1431,3 @@ def test_provider_readiness_codex_missing_warns_by_default_and_fails_when_strict
     assert strict_payload["strict_providers"] == ["codex"]
     assert strict_codex["status"] == "fail"
     assert strict_codex["reason"] == "CODEX_AUTH_MISSING"
-
-
-@pytest.mark.unit
-def test_provider_readiness_existing_file_providers_report_credential_scope(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
-    (home / ".claude.json").write_text('{"oauth":"claude_json_secret"}')
-    (home / ".gemini").mkdir()
-    (home / ".gemini" / "oauth_creds.json").write_text("gemini_file_secret")
-    (home / ".config" / "opencode").mkdir(parents=True)
-    (home / ".config" / "opencode" / "opencode.json").write_text("opencode_file_secret")
-    (home / ".ollama").mkdir()
-    (home / ".ollama" / "id_ed25519").write_text("ollama_file_secret")
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
-        run_subprocess=_unexpected_subprocess,
-        http_get=_ollama_ok,
-    )
-
-    for name in ("claude_code", "gemini", "opencode"):
-        provider = payload["providers"][name]
-        assert provider["ok"] is True
-        assert provider["credential_scope"] == "isolated_workspace"
-        assert provider["isolation"] == "per_workspace_copy"
-        assert provider["credential_sources"]
-    serialized = json.dumps(payload, sort_keys=True)
-    for secret in (
-        "claude_file_secret",
-        "claude_json_secret",
-        "gemini_file_secret",
-        "opencode_file_secret",
-        "ollama_file_secret",
-    ):
-        assert secret not in serialized
-
-
-@pytest.mark.unit
-def test_provider_readiness_env_fallbacks_report_security_warnings(
-    tmp_path: Path,
-) -> None:
-    env = {
-        "AWF_GITHUB_TOKEN": "ghp_env_fallback_secret",
-        "OPENAI_API_KEY": "sk-proj-codex-fallback-secret",
-        "ANTHROPIC_API_KEY": "sk-ant-env-fallback-secret",
-        "GEMINI_API_KEY": "gemini-env-fallback-secret",
-        "OLLAMA_API_KEY": "ollama-env-fallback-secret",
-        "XAI_API_KEY": "xai-env-fallback-secret",
-        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
-    }
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ=env,
-        run_subprocess=lambda _args, **_kwargs: _completed(stdout="logged in\n"),
-        http_get=_ollama_ok,
-    )
-
-    for name in ("github", "codex", "claude_code", "gemini", "opencode", "grok"):
-        provider = payload["providers"][name]
-        assert provider["ok"] is True
-        assert provider["credential_scope"] == "static_env_token"
-        assert provider["isolation"] == "service_env"
-        assert any(warning["reason"] == "STATIC_TOKEN_FALLBACK" for warning in provider["warnings"])
-    serialized = json.dumps(payload, sort_keys=True)
-    for secret in env.values():
-        assert secret not in serialized
-
-
-@pytest.mark.unit
-def test_provider_readiness_docker_reports_host_daemon_broad_control_warning(
-    tmp_path: Path,
-) -> None:
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    docker = payload["providers"]["docker"]
-    assert docker["ok"] is True
-    assert docker["status"] == "ok"
-    assert docker["reason"] == "DOCKER_HOST_CONFIGURED"
-    assert docker["credential_scope"] == "docker_host_control"
-    assert docker["isolation"] == "host_daemon"
-    assert any(warning["reason"] == "DOCKER_HOST_BROAD_CONTROL" for warning in docker["warnings"])
-
-
-@pytest.mark.unit
-def test_provider_readiness_docker_registry_auth_is_observed_not_read(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    docker_home = home / ".docker"
-    docker_home.mkdir(parents=True)
-    (docker_home / "config.json").write_text('{"auths":{"ghcr.io":{"auth":"docker_file_secret"}}}')
-    env_auth = '{"auths":{"registry.example":{"auth":"docker_env_secret"}}}'
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={"DOCKER_AUTH_CONFIG": env_auth},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    docker = payload["providers"]["docker"]
-    source_signals = {source["signal"] for source in docker["credential_sources"]}
-    assert "DOCKER_AUTH_CONFIG" in source_signals
-    assert "~/.docker/config.json" in source_signals
-    serialized = json.dumps(payload, sort_keys=True)
-    assert "docker_file_secret" not in serialized
-    assert "docker_env_secret" not in serialized
-
-
-@pytest.mark.unit
-def test_provider_readiness_docker_reports_missing_auth_without_host_signal(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    result = provider_readiness._check_docker_provider(
-        replace(_settings(tmp_path), docker_host=""),
-        environ={},
-        host_home=home,
-        strict=True,
-        secrets=frozenset(),
-    )
-
-    assert result["status"] == "fail"
-    assert result["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
-    assert result["credential_scope"] == "not_observed"
-    assert result["isolation"] == "none"
-
-
-@pytest.mark.unit
-def test_provider_readiness_docker_without_host_or_registry_warns(tmp_path: Path) -> None:
-    payload = collect_agent_readiness(
-        _settings(tmp_path, docker_host=""),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    docker = payload["providers"]["docker"]
-    assert docker["ok"] is False
-    assert docker["status"] == "warn"
-    assert docker["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
-    assert docker["credential_scope"] == "not_observed"
-    assert docker["isolation"] == "none"
-
-
-@pytest.mark.unit
-def test_provider_readiness_docker_config_path_is_reported_without_reading_secret(
-    tmp_path: Path,
-) -> None:
-    docker_config = tmp_path / "docker-config"
-    docker_config.mkdir()
-    (docker_config / "config.json").write_text(
-        '{"auths":{"registry.example":{"auth":"docker_config_secret"}}}'
-    )
-
-    result = provider_readiness._check_docker_provider(
-        replace(_settings(tmp_path), docker_host=""),
-        environ={"DOCKER_CONFIG": str(docker_config)},
-        host_home=tmp_path / "home",
-        strict=False,
-        secrets=frozenset({"docker_config_secret"}),
-    )
-
-    assert result["status"] == "ok"
-    assert result["reason"] == "DOCKER_REGISTRY_AUTH_PRESENT"
-    assert result["credential_scope"] == "read_only_host_path"
-    assert result["isolation"] == "read_only_bind"
-    assert "docker_config_secret" not in json.dumps(result, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_provider_readiness_docker_config_path_reports_registry_auth(
-    tmp_path: Path,
-) -> None:
-    docker_config = tmp_path / "docker-config"
-    docker_config.mkdir()
-    (docker_config / "config.json").write_text(
-        '{"auths":{"registry.example":{"auth":"docker_config_secret"}}}'
-    )
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path, docker_host=""),
-        environ={"DOCKER_CONFIG": str(docker_config)},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    docker = payload["providers"]["docker"]
-    assert docker["ok"] is True
-    assert docker["reason"] == "DOCKER_REGISTRY_AUTH_PRESENT"
-    assert docker["credential_scope"] == "read_only_host_path"
-    assert docker["isolation"] == "read_only_bind"
-    assert docker["credential_sources"] == [
-        {
-            "type": "path",
-            "signal": "DOCKER_CONFIG/config.json",
-            "credential_scope": "read_only_host_path",
-            "isolation": "read_only_bind",
-        }
-    ]
-    assert "docker_config_secret" not in json.dumps(payload, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_provider_readiness_docker_config_env_does_not_fall_back_to_home(
-    tmp_path: Path,
-) -> None:
-    docker_config = tmp_path / "missing-docker-config"
-    home_docker = tmp_path / "home" / ".docker"
-    home_docker.mkdir(parents=True)
-    (home_docker / "config.json").write_text("home_docker_secret")
-
-    result = provider_readiness._check_docker_provider(
-        replace(_settings(tmp_path), docker_host=""),
-        environ={"DOCKER_CONFIG": str(docker_config)},
-        host_home=tmp_path / "home",
-        strict=False,
-        secrets=frozenset({"home_docker_secret"}),
-    )
-
-    assert result["status"] == "warn"
-    assert result["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
-    assert "home_docker_secret" not in json.dumps(result, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_provider_readiness_explicit_missing_docker_config_does_not_fallback(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    docker_home = home / ".docker"
-    docker_home.mkdir(parents=True)
-    (docker_home / "config.json").write_text(
-        '{"auths":{"registry.example":{"auth":"docker_home_secret"}}}'
-    )
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path, host_home=str(home), docker_host=""),
-        environ={"DOCKER_CONFIG": str(tmp_path / "missing-docker-config")},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    docker = payload["providers"]["docker"]
-    assert docker["ok"] is False
-    assert docker["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
-    assert docker["credential_sources"] == []
-    assert "docker_home_secret" not in json.dumps(payload, sort_keys=True)

@@ -28,7 +28,10 @@ For first-time users: the current runnable first path is
 `awf init <path>` to prepare your project repository. Run `awf setup
 --dry-run` first for a read-only host readiness check.
 """
-_PROVIDER_HELP = "Repeatable provider strictness check: github, codex, claude_code, gemini, opencode, grok, or docker."
+_PROVIDER_HELP = (
+    "Repeatable provider strictness check: github, codex, claude_code, cursor, "
+    "gemini, opencode, grok, or docker."
+)
 
 service_app = typer.Typer(help="Local service operations.")
 

@@ -423,7 +423,12 @@ def register_metrics_tools(
         providers: list[ProviderFilter] | None = Field(
             default=None,
             max_length=16,
-            description="Optional list of provider names to restrict readiness checks to (e.g. 'github', 'codex', 'claude_code', 'gemini', 'opencode', 'grok', 'docker'). When set, only these providers affect the overall readiness outcome.",
+            description=(
+                "Optional list of provider names to restrict readiness checks to "
+                "(e.g. 'github', 'codex', 'claude_code', 'cursor', "
+                "'gemini', 'opencode', 'grok', 'docker'). When set, "
+                "only these providers affect the overall readiness outcome."
+            ),
         ),
     ) -> StructuredToolResult:
         """Read-only operator observability: report AWF service readiness checks."""

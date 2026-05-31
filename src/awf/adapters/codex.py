@@ -25,8 +25,9 @@ class CodexAdapter(AgentAdapter):
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
-        if model:
-            args += ["--model", model]
+        selected_model = model or self._default_model
+        if selected_model:
+            args += ["--model", selected_model]
         if self._default_effort:
             args += ["-c", f'model_reasoning_effort="{self._default_effort}"']
         args.append("-")
