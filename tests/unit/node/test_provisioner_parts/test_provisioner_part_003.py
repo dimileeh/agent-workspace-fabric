@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.redaction import REDACTION_MARKER
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     EgressAuditRepository,
@@ -607,6 +609,66 @@ class TestServiceStartupDiagnostics:
             assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
             assert failed_event.payload is not None
             assert "companion_logs_capture_error" in failed_event.payload
+
+    @pytest.mark.unit
+    async def test_capture_failure_log_omits_unredacted_exc_info(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        # Regression for issue:4585080723. ``ComposeOperationError`` folds raw
+        # docker ``stderr`` into ``str(exc)``, and structlog's
+        # ``format_exc_info`` processor renders the exception traceback verbatim
+        # whenever ``exc_info`` is passed — bypassing ``redact_secrets`` and
+        # leaking any secret docker emitted. The capture-failure warning must
+        # therefore NOT pass ``exc_info``; the redacted ``error`` field plus
+        # ``reason_code`` are sufficient for diagnosis.
+        secret_value = "S3CRET_docker_token_value"
+
+        class _RaisingDiagnostics:
+            async def capture_companion_diagnostics(
+                self, *, project_name: str, workspace_id: str, tail_lines: int = 200
+            ) -> dict[str, Any]:
+                del project_name, workspace_id, tail_lines
+                raise ComposeOperationError(
+                    operation="logs",
+                    returncode=124,
+                    stdout="",
+                    stderr=f"docker logs failed: Bearer {secret_value}",
+                    reason_code="DOCKER_COMMAND_TIMEOUT",
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            service_diagnostics=_RaisingDiagnostics(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        ws_id = await _create_failing_workspace(session_factory, origin_repo)
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeOperationError),
+        ):
+            await provisioner.provision(ws_id)
+
+        capture_failed = [
+            event
+            for event in captured
+            if event.get("event") == "provisioner.service_diagnostics_capture_failed"
+        ]
+        assert capture_failed, "expected a capture-failure warning to be logged"
+        event = capture_failed[0]
+        # ``exc_info`` is the leak vector: with it set, ``format_exc_info`` would
+        # render the unredacted traceback (incl. the docker ``stderr`` secret).
+        assert "exc_info" not in event
+        # The retained, redacted ``error`` field still carries diagnosable detail
+        # without the raw secret, alongside the structured ``reason_code``.
+        assert event["reason_code"] == "DOCKER_COMMAND_TIMEOUT"
+        assert REDACTION_MARKER in event["error"]
+        assert secret_value not in json.dumps(event, default=str)
 
     @pytest.mark.unit
     async def test_unexpected_capture_error_does_not_mask_original_error(

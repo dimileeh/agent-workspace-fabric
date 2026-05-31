@@ -520,9 +520,16 @@ class Provisioner:
         just ``ComposeOperationError``) because this runs *inside* the caller's
         ``except ComposeOperationError`` handler: an escaping error of any other
         type (e.g. a wiring/signature bug surfacing as ``TypeError``) would skip
-        ``_mark_failed`` and propagate in place of the root cause. The full
-        traceback is logged (``exc_info``) so nothing is silently swallowed —
-        mirroring the best-effort egress-audit recording in the same handler.
+        ``_mark_failed`` and propagate in place of the root cause.
+
+        We log the redacted ``error`` and structured ``reason_code`` but
+        deliberately omit ``exc_info``: ``ComposeOperationError`` folds raw
+        docker ``stderr``/``stdout`` into ``str(exc)``, and structlog's
+        ``format_exc_info`` processor would render that traceback verbatim into
+        the live log — bypassing the ``redact_secrets`` boundary every other log
+        field honors. The redacted ``error`` plus ``reason_code`` are sufficient
+        for diagnosis, and the capture error is also persisted (redacted) into
+        the failure-event payload so nothing is silently swallowed.
         """
         if self._service_diagnostics is None:
             return None
@@ -540,7 +547,6 @@ class Provisioner:
                 workspace_id=workspace_id,
                 reason_code=reason_code,
                 error=redact_secrets(str(exc)),
-                exc_info=True,
             )
             return cast(
                 "dict[str, Any]",
