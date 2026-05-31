@@ -279,8 +279,12 @@ class KeyringCredentialBackend:
         provider = _require_safe_identifier(request.provider, field="provider")
         account = _require_safe_identifier(request.account, field="account")
         service = f"{self._service_prefix}/{provider}"
-        # Validate the ref before the keychain write so an over-long identifier
-        # never strands a secret the resulting ref could not be stored against.
+        # Validate the ref before pulling the secret (and before the keychain
+        # write) so an over-long identifier never strands a secret the resulting
+        # ref could not be stored against. ``_pull_secret`` consumes
+        # ``request.secret_source`` (a single-use callable), so keep
+        # ``_build_credential_ref`` first: reordering it below ``_pull_secret``
+        # would consume the one-shot source before the validation could raise.
         ref = _build_credential_ref("keyring", f"keyring://{service}/{account}")
         secret = _pull_secret(request)
         try:
@@ -466,8 +470,12 @@ class PlainFileCredentialBackend:
         # secrets dir to an intermediate ``mkdir`` parent that escapes the leaf
         # create-time mode).
         target = self._secrets_dir / f"{provider}.{account}"
-        # Validate the ref before writing so an over-long path never leaves an
-        # orphaned secret file the resulting ref could not be stored against.
+        # Validate the ref before pulling the secret (and before writing) so an
+        # over-long path never leaves an orphaned secret file the resulting ref
+        # could not be stored against. ``_pull_secret`` consumes
+        # ``request.secret_source`` (a single-use callable), so keep
+        # ``_build_credential_ref`` first: reordering it below ``_pull_secret``
+        # would consume the one-shot source before the validation could raise.
         ref = _build_credential_ref("plain_file", f"plain-file://{target}")
         secret = _pull_secret(request)
         _write_secret_file(target, secret)
