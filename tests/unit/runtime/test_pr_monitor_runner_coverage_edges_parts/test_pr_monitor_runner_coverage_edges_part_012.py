@@ -23,6 +23,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Create an isolated async session factory for helper edge tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -33,6 +34,7 @@ async def test_fetch_base_wraps_broken_ref_repair_exceptions_as_base_fetch_error
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
+    """Verify broken-ref repair errors are wrapped as base fetch failures."""
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
@@ -74,6 +76,7 @@ async def test_missing_workspace_terminal_helpers_return_without_side_effects(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify terminal helpers quietly ignore missing workspaces."""
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),

@@ -33,6 +33,7 @@ from .test_pr_monitor_runner_coverage_edges_part_003 import _status_for_helpers
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Create an isolated async session factory for monitor runner tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 

@@ -110,5 +110,26 @@ Plan reference: `plans/COMMENT_4585055984_DOCSTRING_COVERAGE_PLAN.md`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_prompts.py::TestAddressThread::test_thread_prompt_escapes_owned_paths_before_embedding tests/unit/runtime/test_monitor_prompts.py::TestAddressReviewComment::test_review_comment_prompt_escapes_owned_paths_before_embedding tests/unit/runtime/test_monitor_prompts.py::TestFixCiPrompt::test_ci_prompt_escapes_owned_paths_before_embedding -q`:
   3 passed.
 
+## Coverage-Edge Shard Follow-up Validation
+
+- After later PR monitor coverage-edge shard commits, the diff-scoped
+  `ruff --select D` audit over Python files changed in
+  `origin/development...HEAD`, intersected with actual PR-added lines, reported
+  seven remaining findings:
+  `tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_010.py:35`,
+  `test_pr_monitor_runner_coverage_edges_part_011.py:28`, `:34`, `:97`, and
+  `test_pr_monitor_runner_coverage_edges_part_012.py:25`, `:31`, `:73`.
+- Added behavior-neutral fixture/test docstrings in those three shards without
+  changing assertions or control flow.
+- Re-ran the diff-scoped `ruff --select D` audit over all 28 Python files
+  changed in `origin/development...HEAD`, intersected with actual PR-added
+  lines: `diff_added_d_findings=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_010.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_011.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_012.py`:
+  passed.
+- `uv run --python 3.12 --extra dev ruff format --check tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_010.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_011.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_012.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_010.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_011.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_012.py -q`:
+  6 passed.
+
 Full AWF/GitHub validation, coverage gates, frontend builds, and CI-equivalent
 commands were intentionally not run in this agent phase.

@@ -26,6 +26,7 @@ from .test_pr_monitor_runner_coverage_edges_part_004 import _git_worktree_comman
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Create an isolated async session factory for CI-fix edge tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -35,6 +36,7 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify blocking supply-chain findings stop CI repair before commit."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
@@ -98,6 +100,7 @@ async def test_ci_fix_refuses_pre_existing_dirty_worktree_before_agent(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify CI repair refuses to start from a dirty worktree."""
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
