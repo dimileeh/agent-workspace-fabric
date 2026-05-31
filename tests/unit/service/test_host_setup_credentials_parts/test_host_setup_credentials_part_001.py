@@ -352,9 +352,52 @@ def test_provider_config_still_rejects_raw_secret_credential_ref() -> None:
         ProviderConfig(credential_ref=_FAKE_GH_TOKEN, backend="env_ref")
 
 
+# Each backend kind paired with a ref that uses its own scheme.
+_MATCHING_BACKEND_REFS = {
+    "keyring": "keyring://awf/github/token",
+    "env_ref": "env://GH_TOKEN",
+    "plain_file": "plain-file:///home/agent/.awf/secrets/github",
+}
+
+
+@pytest.mark.unit
+def test_provider_config_accepts_consistent_backend_and_ref() -> None:
+    """Verify each backend kind is accepted with a ref using its own scheme."""
+    for backend, ref in _MATCHING_BACKEND_REFS.items():
+        provider = ProviderConfig(credential_ref=ref, backend=backend)
+        assert provider.backend == backend
+        assert provider.credential_ref == ref
+
+
+@pytest.mark.unit
+def test_provider_config_consistency_check_only_when_both_present() -> None:
+    """Verify the scheme check stays inert unless backend and ref are both set."""
+    assert ProviderConfig(backend="keyring").credential_ref is None
+    assert ProviderConfig(backend="keyring").backend == "keyring"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("backend", "credential_ref"),
+    [
+        ("keyring", "env://GH_TOKEN"),
+        ("env_ref", "keyring://awf/github/token"),
+        ("plain_file", "env://GH_TOKEN"),
+        ("env_ref", "plain-file:///home/agent/.awf/secrets/github"),
+    ],
+)
+def test_provider_config_rejects_backend_ref_scheme_mismatch(
+    backend: str, credential_ref: str
+) -> None:
+    """Verify a backend label that disagrees with the ref scheme is rejected."""
+    with pytest.raises(ValidationError):
+        ProviderConfig(credential_ref=credential_ref, backend=backend)
+
+
 @pytest.mark.unit
 def test_credential_backends_match_provider_config_vocabulary() -> None:
     """Verify the backend kinds stay in lockstep with provider config validation."""
     assert CREDENTIAL_BACKENDS == ("keyring", "env_ref", "plain_file")
     for backend in CREDENTIAL_BACKENDS:
-        assert ProviderConfig(credential_ref="env://GH_TOKEN", backend=backend).backend == backend
+        ref = _MATCHING_BACKEND_REFS[backend]
+        assert ProviderConfig(credential_ref=ref, backend=backend).backend == backend
