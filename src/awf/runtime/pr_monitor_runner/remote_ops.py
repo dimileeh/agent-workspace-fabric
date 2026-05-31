@@ -43,8 +43,30 @@ _log = get_logger(__name__)
 # Constants
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
 _WORKFLOW_FILE_PATH_RE = re.compile(r"\.github/workflows/[^\s`'\"()]+")
-_MISSING_WORKFLOW_SCOPE_RE = re.compile(
-    r"without\s+`?workflows?`?\s+(?:scope|permission)",
+_WORKFLOW_PERMISSION_TERM = r"`?workflows?`?(?:\s+|-)+(?:scope|permission)s?"
+_MISSING_WORKFLOW_SCOPE_PATTERNS = (
+    re.compile(
+        rf"\bwithout\s+(?:the\s+|a\s+)?{_WORKFLOW_PERMISSION_TERM}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_WORKFLOW_PERMISSION_TERM}\s+(?:is\s+|are\s+)?required\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:requires?|needs?|must\s+have|must\s+include)\s+"
+        rf"(?:the\s+|a\s+)?{_WORKFLOW_PERMISSION_TERM}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:missing|lacks?|does\s+not\s+have|doesn't\s+have|has\s+no)\s+"
+        rf"(?:the\s+|a\s+)?{_WORKFLOW_PERMISSION_TERM}\b",
+        re.IGNORECASE,
+    ),
+)
+_WORKFLOW_SCOPE_PUSH_CONTEXT_RE = re.compile(
+    r"refusing to allow|remote rejected|create or update workflow|workflow(?:-|\s+)file|"
+    r"\.github/workflows/",
     re.IGNORECASE,
 )
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
@@ -560,10 +582,9 @@ async def _git_push_result(
 
 def _workflow_scope_push_block(output: str) -> _WorkflowScopePushBlock:
     normalized = " ".join(output.split())
-    lower = normalized.lower()
-    if "refusing to allow" not in lower or "workflow" not in lower:
+    if not any(pattern.search(normalized) for pattern in _MISSING_WORKFLOW_SCOPE_PATTERNS):
         return _WorkflowScopePushBlock(blocked=False)
-    if _MISSING_WORKFLOW_SCOPE_RE.search(normalized) is None:
+    if _WORKFLOW_SCOPE_PUSH_CONTEXT_RE.search(normalized) is None:
         return _WorkflowScopePushBlock(blocked=False)
     paths = tuple(
         dict.fromkeys(

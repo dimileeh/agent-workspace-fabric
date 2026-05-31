@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, fix_cycle
 from awf.runtime.pr_monitor_runner.fix_cycle import _mark_publish_dependent_items_needs_human
 from awf.runtime.pr_monitor_runner.helpers import _notify_human_reason
+from awf.runtime.pr_monitor_runner.remote_ops import _workflow_scope_push_block
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -103,6 +104,46 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     assert result.workflow_scope_required is True
     assert result.terminal_monitor_failure is False
     assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        (
+            "remote: error: refusing to allow a GitHub App to create or update "
+            "workflow `.github/workflows/publish.yml` because the workflows "
+            "permission is required"
+        ),
+        (
+            "remote: error: `.github/workflows/publish.yml` must have workflow "
+            "permission\n ! [remote rejected] HEAD -> awf/ws (protected branch "
+            "hook declined)"
+        ),
+        (
+            "remote: error: workflow scope required to update "
+            ".github/workflows/publish.yml\n ! [remote rejected] HEAD -> awf/ws"
+        ),
+    ],
+)
+def test_workflow_scope_push_block_handles_alternate_github_wording(stderr: str) -> None:
+    """Verify workflow-scope detection handles nearby GitHub wording variants."""
+    block = _workflow_scope_push_block(stderr)
+
+    assert block.blocked is True
+    assert block.paths == (".github/workflows/publish.yml",)
+    assert ".github/workflows/publish.yml" in block.message
+    assert "`workflow` scope" in block.message
+
+
+@pytest.mark.unit
+def test_workflow_scope_push_block_ignores_unrelated_workflow_output() -> None:
+    """Verify generic workflow text does not become a token-scope failure."""
+    block = _workflow_scope_push_block(
+        "remote: workflow validation failed without a required status check"
+    )
+
+    assert block.blocked is False
 
 
 @pytest.mark.unit
