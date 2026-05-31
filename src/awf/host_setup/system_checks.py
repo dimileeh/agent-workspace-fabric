@@ -77,6 +77,19 @@ DEFAULT_OLLAMA_BRIDGE_TARGET_PORT = 11434
 DEFAULT_OLLAMA_BRIDGE_BIND_ADDRESS = "172.17.0.1"
 DEFAULT_OLLAMA_BRIDGE_TARGET_HOST = "127.0.0.1"
 
+# Compose hard-codes Postgres's host publish to the IPv4 loopback
+# (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``), so an ollama-bridge that
+# resolves to bind the *same* loopback collides with Postgres on a shared host
+# port. The overlapping bind addresses are the literal ``127.0.0.1`` and the IPv4
+# wildcard ``0.0.0.0`` (which subsumes every IPv4 address, loopback included). The
+# default bridge bind (``172.17.0.1``, the docker0 gateway) is a distinct specific
+# address and never collides, so it is absent here. Hostnames and IPv6 forms are
+# intentionally excluded: the bind address is never DNS-resolved (mirroring
+# :func:`_invalid_ollama_bridge_bind_address`), so only the literals that
+# unambiguously land on Postgres's loopback are flagged.
+_POSTGRES_HOST_BIND_ADDRESS = "127.0.0.1"
+_BRIDGE_BIND_ADDRESSES_OVERLAPPING_POSTGRES = frozenset({_POSTGRES_HOST_BIND_ADDRESS, "0.0.0.0"})
+
 _DOCKER_INSTALL_DOCS = "https://docs.docker.com/get-docker/"
 _DOCKER_DAEMON_DOCS = "https://docs.docker.com/config/daemon/"
 _GIT_DOCS = "https://git-scm.com/downloads"
@@ -1259,6 +1272,79 @@ def check_ollama_bridge_api_port_conflict(
     )
 
 
+def check_ollama_bridge_postgres_port_conflict(
+    postgres_port: int, bridge_listen_port: int, bridge_bind_address: str
+) -> SetupCheckResult | None:
+    """Block when the ollama-bridge binds Postgres's loopback on a shared host port.
+
+    The local-service Compose stack publishes Postgres on the IPv4 loopback
+    (``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``), and the optional
+    ``ollama-bridge`` profile runs a host-networking socat that binds
+    ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``
+    directly on the host. ``awf service bootstrap`` brings ``postgres`` up *before*
+    ``ollama_bridge``, so Docker reserves the Postgres loopback port first; socat
+    then fails to bind that same loopback port and ``awf start`` fails.
+    :func:`check_postgres_port` and :func:`check_ollama_bridge_listen_port` each
+    validate their port in isolation, so neither catches the collision -- this
+    cross-check closes that dry-run-passes / start-fails gap, mirroring
+    :func:`check_ollama_bridge_api_port_conflict` for the API/bridge pair.
+
+    Unlike the API/bridge cross-check -- where the API side is *always* the
+    wildcard ``0.0.0.0`` publish, so a shared port collides regardless of address
+    -- both Postgres and the bridge bind *specific* addresses here, so the
+    comparison is address-aware: a conflict is reported only when the ports match
+    *and* the resolved bridge bind address overlaps Postgres's ``127.0.0.1``
+    loopback (the literal ``127.0.0.1`` or the IPv4 wildcard ``0.0.0.0``). The
+    default bridge bind (``172.17.0.1``, the docker0 gateway) is a distinct address
+    that never collides, so the common case emits no readiness line. The bind
+    address is matched verbatim and never DNS-resolved (mirroring
+    :func:`check_ollama_bridge_bind_address`), so a hostname or IPv6 form that
+    happens to resolve to loopback is left unflagged rather than risk a
+    DNS-dependent false positive.
+
+    Returns ``None`` when the ports differ or the bridge binds a non-overlapping
+    address, and a BLOCKED result when they collide.
+    """
+    if (
+        postgres_port != bridge_listen_port
+        or bridge_bind_address not in _BRIDGE_BIND_ADDRESSES_OVERLAPPING_POSTGRES
+    ):
+        return None
+    return SetupCheckResult(
+        name="ollama_bridge_postgres_port_conflict",
+        level=SetupCheckLevel.BLOCKED,
+        summary=(
+            f"ollama-bridge bind {bridge_bind_address}:{bridge_listen_port} collides with "
+            f"Postgres on {_POSTGRES_HOST_BIND_ADDRESS}:{postgres_port}."
+        ),
+        detail=(
+            f"The local-service Compose stack publishes Postgres on "
+            f"{_POSTGRES_HOST_BIND_ADDRESS}:{postgres_port} "
+            "(127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432) and, with "
+            "COMPOSE_PROFILES=ollama-bridge, runs a host-networking socat that binds "
+            f"{bridge_bind_address}:{bridge_listen_port} "
+            "(${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}). "
+            "awf service bootstrap starts postgres before the bridge, so Docker reserves the "
+            "Postgres loopback port first and socat cannot bind the same loopback port (a literal "
+            "127.0.0.1 match or a 0.0.0.0 wildcard that overlaps it), so awf start fails to publish "
+            "the bridge. The single-port probes bind and release each port independently, so both "
+            "pass in isolation."
+        ),
+        fix=(
+            "Set AWF_OLLAMA_BRIDGE_LISTEN_PORT and AWF_POSTGRES_HOST_PORT to different ports (the "
+            "defaults are 11434 and 5433), or set AWF_OLLAMA_BRIDGE_BIND_ADDRESS to an address that "
+            "does not overlap Postgres's 127.0.0.1 loopback (the default 172.17.0.1), then re-run "
+            "awf setup --dry-run."
+        ),
+        data={
+            "postgres_port": postgres_port,
+            "ollama_bridge_listen_port": bridge_listen_port,
+            "bridge_bind_address": bridge_bind_address,
+            "conflict": True,
+        },
+    )
+
+
 def _ollama_bridge_profile_enabled(environ: Mapping[str, str]) -> bool:
     """Return whether the optional ``ollama-bridge`` Compose profile is active.
 
@@ -2344,18 +2430,39 @@ def run_system_checks(
     # invalid (its own blocker already fires and there is no resolved port to
     # compare), mirroring the API/Postgres port_conflict gating above.
     bridge_env = os.environ if environ is None else environ
+    bridge_profile_enabled = _ollama_bridge_profile_enabled(bridge_env)
     resolved_bridge_listen_port: int | None = None
-    if (
-        resolved_port is not None
-        and _ollama_bridge_profile_enabled(bridge_env)
-        and _invalid_ollama_bridge_listen_port_override(bridge_env) is None
-    ):
+    if bridge_profile_enabled and _invalid_ollama_bridge_listen_port_override(bridge_env) is None:
         resolved_bridge_listen_port = (
             _env_ollama_bridge_listen_port(bridge_env) or DEFAULT_OLLAMA_BRIDGE_LISTEN_PORT
         )
     ollama_bridge_port_conflict_check = (
         check_ollama_bridge_api_port_conflict(resolved_port, resolved_bridge_listen_port)
         if resolved_port is not None and resolved_bridge_listen_port is not None
+        else None
+    )
+    # Cross-check the Postgres host port against the bridge listen port. Unlike the
+    # API publish (a wildcard 0.0.0.0 that overlaps any address), both Postgres and
+    # the bridge bind *specific* addresses, so a shared port only collides when the
+    # resolved bridge bind address overlaps Postgres's 127.0.0.1 loopback. Resolve
+    # the bind address only when the profile is on and its override is valid -- a
+    # malformed bind address fires its own blocker and leaves nothing to compare --
+    # then gate on a resolved Postgres port too (its own override blocker fires when
+    # invalid), mirroring the API/bridge gating above.
+    resolved_bridge_bind_address: str | None = None
+    if bridge_profile_enabled and _invalid_ollama_bridge_bind_address(bridge_env) is None:
+        resolved_bridge_bind_address = (
+            bridge_env.get("AWF_OLLAMA_BRIDGE_BIND_ADDRESS") or DEFAULT_OLLAMA_BRIDGE_BIND_ADDRESS
+        )
+    ollama_bridge_postgres_port_conflict_check = (
+        check_ollama_bridge_postgres_port_conflict(
+            resolved_postgres_port,
+            resolved_bridge_listen_port,
+            resolved_bridge_bind_address,
+        )
+        if resolved_postgres_port is not None
+        and resolved_bridge_listen_port is not None
+        and resolved_bridge_bind_address is not None
         else None
     )
     invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
@@ -2428,6 +2535,11 @@ def run_system_checks(
         *(
             [ollama_bridge_port_conflict_check]
             if ollama_bridge_port_conflict_check is not None
+            else []
+        ),
+        *(
+            [ollama_bridge_postgres_port_conflict_check]
+            if ollama_bridge_postgres_port_conflict_check is not None
             else []
         ),
         disk_check,
@@ -2635,6 +2747,7 @@ __all__ = [
     "check_ollama_bridge_api_port_conflict",
     "check_ollama_bridge_bind_address",
     "check_ollama_bridge_listen_port",
+    "check_ollama_bridge_postgres_port_conflict",
     "check_ollama_bridge_target_host",
     "check_ollama_bridge_target_port",
     "check_ports",

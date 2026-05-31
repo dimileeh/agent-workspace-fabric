@@ -2363,6 +2363,204 @@ def test_run_system_checks_skips_ollama_bridge_port_conflict_when_bridge_overrid
     assert port.data["env_value"] == "abc"
 
 
+@pytest.mark.unit
+def test_check_ollama_bridge_postgres_port_conflict_blocks_when_loopback_overlaps() -> None:
+    """A bridge bound to Postgres's 127.0.0.1 on a shared host port is a hard blocker.
+
+    The Compose stack publishes Postgres on 127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}
+    and, with the ollama-bridge profile on, runs a host-networking socat binding
+    ${AWF_OLLAMA_BRIDGE_BIND_ADDRESS}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT}. awf service
+    bootstrap starts postgres before ollama_bridge, so Docker reserves the Postgres
+    loopback port first and socat fails to bind the same 127.0.0.1 port. The
+    single-port probes bind and release independently, so only the cross-check
+    catches it; it must block and carry both ports and the bind address.
+    """
+    result = system_checks.check_ollama_bridge_postgres_port_conflict(5433, 5433, "127.0.0.1")
+
+    assert result is not None
+    assert result.name == "ollama_bridge_postgres_port_conflict"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["postgres_port"] == 5433
+    assert result.data["ollama_bridge_listen_port"] == 5433
+    assert result.data["bridge_bind_address"] == "127.0.0.1"
+    assert "5433" in result.summary
+    assert result.fix is not None
+    assert "AWF_OLLAMA_BRIDGE_LISTEN_PORT" in result.fix
+    assert "AWF_POSTGRES_HOST_PORT" in result.fix
+
+
+@pytest.mark.unit
+def test_check_ollama_bridge_postgres_port_conflict_blocks_when_bridge_wildcard() -> None:
+    """A 0.0.0.0 bridge bind overlaps Postgres's loopback on a shared host port.
+
+    An IPv4 wildcard bind reserves the port on every address, including the
+    127.0.0.1 loopback Docker publishes Postgres on, so a shared port still
+    collides even though the literal bind addresses differ.
+    """
+    result = system_checks.check_ollama_bridge_postgres_port_conflict(5433, 5433, "0.0.0.0")
+
+    assert result is not None
+    assert result.name == "ollama_bridge_postgres_port_conflict"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["bridge_bind_address"] == "0.0.0.0"
+
+
+@pytest.mark.unit
+def test_check_ollama_bridge_postgres_port_conflict_passes_when_ports_differ() -> None:
+    """Distinct Postgres/bridge host ports add no readiness line (the common case)."""
+    assert (
+        system_checks.check_ollama_bridge_postgres_port_conflict(5433, 11434, "127.0.0.1") is None
+    )
+
+
+@pytest.mark.unit
+def test_check_ollama_bridge_postgres_port_conflict_passes_when_addresses_distinct() -> None:
+    """A shared port is harmless when the bridge binds a non-loopback address.
+
+    The default bridge bind (172.17.0.1, the docker0 gateway) is a distinct
+    specific address from Postgres's 127.0.0.1, so Docker can reserve both even on
+    a shared port -- the cross-check must not false-positive on the default config.
+    """
+    assert (
+        system_checks.check_ollama_bridge_postgres_port_conflict(5433, 5433, "172.17.0.1") is None
+    )
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_when_bridge_and_postgres_collide_on_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge bound to 127.0.0.1 on the Postgres host port surfaces as a blocker.
+
+    With the bridge profile on, binding it to Postgres's loopback
+    (AWF_OLLAMA_BRIDGE_BIND_ADDRESS=127.0.0.1) on the default Postgres port makes
+    socat and the Postgres publish both claim 127.0.0.1:5433. Postgres comes up
+    first, so awf start cannot bind the bridge; only the cross-check catches it
+    (the per-port probes each report FREE in isolation).
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        work_dir=Path("/tmp"),
+        environ={
+            "COMPOSE_PROFILES": "ollama-bridge",
+            "AWF_OLLAMA_BRIDGE_BIND_ADDRESS": "127.0.0.1",
+            "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "5433",
+        },
+    )
+
+    conflict = next(
+        result for result in results if result.name == "ollama_bridge_postgres_port_conflict"
+    )
+    assert conflict.level is SetupCheckLevel.BLOCKED
+    assert conflict.data["postgres_port"] == 5433
+    assert conflict.data["ollama_bridge_listen_port"] == 5433
+    assert conflict.data["bridge_bind_address"] == "127.0.0.1"
+    # The cross-check is additive: the standalone probes still run.
+    assert any(result.name == "postgres_port" for result in results)
+    assert any(result.name == "ollama_bridge_port" for result in results)
+    # It sits with the other port checks, before disk.
+    names = [result.name for result in results]
+    assert names.index("ollama_bridge_postgres_port_conflict") < names.index("disk")
+    assert names.index("ollama_bridge_postgres_port_conflict") > names.index("postgres_port")
+
+
+@pytest.mark.unit
+def test_run_system_checks_omits_bridge_postgres_conflict_on_default_bind_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge listen port equal to Postgres's is harmless on the default bind.
+
+    The default bridge bind (172.17.0.1) is a distinct address from Postgres's
+    127.0.0.1, so Docker can reserve both even when the ports match; no conflict
+    line is emitted.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        work_dir=Path("/tmp"),
+        environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "5433"},
+    )
+
+    assert all(result.name != "ollama_bridge_postgres_port_conflict" for result in results)
+
+
+@pytest.mark.unit
+def test_run_system_checks_omits_bridge_postgres_conflict_when_profile_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the bridge profile off there is no socat bind to collide with Postgres."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        work_dir=Path("/tmp"),
+        environ={
+            "AWF_OLLAMA_BRIDGE_BIND_ADDRESS": "127.0.0.1",
+            "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "5433",
+        },
+    )
+
+    assert all(result.name != "ollama_bridge_postgres_port_conflict" for result in results)
+
+
+@pytest.mark.unit
+def test_run_system_checks_skips_bridge_postgres_conflict_when_postgres_override_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid Postgres port override blocks on its own; the cross-check is skipped.
+
+    A malformed AWF_POSTGRES_HOST_PORT leaves no resolved Postgres port to compare,
+    so the collision cross-check must not run (and must not crash) -- the override
+    blocker already wedges readiness.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        work_dir=Path("/tmp"),
+        environ={
+            "COMPOSE_PROFILES": "ollama-bridge",
+            "AWF_OLLAMA_BRIDGE_BIND_ADDRESS": "127.0.0.1",
+            "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "5433",
+            "AWF_POSTGRES_HOST_PORT": "abc",
+        },
+    )
+
+    assert all(result.name != "ollama_bridge_postgres_port_conflict" for result in results)
+    postgres = next(result for result in results if result.name == "postgres_port")
+    assert postgres.level is SetupCheckLevel.BLOCKED
+
+
+@pytest.mark.unit
+def test_run_system_checks_skips_bridge_postgres_conflict_when_bind_address_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed bridge bind address blocks on its own; the cross-check is skipped.
+
+    A bind address with whitespace corrupts the socat command, so
+    check_ollama_bridge_bind_address already blocks; there is no resolved bind
+    address to compare against Postgres and the cross-check must not run.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        work_dir=Path("/tmp"),
+        environ={
+            "COMPOSE_PROFILES": "ollama-bridge",
+            "AWF_OLLAMA_BRIDGE_BIND_ADDRESS": "127.0.0.1 ",
+            "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "5433",
+        },
+    )
+
+    assert all(result.name != "ollama_bridge_postgres_port_conflict" for result in results)
+    bind = next(result for result in results if result.name == "ollama_bridge_bind_address")
+    assert bind.level is SetupCheckLevel.BLOCKED
+
+
 def _patch_probes_capture_disk_path(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, object],
