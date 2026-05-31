@@ -741,6 +741,72 @@ async def test_execute_ci_fix_workflow_scope_push_failure_is_terminal(
 
 
 @pytest.mark.unit
+async def test_execute_ci_fix_workflow_scope_notification_failure_still_terminates(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Notification failures must not skip terminal workflow-scope handling."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    cmd.queue_result(returncode=1, stderr="bad credentials")  # gh pr comment notification
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Updated workflow repair.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing check"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
+    assert ci_operation.status == OperationStatus.failed.value
+    assert ci_operation.error_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
+    comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
+    assert len(comment_calls) == 1
+
+
+@pytest.mark.unit
 async def test_protected_scope_push_check_skips_missing_worktree_without_git_diff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

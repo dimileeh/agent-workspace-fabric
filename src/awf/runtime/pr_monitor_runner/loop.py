@@ -75,6 +75,35 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 
 
+async def _post_terminal_workflow_scope_notification_best_effort(
+    self: Any,
+    *,
+    workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
+    status: PRStatus,
+    state: MonitorState,
+    blocker_reason: str,
+) -> None:
+    """Post the human hint without blocking terminal workflow-scope failure."""
+    try:
+        await self._post_human_notification_once(
+            repo=repo,
+            pr_number=pr_number,
+            status=status,
+            state=state,
+            blocker_reason=blocker_reason,
+        )
+    except GitHubClientError as exc:
+        _log.warning(
+            "monitor.terminal_workflow_scope_notification_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            head_sha=status.head_sha[:10],
+            error=_redact_and_truncate_github_error(str(exc)),
+        )
+
+
 async def _execute(
     self: Any,
     *,
@@ -374,7 +403,9 @@ async def _execute(
                 evidence=push_result.failure_evidence(),
             )
             if push_result.workflow_scope_required:
-                await self._post_human_notification_once(
+                await _post_terminal_workflow_scope_notification_best_effort(
+                    self,
+                    workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
                     status=status,
@@ -793,7 +824,9 @@ async def _execute(
                 evidence=push_result.failure_evidence(),
             )
             if push_result.workflow_scope_required:
-                await self._post_human_notification_once(
+                await _post_terminal_workflow_scope_notification_best_effort(
+                    self,
+                    workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
                     status=status,
