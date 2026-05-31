@@ -32,6 +32,7 @@ from awf.runtime.operator_hints import (
     _non_check_reviewer_settle_done_key,
     _non_check_reviewer_settle_started_key,
 )
+from awf.service import controls as controls_module
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
@@ -867,6 +868,32 @@ async def test_remonitor_before_settle_persists_operator_hint_without_freeze(
     assert "warnings" not in operations[0].result
     assert events[0].payload["pending_operator_hint"] == persisted_hint
     assert "warnings" not in events[0].payload
+
+
+@pytest.mark.unit
+async def test_remonitor_requested_at_invariant_raises_clear_error(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/45"
+    workspace.pr_number = 45
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+    monkeypatch.setattr(controls_module, "utcnow", lambda: None)
+
+    with pytest.raises(
+        RuntimeError,
+        match="operator remonitor requested_at was not initialized",
+    ):
+        await service.remonitor_workspace(
+            workspace.id,
+            reason="please repair the reviewer note",
+            idempotency_key="remonitor-requested-at-invariant",
+            expected_version=workspace.version,
+        )
 
 
 @pytest.mark.unit

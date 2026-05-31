@@ -8,9 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.schemas import WorkspaceControlResponse
+from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.common.config import get_settings
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -253,7 +254,7 @@ def _control_response(
     workspace: Workspace,
     operation: Operation,
     message: str,
-    warnings: list[dict[str, object]] | None = None,
+    warnings: list[WorkspaceControlWarningResponse] | None = None,
 ) -> WorkspaceControlResponse:
     return WorkspaceControlResponse(
         workspace_id=workspace.id,
@@ -265,14 +266,34 @@ def _control_response(
     )
 
 
-def _operation_result_warnings(operation: Operation) -> list[dict[str, object]]:
+def _operation_result_warnings(operation: Operation) -> list[WorkspaceControlWarningResponse]:
     result = operation.result
     if not isinstance(result, dict):
         return []
     warnings = result.get("warnings")
     if not isinstance(warnings, list):
         return []
-    return [dict(warning) for warning in warnings if isinstance(warning, dict)]
+    warning_responses: list[WorkspaceControlWarningResponse] = []
+    for warning in warnings:
+        if not isinstance(warning, Mapping):
+            continue
+        try:
+            warning_responses.append(WorkspaceControlWarningResponse.model_validate(warning))
+        except ValidationError:
+            continue
+    return warning_responses
+
+
+def _control_warning_payloads(
+    warnings: Sequence[WorkspaceControlWarningResponse],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "warning_code": warning.warning_code,
+            "message": warning.message,
+        }
+        for warning in warnings
+    ]
 
 
 def _operator_operation_payload(

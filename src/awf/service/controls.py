@@ -11,7 +11,7 @@ from typing import Any, Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.schemas import WorkspaceControlResponse
+from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -98,6 +98,12 @@ _REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE = (
 )
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
+
+
+def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> datetime:
+    if requested_at is None:
+        raise RuntimeError("operator remonitor requested_at was not initialized")
+    return requested_at
 
 
 class _PreparedOperationKind(StrEnum):
@@ -555,7 +561,7 @@ class WorkspaceControlService:
             payload=operation_payload,
             idempotency_key=prepared.idempotency_key,
         )
-        warnings: list[dict[str, object]] = []
+        warnings: list[WorkspaceControlWarningResponse] = []
         pending_operator_hint: dict[str, object] | None = None
         monitor_state_changed = False
         reason_text = (reason or "").strip()
@@ -572,7 +578,7 @@ class WorkspaceControlService:
         past_settle = bool(settle_head_shas)
         requested_at = utcnow() if reason_text or past_settle else None
         if reason_text:
-            assert requested_at is not None
+            requested_at = _require_operator_remonitor_requested_at(requested_at)
             hint = OperatorHint(
                 reason=reason_text,
                 operation_id=operation.id,
@@ -583,7 +589,7 @@ class WorkspaceControlService:
             monitor_state_changed = True
             pending_operator_hint = build_pending_operator_hint_payload(hint)
         if past_settle and workspace.pr_number is not None:
-            assert requested_at is not None
+            requested_at = _require_operator_remonitor_requested_at(requested_at)
             for settle_head_sha in settle_head_shas:
                 arm_operator_hint_freeze(
                     monitor_state,
@@ -592,14 +598,14 @@ class WorkspaceControlService:
                     now=requested_at,
                 )
             warnings.append(
-                {
-                    "warning_code": _REMONITOR_PAST_SETTLE_WARNING_CODE,
-                    "message": (
+                WorkspaceControlWarningResponse(
+                    warning_code=_REMONITOR_PAST_SETTLE_WARNING_CODE,
+                    message=(
                         _REMONITOR_PAST_SETTLE_HINT_MESSAGE
                         if reason_text
                         else _REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE
                     ),
-                }
+                )
             )
             monitor_state_changed = True
         if monitor_state_changed:
@@ -635,7 +641,7 @@ class WorkspaceControlService:
         if pending_operator_hint is not None:
             event_payload["pending_operator_hint"] = pending_operator_hint
         if warnings:
-            event_payload["warnings"] = warnings
+            event_payload["warnings"] = _control_warning_payloads(warnings)
         if state_reset is not None:
             await repo.add_event_with_states(
                 workspace,
@@ -662,7 +668,7 @@ class WorkspaceControlService:
         if cancelled_recovery_operations:
             result["cancelled_recovery_operations"] = cancelled_recovery_operations
         if warnings:
-            result["warnings"] = warnings
+            result["warnings"] = _control_warning_payloads(warnings)
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -1419,6 +1425,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _cleanup_string,
     _communicate,
     _control_response,
+    _control_warning_payloads,
     _docker_process,
     _event_payload,
     _find_active_operation,
@@ -1465,6 +1472,7 @@ __all__ = [
     "_cancel_stale_pr_monitor_recovery_operations",
     "_is_pr_monitor_recovery_operation",
     "_control_response",
+    "_control_warning_payloads",
     "_operator_operation_payload",
     "_operation_payload",
     "_with_secret_lease_result",

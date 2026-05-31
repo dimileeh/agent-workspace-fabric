@@ -167,6 +167,9 @@ def _merge_concurrent_operator_hint(
         if _operator_hint_is_terminal(db_hint):
             return persist_operator_hint(threads_addressed, db_hint)
         return threads_addressed
+    # A newer DB hint supersedes the in-flight hint only in persisted state.
+    # The runner still finishes its current in-memory hint cycle; the next
+    # persist/load pass re-adds the newer hint for a separate repair attempt.
     return persist_operator_hint(threads_addressed, db_hint)
 
 

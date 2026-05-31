@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from awf.api.schemas import WorkspaceControlWarningResponse
 from awf.db.models import Operation
 from awf.service.controls_helpers import _operation_result_warnings
 
 
-def test_operation_result_warnings_replays_json_list_dict_entries() -> None:
+def test_operation_result_warnings_replays_valid_json_warning_entries() -> None:
     operation = Operation(
         result={
             "warnings": [
@@ -16,8 +17,10 @@ def test_operation_result_warnings_replays_json_list_dict_entries() -> None:
     )
 
     assert _operation_result_warnings(operation) == [
-        {"warning_code": "REMONITOR_PAST_SETTLE", "message": "review grace elapsed"},
-        {"warning_code": "STALE_HEAD"},
+        WorkspaceControlWarningResponse(
+            warning_code="REMONITOR_PAST_SETTLE",
+            message="review grace elapsed",
+        )
     ]
 
 
