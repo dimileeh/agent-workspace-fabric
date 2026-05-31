@@ -849,6 +849,11 @@ def _container_is_unhealthy(container: Any) -> bool:
     A container is interesting when its healthcheck is not ``healthy`` (failed,
     starting, or still probing) or — absent a healthcheck — when it has exited
     with a non-zero code.
+
+    Docker/Podman report the literal ``"none"`` (``types.NoHealthcheck``) status
+    for containers without a healthcheck; that is treated like an absent
+    ``Health`` block so running sidecars (e.g. the agent) are not flagged just
+    because a different companion failed startup.
     """
     if not isinstance(container, Mapping):
         return False
@@ -856,8 +861,10 @@ def _container_is_unhealthy(container: Any) -> bool:
     if not isinstance(state, Mapping):
         return False
     health = state.get("Health")
-    if isinstance(health, Mapping) and health.get("Status") is not None:
-        return health.get("Status") != "healthy"
+    if isinstance(health, Mapping):
+        status = health.get("Status")
+        if isinstance(status, str) and status != "none":
+            return status != "healthy"
     exit_code = state.get("ExitCode") or 0
     return state.get("Status") == "exited" and exit_code != 0
 

@@ -607,6 +607,50 @@ class TestCaptureCompanionDiagnostics:
         assert payload["companion_logs"]["c_orphan"] == ["crashed early"]
 
     @pytest.mark.unit
+    async def test_running_sidecar_with_none_health_status_excluded(
+        self, manager: ComposeManager
+    ) -> None:
+        # Docker/Podman report the literal ``"none"`` (``types.NoHealthcheck``)
+        # for containers without a healthcheck. A running sidecar carrying that
+        # status must be treated like an absent ``Health`` block — i.e. excluded
+        # — so it is not dragged into diagnostics just because a different
+        # companion failed startup.
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_agent",
+                    service="agent",
+                    status="running",
+                    health_status="none",
+                ),
+                _inspect_entry(
+                    container_id="c_backend",
+                    service="backend",
+                    health_status="unhealthy",
+                    health_log=[{"ExitCode": 1, "Output": "probe failed"}],
+                    healthcheck_test=["CMD-SHELL", "check"],
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_agent", "c_backend"],
+                inspect_stdout=inspect,
+                logs_by_container={"c_backend": _BACKEND_LOGS.encode()},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_none",
+                workspace_id="ws_none",
+            )
+
+        # Only the genuinely unhealthy backend is captured; the running agent
+        # with ``health_status == "none"`` is excluded.
+        assert set(payload["companion_health"]) == {"backend"}
+        assert "agent" not in payload.get("companion_logs", {})
+
+    @pytest.mark.unit
     async def test_unhealthy_container_without_id_skips_logs(self, manager: ComposeManager) -> None:
         inspect = json.dumps(
             [
