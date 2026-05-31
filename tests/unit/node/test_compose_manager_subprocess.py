@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 
 from awf.node.compose_manager import (
     COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS,
@@ -993,6 +994,33 @@ class TestCaptureCompanionDiagnostics:
 
         assert payload["containers_inspected"] == 0
         assert "unhealthy_companions" not in payload
+
+    @pytest.mark.unit
+    async def test_non_list_inspect_shape_logs_warning(self, manager: ComposeManager) -> None:
+        # A bare ``{}`` inspect payload (not a list) must emit a distinguishing
+        # warning so operators can tell a malformed inspect response apart from
+        # a genuinely empty project (both report ``containers_inspected == 0``).
+        with (
+            patch(
+                "awf.node.compose_manager.asyncio.create_subprocess_exec",
+                side_effect=_docker_dispatch(
+                    ps_ids=["c_backend"],
+                    inspect_stdout=b"{}",
+                ),
+            ),
+            structlog.testing.capture_logs() as logs,
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_objshape",
+                workspace_id="ws_objshape",
+            )
+
+        assert payload["containers_inspected"] == 0
+        warning_event = "compose.companion_diagnostics_unexpected_inspect_shape"
+        shape_warnings = [e for e in logs if e.get("event") == warning_event]
+        assert len(shape_warnings) == 1
+        assert shape_warnings[0]["inspect_type"] == "dict"
+        assert shape_warnings[0]["compose_project"] == "awf_ws_objshape"
 
     @pytest.mark.unit
     async def test_malformed_inspect_entries_are_skipped_defensively(

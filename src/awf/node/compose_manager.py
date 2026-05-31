@@ -536,6 +536,12 @@ class ComposeManager:
             }
             return _redacted_diagnostics(payload)
 
+        if not isinstance(inspected, list):
+            _log.warning(
+                "compose.companion_diagnostics_unexpected_inspect_shape",
+                compose_project=payload.get("compose_project"),
+                inspect_type=type(inspected).__name__,
+            )
         containers = inspected if isinstance(inspected, list) else []
         payload["containers_inspected"] = len(containers)
 
@@ -567,7 +573,7 @@ class ComposeManager:
                     )
                     entry["logs"] = logs_raw.splitlines()
                 except ComposeOperationError as exc:
-                    entry["logs_capture_error"] = _capture_error_detail(exc)
+                    entry["logs_capture_error"] = _capture_error_detail_raw(exc)
                     _log.warning(
                         "compose.companion_logs_capture_failed",
                         workspace_id=workspace_id,
@@ -598,7 +604,7 @@ class ComposeManager:
             error=redact_secrets(str(exc)),
         )
         payload["companion_logs_capture_error"] = {
-            "_top_level": f"{operation}: {_capture_error_detail(exc)}"
+            "_top_level": f"{operation}: {_capture_error_detail_raw(exc)}"
         }
         return _redacted_diagnostics(payload)
 
@@ -836,7 +842,7 @@ def _redacted_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
     return cast("dict[str, Any]", redact_audit_value(payload))
 
 
-def _capture_error_detail(exc: ComposeOperationError) -> str:
+def _capture_error_detail_raw(exc: ComposeOperationError) -> str:
     """Summarize a docker capture failure for a diagnostics marker.
 
     WARNING: the returned string is UNREDACTED — it embeds ``exc.stderr``/
