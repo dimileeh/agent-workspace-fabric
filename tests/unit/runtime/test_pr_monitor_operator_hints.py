@@ -45,6 +45,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedS
 from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProtectedScopeDiffError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
@@ -334,6 +335,73 @@ async def test_operator_hint_repair_marks_policy_block_as_needs_human(
         requested_at=hint.requested_at,
         status="needs_human",
         status_reason="monitor policy blocked the operator hint repair",
+    )
+
+
+@pytest.mark.unit
+async def test_operator_hint_repair_marks_runtime_ownership_failure_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair needs runtime ownership repair",
+        operation_id="op_runtime_ownership_failed_hint",
+        requested_at="2026-05-31T04:20:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _ownership_repair_failed(**_kwargs: object) -> VerdictResult:
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "agent runtime ownership repair failed"
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _ownership_repair_failed)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_runtime_ownership_failed",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_runtime_ownership_failed",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.terminal_monitor_failure is True
+    assert result.stderr == "agent runtime ownership repair failed"
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="needs_human",
+        status_reason="agent runtime ownership repair failed",
     )
 
 
@@ -1305,6 +1373,173 @@ async def test_merge_rechecks_freeze_only_remonitor_before_merge_pr(
     assert settle_done_key not in stale_state.threads_addressed_ids
     assert initial_started_key in stale_state.threads_addressed_ids
     assert settle_started_key in stale_state.threads_addressed_ids
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_merge_final_recheck_blocks_hint_written_after_locked_gate(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    state = MonitorState()
+    hint = OperatorHint(
+        reason="operator warning arrived after the locked merge gate",
+        operation_id="op_final_merge_recheck",
+        requested_at="2026-05-31T05:05:00+00:00",
+    )
+    original_merge_gate = runner._merge_gate_with_legacy_head_support
+    merge_gate_calls = 0
+
+    async def _write_hint_after_locked_gate(*args: object, **kwargs: object) -> object:
+        nonlocal merge_gate_calls
+        merge_gate_calls += 1
+        result = await original_merge_gate(*args, **kwargs)
+        if merge_gate_calls == 3:
+            async with factory() as session:
+                workspace = await WorkspaceRepository(session).get(workspace_id)
+                assert workspace is not None
+                workspace.monitor_threads_addressed = persist_operator_hint(
+                    dict(workspace.monitor_threads_addressed or {}),
+                    hint,
+                )
+                await session.commit()
+        return result
+
+    calls: list[OperatorHint] = []
+
+    async def _record_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        called_hint = kwargs["hint"]
+        state_arg = kwargs["state"]
+        assert isinstance(called_hint, OperatorHint)
+        assert isinstance(state_arg, MonitorState)
+        calls.append(called_hint)
+        mark_operator_hint_processed(state_arg)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(
+        runner,
+        "_merge_gate_with_legacy_head_support",
+        _write_hint_after_locked_gate,
+    )
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _record_operator_hint_cycle)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert calls == [hint]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_merge_final_recheck_waits_on_freeze_written_after_locked_gate(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head_sha = "d" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    initial_done_key = runner_helpers._initial_review_grace_done_key(42)
+    settle_done_key = runner_helpers._non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_started_key = runner_helpers._non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    state = MonitorState(
+        threads_addressed_ids={
+            initial_done_key: "elapsed",
+            settle_done_key: "elapsed",
+        }
+    )
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+    original_merge_gate = runner._merge_gate_with_legacy_head_support
+    merge_gate_calls = 0
+
+    async def _write_freeze_after_locked_gate(*args: object, **kwargs: object) -> object:
+        nonlocal merge_gate_calls
+        merge_gate_calls += 1
+        result = await original_merge_gate(*args, **kwargs)
+        if merge_gate_calls == 3:
+            async with factory() as session:
+                workspace = await WorkspaceRepository(session).get(workspace_id)
+                assert workspace is not None
+                monitor_state = dict(workspace.monitor_threads_addressed or {})
+                operator_hints.arm_operator_hint_freeze(
+                    monitor_state,
+                    pr_number=42,
+                    head_sha=head_sha,
+                    now=datetime.now(UTC),
+                )
+                workspace.monitor_threads_addressed = monitor_state
+                await session.commit()
+        return result
+
+    monkeypatch.setattr(
+        runner,
+        "_merge_gate_with_legacy_head_support",
+        _write_freeze_after_locked_gate,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(head_sha=head_sha),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert settle_done_key not in state.threads_addressed_ids
+    assert settle_started_key in state.threads_addressed_ids
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
 
 

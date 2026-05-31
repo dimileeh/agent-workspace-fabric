@@ -259,6 +259,33 @@ async def handle_merge_action(
         merge_gate_after_lock: _MergeGateResult | None = None
         settle_recheck_decision: _NonCheckReviewerSettleDecision | None = None
         initial_grace_recheck_wait_seconds = 0.0
+        operator_state_refreshed = False
+
+        async def _refresh_operator_state_for_merge(*, event_name: str) -> bool:
+            nonlocal fresh_action, fresh_status, operator_state_refreshed
+            if fresh_action is not None:
+                return False
+            changed = await self._refresh_operator_state_from_workspace(
+                workspace_id,
+                state,
+            )
+            if not changed:
+                return False
+            operator_state_refreshed = True
+            checked_action = decide(merge_status, state, self._config)
+            if not isinstance(checked_action, Merge):
+                fresh_action = checked_action
+                fresh_status = merge_status
+                _log.info(
+                    event_name,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    original_action="Merge",
+                    fresh_action=type(checked_action).__name__,
+                    head_sha=merge_status.head_sha[:10],
+                )
+            return True
+
         async with self._merge_coordinator.serialized_merge(
             repo_url=repo_url,
             base_branch=base_branch,
@@ -358,24 +385,9 @@ async def handle_merge_action(
                     else:
                         merge_status = checked_status
 
-            operator_state_refreshed = False
-            if fresh_action is None and await self._refresh_operator_state_from_workspace(
-                workspace_id,
-                state,
-            ):
-                operator_state_refreshed = True
-                checked_action = decide(merge_status, state, self._config)
-                if not isinstance(checked_action, Merge):
-                    fresh_action = checked_action
-                    fresh_status = merge_status
-                    _log.info(
-                        "monitor.merge_operator_hint_recheck_changed_action",
-                        workspace_id=workspace_id,
-                        pr_number=pr_number,
-                        original_action="Merge",
-                        fresh_action=type(checked_action).__name__,
-                        head_sha=merge_status.head_sha[:10],
-                    )
+            await _refresh_operator_state_for_merge(
+                event_name="monitor.merge_operator_hint_recheck_changed_action"
+            )
 
             if (
                 recheck_error is None
@@ -438,86 +450,56 @@ async def handle_merge_action(
                     and merge_gate_after_lock is not None
                     and not _merge_gate_blocks(merge_gate_after_lock)
                 ):
-                    merge_operation = await self._begin_monitor_state_operation(
-                        workspace_id=workspace_id,
-                        action="merge",
-                        requested_action="merge",
-                        reason="Merging PR after all monitor gates passed.",
-                        reason_code="MERGE",
-                        pr_number=pr_number,
-                        status=merge_status,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        monitor_log=monitor_log,
+                    final_operator_state_refreshed = await _refresh_operator_state_for_merge(
+                        event_name="monitor.merge_operator_hint_final_recheck_changed_action"
                     )
-                    await self._record_pr_monitor_audit_event(
-                        workspace_id=workspace_id,
-                        event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
-                        action="merge",
-                        outcome="attempted",
-                        reason_code="MERGE",
-                        pr_number=pr_number,
-                        status=merge_status,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        operation_id=(
-                            merge_operation.operation_id if merge_operation is not None else None
-                        ),
-                        operation_type=OperationType.monitor_state.value,
-                        monitor_log=monitor_log,
-                    )
-                    try:
-                        merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
-                    except GitHubClientError as exc:
-                        merge_blocker = exc
-                        await self._finish_monitor_operation(
-                            merge_operation,
-                            status=OperationStatus.failed,
-                            result={
-                                "status": "failed",
-                                "outcome": "github_merge_failed",
-                                "reason_code": "GITHUB_MERGE_FAILED",
-                            },
-                            error_code="GITHUB_MERGE_FAILED",
-                            error_message=str(exc),
+                    if final_operator_state_refreshed and fresh_action is None:
+                        initial_grace_recheck_wait_seconds = _initial_review_grace_wait_seconds(
+                            state,
+                            pr_number=pr_number,
+                            now=time.monotonic(),
+                            grace_seconds=self._config.initial_review_grace_period_seconds,
+                            poll_interval_seconds=self._config.poll_interval_seconds,
                         )
-                        await self._record_pr_monitor_audit_event(
+                        if initial_grace_recheck_wait_seconds <= 0:
+                            checked_settle_decision = _non_check_reviewer_settle_decision(
+                                merge_status,
+                                state,
+                                self._config,
+                                pr_number=pr_number,
+                                now=time.monotonic(),
+                            )
+                            await self._record_non_check_reviewer_settle_decision(
+                                decision=checked_settle_decision,
+                                workspace_id=workspace_id,
+                                pr_number=pr_number,
+                                status=merge_status,
+                                monitor_log=monitor_log,
+                            )
+                            if checked_settle_decision.wait_seconds > 0:
+                                settle_recheck_decision = checked_settle_decision
+                    if (
+                        fresh_action is None
+                        and settle_recheck_decision is None
+                        and initial_grace_recheck_wait_seconds <= 0
+                    ):
+                        merge_operation = await self._begin_monitor_state_operation(
                             workspace_id=workspace_id,
-                            event_type=_AUDIT_MERGE_RESULT_EVENT,
                             action="merge",
-                            outcome="failed",
-                            reason_code="GITHUB_MERGE_FAILED",
+                            requested_action="merge",
+                            reason="Merging PR after all monitor gates passed.",
+                            reason_code="MERGE",
                             pr_number=pr_number,
                             status=merge_status,
                             base_branch=base_branch,
                             remote_branch=remote_branch,
-                            operation_id=(
-                                merge_operation.operation_id
-                                if merge_operation is not None
-                                else None
-                            ),
-                            operation_type=OperationType.monitor_state.value,
                             monitor_log=monitor_log,
-                            evidence={
-                                "operation": "merge_pr",
-                                "error_message": str(exc),
-                            },
-                        )
-                    else:
-                        await self._finish_monitor_operation(
-                            merge_operation,
-                            status=OperationStatus.succeeded,
-                            result={
-                                "status": "succeeded",
-                                "outcome": "merged",
-                                "merge_sha": merge_sha,
-                            },
                         )
                         await self._record_pr_monitor_audit_event(
                             workspace_id=workspace_id,
-                            event_type=_AUDIT_MERGE_RESULT_EVENT,
+                            event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
                             action="merge",
-                            outcome="succeeded",
+                            outcome="attempted",
                             reason_code="MERGE",
                             pr_number=pr_number,
                             status=merge_status,
@@ -530,8 +512,76 @@ async def handle_merge_action(
                             ),
                             operation_type=OperationType.monitor_state.value,
                             monitor_log=monitor_log,
-                            evidence={"merge_sha": merge_sha},
                         )
+                        try:
+                            merge_sha = await self._deps.gh.merge_pr(
+                                repo=repo,
+                                pr_number=pr_number,
+                            )
+                        except GitHubClientError as exc:
+                            merge_blocker = exc
+                            await self._finish_monitor_operation(
+                                merge_operation,
+                                status=OperationStatus.failed,
+                                result={
+                                    "status": "failed",
+                                    "outcome": "github_merge_failed",
+                                    "reason_code": "GITHUB_MERGE_FAILED",
+                                },
+                                error_code="GITHUB_MERGE_FAILED",
+                                error_message=str(exc),
+                            )
+                            await self._record_pr_monitor_audit_event(
+                                workspace_id=workspace_id,
+                                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                                action="merge",
+                                outcome="failed",
+                                reason_code="GITHUB_MERGE_FAILED",
+                                pr_number=pr_number,
+                                status=merge_status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                operation_id=(
+                                    merge_operation.operation_id
+                                    if merge_operation is not None
+                                    else None
+                                ),
+                                operation_type=OperationType.monitor_state.value,
+                                monitor_log=monitor_log,
+                                evidence={
+                                    "operation": "merge_pr",
+                                    "error_message": str(exc),
+                                },
+                            )
+                        else:
+                            await self._finish_monitor_operation(
+                                merge_operation,
+                                status=OperationStatus.succeeded,
+                                result={
+                                    "status": "succeeded",
+                                    "outcome": "merged",
+                                    "merge_sha": merge_sha,
+                                },
+                            )
+                            await self._record_pr_monitor_audit_event(
+                                workspace_id=workspace_id,
+                                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                                action="merge",
+                                outcome="succeeded",
+                                reason_code="MERGE",
+                                pr_number=pr_number,
+                                status=merge_status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                operation_id=(
+                                    merge_operation.operation_id
+                                    if merge_operation is not None
+                                    else None
+                                ),
+                                operation_type=OperationType.monitor_state.value,
+                                monitor_log=monitor_log,
+                                evidence={"merge_sha": merge_sha},
+                            )
 
         if initial_grace_recheck_wait_seconds > 0:
             _log.info(
