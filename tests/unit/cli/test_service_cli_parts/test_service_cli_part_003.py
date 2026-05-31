@@ -496,11 +496,13 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             git: object,
             stack_launcher: object,
             config: object,
+            service_diagnostics: object = None,
         ) -> None:
             created["provisioner_session_factory"] = session_factory
             created["provisioner_git"] = git
             created["provisioner_stack_launcher"] = stack_launcher
             created["provisioner_config"] = config
+            created["provisioner_service_diagnostics"] = service_diagnostics
 
     class _ControlWorker:
         def __init__(

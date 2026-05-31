@@ -143,9 +143,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         session_factory=session_factory,
         git=git,
         stack_launcher=stack_launcher,
+        service_diagnostics=compose,
         config=ProvisionerConfig(
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
+            service_startup_log_tail_lines=settings.service_startup_log_tail_lines,
         ),
     )
 
