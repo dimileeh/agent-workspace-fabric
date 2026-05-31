@@ -372,6 +372,16 @@ async def cleanup_validation_worktree_side_effects(
 
     verify = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree_path)
     if not verify.clean:
+        if verify.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=check,
+                restore_ref=restore_ref,
+                reason_code=verify.reason_code,
+                message=verify.message,
+                cleanup_command=None,
+                verify_check=verify,
+            )
         return ValidationWorktreeCleanup(
             cleaned=False,
             check=check,

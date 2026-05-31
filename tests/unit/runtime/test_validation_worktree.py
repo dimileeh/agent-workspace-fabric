@@ -10,6 +10,7 @@ import pytest
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
     ValidationWorktreeCheck,
     ValidationWorktreeCleanup,
     check_validation_worktree_clean,
@@ -150,6 +151,36 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command is None
     assert cleanup.verify_check is not None and not cleanup.verify_check.clean
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
+    tmp_path: Path,
+) -> None:
+    """Status inspection failures during post-clean verification."""
+
+    worktree = _init_fake_worktree(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        calls.append(tuple(args))
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            if len(calls) == 1:
+                return _CommandResultLike(0, "", None)
+            return _CommandResultLike(1, "", "status command failed")
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git, worktree_path=worktree
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert cleanup.message == (
+        "Could not inspect validation worktree cleanliness with `git status --porcelain`."
+    )
+    assert cleanup.verify_check is not None
+    assert cleanup.verify_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert cleanup.verify_check.command_stderr == "status command failed"
 
 
 @pytest.mark.unit
