@@ -24,6 +24,53 @@ from awf.runtime.ownership import (
 _log = get_logger(__name__)
 
 
+class _MonitorHandoffSetupFailureError(RuntimeError):
+    """Setup failure payload that still needs a terminal transition."""
+
+    def __init__(
+        self,
+        *,
+        failure_reason: FailureReason,
+        message: str,
+        reason_code: str | None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_reason = failure_reason
+        self.message = message
+        self.reason_code = reason_code
+        self.details = dict(details) if details is not None else None
+
+
+async def _mark_failed_or_raise_setup_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    failure_reason: FailureReason,
+    message: str,
+    reason_code: str | None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    mark_failed_kwargs: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "from_status": WorkspaceStatus.running,
+        "failure_reason": failure_reason,
+        "message": message,
+        "reason_code": reason_code,
+    }
+    if details is not None:
+        mark_failed_kwargs["details"] = details
+    try:
+        await self._mark_failed(**mark_failed_kwargs)
+    except Exception as exc:
+        raise _MonitorHandoffSetupFailureError(
+            failure_reason=failure_reason,
+            message=message,
+            reason_code=reason_code,
+            details=details,
+        ) from exc
+
+
 async def _run_monitor_handoff_profile_setup(
     self: Any,
     *,
@@ -43,9 +90,9 @@ async def _run_monitor_handoff_profile_setup(
             event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
             reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         ):
-            await self._mark_failed(
+            await _mark_failed_or_raise_setup_failure(
+                self,
                 workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
                 failure_reason=FailureReason.infrastructure_failure,
                 message="agent runtime ownership repair failed before profile setup",
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -59,10 +106,12 @@ async def _run_monitor_handoff_profile_setup(
             phase_names=("setup", "pre_agent"),
             worktree_path=worktree_path,
         )
+    except _MonitorHandoffSetupFailureError:
+        raise
     except ComposeExecCleanupError as exc:
-        await self._mark_failed(
+        await _mark_failed_or_raise_setup_failure(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
             message=cleanup_failure_message(exc),
             reason_code=exc.reason_code,
@@ -71,9 +120,9 @@ async def _run_monitor_handoff_profile_setup(
     except Exception as exc:
         _log.exception("executor.monitor_handoff_setup_failed", workspace_id=workspace_id)
         safe_error = redact_audit_text(repr(exc))
-        await self._mark_failed(
+        await _mark_failed_or_raise_setup_failure(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
             message=f"monitor handoff profile setup failed: {safe_error}"[:2000],
             reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
@@ -109,23 +158,23 @@ async def _run_monitor_handoff_profile_setup(
         else "profile setup failed"
     )[:2000]
     try:
-        await self._mark_failed(
+        await _mark_failed_or_raise_setup_failure(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
             failure_reason=failure_reason,
             message=failure_message,
             reason_code=setup_failure_reason_code,
             details=setup_dependency_details,
         )
-    except Exception:
+    except _MonitorHandoffSetupFailureError:
         _log.exception(
             "executor.monitor_handoff_setup_mark_failed_after_command_failure_failed",
             workspace_id=workspace_id,
             setup_failure_reason_code=setup_failure_reason_code,
         )
-        await self._mark_failed(
+        await _mark_failed_or_raise_setup_failure(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
             failure_reason=failure_reason,
             message=failure_message,
             reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,

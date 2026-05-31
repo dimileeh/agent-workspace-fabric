@@ -61,6 +61,7 @@ from awf.control.executor.helpers import (
     _with_release_sync_pr_metadata,
 )
 from awf.control.executor.metadata import _metadata_int
+from awf.control.executor.monitor_handoff_setup import _MonitorHandoffSetupFailureError
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _log,
@@ -856,6 +857,18 @@ async def _prepare_handoff_pr_monitor_profile(
         ):
             return None
         return profile
+    except _MonitorHandoffSetupFailureError as exc:
+        _log.error(
+            build_failed_log_event,
+            workspace_id=workspace_id,
+            redacted_traceback=_redacted_exception_traceback(exc),
+        )
+        await _mark_failed_from_monitor_handoff_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            setup_failure=exc,
+        )
+        return None
     except Exception as exc:
         _log.error(
             build_failed_log_event,
@@ -871,6 +884,24 @@ async def _prepare_handoff_pr_monitor_profile(
             reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
         )
         return None
+
+
+async def _mark_failed_from_monitor_handoff_setup_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    setup_failure: _MonitorHandoffSetupFailureError,
+) -> None:
+    mark_failed_kwargs: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "from_status": WorkspaceStatus.running,
+        "failure_reason": setup_failure.failure_reason,
+        "message": setup_failure.message,
+        "reason_code": setup_failure.reason_code,
+    }
+    if setup_failure.details is not None:
+        mark_failed_kwargs["details"] = setup_failure.details
+    await self._mark_failed(**mark_failed_kwargs)
 
 
 async def _build_handoff_pr_monitor(
@@ -954,6 +985,18 @@ async def _build_handoff_pr_monitor(
                     )
                 ),
             )
+    except _MonitorHandoffSetupFailureError as exc:
+        _log.error(
+            build_failed_log_event,
+            workspace_id=workspace_id,
+            redacted_traceback=_redacted_exception_traceback(exc),
+        )
+        await _mark_failed_from_monitor_handoff_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            setup_failure=exc,
+        )
+        return None
     except Exception as exc:
         _log.error(
             build_failed_log_event,

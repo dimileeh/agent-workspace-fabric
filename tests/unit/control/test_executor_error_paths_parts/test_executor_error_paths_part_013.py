@@ -468,6 +468,167 @@ class TestExecutorMonitorHandoffSetup:
             assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
 
     @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_setup_mark_failed_double_error_preserves_setup_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monitor_runs: list[str] = []
+        mark_failed_calls: list[dict[str, Any]] = []
+        validation = _SetupDependencyValidation(
+            ValidationResult(
+                commands=[
+                    _setup_dependency_command_result(
+                        tmp_path,
+                        returncode=1,
+                        retry_exhausted=True,
+                    )
+                ]
+            )
+        )
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+        original_mark_failed = executor._mark_failed
+
+        async def _mark_failed(**kwargs: Any) -> None:
+            mark_failed_calls.append(kwargs)
+            if len(mark_failed_calls) <= 2:
+                raise RuntimeError(f"persistence attempt {len(mark_failed_calls)} failed")
+            await original_mark_failed(**kwargs)
+
+        monkeypatch.setattr(executor, "_mark_failed", _mark_failed)
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert monitor_runs == []
+        assert [call["reason_code"] for call in mark_failed_calls] == [
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
+            PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            PR_MONITOR_SETUP_FAILED_REASON_CODE,
+        ]
+        assert mark_failed_calls[-1]["message"] == "profile setup failed: uv sync --extra dev"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "service_startup_failure"
+            assert ws.failure_message == "profile setup failed: uv sync --extra dev"
+            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+
+    @pytest.mark.unit
+    async def test_sync_release_pr_handoff_setup_mark_failed_double_error_preserves_setup_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        monitor_runs: list[str] = []
+        mark_failed_calls: list[dict[str, Any]] = []
+        validation = _SetupDependencyValidation(
+            ValidationResult(
+                commands=[
+                    _setup_dependency_command_result(
+                        tmp_path,
+                        returncode=1,
+                        retry_exhausted=True,
+                    )
+                ]
+            )
+        )
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy={
+                "release_sync": {
+                    "source_branch": "development",
+                    "target_branch": "main",
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+        original_mark_failed = executor._mark_failed
+
+        async def _mark_failed(**kwargs: Any) -> None:
+            mark_failed_calls.append(kwargs)
+            if len(mark_failed_calls) <= 2:
+                raise RuntimeError(f"persistence attempt {len(mark_failed_calls)} failed")
+            await original_mark_failed(**kwargs)
+
+        monkeypatch.setattr(executor, "_mark_failed", _mark_failed)
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert monitor_runs == []
+        assert [call.args[:3] for call in fake.calls] == [
+            ["git", "fetch", "origin"],
+            ["git", "rev-list", "--count"],
+        ]
+        assert [call["reason_code"] for call in mark_failed_calls] == [
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
+            PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            PR_MONITOR_SETUP_FAILED_REASON_CODE,
+        ]
+        assert mark_failed_calls[-1]["message"] == "profile setup failed: uv sync --extra dev"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "service_startup_failure"
+            assert ws.failure_message == "profile setup failed: uv sync --extra dev"
+            assert ws.pr_url is None
+            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+
+    @pytest.mark.unit
     async def test_sync_feature_pr_handoff_plain_setup_failure_records_named_reason_code(
         self,
         fake: FakeCommandRunner,
