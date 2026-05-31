@@ -353,6 +353,52 @@ def test_manifest_without_wheel_artifact_is_invalid(harness: InstallerHarness) -
 
 
 @pytest.mark.unit
+def test_manifest_wheel_name_with_path_traversal_is_rejected(harness: InstallerHarness) -> None:
+    """A wheel name that escapes ``WORK_DIR`` aborts before any download."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    # A compromised manifest names the wheel with a traversal sequence so that
+    # download_artifact's ${WORK_DIR}/${ARTIFACT_NAME} resolves outside the temp
+    # dir; the url still points at the real fixture so an unguarded fetch would
+    # actually write (and clobber) the escape target.
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, wheel_name="../awf-pwned.txt")
+    tmpdir = harness.root / "tmp"
+    tmpdir.mkdir()
+    # WORK_DIR is ${TMPDIR}/awf-install.XXXXXX, so ../awf-pwned.txt lands here.
+    escape_target = tmpdir / "awf-pwned.txt"
+
+    result = harness.run([], manifest=manifest, extra_env={"TMPDIR": str(tmpdir)})
+
+    assert result.returncode != 0
+    assert "MANIFEST_INVALID" in result.stderr
+    # The traversal name must be rejected before fetch writes the artifact.
+    assert not escape_target.exists()
+    assert "uv tool install" not in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_manifest_wheel_name_traversal_rejected_even_in_dry_run(
+    harness: InstallerHarness,
+) -> None:
+    """Dry-run also rejects a traversal wheel name before writing the artifact."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, wheel_name="../../awf-pwned.txt")
+    tmpdir = harness.root / "tmp"
+    tmpdir.mkdir()
+    # ${WORK_DIR}/../../awf-pwned.txt resolves up two levels to harness.root.
+    escape_target = harness.root / "awf-pwned.txt"
+
+    result = harness.run(["--dry-run"], manifest=manifest, extra_env={"TMPDIR": str(tmpdir)})
+
+    assert result.returncode != 0
+    assert "MANIFEST_INVALID" in result.stderr
+    assert not escape_target.exists()
+
+
+@pytest.mark.unit
 def test_missing_manifest_source_is_unavailable(harness: InstallerHarness) -> None:
     """A manifest path that does not exist fails with ``MANIFEST_UNAVAILABLE``."""
     harness.add_uname("Linux", "x86_64")

@@ -332,6 +332,17 @@ parse_manifest() {
     if ! printf '%s' "$ARTIFACT_SHA256" | grep -Eq '^[0-9a-fA-F]{64}$'; then
         fail MANIFEST_INVALID "manifest wheel sha256 is not 64 hex characters: $MANIFEST_SOURCE"
     fi
+    # The wheel name becomes the download-destination basename
+    # (download_artifact builds ${WORK_DIR}/${ARTIFACT_NAME}). A malformed or
+    # compromised manifest whose name carries a path traversal (../../...) or an
+    # absolute path would make fetch write outside WORK_DIR — before checksum
+    # verification and even under --dry-run. Require a plain basename so an
+    # untrusted manifest cannot clobber arbitrary user-writable files.
+    case "$ARTIFACT_NAME" in
+        */* | '.' | '..')
+            fail MANIFEST_INVALID "manifest wheel name is not a plain filename ('${ARTIFACT_NAME}'): $MANIFEST_SOURCE"
+            ;;
+    esac
 }
 
 # Extract the manifest's top-level "channel" string (jq-free). The T11 manifest

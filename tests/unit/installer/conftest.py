@@ -184,12 +184,18 @@ class InstallerHarness:
         channel: str = "stable",
         include_sdist: bool = True,
         wheel_url: str | None = None,
+        wheel_name: str | None = None,
     ) -> Path:
-        """Write a T11-shaped manifest pointing at the fixture wheel."""
+        """Write a T11-shaped manifest pointing at the fixture wheel.
+
+        ``wheel_name`` overrides the artifact's ``name`` field (which the
+        installer uses as the download-destination basename) so tests can model
+        a malformed/compromised manifest; it defaults to the wheel's basename.
+        """
         artifacts = [
             {
                 "kind": "wheel",
-                "name": wheel.name,
+                "name": wheel_name if wheel_name is not None else wheel.name,
                 "platform": {"arch": "any", "os": "any", "python": ">=3.12"},
                 "sha256": sha256,
                 "signatures": [],
