@@ -12,7 +12,7 @@ useTransition,
 } from "react";
 import { WorkspaceInspector } from "./workspace-inspector";
 
-import { compactDuration,fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
+import { capacityUtilizationPct,compactDuration,fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
 DEFAULT_OPERATOR_PREFERENCES,
@@ -68,7 +68,6 @@ PanelContext,
 apiGet,
 apiPost,
 applyOperatorPreferenceAttributes,
-capacityUtilizationPct,
 compareLogEntries,
 compareWorkspaceDates,
 emptyDetail,

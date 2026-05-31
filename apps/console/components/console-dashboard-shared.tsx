@@ -551,23 +551,6 @@ export function formatPercent(value: number): string {
   return `${value.toFixed(1)}%`;
 }
 
-// Single fleet-capacity headline: the worst utilization across peak CPU, peak
-// memory, and execution concurrency, clamped to 0-100.
-export function capacityUtilizationPct(saturation: ResourceSaturationSummary): number {
-  let pct = 0;
-  const dims = [saturation.allocated_capacity.peak_cpu, saturation.allocated_capacity.peak_memory_gb];
-  for (const dimension of dims) {
-    if (dimension.limit && dimension.limit > 0) {
-      pct = Math.max(pct, (dimension.reserved / dimension.limit) * 100);
-    }
-  }
-  const execution = saturation.concurrency.execution;
-  if (execution.limit > 0) {
-    pct = Math.max(pct, (execution.in_use / execution.limit) * 100);
-  }
-  return Math.min(100, Math.max(0, Math.round(pct)));
-}
-
 export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
   try {
     const response = await fetch(path, { cache: "no-store" });

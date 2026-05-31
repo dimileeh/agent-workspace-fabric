@@ -1,6 +1,7 @@
 import type {
   LlmUsageSummary,
   PricingMetadata,
+  ResourceSaturationSummary,
   WorkspaceLifecycleStage,
   WorkspaceStatus,
 } from "@/lib/types";
@@ -220,6 +221,39 @@ export function compactDuration(seconds: number | null | undefined): string {
     return `${minutes}m ${remainingSeconds}s`;
   }
   return `${remainingSeconds}s`;
+}
+
+// Single fleet-capacity headline: the worst utilization across every allocated
+// capacity dimension (CPU, memory, disk, DinD slots) and both concurrency lanes
+// (provision, execution), clamped to 0-100. Any dimension flagged saturated via
+// a *_SATURATED pressure reason counts as fully utilized, so the strip cannot
+// read healthy while a hard constraint the capacity panel already shows as
+// saturated has no headroom left.
+export function capacityUtilizationPct(saturation: ResourceSaturationSummary): number {
+  let pct = 0;
+  const allocated = saturation.allocated_capacity;
+  const dimensions = [
+    allocated.steady_cpu,
+    allocated.peak_cpu,
+    allocated.steady_memory_gb,
+    allocated.peak_memory_gb,
+    allocated.disk_mb,
+    allocated.dind_slots,
+  ];
+  for (const dimension of dimensions) {
+    if (dimension && dimension.limit && dimension.limit > 0) {
+      pct = Math.max(pct, (dimension.reserved / dimension.limit) * 100);
+    }
+  }
+  for (const lane of [saturation.concurrency.provision, saturation.concurrency.execution]) {
+    if (lane && lane.limit > 0) {
+      pct = Math.max(pct, (lane.in_use / lane.limit) * 100);
+    }
+  }
+  if (allocated.pressure_reasons?.some((reason) => reason.endsWith("_SATURATED"))) {
+    pct = Math.max(pct, 100);
+  }
+  return Math.min(100, Math.max(0, Math.round(pct)));
 }
 
 export function bytes(value: number): string {
