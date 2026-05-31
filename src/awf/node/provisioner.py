@@ -342,16 +342,26 @@ class Provisioner:
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
             )
-            async with self._session_factory() as compose_fail_session:
-                compose_fail_repo = WorkspaceRepository(compose_fail_session)
-                compose_fail_ws = await compose_fail_repo.get(workspace_id)
-                if compose_fail_ws is not None and compose_fail_ws.compose_project_name is None:
-                    compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
-                    if profile_resolution is not None and compose_fail_ws.resolved_profile is None:
-                        compose_fail_ws.resolved_profile = profile_resolution.profile.model_dump(
-                            mode="json", by_alias=True
-                        )
+            try:
+                async with self._session_factory() as compose_fail_session:
+                    compose_fail_repo = WorkspaceRepository(compose_fail_session)
+                    compose_fail_ws = await compose_fail_repo.get(workspace_id)
+                    if compose_fail_ws is not None and compose_fail_ws.compose_project_name is None:
+                        compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
+                        if (
+                            profile_resolution is not None
+                            and compose_fail_ws.resolved_profile is None
+                        ):
+                            compose_fail_ws.resolved_profile = (
+                                profile_resolution.profile.model_dump(mode="json", by_alias=True)
+                            )
                     await compose_fail_session.commit()
+            except Exception:
+                _log.warning(
+                    "provisioner.compose_fail_commit_failed",
+                    workspace_id=workspace_id,
+                    reason_code="COMPOSE_FAIL_COMMIT_NON_FATAL",
+                )
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
             # Best-effort and must never mask the original ComposeOperationError.

@@ -312,27 +312,7 @@ async def create_workspace(
         return _insufficient_disk_response(disk_check)
 
     try:
-        if idempotency_key is not None:
-            existing = await repo.get_by_idempotency_key(idempotency_key)
-            if existing is not None:
-                if not _payloads_match(existing, payload, settings=settings):
-                    return _workspace_create_idempotency_conflict_response()
-                replay_key_cache.remember(
-                    payload,
-                    idempotency_key=idempotency_key,
-                    api_version=_WORKSPACE_CREATE_API_VERSION,
-                )
-                return _accepted(
-                    existing.id,
-                    existing.status,
-                    existing.version,
-                    existing.created_at,
-                    warnings=owned_path_overlap_warnings(existing),
-                    provider_readiness_preflight=workspace_provider_readiness_preflight(existing),
-                )
-        else:
-            existing = None
-        excluding_workspace_id = existing.id if existing is not None else None
+        excluding_workspace_id = None
         _req_profile, _resolved_profile = workspace_create_profile_snapshots(payload)
         await check_host_port_conflicts(
             repo,
