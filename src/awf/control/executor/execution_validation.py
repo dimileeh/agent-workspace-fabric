@@ -301,6 +301,7 @@ async def run_validation_and_fix_cycle(
         pre_validation_check = await check_validation_worktree_clean(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
+            ignore_all_ignored=True,
         )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
@@ -361,6 +362,7 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
+                ignore_ignored_paths=pre_validation_check.ignored_paths,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -418,6 +420,7 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
+                ignore_ignored_paths=pre_validation_check.ignored_paths,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -463,6 +466,7 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
+            ignore_ignored_paths=pre_validation_check.ignored_paths,
         )
         if not cleanup_result.ok:
             if await self._finish_validation_callback_if_terminal(

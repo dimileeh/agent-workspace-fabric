@@ -98,6 +98,33 @@ async def test_check_validation_worktree_clean_treats_ignored_paths_as_dirty(
     assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert check.paths == ("ignored-output/fixture.json",)
     assert check.untracked_paths == ("ignored-output/fixture.json",)
+    assert check.ignored_paths == ("ignored-output/fixture.json",)
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_can_ignore_all_ignored_paths(
+    tmp_path: Path,
+) -> None:
+    """Ignored paths can be ignored as setup-owned pre-existing workspace state."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command reporting only ignored files."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+    assert check.untracked_paths == ()
+    assert check.ignored_paths == (".venv/",)
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:
@@ -211,6 +238,41 @@ async def test_cleanup_validation_worktree_cleans_ignored_files_with_none_stderr
         "tracked.py",
     ) in commands
     assert ("clean", "-fdx", "--", "ignored-output/fixture.json") in commands
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_ignores_pre_existing_ignored_paths_in_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Known pre-existing ignored state should be ignored by cleanup checks."""
+    worktree = _init_fake_worktree(tmp_path)
+    pre_validation_ignored = ("setup-state/",)
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Return setup-owned ignored state plus a validation-created ignored artifact."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            if len(commands) == 1:
+                return _CommandResultLike(
+                    0,
+                    "?? validation-artifact.log\n!! setup-state/\n!! generated-state/\n",
+                    None,
+                )
+            return _CommandResultLike(0, "", None)
+        if args == ["clean", "-fdx", "--", "validation-artifact.log", "generated-state/"]:
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_ignored_paths=pre_validation_ignored,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert ("clean", "-fdx", "--", "validation-artifact.log", "generated-state/") in commands
 
 
 @pytest.mark.unit

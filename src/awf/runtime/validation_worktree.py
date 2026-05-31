@@ -12,6 +12,9 @@ from awf.runtime.pr_monitor_runner.path_parsing import (
     _changed_paths_from_porcelain as _changed_paths_from_porcelain,
 )
 from awf.runtime.pr_monitor_runner.path_parsing import (
+    _unquote_porcelain_path as _unquote_porcelain_path,
+)
+from awf.runtime.pr_monitor_runner.path_parsing import (
     _untracked_paths_from_porcelain as _untracked_paths_from_porcelain,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -64,6 +67,7 @@ class ValidationWorktreeCheck:
     skipped: bool = False
     paths: tuple[str, ...] = ()
     untracked_paths: tuple[str, ...] = ()
+    ignored_paths: tuple[str, ...] = ()
     reason_code: str | None = None
     message: str = ""
     command_stderr: str = ""
@@ -79,6 +83,7 @@ class ValidationWorktreeCheck:
         details: dict[str, object] = {
             "paths": list(self.paths),
             "untracked_paths": list(self.untracked_paths),
+            "ignored_paths": list(self.ignored_paths),
         }
         if self.reason_code is not None:
             details["reason_code"] = self.reason_code
@@ -121,10 +126,25 @@ class ValidationWorktreeCleanup:
         return details
 
 
+def _ignored_paths_from_porcelain(status_stdout: str) -> tuple[str, ...]:
+    """Extract ignored pathnames from a porcelain status output."""
+    paths: list[str] = []
+    for line in status_stdout.splitlines():
+        if not line.startswith("!! "):
+            continue
+        path = line[3:]
+        if not path:
+            continue
+        paths.append(_unquote_porcelain_path(path))
+    return tuple(dict.fromkeys(paths))
+
+
 async def check_validation_worktree_clean(
     *,
     run_git: GitRunner,
     worktree_path: Path,
+    ignore_all_ignored: bool = False,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
 ) -> ValidationWorktreeCheck:
     """Return dirty paths before or after an AWF validation command.
 
@@ -150,14 +170,30 @@ async def check_validation_worktree_clean(
         )
 
     status_stdout = status.stdout or ""
-    paths = tuple(_changed_paths_from_porcelain(status_stdout))
-    untracked_paths = tuple(_untracked_paths_from_porcelain(status_stdout))
+    ignored_paths = _ignored_paths_from_porcelain(status_stdout)
+    if ignore_all_ignored:
+        ignored_paths_to_ignore = set(ignored_paths)
+    elif ignore_ignored_paths is None:
+        ignored_paths_to_ignore = set()
+    else:
+        ignored_paths_to_ignore = set(ignore_ignored_paths)
+    paths = tuple(
+        path
+        for path in _changed_paths_from_porcelain(status_stdout)
+        if path not in ignored_paths_to_ignore
+    )
+    untracked_paths = tuple(
+        path
+        for path in _untracked_paths_from_porcelain(status_stdout)
+        if path not in ignored_paths_to_ignore
+    )
     if not paths and not untracked_paths:
-        return ValidationWorktreeCheck(clean=True)
+        return ValidationWorktreeCheck(clean=True, ignored_paths=ignored_paths)
     return ValidationWorktreeCheck(
         clean=False,
         paths=paths,
         untracked_paths=untracked_paths,
+        ignored_paths=ignored_paths,
         reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
         message=(
             "Validation worktree has pre-existing uncommitted changes; "
@@ -171,6 +207,7 @@ async def cleanup_validation_worktree_side_effects(
     run_git: GitRunner,
     worktree_path: Path,
     restore_ref: str | None = None,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
 
@@ -266,6 +303,7 @@ async def cleanup_validation_worktree_side_effects(
     check = await check_validation_worktree_clean(
         run_git=run_git,
         worktree_path=worktree_path,
+        ignore_ignored_paths=ignore_ignored_paths,
     )
     if check.skipped:
         return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
@@ -316,8 +354,12 @@ async def cleanup_validation_worktree_side_effects(
                 cleanup_stderr=(restore.stderr or "")[:1000],
             )
 
-    if check.untracked_paths:
-        clean = await run_git(["clean", "-fdx", "--", *check.untracked_paths])
+    ignored_paths = set(ignore_ignored_paths or ())
+    cleanup_untracked_paths = tuple(
+        path for path in check.untracked_paths if path not in ignored_paths
+    )
+    if cleanup_untracked_paths:
+        clean = await run_git(["clean", "-fdx", "--", *cleanup_untracked_paths])
         if not clean.ok:
             return ValidationWorktreeCleanup(
                 cleaned=False,
@@ -331,7 +373,11 @@ async def cleanup_validation_worktree_side_effects(
                 cleanup_stderr=(clean.stderr or "")[:1000],
             )
 
-    verify = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree_path)
+    verify = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree_path,
+        ignore_ignored_paths=ignore_ignored_paths,
+    )
     if not verify.clean:
         if verify.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
             return ValidationWorktreeCleanup(

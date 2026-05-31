@@ -266,7 +266,11 @@ async def _pre_push_validation_worktree_check(
 
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
-    return await check_validation_worktree_clean(run_git=_run_git, worktree_path=worktree_path)
+    return await check_validation_worktree_clean(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        ignore_all_ignored=True,
+    )
 
 
 async def _pre_push_validation_cleanup(
@@ -274,6 +278,7 @@ async def _pre_push_validation_cleanup(
     *,
     worktree_path: Path,
     restore_ref: str,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
 ) -> ValidationWorktreeCleanup:
     """Clean validation side effects and restore the worktree to the requested ref."""
 
@@ -287,6 +292,7 @@ async def _pre_push_validation_cleanup(
         run_git=_run_git,
         worktree_path=worktree_path,
         restore_ref=restore_ref,
+        ignore_ignored_paths=ignore_ignored_paths,
     )
 
 
@@ -655,6 +661,7 @@ async def _run_pre_push_validation(
             self,
             worktree_path=worktree_path,
             restore_ref=workspace_head_sha,
+            ignore_ignored_paths=pre_validation_check.ignored_paths,
         )
         if not cleanup_result.ok:
             await _finish_pre_push_validation_run(
@@ -698,6 +705,7 @@ async def _run_pre_push_validation(
             self,
             worktree_path=worktree_path,
             restore_ref=workspace_head_sha,
+            ignore_ignored_paths=pre_validation_check.ignored_paths,
         )
         if not cleanup_result.ok:
             await _finish_pre_push_validation_run(
@@ -730,6 +738,7 @@ async def _run_pre_push_validation(
         self,
         worktree_path=worktree_path,
         restore_ref=workspace_head_sha,
+        ignore_ignored_paths=pre_validation_check.ignored_paths,
     )
     if not cleanup_result.ok:
         await _finish_pre_push_validation_run(
