@@ -160,8 +160,14 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
         calls.append(tuple(args))
         if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
             if len(calls) == 1:
-                return _CommandResultLike(0, "", None)
+                return _CommandResultLike(0, " M tracked.py\n", "")
             return _CommandResultLike(1, "", "status command failed")
+        if args[:1] == ["restore"]:
+            return _CommandResultLike(0, "", None)
+        if args[:1] == ["clean"]:
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, "abc1234\n", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
