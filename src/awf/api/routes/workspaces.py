@@ -103,6 +103,7 @@ from awf.service.workspaces import (
     owned_path_overlap_warnings,
     retry_workspace_row,
     workspace_create_payload_matches,
+    workspace_create_profile_snapshots,
     workspace_provider_readiness_preflight,
     workspace_response,
     workspace_retry_response,
@@ -315,9 +316,11 @@ async def create_workspace(
         else:
             existing = None
         excluding_workspace_id = existing.id if existing is not None else None
+        _req_profile, _resolved_profile = workspace_create_profile_snapshots(payload)
         await check_host_port_conflicts(
             repo,
             payload.companions,
+            resolved_profile=_resolved_profile,
             excluding_workspace_id=excluding_workspace_id,
         )
 

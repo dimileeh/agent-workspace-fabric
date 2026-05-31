@@ -310,20 +310,52 @@ class WorkspaceCreateHostPortConflictError(Exception):
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 
 
+def _host_ports_from_resolved_profile(
+    resolved_profile: Mapping[str, Any] | None,
+) -> builtins.list[int]:
+    """Extract host-side ports from a resolved profile's services block."""
+    if not resolved_profile or not isinstance(resolved_profile, dict):
+        return []
+    services = resolved_profile.get("services")
+    if not services or not isinstance(services, list):
+        return []
+    host_ports: builtins.list[int] = []
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        svc_ports = service.get("ports")
+        if not svc_ports or not isinstance(svc_ports, list):
+            continue
+        for port_mapping in svc_ports:
+            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+                try:
+                    host_ports.append(int(port_mapping[1]))
+                except (ValueError, TypeError):
+                    continue
+    return host_ports
+
+
 async def check_host_port_conflicts(
     repo: WorkspaceRepository,
     companions: Sequence[WorkspaceCompanionRequest],
     *,
+    resolved_profile: Mapping[str, Any] | None = None,
     excluding_workspace_id: str | None = None,
 ) -> None:
-    """Check for host-port conflicts among companion ports and raise if found.
+    """Check for host-port conflicts among companion and profile-service ports and raise if found.
 
     Shared by the REST route handler and ``WorkspaceService.create`` so that
     the conflict-detection logic stays in one place.  Callers that need to
     translate the exception into an HTTP response should catch
     ``WorkspaceCreateHostPortConflictError``.
+
+    ``resolved_profile`` is the already-resolved profile snapshot of the
+    *incoming* workspace request.  Its ``services[].ports`` host-side entries
+    are included in the conflict check so that a profile-service port on the
+    new workspace is caught before Docker Compose provisioning starts.
     """
     host_ports = [hp for c in companions for _, hp in c.ports]
+    host_ports.extend(_host_ports_from_resolved_profile(resolved_profile))
     if host_ports:
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
@@ -497,7 +529,11 @@ class WorkspaceService:
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
-            await check_host_port_conflicts(repo, req.companions)
+            await check_host_port_conflicts(
+                repo,
+                req.companions,
+                resolved_profile=workspace_create_profile_snapshots(req)[1],
+            )
 
             ws = await create_workspace_row(
                 s,
