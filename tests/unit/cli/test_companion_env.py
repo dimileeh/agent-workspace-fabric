@@ -365,11 +365,42 @@ def test_false_environment_secrets_also_raises() -> None:
 
 
 @pytest.mark.unit
-def test_none_environment_treated_as_empty() -> None:
-    """A None environment field is treated as an empty dict."""
+def test_none_environment_treated_as_empty(tmp_path: Path) -> None:
+    """A None environment field becomes {} when the companion is targeted by env-from."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("KEY=val\n")
+    companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": None}]
+    result = merge_companion_env(
+        companions,
+        env_from=[("app", str(env_file))],
+        env_exclude=[],
+    )
+    assert result[0]["environment"] == {"KEY": "val"}
+
+
+@pytest.mark.unit
+def test_none_environment_preserved_when_untargeted() -> None:
+    """Companions not targeted by env-from/exclude keep their original shape.
+
+    An untargeted companion that had no ``environment`` key should NOT receive
+    an injected ``environment: {}`` — that would change the payload the API
+    receives for companions the user never mentioned.
+    """
+    companions = [
+        {"name": "app", "repo_url": "git@x:app.git"},
+        {"name": "svc2", "repo_url": "git@x:svc2.git", "environment": {"A": "1"}},
+    ]
+    result = merge_companion_env(companions, env_from=[], env_exclude=[])
+    assert "environment" not in result[0]
+    assert result[1]["environment"] == {"A": "1"}
+
+
+@pytest.mark.unit
+def test_none_environment_preserved_with_empty_flags() -> None:
+    """A companion with environment=None and no env-from/exclude keeps None."""
     companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": None}]
     result = merge_companion_env(companions, env_from=[], env_exclude=[])
-    assert result[0]["environment"] == {}
+    assert result[0]["environment"] is None
 
 
 # ---------------------------------------------------------------------------

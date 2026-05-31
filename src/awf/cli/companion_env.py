@@ -104,8 +104,18 @@ def merge_companion_env(
     for comp_name, _keys in env_exclude:
         _require_companion(comp_name, name_to_index, "--companion-env-exclude")
 
-    # Deep-copy companions so we don't mutate the caller's dicts
-    result = [_shallow_copy_companion(c) for c in companions]
+    # Shallow-copy companions, deep-copying only the environment dict,
+    # so that env mutations do not propagate back to the caller's dicts.
+    # Only inject environment: {} for companions that will be mutated;
+    # untargeted companions pass through unchanged.
+    targeted = {name for name, _ in env_from} | {name for name, _ in env_exclude}
+    result = [
+        _shallow_copy_companion(
+            c,
+            always_include_env=str(c.get("name", "")).strip() in targeted,
+        )
+        for c in companions
+    ]
 
     # Apply env-from merges
     for comp_name, file_path_str in env_from:
@@ -210,8 +220,24 @@ def _warn(message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
 
 
-def _shallow_copy_companion(companion: dict[str, object]) -> dict[str, object]:
-    """Shallow-copy a companion dict, isolating the environment mapping."""
+def _shallow_copy_companion(
+    companion: dict[str, object],
+    *,
+    always_include_env: bool = True,
+) -> dict[str, object]:
+    """Shallow-copy a companion dict, isolating the environment mapping.
+
+    When *always_include_env* is True (default), the result always has an
+    ``environment`` key — an empty dict ``{}`` is substituted when the
+    original had no ``environment`` field.  This is needed for companions
+    that will receive env-from / env-exclude mutations so that downstream
+    code can rely on the key existing.
+
+    When *always_include_env* is False, companions without an
+    ``environment`` field are left unchanged (no ``environment: {}``
+    injected), preserving the original payload shape for untargeted
+    companions.
+    """
     result = dict(companion)
     env = companion.get("environment")
     if env is not None and not isinstance(env, dict):
@@ -222,5 +248,8 @@ def _shallow_copy_companion(companion: dict[str, object]) -> dict[str, object]:
             f"Each companion's 'environment' must be a key-value mapping "
             f'like {{"KEY": "value"}}, not a scalar or array.'
         )
-    result["environment"] = dict(cast(dict[str, str], env)) if env else {}
+    if env is not None:
+        result["environment"] = dict(cast(dict[str, str], env))
+    elif always_include_env:
+        result["environment"] = {}
     return result
