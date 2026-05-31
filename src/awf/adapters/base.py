@@ -446,7 +446,7 @@ class AgentAdapter(ABC):
 
 # ── Registry ──────────────────────────────────────────────────────────────
 
-# Populated by awf.adapters.codex / .claude_code / .gemini / .opencode on
+# Populated by awf.adapters.codex / .claude_code / .gemini / .opencode / .grok on
 # import. Keyed by AgentRuntime enum so callers that receive a Workspace.agent
 # string just map through the enum.
 _REGISTRY: dict[AgentRuntime, type[AgentAdapter]] = {}

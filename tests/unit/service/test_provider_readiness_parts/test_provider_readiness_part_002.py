@@ -1169,6 +1169,7 @@ def test_provider_readiness_redacts_secret_values_from_details(tmp_path: Path) -
         "AWF_GITHUB_TOKEN": github_secret,
         "ANTHROPIC_API_KEY": "anthropic_secret",
         "GEMINI_API_KEY": "gemini_secret",
+        "XAI_API_KEY": "xai_secret",
     }
 
     def _run(args: list[str], **_kwargs: object) -> Any:
@@ -1177,7 +1178,7 @@ def test_provider_readiness_redacts_secret_values_from_details(tmp_path: Path) -
             returncode=1,
             stderr=(
                 "failed cloning https://user:ghp_super_secret@github.com/org/repo "
-                "with bearer anthropic_secret and gemini_secret"
+                "with bearer anthropic_secret, gemini_secret, and xai_secret"
             ),
         )
 
@@ -1193,6 +1194,7 @@ def test_provider_readiness_redacts_secret_values_from_details(tmp_path: Path) -
     assert github_secret not in serialized
     assert "anthropic_secret" not in serialized
     assert "gemini_secret" not in serialized
+    assert "xai_secret" not in serialized
     assert "<redacted>" in serialized
 
 
