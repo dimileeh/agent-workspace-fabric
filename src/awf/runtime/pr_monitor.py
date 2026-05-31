@@ -753,13 +753,17 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     Gate order matters:
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
-    1.  Base behind / DIRTY → SyncBase (BEFORE addressing comments so a
-        PR on a fast-moving base doesn't loop forever on new bot-review
-        cycles without ever integrating base updates — if bots keep
-        commenting, AddressComments would fire every iteration and
-        SyncBase would never get its turn; PR #344/#345 hit this with
-        5 bot reviewers).
-    2.  Unresolved comments (inline + review) → AddressComments.
+    1.  Base behind / DIRTY → SyncBase (BEFORE addressing comments or
+        operator hints so a PR on a fast-moving base doesn't loop
+        forever on new bot-review cycles without ever integrating base
+        updates — if bots keep commenting, AddressComments would fire
+        every iteration and SyncBase would never get its turn; PR
+        #344/#345 hit this with 5 bot reviewers).
+    2.  Operator remonitor hint → AddressOperatorHint / NotifyHuman.
+        Runs after SyncBase because hint repair commits also need to
+        push; on a stale head they would be rejected non-fast-forward
+        and loop without ever integrating the base update.
+    3.  Unresolved comments (inline + review) → AddressComments.
         The batch only contains threads/comments we HAVEN'T already
         addressed (``state.threads_addressed_ids``). If every comment
         is already in that dict we fall through — the runner is
@@ -768,24 +772,24 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         stale; either way, gate forward to CI/merge checks.
         Review comments are routed to the coding agent so it can record a
         fix, false-positive, or defer verdict against the current evidence.
-    3.  Effective blocking reviews → NotifyHuman.
-    4.  CI FAILURE → ReportCiFailure.
-    5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
+    4.  Effective blocking reviews → NotifyHuman.
+    5.  CI FAILURE → ReportCiFailure.
+    6.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    6.  Legacy ``mergeable == CONFLICTING`` (without the richer
+    7.  Legacy ``mergeable == CONFLICTING`` (without the richer
         mergeStateStatus / BEHIND / DIRTY signal) → SyncBase. The
         coding CLI gets a chance to resolve via the
         `git merge origin/<base>` + fix cycle; runs AFTER comments so
         a mergeable-CONFLICTING PR's conflict + comments can be fixed
         in one CLI pass.
-    7.  Deferred HUMAN feedback still unresolved on GitHub →
+    8.  Deferred HUMAN feedback still unresolved on GitHub →
         NotifyHuman. Deferred BOT feedback does not block — bots
         can't themselves mark threads resolved, so their deferred
         nits would linger forever.
-    8.  ``merge_state_status`` BLOCKED / HAS_HOOKS → NotifyHuman. These
+    9.  ``merge_state_status`` BLOCKED / HAS_HOOKS → NotifyHuman. These
         protected states can represent missing approval or branch-protection
         hooks even when there is no unresolved review thread to address.
-    9.  All green → Merge (or NotifyHuman if auto_merge=False).
+    10. All green → Merge (or NotifyHuman if auto_merge=False).
 
     There is NO iteration or wall-clock budget gate — volume is not a
     terminal condition. A PR that attracts 500 comment cycles is fine
@@ -798,16 +802,6 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return ShortCircuitCompleted()
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
-
-    if state.pending_operator_hint is not None:
-        if state.pending_operator_hint.status == "pending":
-            return AddressOperatorHint(hint=state.pending_operator_hint)
-        return NotifyHuman(
-            message=(
-                "An operator remonitor hint still requires human attention before "
-                "this PR can merge."
-            )
-        )
 
     # Pre-compute actionable comments so a no-progress DIRTY loop can break
     # back to review repair instead of starving new feedback forever.
@@ -823,14 +817,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
     )
 
-    # 1. Base-behind / DIRTY check runs BEFORE comments. Rationale: on a
-    # PR with an active bot-review fleet every push triggers a new wave of comments —
-    # AddressComments would fire every single iteration and we'd never
-    # integrate base updates, leaving the PR stuck on BEHIND
-    # indefinitely. SyncBase only adds a merge commit; the feature work
-    # is unchanged, and any freshly-arrived review comments are still
-    # there for the next iteration's AddressComments gate. PR #344/#345
-    # hit this with 5 bot reviewers.
+    # 1. Base-behind / DIRTY check runs BEFORE comments and operator hints.
+    # Rationale: on a PR with an active bot-review fleet every push triggers a
+    # new wave of comments — AddressComments would fire every single iteration
+    # and we'd never integrate base updates, leaving the PR stuck on BEHIND
+    # indefinitely. Pending operator hints have the same stale-push failure
+    # mode: the repair agent can commit, but the push is rejected
+    # non-fast-forward. SyncBase only adds a merge commit; the feature work is
+    # unchanged, and any freshly-arrived review comments or pending hint are
+    # still there for the next iteration. PR #344/#345 hit this with 5 bot
+    # reviewers.
     #
     # Three signals route here:
     #   * local rev-list says base has advanced (base_behind_count > 0)
@@ -857,20 +853,33 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return Abort(reason=AbortReason.base_sync_no_progress)
         return SyncBase()
 
-    # 2. Unresolved comments, filtered to those we haven't handled yet.
+    # 2. Operator remonitor hints must be processed before merge, but AFTER
+    # SyncBase. Hint repair commits need to push, and a stale PR head would
+    # reject those pushes non-fast-forward and re-enter the same hint cycle.
+    if state.pending_operator_hint is not None:
+        if state.pending_operator_hint.status == "pending":
+            return AddressOperatorHint(hint=state.pending_operator_hint)
+        return NotifyHuman(
+            message=(
+                "An operator remonitor hint still requires human attention before "
+                "this PR can merge."
+            )
+        )
+
+    # 3. Unresolved comments, filtered to those we haven't handled yet.
     # Review comments get one agent pass so the monitor records whether the
     # agent fixed, rejected, or deferred them.
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
-    # 3. Effective review-state blockers stop auto-merge, but they must not
+    # 4. Effective review-state blockers stop auto-merge, but they must not
     # terminate the monitor. Advisory review bodies and top-level issue
     # comments stay in ``unresolved_review_comments`` for the agent path and
     # are deliberately not consulted here.
     if status.blocking_reviews:
         return NotifyHuman()
 
-    # 4. CI failures.
+    # 5. CI failures.
     if status.check_state == CheckState.FAILURE:
         if not status.ci_failures:
             # Failure reported by GraphQL but no per-check log available.
@@ -882,7 +891,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return RerunTransientCI(failures=_ci_transient_rerun_failures(status))
         return ReportCiFailure(failures=status.ci_failures)
 
-    # 5. CI still running, or GitHub is still computing state → passive wait.
+    # 6. CI still running, or GitHub is still computing state → passive wait.
     if status.check_state == CheckState.PENDING:
         return WaitForCI(reason="pending_checks")
     if (
@@ -901,7 +910,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # here too; that fix (base_behind_count fallback) is preserved at
     # step 1 above.
 
-    # 6. Legacy ``mergeable == CONFLICTING`` without the richer
+    # 7. Legacy ``mergeable == CONFLICTING`` without the richer
     # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
     # attempt to reproduce + resolve. Runs AFTER comments because a
     # mergeable CONFLICTING PR is often resolvable in the same pass as
@@ -912,10 +921,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return Abort(reason=AbortReason.merge_conflict_not_reproduced)
         return SyncBase()
 
-    # 7. Unresolved review feedback that the runner has triaged but not cleared
+    # 8. Unresolved review feedback that the runner has triaged but not cleared
     # blocks auto-merge (#305).
     #
-    # Gate 2 (AddressComments) has already claimed every item whose verdict
+    # Gate 3 (AddressComments) has already claimed every item whose verdict
     # still ``_needs_comment_attention`` (None / ``agent_failed``), so anything
     # reaching this gate carries a recorded verdict.
     #
@@ -948,7 +957,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if has_blocking_feedback:
         return NotifyHuman()
 
-    # 8. GitHub may report BLOCKED / HAS_HOOKS because required approval,
+    # 9. GitHub may report BLOCKED / HAS_HOOKS because required approval,
     # protected hooks, or maintainer-controlled review state has not cleared.
     # A rejected merge would only confirm the same protected-state blocker,
     # so hand off instead of probing GitHub every poll.
@@ -958,7 +967,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return NotifyHuman()
 
-    # 9. All green — terminal success action.
+    # 10. All green — terminal success action.
     if config.auto_merge:
         return Merge()
     return NotifyHuman()

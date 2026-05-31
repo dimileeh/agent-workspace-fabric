@@ -284,6 +284,30 @@ class TestOperatorHints:
         assert action.hint == hint
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_pending_operator_hint_does_not_block_sync_base_for_stale_pr(
+        self,
+        status: PRStatus,
+    ) -> None:
+        hint = OperatorHint(
+            reason="the docs CTA URL 404s; use https://example.test/docs",
+            operation_id="op_hint",
+            requested_at="2026-05-30T12:00:00+00:00",
+        )
+        state = MonitorState(pending_operator_hint=hint)
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
     def test_processed_operator_hint_allows_green_pr_to_merge(self) -> None:
         action = decide(_status(), MonitorState(), MonitorConfig(auto_merge=True))
 
