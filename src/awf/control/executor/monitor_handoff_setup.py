@@ -8,6 +8,7 @@ from typing import Any
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
+from awf.control.executor.constants import PR_MONITOR_SETUP_FAILED_REASON_CODE
 from awf.control.executor.helpers import _failure_reason_for_phase
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -54,7 +55,7 @@ async def _run_monitor_handoff_profile_setup(
             from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
             message=f"monitor handoff profile setup failed: {safe_error}"[:2000],
-            reason_code="PR_MONITOR_SETUP_FAILED",
+            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
         )
         return False
 
