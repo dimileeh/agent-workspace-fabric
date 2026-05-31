@@ -592,7 +592,9 @@ export function QueueDatum({
   return (
     <div className={`min-w-0 rounded-[var(--radius-control)] border px-2 py-1.5 ${tone ? toneClass(tone) : "border-line bg-surface-2"}`}>
       <div className="label-caps">{label}</div>
-      <div className={`${mono ? "mono" : "tnum"} truncate text-[11px] text-fg`}>{value}</div>
+      <div className={`${mono ? "mono" : "tnum"} truncate text-[11px] ${tone && tone !== "neutral" ? "" : "text-fg"}`}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -616,7 +618,9 @@ export function QueueChip({
       className={`min-w-0 rounded-[var(--radius-control)] border px-2 py-1 ${toneClass(tone)}`}
     >
       <div className="label-caps">{label}</div>
-      <div className={`${mono ? "mono" : "tnum"} truncate text-[11px] font-medium text-fg`}>{value}</div>
+      <div className={`${mono ? "mono" : "tnum"} truncate text-[11px] font-medium ${tone && tone !== "neutral" ? "" : "text-fg"}`}>
+        {value}
+      </div>
       {detail ? <div className="truncate text-[10px] text-fg-faint">{detail}</div> : null}
     </div>
   );
@@ -905,7 +909,7 @@ export function LifecycleRail({
                 stage.status === "pending" ? "border-line bg-surface" : toneClass(cellTone)
               }`}
             >
-              <div className="flex items-center gap-1.5 text-fg">
+              <div className="flex items-center gap-1.5">
                 {stage.status === "completed" ? (
                   <CheckCircle2 size={14} className="text-healthy" aria-hidden />
                 ) : isActive ? (

@@ -796,60 +796,82 @@ const searchParams = useSearchParams();
   );
 
   const fleetKpis = useMemo<FleetKpi[]>(() => {
-    const counts = resourceSaturation?.workspace_counts;
+    const counts = resourceSaturation?.workspace_counts ?? null;
     const capacity = resourceSaturation ? capacityUtilizationPct(resourceSaturation) : null;
-    const queued = resourceSaturation?.capacity_queue.queued_workspace_count ?? 0;
+    const queued = resourceSaturation?.capacity_queue.queued_workspace_count ?? null;
     const oldestWait = resourceSaturation?.capacity_queue.oldest_wait_seconds ?? null;
     // Windowed reliability counts (default 24h) — actionable, unlike the
-    // ever-growing cumulative failed total.
-    const windowHours = workspaceSummary?.since_hours ?? 24;
-    const windowHint = `last ${windowHours}h`;
+    // ever-growing cumulative failed total. Only meaningful once the summary
+    // has loaded, so the window hint is omitted while the value is unknown.
+    const windowHint = workspaceSummary ? `last ${workspaceSummary.since_hours}h` : undefined;
     const completed = workspaceSummary?.completed_count;
     const cancelled = workspaceSummary?.cancelled_count;
     const failed = workspaceSummary?.failed_count;
+    const dash = "—";
     return [
-      { id: "active", label: "Active", value: counts?.active_total ?? 0 },
-      { id: "running", label: "Running", value: counts?.running ?? 0, tone: "info" },
-      { id: "monitoring_pr", label: "Monitoring PR", value: counts?.monitoring_pr ?? 0, tone: "info" },
+      { id: "active", label: "Active", value: counts ? counts.active_total : dash },
+      {
+        id: "running",
+        label: "Running",
+        value: counts ? counts.running : dash,
+        tone: counts?.running ? "info" : undefined,
+      },
+      {
+        id: "monitoring_pr",
+        label: "Monitoring PR",
+        value: counts ? counts.monitoring_pr : dash,
+        tone: counts?.monitoring_pr ? "info" : undefined,
+      },
       {
         id: "queued",
         label: "Queued",
-        value: queued,
-        tone: queued > 0 ? "warn" : undefined,
-        hint: oldestWait != null ? `oldest ${compactDuration(oldestWait)}` : "awaiting capacity",
+        value: queued ?? dash,
+        tone: queued ? "warn" : undefined,
+        hint:
+          queued && queued > 0
+            ? oldestWait != null
+              ? `oldest ${compactDuration(oldestWait)}`
+              : "awaiting capacity"
+            : undefined,
       },
       {
         id: "completed",
         label: "Completed",
-        value: completed ?? "—",
-        tone: completed != null ? "good" : undefined,
-        hint: windowHint,
+        value: completed ?? dash,
+        tone: completed ? "good" : undefined,
+        hint: completed != null ? windowHint : undefined,
       },
       {
         id: "cancelled",
         label: "Cancelled",
-        value: cancelled ?? "—",
+        value: cancelled ?? dash,
         tone: cancelled ? "warn" : undefined,
-        hint: windowHint,
+        hint: cancelled != null ? windowHint : undefined,
       },
       {
         id: "failed",
         label: "Failed",
-        value: failed ?? "—",
+        value: failed ?? dash,
         tone: failed ? "bad" : undefined,
-        hint: windowHint,
+        hint: failed != null ? windowHint : undefined,
       },
       {
         id: "capacity",
         label: "Capacity",
-        value: capacity ?? "—",
+        value: capacity ?? dash,
         suffix: capacity != null ? "%" : undefined,
         tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : "info") : undefined,
       },
     ];
   }, [resourceSaturation, workspaceSummary]);
 
-  const dataStale = apiState === "error";
+  // Stale dimming per concern: a panel is stale when the API health check fails
+  // OR that panel's own refresh kept the last snapshot after an error.
+  const apiDown = apiState === "error";
+  const capacityStale = apiDown || resourceError != null || workspaceSummaryError != null;
+  const mergeStale = apiDown || mergeQueueError != null || mergeQueueStatus === "error";
+  const failureStale = apiDown || failureSummaryStatus === "error";
+  const fleetStale = apiDown || resourceError != null || workspaceSummaryError != null;
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -871,13 +893,13 @@ const searchParams = useSearchParams();
         isPending={isPending}
       />
 
-      <FleetHealthStrip kpis={fleetKpis} />
+      <FleetHealthStrip kpis={fleetKpis} stale={fleetStale} />
       <SectionNav />
 
-      <div className="grid min-h-[calc(100vh-57px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
+      <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
         <aside
           id="awf-workspaces"
-          className="min-w-0 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0"
+          className="min-w-0 scroll-mt-14 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0"
         >
           <WorkspaceFilters
             statusFilters={statusFilters}
@@ -919,11 +941,11 @@ const searchParams = useSearchParams();
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            <div id="awf-capacity" className="min-w-0 scroll-mt-4">
+            <div id="awf-capacity" className="min-w-0 scroll-mt-14">
               <ResourceCapacityPanel
                 saturation={resourceSaturation}
                 error={resourceError}
-                stale={dataStale}
+                stale={capacityStale}
                 workspaceSummary={workspaceSummary}
                 workspaceSummaryError={workspaceSummaryError}
               />
@@ -931,22 +953,23 @@ const searchParams = useSearchParams();
             {/* 2xl: the panel overlays the cell (absolute) so the long merge
                 list never drives the row height — Capacity sets the height and
                 the list scrolls to fill it. Below 2xl it is normal flow. */}
-            <div id="awf-merge-queue" className="min-w-0 scroll-mt-4 2xl:relative">
+            <div id="awf-merge-queue" className="min-w-0 scroll-mt-14 2xl:relative">
               <div className="2xl:absolute 2xl:inset-0">
                 <MergeQueuePanel
                   items={mergeQueue}
                   hasMore={mergeQueueHasMore}
                   status={mergeQueueStatus}
                   error={mergeQueueError}
-                  stale={dataStale}
+                  stale={mergeStale}
                 />
               </div>
             </div>
-            <div id="awf-failures" className="scroll-mt-4 2xl:col-span-2">
+            <div id="awf-failures" className="scroll-mt-14 2xl:col-span-2">
               <FailureAnalysisPanel
                 summary={failureSummary}
                 status={failureSummaryStatus}
                 error={failureSummaryError}
+                stale={failureStale}
               />
             </div>
           </div>

@@ -241,10 +241,12 @@ export function FailureAnalysisPanel({
   summary,
   status,
   error,
+  stale = false,
 }: {
   summary: FailureSummaryResponse | null;
   status: "loading" | "success" | "error" | "unavailable";
   error: string | null;
+  stale?: boolean;
 }) {
   if (status === "unavailable") {
     return (
@@ -261,6 +263,7 @@ export function FailureAnalysisPanel({
     <Panel
       title="Failure Analysis"
       icon={<Activity size={16} aria-hidden />}
+      stale={stale}
       action={
         <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
           {isLoading && !summary ? "loading" : isError && !summary ? "error" : `${summary?.total_failures ?? 0} failures in window`}

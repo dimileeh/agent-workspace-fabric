@@ -295,7 +295,6 @@ export function Panel({
 
   return (
     <section
-      data-awf-stale={stale ? "true" : undefined}
       className={`min-w-0 w-full max-w-full ${fill ? "flex min-h-0 flex-col " : ""}${isGhost ? "" : "rounded-[var(--radius-panel)] border border-line bg-surface"} ${className}`}
     >
       <div
@@ -310,7 +309,7 @@ export function Panel({
         <div className="flex min-w-0 items-center gap-2">
           {stale ? (
             <span
-              title="Data may be stale — last refresh failed or stream disconnected"
+              title="Showing the last snapshot — live data may be stale"
               className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 text-[10px] font-medium text-attention-text"
             >
               <span aria-hidden>⚠</span>
@@ -320,7 +319,12 @@ export function Panel({
           {action}
         </div>
       </div>
-      <div className={`min-w-0 ${fill ? "flex min-h-0 flex-1 flex-col " : ""}${isGhost ? "py-3" : "p-3"}`}>
+      {/* Only the body dims when stale (data-awf-stale) so the header's stale
+          warning badge keeps full opacity. */}
+      <div
+        data-awf-stale={stale ? "true" : undefined}
+        className={`min-w-0 ${fill ? "flex min-h-0 flex-1 flex-col " : ""}${isGhost ? "py-3" : "p-3"}`}
+      >
         {children}
       </div>
     </section>

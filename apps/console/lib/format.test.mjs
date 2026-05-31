@@ -174,9 +174,9 @@ test("formatCostWithPricing suppresses stale-pricing suffix when source is ccusa
 });
 
 test("toneFillClass maps warning and bad pressure to distinct fills", () => {
-  assert.equal(toneFillClass("good"), "bg-emerald-500");
-  assert.equal(toneFillClass("warn"), "bg-amber-500");
-  assert.equal(toneFillClass("bad"), "bg-red-500");
+  assert.equal(toneFillClass("good"), "tone-fill-good");
+  assert.equal(toneFillClass("warn"), "tone-fill-warn");
+  assert.equal(toneFillClass("bad"), "tone-fill-bad");
 });
 
 test("renderLogEntries preserves message order inside chunks in asc mode", () => {
