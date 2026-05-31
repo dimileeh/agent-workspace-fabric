@@ -2380,3 +2380,226 @@ def test_check_host_home_override_blocks_with_value_in_data() -> None:
     assert padded.level is SetupCheckLevel.BLOCKED
     assert padded.data["env_value"] == " /home/op"
     assert "whitespace" in padded.summary
+
+
+# --- ${HOME} fallback validation (no AWF_HOST_* override set) --------------
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_non_absolute_home_work_dir_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative/``~`` ``HOME`` blocks the work-dir default when no override is set.
+
+    With ``AWF_HOST_WORK_DIR`` unset, the local-service Compose stack binds
+    ``${HOME}/.awf/service`` as both the source and the absolute-required mount
+    target, interpolating ``${HOME}`` verbatim. A relative or ``~``-prefixed
+    ``HOME`` (for example ``HOME=tmp``) therefore yields a non-absolute bind path
+    Docker cannot mount, even though ``_default_compose_work_dir`` would expand or
+    normalize it. The probe must block instead of reporting disk readiness for a
+    directory ``awf start`` never mounts. ``AWF_HOST_HOME`` is pinned to an
+    absolute value so only the work-dir fallback is exercised.
+    """
+    for bad_home in ("tmp", "./work", "~", "~/work", "~op/work"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": bad_home, "AWF_HOST_HOME": "/home/op"},
+        )
+
+        disk = next(result for result in results if result.name == "disk")
+        assert disk.level is SetupCheckLevel.BLOCKED, repr(bad_home)
+        assert disk.data["env_value"] == bad_home
+        assert "absolute" in disk.summary
+        # The disk probe must not run for a path awf start never mounts.
+        assert "disk_path" not in captured, repr(bad_home)
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_padded_home_work_dir_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-padded/-only ``HOME`` blocks the work-dir default fallback.
+
+    Compose interpolates ``${HOME}`` verbatim — with its surrounding whitespace —
+    so a padded ``HOME`` makes ``awf start`` mount (or fail on) the spaced path
+    instead of the stripped path the readiness probe would otherwise report.
+    """
+    for bad_home in (" /home/op", "/home/op ", "\t/home/op", "   "):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": bad_home, "AWF_HOST_HOME": "/home/op"},
+        )
+
+        disk = next(result for result in results if result.name == "disk")
+        assert disk.level is SetupCheckLevel.BLOCKED, repr(bad_home)
+        assert disk.data["env_value"] == bad_home
+        assert "whitespace" in disk.summary
+        assert "disk_path" not in captured, repr(bad_home)
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_non_absolute_home_auth_mount_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative/``~`` ``HOME`` blocks the auth mounts when ``AWF_HOST_HOME`` is unset.
+
+    The local-service Compose stack uses ``${AWF_HOST_HOME:-${HOME}}`` as both the
+    host source and the absolute-required container target for every auth mount, so
+    an unset ``AWF_HOST_HOME`` falls back to ``${HOME}`` verbatim. A relative or
+    ``~``-prefixed ``HOME`` makes ``awf start`` fail to mount the auth directories,
+    so the probe must block instead of declaring the machine ready.
+    ``AWF_HOST_WORK_DIR`` is pinned to an absolute value so only the auth-mount
+    fallback is exercised.
+    """
+    for bad_home in ("tmp", "./home", "~", "~/home", "~op/home"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": bad_home, "AWF_HOST_WORK_DIR": "/data/awf"},
+        )
+
+        host_home = next(result for result in results if result.name == "host_home")
+        assert host_home.level is SetupCheckLevel.BLOCKED, repr(bad_home)
+        assert host_home.data["env_value"] == bad_home
+        assert "absolute" in host_home.summary
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_padded_home_auth_mount_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-padded/-only ``HOME`` blocks the auth-mount fallback.
+
+    Compose keeps ``${HOME}`` unstripped, so a padded ``HOME`` reaches Docker with
+    its surrounding whitespace and ``awf start`` mounts (or fails on) the spaced
+    auth paths instead of the stripped path the readiness probe would report.
+    """
+    for bad_home in (" /home/op", "/home/op ", "\t/home/op", "   "):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"HOME": bad_home, "AWF_HOST_WORK_DIR": "/data/awf"},
+        )
+
+        host_home = next(result for result in results if result.name == "host_home")
+        assert host_home.level is SetupCheckLevel.BLOCKED, repr(bad_home)
+        assert host_home.data["env_value"] == bad_home
+        assert "whitespace" in host_home.summary
+
+
+@pytest.mark.unit
+def test_run_system_checks_home_fallback_ok_when_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absolute ``HOME`` passes both fallbacks when no ``AWF_HOST_*`` override is set."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        environ={"HOME": "/home/op"},
+    )
+
+    disk = next(result for result in results if result.name == "disk")
+    host_home = next(result for result in results if result.name == "host_home")
+    assert disk.level is SetupCheckLevel.OK
+    assert host_home.level is SetupCheckLevel.OK
+    assert captured["disk_path"] == Path("/home/op/.awf/service")
+
+
+@pytest.mark.unit
+def test_run_system_checks_home_fallback_ok_when_unset_or_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset or empty ``HOME`` is left to the ``~``-expansion fallback, not blocked.
+
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` and ``${AWF_HOST_HOME:-${HOME}}``
+    substitute their default only when the override is unset or empty, and a
+    missing/empty ``HOME`` makes Compose interpolate ``${HOME}`` as nothing — the
+    readiness probe deliberately mirrors that by expanding ``~`` to the user home
+    (an absolute path) rather than blocking. Guards against the HOME-fallback
+    validation over-reaching into the unset/empty case the override checks treat as
+    a legitimate fall-back.
+    """
+    for empty in (None, ""):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_disk_path(monkeypatch, captured)
+
+        environ: dict[str, str] = {}
+        if empty is not None:
+            environ["HOME"] = empty
+        results = run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ=environ,
+        )
+
+        disk = next(result for result in results if result.name == "disk")
+        host_home = next(result for result in results if result.name == "host_home")
+        assert disk.level is SetupCheckLevel.OK, repr(empty)
+        assert host_home.level is SetupCheckLevel.OK, repr(empty)
+        assert captured["disk_path"] == Path("~/.awf/service").expanduser(), repr(empty)
+
+
+@pytest.mark.unit
+def test_run_system_checks_home_fallback_suppressed_by_usable_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A usable ``AWF_HOST_WORK_DIR``/``AWF_HOST_HOME`` override hides a bad ``HOME``.
+
+    When both overrides resolve to absolute paths Compose never interpolates
+    ``${HOME}``, so a relative ``HOME`` is irrelevant to the bind/auth mounts and
+    must not block readiness.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        environ={
+            "HOME": "tmp",
+            "AWF_HOST_WORK_DIR": "/data/awf",
+            "AWF_HOST_HOME": "/home/op",
+        },
+    )
+
+    disk = next(result for result in results if result.name == "disk")
+    host_home = next(result for result in results if result.name == "host_home")
+    assert disk.level is SetupCheckLevel.OK
+    assert host_home.level is SetupCheckLevel.OK
+    assert captured["disk_path"] == Path("/data/awf")
+
+
+@pytest.mark.unit
+def test_run_system_checks_home_fallback_suppressed_by_explicit_work_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``work_dir`` wins over a bad ``HOME`` for the disk probe.
+
+    The auth mounts still fall back to ``${HOME}`` (no ``AWF_HOST_HOME``), so the
+    host_home check blocks while the disk check inspects the explicit directory.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        work_dir=Path("/explicit/state"),
+        environ={"HOME": "tmp"},
+    )
+
+    disk = next(result for result in results if result.name == "disk")
+    host_home = next(result for result in results if result.name == "host_home")
+    assert disk.level is SetupCheckLevel.OK
+    assert captured["disk_path"] == Path("/explicit/state")
+    assert host_home.level is SetupCheckLevel.BLOCKED
+    assert host_home.data["env_value"] == "tmp"

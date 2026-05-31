@@ -1181,6 +1181,34 @@ def _default_compose_work_dir(environ: Mapping[str, str]) -> Path:
     return _safe_expanduser(base) / ".awf" / "service"
 
 
+def _invalid_home_fallback(environ: Mapping[str, str]) -> str | None:
+    """Return ``HOME`` when Compose would interpolate it as a non-mountable fallback.
+
+    Both ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` (the work-dir bind) and
+    ``${AWF_HOST_HOME:-${HOME}}`` (every auth mount) fall back to ``${HOME}``
+    *verbatim* when their override is unset or empty. Compose neither strips
+    surrounding whitespace nor expands a leading ``~`` nor resolves a relative
+    ``HOME``, and Docker's bind-mount target must be absolute, so a relative,
+    ``~``-prefixed, or whitespace-padded ``HOME`` (for example ``HOME=tmp``) makes
+    ``awf start`` mount a non-absolute path it can never bind -- even though the
+    readiness probe would expand or normalize it before declaring the machine
+    ready.
+
+    Returns the raw ``HOME`` for those unusable values and ``None`` when ``HOME``
+    is unset, empty, or an absolute path with no surrounding whitespace. An unset
+    or empty ``HOME`` is left to the existing ``~``-expansion fallback (Compose
+    substitutes nothing into ``${HOME}``), mirroring the same empty-vs-set split
+    the ``AWF_HOST_*`` override checks use so every layer agrees.
+    """
+    raw = environ.get("HOME")
+    if not raw:
+        return None
+    candidate = raw.strip()
+    if candidate and candidate == raw and Path(candidate).is_absolute():
+        return None
+    return raw
+
+
 def _resolve_work_dir(
     *,
     work_dir: Path | None,
@@ -1321,6 +1349,93 @@ def check_host_work_dir_override(raw: str) -> SetupCheckResult:
     )
 
 
+def _invalid_work_dir_home_fallback(
+    *,
+    work_dir: Path | None,
+    environ: Mapping[str, str] | None,
+) -> str | None:
+    """Return ``HOME`` when the work-dir default would fall back to an unusable ``HOME``.
+
+    Only relevant when neither an explicit ``work_dir`` nor a usable
+    ``AWF_HOST_WORK_DIR`` override wins, so the local-service Compose stack
+    resolves the bind from ``${HOME}/.awf/service``. A set-but-unusable
+    ``AWF_HOST_WORK_DIR`` is already surfaced by
+    :func:`_invalid_host_work_dir_override`, which runs first; reaching here with
+    no usable override (``_env_host_work_dir`` returns ``None``) therefore means
+    the variable is unset or empty and Compose interpolates ``${HOME}`` verbatim,
+    so an unusable ``HOME`` must block instead of probing the normalized default.
+    """
+    if work_dir is not None:
+        return None
+    env = os.environ if environ is None else environ
+    if _env_host_work_dir(env) is not None:
+        return None
+    return _invalid_home_fallback(env)
+
+
+def check_work_dir_home_fallback(raw_home: str) -> SetupCheckResult:
+    """Report an unusable ``${HOME}`` work-dir fallback as a startup blocker.
+
+    With ``AWF_HOST_WORK_DIR`` unset, the local-service Compose stack binds
+    ``${HOME}/.awf/service`` as *both* the bind source and the (absolute-required)
+    mount target, interpolating ``${HOME}`` verbatim. A relative or ``~``-prefixed
+    ``HOME`` yields a non-absolute bind path Docker rejects, and a
+    surrounding-whitespace ``HOME`` reaches Docker unstripped, so either way
+    ``awf start`` mounts (or fails on) a path the readiness probe would otherwise
+    normalize. The probe blocks rather than reporting disk readiness for a
+    directory ``awf start`` never mounts.
+    """
+    candidate = raw_home.strip()
+    if candidate and candidate == raw_home:
+        # Non-empty with no surrounding whitespace, but not absolute: a relative
+        # path or a leading ``~`` Compose keeps verbatim as the bind path.
+        summary = (
+            f"HOME={raw_home!r} is not an absolute path, so the "
+            "${HOME}/.awf/service work dir is not a usable bind path."
+        )
+        detail = (
+            "HOME must be an absolute directory path. With AWF_HOST_WORK_DIR unset, the "
+            "local-service Compose stack binds ${HOME}/.awf/service as both the source and the "
+            "container target, verbatim. Docker's bind mount target must be absolute and Compose "
+            "does not expand a leading ~ or resolve a relative path, so awf start fails to mount "
+            "the work dir even though the readiness probe could resolve it (expanding ~ or "
+            "reading it relative to the current process)."
+        )
+        fix = (
+            "Set HOME to an absolute directory path (for example /home/you rather than ~ or "
+            "home/you), or set AWF_HOST_WORK_DIR to an absolute work directory, then re-run "
+            "awf setup --dry-run."
+        )
+    else:
+        summary = (
+            f"HOME={raw_home!r} has leading or trailing whitespace, so the "
+            "${HOME}/.awf/service work dir is not a usable bind path."
+        )
+        detail = (
+            "HOME must be a real directory path with no surrounding whitespace. With "
+            "AWF_HOST_WORK_DIR unset, the local-service Compose stack binds ${HOME}/.awf/service "
+            "verbatim — with its surrounding whitespace — so awf start mounts (or fails on) the "
+            "spaced path instead of the stripped path the readiness probe would otherwise report."
+        )
+        fix = (
+            "Set HOME to a real directory path with no leading or trailing whitespace, or set "
+            "AWF_HOST_WORK_DIR to an absolute work directory, then re-run awf setup --dry-run."
+        )
+    return SetupCheckResult(
+        name="disk",
+        level=SetupCheckLevel.BLOCKED,
+        summary=summary,
+        detail=detail,
+        fix=fix,
+        data={
+            "path": None,
+            "free_bytes": None,
+            "minimum_bytes": MIN_FREE_DISK_BYTES,
+            "env_value": raw_home,
+        },
+    )
+
+
 def _invalid_host_home_override(
     *,
     environ: Mapping[str, str] | None,
@@ -1424,21 +1539,101 @@ def check_host_home_override(raw: str) -> SetupCheckResult:
     )
 
 
-def check_host_home() -> SetupCheckResult:
-    """Confirm ``AWF_HOST_HOME`` is usable as the Compose auth-mount root.
+def _invalid_auth_mount_home_fallback(
+    *,
+    environ: Mapping[str, str] | None,
+) -> str | None:
+    """Return ``HOME`` when the auth mounts would fall back to an unusable ``HOME``.
 
-    Reached only when :func:`_invalid_host_home_override` finds no blocker: the
-    override is unset or empty (Compose falls back to ``${HOME}``) or an absolute
-    path with no surrounding whitespace, so every ``${AWF_HOST_HOME:-${HOME}}``
-    auth mount resolves to an absolute target ``awf start`` can bind.
+    Only relevant when ``AWF_HOST_HOME`` is unset or empty, so every
+    ``${AWF_HOST_HOME:-${HOME}}`` auth mount resolves to ``${HOME}`` verbatim. A
+    set-but-unusable ``AWF_HOST_HOME`` is already surfaced by
+    :func:`_invalid_host_home_override`, which runs first, and a set-and-usable
+    one makes ``${HOME}`` irrelevant; either way a non-empty ``AWF_HOST_HOME``
+    short-circuits to ``None`` here so only the genuine ``${HOME}`` fall-back is
+    validated.
+    """
+    env = os.environ if environ is None else environ
+    if env.get("AWF_HOST_HOME"):
+        return None
+    return _invalid_home_fallback(env)
+
+
+def check_auth_mount_home_fallback(raw_home: str) -> SetupCheckResult:
+    """Report an unusable ``${HOME}`` auth-mount fallback as a startup blocker.
+
+    With ``AWF_HOST_HOME`` unset, the local-service Compose stack uses ``${HOME}``
+    as *both* the host source and the (absolute-required) container target for
+    every auth mount (gh, gcloud, git, ssh, and the agent CLI directories),
+    verbatim. A relative or ``~``-prefixed ``HOME`` yields a non-absolute mount
+    target Docker rejects, and a surrounding-whitespace ``HOME`` reaches Docker
+    unstripped, so either way ``awf start`` fails to mount the auth directories
+    the readiness probe would otherwise normalize. The probe blocks rather than
+    reporting auth mounts that are never bound.
+    """
+    candidate = raw_home.strip()
+    if candidate and candidate == raw_home:
+        # Non-empty with no surrounding whitespace, but not absolute: a relative
+        # path or a leading ``~`` Compose mounts verbatim.
+        summary = (
+            f"HOME={raw_home!r} is not an absolute path, not a usable ${{HOME}} auth-mount root."
+        )
+        detail = (
+            "HOME must be an absolute directory path. With AWF_HOST_HOME unset, the "
+            "local-service Compose stack uses ${HOME} as both the host source and the container "
+            "target for the auth mounts (for example ${HOME}/.config/gh:${HOME}/.config/gh:ro), "
+            "verbatim. Docker's bind mount target must be absolute and Compose does not expand a "
+            "leading ~ or resolve a relative path, so awf start fails to mount the auth "
+            "directories even though the readiness probe could resolve it."
+        )
+        fix = (
+            "Set HOME to an absolute directory path (for example /home/you rather than ~ or "
+            "home/you), or set AWF_HOST_HOME to an absolute directory path, then re-run "
+            "awf setup --dry-run."
+        )
+    else:
+        summary = (
+            f"HOME={raw_home!r} has leading or trailing whitespace, "
+            "not a usable ${HOME} auth-mount root."
+        )
+        detail = (
+            "HOME must be a real directory path with no surrounding whitespace. With "
+            "AWF_HOST_HOME unset, the local-service Compose stack bind-mounts ${HOME} as both "
+            "the host source and the container target for the auth mounts and interpolates it "
+            "verbatim — with its surrounding whitespace — so awf start mounts (or fails on) the "
+            "spaced path instead of the stripped path the readiness probe would otherwise report."
+        )
+        fix = (
+            "Set HOME to a real directory path with no leading or trailing whitespace, or set "
+            "AWF_HOST_HOME to an absolute directory path, then re-run awf setup --dry-run."
+        )
+    return SetupCheckResult(
+        name="host_home",
+        level=SetupCheckLevel.BLOCKED,
+        summary=summary,
+        detail=detail,
+        fix=fix,
+        data={"env_value": raw_home},
+    )
+
+
+def check_host_home() -> SetupCheckResult:
+    """Confirm the Compose auth-mount root resolves to an absolute path.
+
+    Reached only when neither :func:`_invalid_host_home_override` nor
+    :func:`_invalid_auth_mount_home_fallback` finds a blocker: ``AWF_HOST_HOME``
+    is an absolute path with no surrounding whitespace, or it is unset/empty and
+    the ``${HOME}`` fall-back is itself usable (unset/empty so Compose substitutes
+    nothing, or an absolute path). Every ``${AWF_HOST_HOME:-${HOME}}`` auth mount
+    therefore resolves to an absolute target ``awf start`` can bind.
     """
     return SetupCheckResult(
         name="host_home",
         level=SetupCheckLevel.OK,
         summary="AWF_HOST_HOME resolves to an absolute auth-mount root.",
         detail=(
-            "AWF_HOST_HOME is unset (the local-service Compose stack falls back to ${HOME}) "
-            "or an absolute path, so the auth mounts (${AWF_HOST_HOME:-${HOME}}/.config/gh, "
+            "AWF_HOST_HOME is unset (the local-service Compose stack falls back to a usable "
+            "${HOME}) or an absolute path, so the auth mounts (${AWF_HOST_HOME:-${HOME}}/.config/gh, "
             "/.ssh, the agent CLI directories, ...) resolve to absolute targets awf start "
             "can bind."
         ),
@@ -1483,8 +1678,15 @@ def run_system_checks(
         else None
     )
     invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
+    invalid_work_dir_home = _invalid_work_dir_home_fallback(work_dir=work_dir, environ=environ)
     if invalid_work_dir is not None:
         disk_check = check_host_work_dir_override(invalid_work_dir)
+    elif invalid_work_dir_home is not None:
+        # No usable AWF_HOST_WORK_DIR override, so Compose binds
+        # ${HOME}/.awf/service verbatim. A relative, ~-prefixed, or
+        # whitespace-padded HOME makes that bind path non-absolute (or spaced),
+        # so awf start cannot mount it even though the probe would normalize it.
+        disk_check = check_work_dir_home_fallback(invalid_work_dir_home)
     else:
         resolved_work_dir = _resolve_work_dir(work_dir=work_dir, environ=environ)
         disk_check = check_disk(resolved_work_dir)
@@ -1493,13 +1695,16 @@ def run_system_checks(
     # the host source and the absolute-required container target for every auth
     # mount, so a relative, ~-prefixed, or whitespace-padded value passes the
     # readiness probe yet makes ``awf start`` fail to mount the auth directories.
-    # Block on it here rather than declaring the machine ready.
+    # Block on it here rather than declaring the machine ready. When AWF_HOST_HOME
+    # is unset the same trap applies to the ${HOME} fall-back the auth mounts use.
     invalid_host_home = _invalid_host_home_override(environ=environ)
-    host_home_check = (
-        check_host_home_override(invalid_host_home)
-        if invalid_host_home is not None
-        else check_host_home()
-    )
+    invalid_host_home_fallback = _invalid_auth_mount_home_fallback(environ=environ)
+    if invalid_host_home is not None:
+        host_home_check = check_host_home_override(invalid_host_home)
+    elif invalid_host_home_fallback is not None:
+        host_home_check = check_auth_mount_home_fallback(invalid_host_home_fallback)
+    else:
+        host_home_check = check_host_home()
     # Probe the daemon ``awf start`` will use: the resolved service env can point
     # Docker at a different host (``AWF_DOCKER_HOST``) or blank an inherited
     # ``DOCKER_HOST``, so feed that selection into both the docker and compose
@@ -1703,6 +1908,7 @@ __all__ = [
     "SetupCheckResult",
     "build_setup_readiness_payload",
     "check_api_host_port_override",
+    "check_auth_mount_home_fallback",
     "check_compose",
     "check_disk",
     "check_docker",
@@ -1718,6 +1924,7 @@ __all__ = [
     "check_postgres_port",
     "check_python_runtime",
     "check_shell_path",
+    "check_work_dir_home_fallback",
     "normalize_provider",
     "normalize_providers",
     "require_interactive",
