@@ -21,7 +21,7 @@ non-terminal workspace, the API returns HTTP 409 with error code
 
 ## Test Results
 
-```
+```text
 11 passed in 9.61s
 ```
 
