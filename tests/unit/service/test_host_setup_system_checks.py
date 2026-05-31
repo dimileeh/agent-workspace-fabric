@@ -1399,6 +1399,38 @@ def test_run_system_checks_blocks_on_whitespace_only_override(
 
 
 @pytest.mark.unit
+def test_run_system_checks_blocks_on_padded_api_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A surrounding-whitespace ``AWF_API_HOST_PORT`` blocks; it is not stripped-then-probed.
+
+    The port helper used to ``strip`` the override before parsing, so a padded
+    ``" 8000"`` parsed to ``8000``, passed validation, and the readiness probe
+    bound and reported port 8000 free. But Compose interpolates
+    ``${AWF_API_HOST_PORT:-8000}:8000`` verbatim, producing ``" 8000:8000"`` — an
+    invalid port spec ``awf start`` cannot publish. Mirroring the padded work-dir
+    guard, the probe must block on the surrounding whitespace instead of probing
+    the stripped port and reporting readiness for a port the operator can never
+    publish.
+    """
+    for padded in (" 8000", "8000 ", "\t8000", "8000\n"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_port(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
+            work_dir=Path("/tmp"),
+            environ={"AWF_API_HOST_PORT": padded},
+        )
+
+        ports = next(result for result in results if result.name == "ports")
+        assert ports.level is SetupCheckLevel.BLOCKED, repr(padded)
+        assert ports.data["env_value"] == padded
+        # The bind probe must not run for a port the operator never published.
+        assert "port" not in captured, repr(padded)
+
+
+@pytest.mark.unit
 def test_run_system_checks_blocks_on_set_but_invalid_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1668,6 +1700,35 @@ def test_run_system_checks_blocks_on_set_but_invalid_postgres_override(
         assert postgres.data["env_value"] == invalid
         # The bind probe must not run for a port the operator never published.
         assert "postgres_port" not in captured, repr(invalid)
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_padded_postgres_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A surrounding-whitespace ``AWF_POSTGRES_HOST_PORT`` blocks; it is not stripped-then-probed.
+
+    Mirrors ``test_run_system_checks_blocks_on_padded_api_host_port_override`` for
+    Postgres. Compose interpolates ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432``
+    verbatim, so a padded ``" 5433"`` becomes ``127.0.0.1: 5433:5432`` — an invalid
+    port spec ``awf start`` cannot publish. The probe must block on the surrounding
+    whitespace rather than strip it and report the wrong port as free.
+    """
+    for padded in (" 5433", "5433 ", "\t5433", "5433\n"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(),
+            work_dir=Path("/tmp"),
+            environ={"AWF_POSTGRES_HOST_PORT": padded},
+        )
+
+        postgres = next(result for result in results if result.name == "postgres_port")
+        assert postgres.level is SetupCheckLevel.BLOCKED, repr(padded)
+        assert postgres.data["env_value"] == padded
+        # The bind probe must not run for a port the operator never published.
+        assert "postgres_port" not in captured, repr(padded)
 
 
 @pytest.mark.unit

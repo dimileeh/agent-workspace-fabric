@@ -782,20 +782,26 @@ def check_local_capacity(
 def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
     """Return a usable ``AWF_API_HOST_PORT`` override, or ``None`` when unusable.
 
-    A missing, empty, whitespace-only, malformed, or out-of-range value yields
-    ``None``. Whether that ``None`` means a legitimate fall-back to Compose's
-    ``8000`` default (only an *unset or empty* override, mirroring
-    ``${AWF_API_HOST_PORT:-8000}``) or a startup blocker (any other set-but-
-    unusable value, including whitespace-only, which Compose interpolates
-    verbatim) is decided by :func:`_invalid_api_host_port_override`, which the
-    readiness probe surfaces as a blocker instead of silently probing the default
-    port.
+    A missing, empty, whitespace-only, *surrounding-whitespace* (padded),
+    malformed, or out-of-range value yields ``None``. The override is "usable"
+    only when AWF can honor it identically across every layer, and a value with
+    leading/trailing whitespace cannot be: this helper would ``strip`` it to a
+    valid port, but Compose interpolates ``${AWF_API_HOST_PORT:-8000}:8000``
+    verbatim, so a padded ``" 8000"`` would pass the bind probe for the stripped
+    8000 while ``awf start`` tries to publish ``" 8000:8000"`` and fails. Whether
+    that ``None`` means a legitimate fall-back to Compose's ``8000`` default (only
+    an *unset or empty* override, mirroring ``${AWF_API_HOST_PORT:-8000}``) or a
+    startup blocker (any other set-but-unusable value, including whitespace-only
+    or padded, which Compose interpolates verbatim) is decided by
+    :func:`_invalid_api_host_port_override`, which the readiness probe surfaces as
+    a blocker instead of silently probing the stripped or default port. This
+    mirrors the padded-value guard in :func:`_env_host_work_dir`.
     """
     raw = environ.get("AWF_API_HOST_PORT")
     if raw is None:
         return None
     candidate = raw.strip()
-    if not candidate:
+    if not candidate or candidate != raw:
         return None
     try:
         parsed = int(candidate)
@@ -849,15 +855,18 @@ def _invalid_api_host_port_override(
     zero-length string) — the empty case is a legitimate fall-back to Compose's
     ``8000`` default because ``${AWF_API_HOST_PORT:-8000}`` substitutes the
     default only when the variable is unset or empty. Any other set value that
-    does not parse to a ``1..65535`` TCP port is returned, *including a
-    whitespace-only value*: Compose treats ``"   "`` as a non-empty literal and
-    publishes it verbatim into ``"   :8000"`` (so ``awf start`` fails), and
-    ``awf service`` settings parse the same override and reject it
-    (``_default_local_service_api_base_url`` reaches ``int("   ")``, which
-    raises). The readiness probe must block on it instead of silently probing the
+    :func:`_env_api_host_port` cannot honor verbatim is returned, *including a
+    whitespace-only or surrounding-whitespace (padded) value*: Compose treats
+    ``"   "`` and ``" 8000"`` as non-empty literals and publishes them verbatim
+    into ``"   :8000"`` / ``" 8000:8000"`` (so ``awf start`` fails). A
+    whitespace-only value is additionally rejected by ``awf service`` settings
+    (``_default_local_service_api_base_url`` reaches ``int("   ")``, which raises);
+    a padded ``" 8000"`` survives ``int`` there but still breaks Compose, so the
+    readiness probe must block on both instead of silently probing the stripped or
     default port and reporting the wrong port as free. The ``not raw`` guard
-    mirrors ``awf service``'s own ``if not host_port`` fall-back so the two
-    layers agree on empty-vs-whitespace.
+    mirrors ``awf service``'s own ``if not host_port`` fall-back so the two layers
+    agree on empty-vs-whitespace, and the padded-value rejection mirrors
+    :func:`_env_host_work_dir`.
     """
     if port is not None:
         return None
@@ -898,18 +907,21 @@ def _env_postgres_host_port(environ: Mapping[str, str]) -> int | None:
     """Return a usable ``AWF_POSTGRES_HOST_PORT`` override, or ``None`` when unusable.
 
     Mirrors :func:`_env_api_host_port` for the Postgres host port. A missing,
-    empty, whitespace-only, malformed, or out-of-range value yields ``None``.
-    Whether that ``None`` means a legitimate fall-back to Compose's ``5433``
-    default (only an *unset or empty* override, mirroring
-    ``${AWF_POSTGRES_HOST_PORT:-5433}``) or a startup blocker (any other set-but-
-    unusable value, including whitespace-only, which Compose interpolates
-    verbatim) is decided by :func:`_invalid_postgres_host_port_override`.
+    empty, whitespace-only, *surrounding-whitespace* (padded), malformed, or
+    out-of-range value yields ``None`` — a padded value cannot be honored
+    identically across layers because Compose interpolates
+    ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432`` verbatim. Whether that
+    ``None`` means a legitimate fall-back to Compose's ``5433`` default (only an
+    *unset or empty* override, mirroring ``${AWF_POSTGRES_HOST_PORT:-5433}``) or a
+    startup blocker (any other set-but-unusable value, including whitespace-only
+    or padded, which Compose interpolates verbatim) is decided by
+    :func:`_invalid_postgres_host_port_override`.
     """
     raw = environ.get("AWF_POSTGRES_HOST_PORT")
     if raw is None:
         return None
     candidate = raw.strip()
-    if not candidate:
+    if not candidate or candidate != raw:
         return None
     try:
         parsed = int(candidate)
@@ -945,9 +957,12 @@ def _invalid_postgres_host_port_override(*, environ: Mapping[str, str] | None) -
     *genuinely empty* (a zero-length string) — the empty case is a legitimate
     fall-back to Compose's ``5433`` default because
     ``${AWF_POSTGRES_HOST_PORT:-5433}`` substitutes the default only when the
-    variable is unset or empty. Any other set value that does not parse to a
-    ``1..65535`` TCP port is returned, *including a whitespace-only value*, which
-    Compose interpolates verbatim so that ``awf start`` fails to publish the port.
+    variable is unset or empty. Any other set value that
+    :func:`_env_postgres_host_port` cannot honor verbatim is returned, *including
+    a whitespace-only or surrounding-whitespace (padded) value*, which Compose
+    interpolates verbatim into ``127.0.0.1: 5433:5432`` so that ``awf start``
+    fails to publish the port. The padded-value rejection mirrors
+    :func:`_env_host_work_dir`.
     """
     env = os.environ if environ is None else environ
     raw = env.get("AWF_POSTGRES_HOST_PORT")
