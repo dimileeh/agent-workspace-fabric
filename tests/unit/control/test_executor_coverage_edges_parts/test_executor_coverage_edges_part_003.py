@@ -27,6 +27,7 @@ from awf.control.executor.helpers import (
 )
 from awf.db.enums import (
     AgentRuntime,
+    FailureReason,
     OperationStatus,
     OperationType,
     TaskClass,
@@ -683,6 +684,99 @@ async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
 
     assert result.stop
     assert result.has_known_non_plan_output
+
+
+@pytest.mark.unit
+async def test_execution_validation_fails_when_workspace_head_sha_cannot_be_captured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate({"name": "validation-missing-head"})
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "validation-missing-head"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        test_commands=[],
+        task_class=None,
+        operations=[],
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(max_validation_fix_passes=0, planning_max_iterations_default=3),
+        _capture_workspace_head_sha=AsyncMock(return_value=None),
+        _start_validation_run=AsyncMock(return_value="vr-missing-head"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+    )
+
+    async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_resolved_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_missing_head",
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_missing_head",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_missing_head",
+        adapter=object(),  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert result.successful_validation_run_id is None
+    executor._start_validation_run.assert_awaited_once_with(
+        workspace_id="ws_missing_head",
+        profile=profile,
+        base_commit="b" * 40,
+        workspace_head_sha=None,
+        target_branch="awf/ws_missing_head",
+        target_head_sha=None,
+        tier=1,
+    )
+    executor._finish_validation_run.assert_awaited_once()
+    finish_kwargs = executor._finish_validation_run.await_args.kwargs
+    assert finish_kwargs["status"] == "failed"
+    assert finish_kwargs["reason_code"] == "VALIDATION_INFRASTRUCTURE_ERROR"
+    executor._finish_pending_validate_operations.assert_awaited_once()
+    assert executor._finish_pending_validate_operations.await_args.kwargs["status"] == "failed"
+    executor._mark_failed.assert_awaited_once()
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert getattr(mark_kwargs["from_status"], "value", mark_kwargs["from_status"]) == "validating"
+    assert mark_kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert mark_kwargs["reason_code"] == "VALIDATION_INFRASTRUCTURE_ERROR"
 
 
 @pytest.mark.unit

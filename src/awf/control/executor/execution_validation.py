@@ -219,6 +219,24 @@ async def run_validation_and_fix_cycle(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
         )
+        if validation_workspace_head_sha is None:
+            validation_run_id = await self._start_validation_run(
+                workspace_id=workspace_id,
+                profile=profile,
+                base_commit=base_commit,
+                workspace_head_sha=validation_workspace_head_sha,
+                target_branch=expected_branch,
+                target_head_sha=None,
+                tier=validation_tier,
+            )
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                validation_tier=validation_tier,
+                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                message="could not capture workspace HEAD before AWF validation",
+            )
         validation_run_id = await self._start_validation_run(
             workspace_id=workspace_id,
             profile=profile,
@@ -290,7 +308,7 @@ async def run_validation_and_fix_cycle(
             cleanup_result = await cleanup_validation_worktree_side_effects(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
-                restore_ref=validation_workspace_head_sha or "HEAD",
+                restore_ref=validation_workspace_head_sha,
             )
             if not cleanup_result.ok:
                 if callback_ignored:
@@ -365,7 +383,7 @@ async def run_validation_and_fix_cycle(
             cleanup_result = await cleanup_validation_worktree_side_effects(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
-                restore_ref=validation_workspace_head_sha or "HEAD",
+                restore_ref=validation_workspace_head_sha,
             )
             if not cleanup_result.ok:
                 if callback_ignored:
@@ -428,7 +446,7 @@ async def run_validation_and_fix_cycle(
         cleanup_result = await cleanup_validation_worktree_side_effects(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
-            restore_ref=validation_workspace_head_sha or "HEAD",
+            restore_ref=validation_workspace_head_sha,
         )
         if not cleanup_result.ok:
             reason_code = cleanup_result.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
