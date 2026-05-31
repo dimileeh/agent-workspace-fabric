@@ -1,4 +1,4 @@
-"""Non-interactive enforcement, redaction, capability detection, config tests."""
+"""CredentialRef validation, optional keyring import, and storage-cap tests."""
 
 from __future__ import annotations
 
@@ -8,12 +8,13 @@ import pytest
 from pydantic import ValidationError
 
 import awf.host_setup as host_setup
-from awf.host_setup import read_host_setup_config, write_host_setup_config
-from awf.host_setup.config import ProviderConfig, default_host_setup_config_path
+import awf.host_setup.credentials as credentials
+from awf.host_setup.config import ProviderConfig
 from awf.host_setup.credentials import (
     CREDENTIAL_BACKEND_UNAVAILABLE,
     CREDENTIAL_BACKENDS,
-    INTERACTIVE_INPUT_REQUIRED,
+    CREDENTIAL_REF_INVALID,
+    MAX_CREDENTIAL_REF_LENGTH,
     CredentialError,
     CredentialRef,
     CredentialRequest,
@@ -21,86 +22,148 @@ from awf.host_setup.credentials import (
     KeyringCredentialBackend,
     PlainFileCredentialBackend,
     detect_host_credential_capabilities,
+    select_credential_backend,
     store_provider_credential,
 )
-from awf.host_setup.rendering import redact_first_run_value
 from tests.unit.service.test_host_setup_credentials_parts._helpers import (
     _FAKE_GH_TOKEN,
     _FAKE_TOKEN,
     _HEADLESS_LINUX,
     FakeKeyringModule,
+    _ChainerBackend,
+    _FakeKeyringErrors,
     _secret,
 )
 
 
 # --------------------------------------------------------------------------- #
-# 8. Non-interactive enforcement for missing input.
+# CredentialRef validation and selection edge cases.
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-def test_keyring_missing_secret_is_interactive_input_required() -> None:
-    """Verify keyring storage with no secret source fails non-interactively."""
-    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule())
-    with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(CredentialRequest(provider="github", secret_source=None))
-
-    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+def test_credential_ref_rejects_mismatched_prefix() -> None:
+    """Verify a ref must use the scheme matching its backend kind."""
+    with pytest.raises(ValidationError):
+        CredentialRef(backend="keyring", ref="env://GH_TOKEN")
 
 
 @pytest.mark.unit
-def test_keyring_empty_secret_is_interactive_input_required() -> None:
-    """Verify an empty secret value is treated as missing input."""
-    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule())
-    with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(CredentialRequest(provider="github", secret_source=_secret("")))
+def test_credential_ref_rejects_secret_like_value() -> None:
+    """Verify a ref that resembles a raw secret is rejected and redacted."""
+    with pytest.raises(ValidationError) as exc_info:
+        CredentialRef(backend="env_ref", ref=f"env://{_FAKE_GH_TOKEN}")
 
-    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert _FAKE_GH_TOKEN not in str(exc_info.value)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("secret", ["   ", "\t\n"])
-def test_keyring_whitespace_only_secret_is_interactive_input_required(secret: str) -> None:
-    """Verify a whitespace-only secret is treated as missing input.
+def test_credential_ref_validation_error_does_not_echo_input() -> None:
+    """Verify Pydantic never echoes the offending input into the error string.
 
-    A whitespace-only value is truthy, so it would otherwise slip past the
-    ``not secret`` guard and be written to the keychain as an unusable
-    credential. It must instead raise ``INTERACTIVE_INPUT_REQUIRED`` and never
-    reach the backend, mirroring the env_ref name guard.
+    Without ``hide_input_in_errors=True`` Pydantic appends an ``input_value=``
+    clause whose (truncated) repr leaks a recognizable suffix of the raw secret
+    into ``str(exc)`` — the value ``logger.exception`` formats. Guard against
+    that regression for any secret-bearing ref.
     """
-    fake_keyring = FakeKeyringModule()
-    backend = KeyringCredentialBackend(keyring_module=fake_keyring)
-    with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(CredentialRequest(provider="github", secret_source=_secret(secret)))
+    secret = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0PoNmLkJiHgFeDcBa"
+    with pytest.raises(ValidationError) as exc_info:
+        CredentialRef(backend="env_ref", ref=f"env://{secret}")
 
-    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
-    assert fake_keyring.set_calls == []
+    rendered = str(exc_info.value)
+    assert secret not in rendered
+    # The distinctive tail must not survive Pydantic's middle truncation either.
+    assert secret[-20:] not in rendered
+    assert "input_value" not in rendered
 
 
 @pytest.mark.unit
-def test_keyring_strips_secret_whitespace_before_storage() -> None:
-    """Verify a whitespace-padded secret is stripped before the keychain write.
+def test_select_credential_backend_rejects_unknown_preference() -> None:
+    """Verify an unknown backend preference is reason-coded, listing valid kinds."""
+    with pytest.raises(CredentialError) as exc_info:
+        select_credential_backend(
+            preferred="hsm",
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+        )
 
-    A secret padded with leading/trailing whitespace is truthy and survives the
-    whitespace-only guard, but the surrounding whitespace would make the stored
-    credential fail silently at authentication time. It must be stripped before
-    storage, mirroring the env_ref path which strips its identifier before use.
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details["valid_backends"] == list(CREDENTIAL_BACKENDS)
+
+
+@pytest.mark.unit
+def test_select_plain_file_returns_gated_backend() -> None:
+    """Verify selecting plain_file returns the gated plain-file backend."""
+    selected = select_credential_backend(
+        preferred="plain_file",
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        plain_file_consent=True,
+    )
+    assert selected.kind == "plain_file"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("provider", ["../evil", "bad/provider", ""])
+def test_keyring_rejects_unsafe_provider_identifier(provider: str) -> None:
+    """Verify unsafe provider identifiers are rejected before any secret use."""
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule())
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider=provider, secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    assert exc_info.value.reason_code == CREDENTIAL_REF_INVALID
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("provider", "account", "field"),
+    [
+        (_FAKE_TOKEN, "default", "provider"),
+        ("github", _FAKE_GH_TOKEN, "account"),
+    ],
+)
+def test_keyring_rejects_token_shaped_identifier(
+    provider: str,
+    account: str,
+    field: str,
+) -> None:
+    """Verify token-shaped provider/account identifiers are refused pre-storage.
+
+    A token accidentally populating ``provider``/``account`` still matches the
+    filename-safe regex, so without an explicit token-shape guard it would be
+    interpolated into the keychain service/account name before the resulting ref
+    is rejected. The guard must refuse it with the same secret-free reason code
+    env var names already use, and never reach the keychain write.
     """
     module = FakeKeyringModule()
     backend = KeyringCredentialBackend(keyring_module=module)
-
-    backend.create_ref(
-        CredentialRequest(
-            provider="github",
-            secret_source=_secret(f"  {_FAKE_GH_TOKEN}  "),
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(
+                provider=provider,
+                account=account,
+                secret_source=_secret(_FAKE_GH_TOKEN),
+            )
         )
-    )
 
-    # The padded value is normalised to the bare token before it reaches storage.
-    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {"field": field}
+    assert module.set_calls == []
+    assert _FAKE_TOKEN not in str(error.to_dict())
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 
 @pytest.mark.unit
-def test_plain_file_missing_secret_is_interactive_input_required(tmp_path: Path) -> None:
-    """Verify plain-file storage with no secret source fails non-interactively."""
+def test_plain_file_rejects_token_shaped_provider(tmp_path: Path) -> None:
+    """Verify a token-shaped provider is refused before any plain-file write.
+
+    The provider is interpolated into the secret file path, so a token-shaped
+    value must be rejected with a secret-free reason code and leave neither the
+    secret file nor the secrets directory behind.
+    """
     secrets_dir = tmp_path / "secrets"
     backend = PlainFileCredentialBackend(
         capabilities=_HEADLESS_LINUX,
@@ -109,252 +172,500 @@ def test_plain_file_missing_secret_is_interactive_input_required(tmp_path: Path)
         secrets_dir=secrets_dir,
     )
     with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(CredentialRequest(provider="openai", secret_source=None))
+        backend.create_ref(
+            CredentialRequest(provider=_FAKE_TOKEN, secret_source=_secret(_FAKE_TOKEN))
+        )
 
-    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.details == {"field": "provider"}
     assert not secrets_dir.exists()
-
-
-@pytest.mark.unit
-def test_env_ref_missing_variable_is_interactive_input_required() -> None:
-    """Verify env refs without a variable name fail non-interactively."""
-    with pytest.raises(CredentialError) as exc_info:
-        EnvRefCredentialBackend().create_ref(CredentialRequest(provider="openai", env_var=None))
-
-    error = exc_info.value
-    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
-    # A legitimate provider name is preserved verbatim in the diagnostic.
-    assert error.details["provider"] == "openai"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("env_var", ["", "   ", "\t\n"])
-def test_env_ref_blank_variable_is_interactive_input_required(env_var: str) -> None:
-    """Verify a blank/whitespace-only env var name is treated as missing input.
-
-    A whitespace-only name strips to ``""``, which is semantically "no name
-    provided", so it must raise ``INTERACTIVE_INPUT_REQUIRED`` (missing input)
-    rather than the ``CREDENTIAL_REF_INVALID`` an empty post-strip identifier
-    would otherwise hit.
-    """
-    with pytest.raises(CredentialError) as exc_info:
-        EnvRefCredentialBackend().create_ref(CredentialRequest(provider="openai", env_var=env_var))
-
-    error = exc_info.value
-    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
-    assert error.details["missing"] == "env_var"
-
-
-@pytest.mark.unit
-def test_env_ref_missing_variable_redacts_token_shaped_provider() -> None:
-    """Verify a token-shaped provider never surfaces when env input is missing.
-
-    The env_ref backend raises ``INTERACTIVE_INPUT_REQUIRED`` for a missing env
-    var name without first routing ``provider`` through ``_require_safe_identifier``
-    (env_ref never interpolates the provider, so it has no other validation). A
-    provider accidentally populated with a raw secret must therefore be redacted
-    out of the error ``details``/``to_dict()`` rather than echoed verbatim.
-    """
-    with pytest.raises(CredentialError) as exc_info:
-        EnvRefCredentialBackend().create_ref(CredentialRequest(provider=_FAKE_TOKEN, env_var=None))
-
-    error = exc_info.value
-    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
-    assert error.details["missing"] == "env_var"
-    assert _FAKE_TOKEN not in str(error.details["provider"])
     assert _FAKE_TOKEN not in str(error.to_dict())
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "provider",
-    [
-        _FAKE_TOKEN.upper(),
-        _FAKE_GH_TOKEN.upper(),
-        "sK-pRoJ-" + ("a" * 48),
-    ],
-)
-def test_env_ref_missing_variable_redacts_case_variant_token_provider(provider: str) -> None:
-    """Verify a case-variant token-shaped provider is redacted, not echoed verbatim.
-
-    This module's own token-shape checks (``_TOKEN_SHAPE_RE``) are
-    case-insensitive, so the diagnostic redaction on the unvalidated env_ref
-    missing-input path must fold case too. A case-variant token-shaped provider
-    (e.g. ``SK-PROJ-...``) must not slip past the case-sensitive audit helper and
-    surface verbatim in the error ``details``/``to_dict()``.
-    """
+def test_keyring_set_password_failure_is_reason_coded() -> None:
+    """Verify keychain write failures surface as backend-unavailable errors."""
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule(raise_on_set=True))
     with pytest.raises(CredentialError) as exc_info:
-        EnvRefCredentialBackend().create_ref(CredentialRequest(provider=provider, env_var=None))
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
 
     error = exc_info.value
-    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
-    assert error.details["missing"] == "env_var"
-    assert provider not in str(error.details["provider"])
-    assert provider not in str(error.to_dict())
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 
-# --------------------------------------------------------------------------- #
-# 9. Redaction: token-shaped inputs never surface.
-# --------------------------------------------------------------------------- #
 @pytest.mark.unit
-def test_token_inputs_never_appear_in_outputs(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Verify token-shaped secrets never appear in refs, errors, or output."""
-    keyring_ref = store_provider_credential(
-        CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN)),
-        preferred="keyring",
+@pytest.mark.parametrize(
+    "set_error",
+    [
+        OSError("DBus session unavailable"),
+        RuntimeError("partially-configured keychain stack"),
+    ],
+)
+def test_keyring_non_keyring_error_is_reason_coded(set_error: BaseException) -> None:
+    """Verify non-``KeyringError`` write failures are translated, not propagated.
+
+    Real keyring backends can raise standard exceptions that do not inherit from
+    ``KeyringError`` (``OSError`` when DBus is unavailable, a bare ``RuntimeError``
+    from a partially-configured stack). These must surface as a reason-coded
+    ``CredentialError`` with the original type preserved, never crash the caller,
+    and never leak the secret.
+    """
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule(set_error=set_error))
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "keyring", "error_type": type(set_error).__name__}
+    assert error.__cause__ is set_error
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_create_ref_rejects_backend_that_drops_write() -> None:
+    """Verify a non-noop backend that silently drops the write yields no ref.
+
+    On headless Linux ``keyring.get_keyring()`` can resolve to a ChainerBackend
+    with no usable child: its module leaf is not ``fail``/``null`` so it passes
+    the availability probe, and its ``set_password`` returns without raising while
+    storing nothing. Without a read-back check ``create_ref`` would mint a
+    ``keyring://`` reference pointing at an empty slot that silently fails at
+    resolution time, so the write is verified and degrades to a reason-coded
+    unavailable error instead of a bogus ref.
+    """
+    module = FakeKeyringModule(backend=_ChainerBackend(), drop_writes=True)
+    backend = KeyringCredentialBackend(keyring_module=module)
+    # The chainer backend is not a fail/null no-op, so availability reports True.
+    assert backend.is_available() is True
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "keyring"}
+    # The write was attempted, but the empty read-back blocks the bogus ref and
+    # the secret never leaks into the error surface.
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_create_ref_readback_failure_is_reason_coded() -> None:
+    """Verify a read-back error after the write maps to a secret-free reason code.
+
+    The read-back touches the same unbounded third-party surface as the write, so
+    a ``get_password`` that raises (e.g. ``OSError`` when DBus drops mid-call)
+    must surface as a reason-coded ``CredentialError`` with the original type
+    preserved, never crash the caller, and never leak the secret.
+    """
+    read_error = OSError("DBus session closed")
+    module = FakeKeyringModule(read_back_error=read_error)
+    backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "keyring", "error_type": "OSError"}
+    assert error.__cause__ is read_error
+    assert "DBus session closed" not in str(error.to_dict())
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_create_ref_discards_orphaned_write_on_readback_failure() -> None:
+    """Verify a persisted-but-unverified write is deleted before signalling unavailable.
+
+    ``set_password`` succeeds (the secret reaches the keychain), then the read-back
+    ``get_password`` raises — durability cannot be confirmed, so ``create_ref``
+    raises ``CREDENTIAL_BACKEND_UNAVAILABLE`` and the caller degrades to env_ref.
+    The just-written secret must be deleted first so the recorded ``env://`` ref
+    never diverges from a value left orphaned in the OS keychain under a backend
+    nothing will resolve through.
+    """
+    module = FakeKeyringModule(read_back_error=OSError("DBus session closed"))
+    backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    assert exc_info.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The write was attempted, then cleaned up: no secret is orphaned in the keychain.
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    assert module.delete_calls == [("awf/github", "default")]
+    assert module._stored == {}
+
+
+@pytest.mark.unit
+def test_store_cleans_up_orphaned_keyring_write_before_env_ref_fallback() -> None:
+    """Verify degrading to env_ref never leaves the keyring write orphaned.
+
+    A read-back failure after a persisting ``set_password`` makes ``create_ref``
+    raise ``CREDENTIAL_BACKEND_UNAVAILABLE``, so ``store_provider_credential``
+    degrades to the ``env://`` offer. Recording ``env://NAME`` while the secret
+    still lives in the OS keychain would point the host config at the wrong
+    backend, so the orphaned write must be removed before the fallback runs.
+    """
+    module = FakeKeyringModule(read_back_error=OSError("DBus session closed"))
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+
+    ref = store_provider_credential(
+        CredentialRequest(
+            provider="github",
+            env_var="GH_TOKEN",
+            secret_source=_secret(_FAKE_GH_TOKEN),
+        ),
+        preferred=None,
         capabilities=_HEADLESS_LINUX,
         allow_plain_secrets=False,
         plain_file_consent=False,
-        keyring_backend=KeyringCredentialBackend(keyring_module=FakeKeyringModule()),
-    )
-    plain_ref = store_provider_credential(
-        CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)),
-        preferred="plain_file",
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=True,
-        plain_file_consent=True,
-        plain_file_backend=PlainFileCredentialBackend(
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=True,
-            consent=True,
-            secrets_dir=tmp_path / "secrets",
-        ),
+        keyring_backend=keyring_backend,
     )
 
-    for ref in (keyring_ref, plain_ref):
-        assert _FAKE_TOKEN not in ref.ref
-        assert _FAKE_GH_TOKEN not in ref.ref
-
-    rendered = redact_first_run_value(
-        {
-            "providers": {
-                "github": {"credential_ref": keyring_ref.ref},
-                "openai": {"credential_ref": plain_ref.ref},
-            }
-        }
-    )
-    assert _FAKE_TOKEN not in str(rendered)
-    assert _FAKE_GH_TOKEN not in str(rendered)
-    # Provider refs are redacted to a stable marker, not echoed verbatim.
-    assert keyring_ref.ref not in str(rendered)
-    assert plain_ref.ref not in str(rendered)
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == ""
+    assert ref.backend == "env_ref"
+    assert ref.ref == "env://GH_TOKEN"
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+    assert module.delete_calls == [("awf/github", "default")]
+    assert module._stored == {}
 
 
 @pytest.mark.unit
-def test_credential_error_to_dict_round_trips_without_details() -> None:
-    """Verify credential errors omit empty details and expose reason codes."""
-    error = CredentialError(
-        reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
-        message="No usable credential backend.",
-    )
-    assert error.to_dict() == {
-        "status": "failed",
-        "reason_code": CREDENTIAL_BACKEND_UNAVAILABLE,
-        "message": "No usable credential backend.",
-    }
+def test_keyring_unavailable_module_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a missing keyring module reports backend unavailable on use.
+
+    The lazy import is forced to ``None`` so the test is hermetic and never
+    touches a real OS keychain even when ``keyring`` is installed.
+    """
+    monkeypatch.setattr(credentials, "_import_keyring_module", lambda: None)
+    backend = KeyringCredentialBackend(keyring_module=None)
+    assert backend.is_available() is False
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    assert exc_info.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
 
 
 # --------------------------------------------------------------------------- #
-# 10. Host capability detection.
+# Optional keyring import behaviour.
 # --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_import_keyring_module_returns_module_when_importable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the optional keyring import returns the module when present."""
+    sentinel = FakeKeyringModule()
+
+    def _fake_import(name: str) -> object:
+        """Return the fake module for the keyring import only."""
+        assert name == "keyring"
+        return sentinel
+
+    monkeypatch.setattr(credentials.importlib, "import_module", _fake_import)
+    assert credentials._import_keyring_module() is sentinel
+
+
+@pytest.mark.unit
+def test_import_keyring_module_returns_none_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the optional keyring import degrades to ``None`` when absent."""
+
+    def _missing_import(name: str) -> object:
+        """Raise ``ImportError`` as an absent keyring install would."""
+        raise ImportError("No module named 'keyring'")
+
+    monkeypatch.setattr(credentials.importlib, "import_module", _missing_import)
+    assert credentials._import_keyring_module() is None
+
+
+@pytest.mark.unit
+def test_keyring_backend_uses_lazy_import_when_module_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the keyring backend consults the lazy import when not injected."""
+    monkeypatch.setattr(credentials, "_import_keyring_module", lambda: None)
+    assert KeyringCredentialBackend().is_available() is False
+
+    monkeypatch.setattr(credentials, "_import_keyring_module", lambda: FakeKeyringModule())
+    assert KeyringCredentialBackend().is_available() is True
+
+
+@pytest.mark.unit
+def test_env_ref_backend_is_always_available() -> None:
+    """Verify the env-ref backend needs no storage and is always available."""
+    assert EnvRefCredentialBackend().is_available() is True
+
+
+@pytest.mark.unit
+def test_keyring_unavailable_when_module_lacks_get_keyring() -> None:
+    """Verify a module without ``get_keyring`` is treated as unavailable."""
+
+    class _NoGetKeyringModule:
+        """Keyring-like module missing the ``get_keyring`` entry point."""
+
+        errors = _FakeKeyringErrors
+
+        def set_password(self, service: str, username: str, password: str) -> None:
+            """Record nothing; this fake is never reached for writes."""
+
+    backend = KeyringCredentialBackend(keyring_module=_NoGetKeyringModule())
+    assert backend.is_available() is False
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("system", "environ", "expected_headless", "expected_plain_file"),
+    "get_error",
     [
-        ("Linux", {}, True, True),
-        ("Linux", {"DISPLAY": ":0"}, False, False),
-        ("Linux", {"WAYLAND_DISPLAY": "wayland-0"}, False, False),
-        ("Darwin", {}, False, False),
-        ("Windows", {}, False, False),
+        OSError("DBus session unavailable"),
+        RuntimeError("partially-configured keychain stack"),
     ],
 )
-def test_detect_host_credential_capabilities(
-    system: str,
-    environ: dict[str, str],
-    expected_headless: bool,
-    expected_plain_file: bool,
+def test_keyring_availability_swallows_non_keyring_get_errors(
+    get_error: BaseException,
 ) -> None:
-    """Verify host capability detection classifies hosts deterministically."""
-    capabilities = detect_host_credential_capabilities(system=system, environ=environ)
-    assert capabilities.os_name == system
-    assert capabilities.is_headless is expected_headless
-    assert capabilities.supports_plain_file is expected_plain_file
+    """Verify a non-``KeyringError`` from ``get_keyring`` degrades to unavailable.
 
-
-@pytest.mark.unit
-def test_detect_host_credential_capabilities_uses_live_defaults() -> None:
-    """Verify detection falls back to the live platform and environment."""
-    capabilities = detect_host_credential_capabilities()
-    assert capabilities.os_name
-    assert isinstance(capabilities.is_headless, bool)
-
-
-# --------------------------------------------------------------------------- #
-# 11. Config integration and metadata round-trip.
-# --------------------------------------------------------------------------- #
-@pytest.mark.unit
-def test_credential_ref_builds_provider_config_fields() -> None:
-    """Verify credential refs map to provider config fields with a default status."""
-    ref = CredentialRef(backend="env_ref", ref="env://GH_TOKEN")
-    assert ref.to_provider_config_fields() == {
-        "credential_ref": "env://GH_TOKEN",
-        "backend": "env_ref",
-        "status": "ready",
-    }
-    assert ref.to_provider_config_fields(status="configured")["status"] == "configured"
-
-
-@pytest.mark.unit
-def test_provider_config_round_trips_backend_metadata(tmp_path: Path) -> None:
-    """Verify backend metadata persists through write/read round-trips."""
-    ref = CredentialRef(backend="keyring", ref="keyring://awf/github/token")
-    config_path = default_host_setup_config_path(home=tmp_path / "home")
-
-    write_host_setup_config(
-        host_setup.HostSetupConfig(
-            providers={"github": ProviderConfig(**ref.to_provider_config_fields())}
-        ),
-        path=config_path,
+    On headless Linux a partially-configured D-Bus stack can make
+    ``get_keyring()`` raise ``OSError``/``RuntimeError`` (or a ``DBusException``)
+    rather than a ``KeyringError`` subclass. Availability detection must treat
+    these as "no usable backend" so credential selection falls back to env-ref,
+    never propagate and crash on exactly the hosts this fallback is meant to serve.
+    """
+    keyring_backend = KeyringCredentialBackend(
+        keyring_module=FakeKeyringModule(get_error=get_error)
     )
+    assert keyring_backend.is_available() is False
 
-    loaded = read_host_setup_config(path=config_path)
-    provider = loaded.providers["github"]
-    assert provider.credential_ref == "keyring://awf/github/token"
-    assert provider.backend == "keyring"
-    assert provider.status == "ready"
-
-
-@pytest.mark.unit
-def test_provider_config_backend_metadata_is_optional() -> None:
-    """Verify the backend metadata field stays optional for back-compat."""
-    assert ProviderConfig(credential_ref="env://GH_TOKEN").backend is None
-    assert ProviderConfig(credential_ref="env://GH_TOKEN", backend=None).backend is None
+    selected = select_credential_backend(
+        preferred=None,
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=False,
+        plain_file_consent=False,
+        keyring_backend=keyring_backend,
+    )
+    assert selected.kind == "env_ref"
 
 
 @pytest.mark.unit
-def test_provider_config_rejects_unknown_backend() -> None:
-    """Verify provider config rejects unknown backend metadata."""
+def test_keyring_unavailable_when_backend_resolves_to_none() -> None:
+    """Verify a keyring module resolving to no backend is unavailable."""
+
+    class _NullBackendModule:
+        """Keyring-like module whose ``get_keyring`` returns ``None``."""
+
+        errors = _FakeKeyringErrors
+
+        def get_keyring(self) -> object | None:
+            """Return ``None`` to model an unresolved keyring backend."""
+            return None
+
+        def set_password(self, service: str, username: str, password: str) -> None:
+            """Record nothing; this fake is never reached for writes."""
+
+    backend = KeyringCredentialBackend(keyring_module=_NullBackendModule())
+    assert backend.is_available() is False
+
+
+@pytest.mark.unit
+def test_third_party_backend_with_noop_named_module_stays_available() -> None:
+    """Verify a non-keyring backend whose module leaf is ``null``/``fail`` is usable.
+
+    The no-op probe must match only the ``fail``/``null`` backends ``keyring``
+    itself resolves to. A fully functional third-party backend from e.g.
+    ``myvault.null`` shares that leaf name but is not a keyring no-op, so scoping
+    the check to ``keyring``-rooted modules keeps it reporting available rather
+    than being silently rejected and degraded to env-ref.
+    """
+
+    class _ThirdPartyVaultBackend:
+        """Functional third-party backend whose module leaf collides with ``null``."""
+
+    _ThirdPartyVaultBackend.__module__ = "myvault.null"
+
+    backend = KeyringCredentialBackend(
+        keyring_module=FakeKeyringModule(backend=_ThirdPartyVaultBackend())
+    )
+    assert backend.is_available() is True
+
+
+@pytest.mark.unit
+def test_plain_file_dir_creation_failure_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify a secrets-dir creation failure is a secret-free reason code."""
+
+    def _mkdir_fails(self: Path, *args: object, **kwargs: object) -> None:
+        """Raise an `OSError` before any temp secret file is created."""
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir_fails)
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=tmp_path / "secrets",
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"error_type": "OSError"}
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_chmod_best_effort_skips_non_posix_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the chmod helper is a no-op on non-POSIX hosts."""
+    target = tmp_path / "secret"
+    target.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(credentials.os, "name", "nt")
+
+    credentials._chmod_best_effort(target, 0o600)
+
+
+# --------------------------------------------------------------------------- #
+# 12. Credential refs stay within the ProviderConfig storage cap.
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_credential_ref_cap_matches_provider_config_credential_ref() -> None:
+    """Verify a max-length ref stores in ``ProviderConfig`` and one char over fails.
+
+    ``CredentialRef.ref`` is the value later persisted to
+    ``ProviderConfig.credential_ref``; if its cap drifts above that field's a
+    backend can mint a ref that passes ``CredentialRef`` validation yet cannot be
+    stored. Pin both caps to the same boundary to keep them in lockstep.
+    """
+    cap = MAX_CREDENTIAL_REF_LENGTH
+    at_cap = "env://" + "A" * (cap - len("env://"))
+    assert len(at_cap) == cap
+    assert CredentialRef(backend="env_ref", ref=at_cap).ref == at_cap
+    assert ProviderConfig(credential_ref=at_cap, backend="env_ref").credential_ref == at_cap
+
+    over_cap = at_cap + "A"
     with pytest.raises(ValidationError):
-        ProviderConfig(credential_ref="env://GH_TOKEN", backend="bogus")
-
-
-@pytest.mark.unit
-def test_provider_config_still_rejects_raw_secret_credential_ref() -> None:
-    """Verify the existing raw-secret guard still holds with backend metadata."""
+        CredentialRef(backend="env_ref", ref=over_cap)
     with pytest.raises(ValidationError):
-        ProviderConfig(credential_ref=_FAKE_GH_TOKEN, backend="env_ref")
+        ProviderConfig(credential_ref=over_cap, backend="env_ref")
 
 
 @pytest.mark.unit
-def test_credential_backends_match_provider_config_vocabulary() -> None:
-    """Verify the backend kinds stay in lockstep with provider config validation."""
-    assert CREDENTIAL_BACKENDS == ("keyring", "env_ref", "plain_file")
-    for backend in CREDENTIAL_BACKENDS:
-        assert ProviderConfig(credential_ref="env://GH_TOKEN", backend=backend).backend == backend
+def test_plain_file_overlong_ref_fails_before_writing_secret(tmp_path: Path) -> None:
+    """Verify an over-long plain-file ref is rejected before any secret write.
+
+    A provider long enough to push ``plain-file://<dir>/<provider>`` past the
+    ProviderConfig cap must fail with no secret file — and no secrets dir — left
+    behind: the write must not happen before the ref is known to be storable.
+    """
+    secrets_dir = tmp_path / "secrets"
+    long_provider = "a" * (MAX_CREDENTIAL_REF_LENGTH + 50)
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider=long_provider, secret_source=_secret(_FAKE_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert not (secrets_dir / long_provider).exists()
+    assert not secrets_dir.exists()
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_keyring_overlong_ref_fails_before_storing_secret() -> None:
+    """Verify an over-long keyring ref is rejected before the keychain write."""
+    module = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=module)
+    long_provider = "a" * (MAX_CREDENTIAL_REF_LENGTH + 50)
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider=long_provider, secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert module.set_calls == []
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_env_ref_overlong_name_is_rejected() -> None:
+    """Verify a valid-but-over-long env var name is rejected at the storage cap.
+
+    The env-ref backend stores nothing, but its ref must still fit ProviderConfig;
+    a POSIX-valid name long enough to overflow the cap must be refused.
+    """
+    long_name = "A" * (MAX_CREDENTIAL_REF_LENGTH + 50)
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(
+            CredentialRequest(provider="openai", env_var=long_name)
+        )
+
+    assert exc_info.value.reason_code == CREDENTIAL_REF_INVALID
+
+
+@pytest.mark.unit
+def test_plain_file_ref_validation_error_is_reason_coded(tmp_path: Path) -> None:
+    """Verify a ref that fails ``CredentialRef`` validation raises ``CredentialError``.
+
+    ``_build_credential_ref`` assembles the ref from a ``secrets_dir`` it does not
+    sanitise, so a secrets dir whose own path component is token-shaped makes the
+    assembled ``plain-file://`` ref trip ``CredentialRef``'s raw-secret guard,
+    which raises a Pydantic ``ValidationError``. Every backend promises to raise
+    only ``CredentialError``, so that internal validation failure must be wrapped
+    with a reason code rather than escaping ``store_provider_credential`` raw —
+    and the secret must never reach the keychain/file or the diagnostics.
+    """
+    token_shaped_dir = tmp_path / ("ghp_" + "c" * 36) / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=token_shaped_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert not token_shaped_dir.exists()
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_host_setup_reexports_credential_symbols() -> None:
+    """Verify host setup re-exports the public credential surface additively."""
+    assert host_setup.CredentialError is CredentialError
+    assert host_setup.CredentialRef is CredentialRef
+    assert host_setup.store_provider_credential is store_provider_credential
+    assert host_setup.detect_host_credential_capabilities is (detect_host_credential_capabilities)

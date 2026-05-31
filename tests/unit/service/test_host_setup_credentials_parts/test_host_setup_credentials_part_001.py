@@ -1,369 +1,216 @@
-"""Backend selection, env-ref fallback, and plain-file storage tests."""
+"""Non-interactive enforcement, redaction, capability detection, config tests."""
 
 from __future__ import annotations
 
-import os
-import stat
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-import awf.host_setup.credentials as credentials
-from awf.host_setup.config import ProviderConfig
+import awf.host_setup as host_setup
+from awf.host_setup import read_host_setup_config, write_host_setup_config
+from awf.host_setup.config import ProviderConfig, default_host_setup_config_path
 from awf.host_setup.credentials import (
     CREDENTIAL_BACKEND_UNAVAILABLE,
-    CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED,
-    CREDENTIAL_REF_INVALID,
+    CREDENTIAL_BACKENDS,
     INTERACTIVE_INPUT_REQUIRED,
     CredentialError,
     CredentialRef,
     CredentialRequest,
     EnvRefCredentialBackend,
-    HostCredentialCapabilities,
     KeyringCredentialBackend,
     PlainFileCredentialBackend,
-    select_credential_backend,
+    detect_host_credential_capabilities,
     store_provider_credential,
 )
+from awf.host_setup.rendering import redact_first_run_value
 from tests.unit.service.test_host_setup_credentials_parts._helpers import (
-    _DESKTOP_LINUX,
     _FAKE_GH_TOKEN,
     _FAKE_TOKEN,
     _HEADLESS_LINUX,
-    _MACOS,
-    _WINDOWS,
     FakeKeyringModule,
-    _ChainerBackend,
-    _FailBackend,
     _secret,
 )
 
 
 # --------------------------------------------------------------------------- #
-# 1. Keyring is the default backend when available.
+# 8. Non-interactive enforcement for missing input.
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-def test_keyring_is_default_backend_when_available() -> None:
-    """Verify auto selection prefers an available keyring backend."""
-    module = FakeKeyringModule()
-    keyring_backend = KeyringCredentialBackend(keyring_module=module)
-    assert keyring_backend.is_available() is True
-
-    selected = select_credential_backend(
-        preferred=None,
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=False,
-        plain_file_consent=False,
-        keyring_backend=keyring_backend,
-    )
-    assert selected.kind == "keyring"
-
-    ref = store_provider_credential(
-        CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN)),
-        preferred=None,
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=False,
-        plain_file_consent=False,
-        keyring_backend=keyring_backend,
-    )
-    assert ref.backend == "keyring"
-    assert ref.ref == "keyring://awf/github/default"
-    # The secret reaches the keychain store, never the returned reference.
-    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
-    assert _FAKE_GH_TOKEN not in ref.ref
-
-
-@pytest.mark.unit
-def test_keyring_ref_uses_explicit_account() -> None:
-    """Verify keyring refs encode the requested account identifier."""
-    module = FakeKeyringModule()
-    ref = KeyringCredentialBackend(keyring_module=module).create_ref(
-        CredentialRequest(
-            provider="github",
-            account="token",
-            secret_source=_secret(_FAKE_GH_TOKEN),
-        )
-    )
-    assert ref.ref == "keyring://awf/github/token"
-
-
-# --------------------------------------------------------------------------- #
-# 2. Unavailable keyring falls back to env_ref (headless-Linux no-keychain).
-# --------------------------------------------------------------------------- #
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "module",
-    [
-        FakeKeyringModule(backend=_FailBackend()),
-        FakeKeyringModule(raise_on_get=True),
-    ],
-)
-def test_unavailable_keyring_falls_back_to_env_ref(module: FakeKeyringModule) -> None:
-    """Verify a no-op or failing keyring backend yields the env-ref fallback."""
-    keyring_backend = KeyringCredentialBackend(keyring_module=module)
-    assert keyring_backend.is_available() is False
-
-    selected = select_credential_backend(
-        preferred=None,
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=False,
-        plain_file_consent=False,
-        keyring_backend=keyring_backend,
-    )
-    assert selected.kind == "env_ref"
-
-    ref = selected.create_ref(CredentialRequest(provider="github", env_var="GH_TOKEN"))
-    assert ref.ref == "env://GH_TOKEN"
-
-
-@pytest.mark.unit
-def test_explicit_keyring_preference_falls_back_to_env_ref_when_unavailable() -> None:
-    """Verify an explicit keyring preference still falls back to env_ref."""
-    keyring_backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule(raise_on_get=True))
-    selected = select_credential_backend(
-        preferred="keyring",
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=False,
-        plain_file_consent=False,
-        keyring_backend=keyring_backend,
-    )
-    assert selected.kind == "env_ref"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("preferred", [None, "keyring"])
-def test_store_falls_back_to_env_ref_when_keyring_unusable_at_write_time(
-    preferred: str | None,
-) -> None:
-    """Verify a keyring proven unusable in ``create_ref`` degrades to the env-ref offer.
-
-    ``is_available`` is a cheap pre-filter that only rejects the ``fail``/``null``
-    no-op backends, so a headless-Linux ``ChainerBackend`` with no usable child is
-    selected as the default keyring backend, yet its write/read-back round-trip in
-    ``create_ref`` proves it cannot durably store a secret
-    (``CREDENTIAL_BACKEND_UNAVAILABLE``). A keyring detected unusable up front
-    already degrades to env_ref; one detected unusable only at write time must
-    reach the same env-ref offer (plan R5) instead of failing setup — for both the
-    implicit (``None``) and explicit (``"keyring"``) best-effort selections.
-    """
-    module = FakeKeyringModule(backend=_ChainerBackend(), drop_writes=True)
-    keyring_backend = KeyringCredentialBackend(keyring_module=module)
-    assert keyring_backend.is_available() is True
-
-    ref = store_provider_credential(
-        CredentialRequest(
-            provider="github",
-            env_var="GH_TOKEN",
-            secret_source=_secret(_FAKE_GH_TOKEN),
-        ),
-        preferred=preferred,
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=False,
-        plain_file_consent=False,
-        keyring_backend=keyring_backend,
-    )
-
-    assert ref.backend == "env_ref"
-    assert ref.ref == "env://GH_TOKEN"
-    # The keyring write was attempted (and proved non-durable) before the fallback,
-    # but the secret never reaches the env-ref offer.
-    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
-    assert _FAKE_GH_TOKEN not in ref.ref
-
-
-@pytest.mark.unit
-def test_store_keyring_unusable_without_env_var_surfaces_interactive_input() -> None:
-    """Verify a write-time-unusable keyring with no env_var mirrors the pre-create path.
-
-    When the keyring is proven unusable at write time and the request carries no
-    env_var, the env-ref fallback cannot mint a ref, so it must surface the same
-    ``INTERACTIVE_INPUT_REQUIRED`` (missing env_var) a keyring detected unusable up
-    front would — an actionable "provide an env var" signal — rather than failing
-    with the raw ``CREDENTIAL_BACKEND_UNAVAILABLE``.
-    """
-    module = FakeKeyringModule(backend=_ChainerBackend(), drop_writes=True)
-    keyring_backend = KeyringCredentialBackend(keyring_module=module)
-
+def test_keyring_missing_secret_is_interactive_input_required() -> None:
+    """Verify keyring storage with no secret source fails non-interactively."""
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule())
     with pytest.raises(CredentialError) as exc_info:
-        store_provider_credential(
-            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN)),
-            preferred=None,
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=False,
-            plain_file_consent=False,
-            keyring_backend=keyring_backend,
+        backend.create_ref(CredentialRequest(provider="github", secret_source=None))
+
+    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+
+
+@pytest.mark.unit
+def test_keyring_empty_secret_is_interactive_input_required() -> None:
+    """Verify an empty secret value is treated as missing input."""
+    backend = KeyringCredentialBackend(keyring_module=FakeKeyringModule())
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="github", secret_source=_secret("")))
+
+    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("secret", ["   ", "\t\n"])
+def test_keyring_whitespace_only_secret_is_interactive_input_required(secret: str) -> None:
+    """Verify a whitespace-only secret is treated as missing input.
+
+    A whitespace-only value is truthy, so it would otherwise slip past the
+    ``not secret`` guard and be written to the keychain as an unusable
+    credential. It must instead raise ``INTERACTIVE_INPUT_REQUIRED`` and never
+    reach the backend, mirroring the env_ref name guard.
+    """
+    fake_keyring = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=fake_keyring)
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="github", secret_source=_secret(secret)))
+
+    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert fake_keyring.set_calls == []
+
+
+@pytest.mark.unit
+def test_keyring_strips_secret_whitespace_before_storage() -> None:
+    """Verify a whitespace-padded secret is stripped before the keychain write.
+
+    A secret padded with leading/trailing whitespace is truthy and survives the
+    whitespace-only guard, but the surrounding whitespace would make the stored
+    credential fail silently at authentication time. It must be stripped before
+    storage, mirroring the env_ref path which strips its identifier before use.
+    """
+    module = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=module)
+
+    backend.create_ref(
+        CredentialRequest(
+            provider="github",
+            secret_source=_secret(f"  {_FAKE_GH_TOKEN}  "),
         )
+    )
+
+    # The padded value is normalised to the bare token before it reaches storage.
+    assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
+
+
+@pytest.mark.unit
+def test_plain_file_missing_secret_is_interactive_input_required(tmp_path: Path) -> None:
+    """Verify plain-file storage with no secret source fails non-interactively."""
+    secrets_dir = tmp_path / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=None))
+
+    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert not secrets_dir.exists()
+
+
+@pytest.mark.unit
+def test_env_ref_missing_variable_is_interactive_input_required() -> None:
+    """Verify env refs without a variable name fail non-interactively."""
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(CredentialRequest(provider="openai", env_var=None))
 
     error = exc_info.value
     assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
-    assert error.details["missing"] == "env_var"
-    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+    # A legitimate provider name is preserved verbatim in the diagnostic.
+    assert error.details["provider"] == "openai"
 
 
 @pytest.mark.unit
-def test_store_keyring_token_shaped_provider_is_not_masked_by_env_ref() -> None:
-    """Verify a rejected token-shaped identifier is never masked by the env-ref fallback.
+@pytest.mark.parametrize("env_var", ["", "   ", "\t\n"])
+def test_env_ref_blank_variable_is_interactive_input_required(env_var: str) -> None:
+    """Verify a blank/whitespace-only env var name is treated as missing input.
 
-    The env-ref backend only consumes ``env_var`` (it never touches the provider or
-    secret), so a fallback that fired on ``CREDENTIAL_REF_INVALID`` would silently
-    emit ``env://NAME`` and hide a provider accidentally populated with a raw
-    secret. The fallback must trigger only on the keyring-unusable signal, so this
-    pre-write identifier rejection propagates unchanged and the keyring is never
-    even written.
+    A whitespace-only name strips to ``""``, which is semantically "no name
+    provided", so it must raise ``INTERACTIVE_INPUT_REQUIRED`` (missing input)
+    rather than the ``CREDENTIAL_REF_INVALID`` an empty post-strip identifier
+    would otherwise hit.
     """
-    module = FakeKeyringModule()
-    keyring_backend = KeyringCredentialBackend(keyring_module=module)
-
-    with pytest.raises(CredentialError) as exc_info:
-        store_provider_credential(
-            CredentialRequest(
-                provider=_FAKE_TOKEN,
-                env_var="GH_TOKEN",
-                secret_source=_secret(_FAKE_GH_TOKEN),
-            ),
-            preferred=None,
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=False,
-            plain_file_consent=False,
-            keyring_backend=keyring_backend,
-        )
-
-    error = exc_info.value
-    assert error.reason_code == CREDENTIAL_REF_INVALID
-    assert error.details == {"field": "provider"}
-    assert module.set_calls == []
-    assert _FAKE_TOKEN not in str(error.to_dict())
-
-
-@pytest.mark.unit
-def test_store_keyring_missing_secret_is_not_masked_by_env_ref() -> None:
-    """Verify a usable keyring's missing-secret fault is not masked by the env-ref offer.
-
-    A usable keyring that simply lacks an inline secret raises
-    ``INTERACTIVE_INPUT_REQUIRED`` before any write; that is a genuine input fault,
-    not the keyring-unusable signal, so it must propagate unchanged even when an
-    env_var is present rather than being swapped for a silent ``env://NAME``.
-    """
-    module = FakeKeyringModule()
-    keyring_backend = KeyringCredentialBackend(keyring_module=module)
-
-    with pytest.raises(CredentialError) as exc_info:
-        store_provider_credential(
-            CredentialRequest(provider="github", env_var="GH_TOKEN", secret_source=None),
-            preferred=None,
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=False,
-            plain_file_consent=False,
-            keyring_backend=keyring_backend,
-        )
-
-    assert exc_info.value.reason_code == INTERACTIVE_INPUT_REQUIRED
-    assert module.set_calls == []
-
-
-# --------------------------------------------------------------------------- #
-# 3. Env ref stores only a variable name.
-# --------------------------------------------------------------------------- #
-@pytest.mark.unit
-@pytest.mark.parametrize("env_var", ["OPENAI_API_KEY", "GH_TOKEN"])
-def test_env_ref_stores_only_variable_name(env_var: str) -> None:
-    """Verify env refs encode only the variable name and store no value."""
-    ref = EnvRefCredentialBackend().create_ref(
-        CredentialRequest(provider="openai", env_var=env_var)
-    )
-    assert ref.backend == "env_ref"
-    assert ref.ref == f"env://{env_var}"
-
-
-@pytest.mark.unit
-def test_env_ref_select_with_explicit_preference() -> None:
-    """Verify env_ref can be selected explicitly without a keyring backend."""
-    selected = select_credential_backend(
-        preferred="env_ref",
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=False,
-        plain_file_consent=False,
-    )
-    assert selected.kind == "env_ref"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "env_var",
-    [_FAKE_TOKEN, _FAKE_GH_TOKEN, "openai_api_key", "1BAD", "BAD-NAME", "AIza" + "B" * 16],
-)
-def test_env_ref_rejects_invalid_or_token_shaped_names(env_var: str) -> None:
-    """Verify malformed or token-shaped env var names are rejected and redacted."""
     with pytest.raises(CredentialError) as exc_info:
         EnvRefCredentialBackend().create_ref(CredentialRequest(provider="openai", env_var=env_var))
 
     error = exc_info.value
-    assert error.reason_code == CREDENTIAL_REF_INVALID
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "env_var"
+
+
+@pytest.mark.unit
+def test_env_ref_missing_variable_redacts_token_shaped_provider() -> None:
+    """Verify a token-shaped provider never surfaces when env input is missing.
+
+    The env_ref backend raises ``INTERACTIVE_INPUT_REQUIRED`` for a missing env
+    var name without first routing ``provider`` through ``_require_safe_identifier``
+    (env_ref never interpolates the provider, so it has no other validation). A
+    provider accidentally populated with a raw secret must therefore be redacted
+    out of the error ``details``/``to_dict()`` rather than echoed verbatim.
+    """
+    with pytest.raises(CredentialError) as exc_info:
+        EnvRefCredentialBackend().create_ref(CredentialRequest(provider=_FAKE_TOKEN, env_var=None))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "env_var"
+    assert _FAKE_TOKEN not in str(error.details["provider"])
     assert _FAKE_TOKEN not in str(error.to_dict())
-    assert _FAKE_GH_TOKEN not in str(error.to_dict())
 
 
-# --------------------------------------------------------------------------- #
-# 4. Plain-file consent / flag gating.
-# --------------------------------------------------------------------------- #
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("allow_plain_secrets", "consent"),
-    [(False, False), (True, False), (False, True)],
+    "provider",
+    [
+        _FAKE_TOKEN.upper(),
+        _FAKE_GH_TOKEN.upper(),
+        "sK-pRoJ-" + ("a" * 48),
+    ],
 )
-def test_plain_file_requires_flag_and_consent(
-    allow_plain_secrets: bool,
-    consent: bool,
-    tmp_path: Path,
-) -> None:
-    """Verify plain-file storage needs both the flag and recorded consent."""
-    secrets_dir = tmp_path / "secrets"
+def test_env_ref_missing_variable_redacts_case_variant_token_provider(provider: str) -> None:
+    """Verify a case-variant token-shaped provider is redacted, not echoed verbatim.
+
+    This module's own token-shape checks (``_TOKEN_SHAPE_RE``) are
+    case-insensitive, so the diagnostic redaction on the unvalidated env_ref
+    missing-input path must fold case too. A case-variant token-shaped provider
+    (e.g. ``SK-PROJ-...``) must not slip past the case-sensitive audit helper and
+    surface verbatim in the error ``details``/``to_dict()``.
+    """
     with pytest.raises(CredentialError) as exc_info:
-        store_provider_credential(
-            CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)),
-            preferred="plain_file",
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=allow_plain_secrets,
-            plain_file_consent=consent,
-            plain_file_backend=PlainFileCredentialBackend(
-                capabilities=_HEADLESS_LINUX,
-                allow_plain_secrets=allow_plain_secrets,
-                consent=consent,
-                secrets_dir=secrets_dir,
-            ),
-        )
+        EnvRefCredentialBackend().create_ref(CredentialRequest(provider=provider, env_var=None))
 
-    assert exc_info.value.reason_code == CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED
-    assert not secrets_dir.exists()
-    assert _FAKE_TOKEN not in str(exc_info.value.to_dict())
-
-
-@pytest.mark.unit
-def test_plain_file_consent_gating_uses_default_backend(tmp_path: Path) -> None:
-    """Verify the default plain-file backend is built and gated on consent."""
-    with pytest.raises(CredentialError) as exc_info:
-        store_provider_credential(
-            CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)),
-            preferred="plain_file",
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=False,
-            plain_file_consent=False,
-        )
-
-    assert exc_info.value.reason_code == CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "env_var"
+    assert provider not in str(error.details["provider"])
+    assert provider not in str(error.to_dict())
 
 
 # --------------------------------------------------------------------------- #
-# 5. Plain-file permissions and ref shape.
+# 9. Redaction: token-shaped inputs never surface.
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-def test_plain_file_writes_secret_with_conservative_permissions(
+def test_token_inputs_never_appear_in_outputs(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify plain-file storage writes a 0600 secret in a 0700 directory."""
-    secrets_dir = tmp_path / "secrets"
-    ref = store_provider_credential(
+    """Verify token-shaped secrets never appear in refs, errors, or output."""
+    keyring_ref = store_provider_credential(
+        CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN)),
+        preferred="keyring",
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=False,
+        plain_file_consent=False,
+        keyring_backend=KeyringCredentialBackend(keyring_module=FakeKeyringModule()),
+    )
+    plain_ref = store_provider_credential(
         CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)),
         preferred="plain_file",
         capabilities=_HEADLESS_LINUX,
@@ -373,23 +220,27 @@ def test_plain_file_writes_secret_with_conservative_permissions(
             capabilities=_HEADLESS_LINUX,
             allow_plain_secrets=True,
             consent=True,
-            secrets_dir=secrets_dir,
+            secrets_dir=tmp_path / "secrets",
         ),
     )
 
-    secret_file = secrets_dir / "openai.default"
-    assert ref.backend == "plain_file"
-    assert ref.ref == f"plain-file://{secret_file}"
-    assert secret_file.read_text(encoding="utf-8") == _FAKE_TOKEN
-    if os.name == "posix":
-        assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
-        assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
+    for ref in (keyring_ref, plain_ref):
+        assert _FAKE_TOKEN not in ref.ref
+        assert _FAKE_GH_TOKEN not in ref.ref
 
-    # The path-only ref and config metadata never include the secret value.
-    assert _FAKE_TOKEN not in ref.ref
-    fields = ref.to_provider_config_fields()
-    assert _FAKE_TOKEN not in str(fields)
-    assert ProviderConfig(**fields).backend == "plain_file"
+    rendered = redact_first_run_value(
+        {
+            "providers": {
+                "github": {"credential_ref": keyring_ref.ref},
+                "openai": {"credential_ref": plain_ref.ref},
+            }
+        }
+    )
+    assert _FAKE_TOKEN not in str(rendered)
+    assert _FAKE_GH_TOKEN not in str(rendered)
+    # Provider refs are redacted to a stable marker, not echoed verbatim.
+    assert keyring_ref.ref not in str(rendered)
+    assert plain_ref.ref not in str(rendered)
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -397,251 +248,113 @@ def test_plain_file_writes_secret_with_conservative_permissions(
 
 
 @pytest.mark.unit
-def test_plain_file_scopes_secret_file_by_account(tmp_path: Path) -> None:
-    """Verify plain-file storage scopes the secret file/ref by account.
-
-    Without account scoping, two accounts for one provider would share a single
-    ``<provider>`` file and the second write would silently overwrite the first.
-    The ref must encode the account (as the keyring backend already does) so each
-    account keeps a distinct file and a distinct, non-overwriting reference.
-    """
-    secrets_dir = tmp_path / "secrets"
-
-    def _store(account: str, secret: str) -> CredentialRef:
-        return PlainFileCredentialBackend(
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=True,
-            consent=True,
-            secrets_dir=secrets_dir,
-        ).create_ref(
-            CredentialRequest(
-                provider="openai",
-                account=account,
-                secret_source=_secret(secret),
-            )
-        )
-
-    default_ref = _store("default", _FAKE_TOKEN)
-    work_ref = _store("work", _FAKE_GH_TOKEN)
-
-    default_file = secrets_dir / "openai.default"
-    work_file = secrets_dir / "openai.work"
-    assert default_ref.ref == f"plain-file://{default_file}"
-    assert work_ref.ref == f"plain-file://{work_file}"
-    assert default_ref.ref != work_ref.ref
-    # The first account's secret survives the second account's write.
-    assert default_file.read_text(encoding="utf-8") == _FAKE_TOKEN
-    assert work_file.read_text(encoding="utf-8") == _FAKE_GH_TOKEN
-
-
-@pytest.mark.unit
-def test_plain_file_strips_secret_whitespace_before_storage(tmp_path: Path) -> None:
-    """Verify a whitespace-padded secret is stripped before the plain-file write.
-
-    Surrounding whitespace would otherwise be written to the ``0600`` secret file
-    verbatim and silently break authentication later, so the stored value is
-    normalised the same way the keyring path normalises it.
-    """
-    secrets_dir = tmp_path / "secrets"
-    ref = PlainFileCredentialBackend(
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=True,
-        consent=True,
-        secrets_dir=secrets_dir,
-    ).create_ref(
-        CredentialRequest(
-            provider="openai",
-            secret_source=_secret(f"\t{_FAKE_TOKEN}\n"),
-        )
+def test_credential_error_to_dict_round_trips_without_details() -> None:
+    """Verify credential errors omit empty details and expose reason codes."""
+    error = CredentialError(
+        reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
+        message="No usable credential backend.",
     )
-
-    target = secrets_dir / "openai.default"
-    assert ref.ref == f"plain-file://{target}"
-    assert target.read_text(encoding="utf-8") == _FAKE_TOKEN
-
-
-@pytest.mark.unit
-def test_plain_file_rejects_token_shaped_account(tmp_path: Path) -> None:
-    """Verify a token-shaped account is refused before any plain-file write.
-
-    The account is interpolated into the secret file path for multi-account
-    scoping, so a token-shaped value must be rejected with a secret-free reason
-    code and leave neither the secret file nor the secrets directory behind.
-    """
-    secrets_dir = tmp_path / "secrets"
-    backend = PlainFileCredentialBackend(
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=True,
-        consent=True,
-        secrets_dir=secrets_dir,
-    )
-    with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(
-            CredentialRequest(
-                provider="openai",
-                account=_FAKE_GH_TOKEN,
-                secret_source=_secret(_FAKE_TOKEN),
-            )
-        )
-
-    error = exc_info.value
-    assert error.reason_code == CREDENTIAL_REF_INVALID
-    assert error.details == {"field": "account"}
-    assert not secrets_dir.exists()
-    assert _FAKE_TOKEN not in str(error.to_dict())
-    assert _FAKE_GH_TOKEN not in str(error.to_dict())
-
-
-@pytest.mark.unit
-def test_plain_file_creates_secrets_dir_restrictively(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Verify the secrets dir is *created* 0700, not loosened-then-tightened.
-
-    ``mkdir`` honours the caller's umask, so a permissive umask would otherwise
-    expose the directory listing (provider names/structure) until the later
-    ``_chmod_best_effort`` tightens it — a TOCTOU window on multi-user hosts.
-    Neutralise the post-``mkdir`` chmod and use a fully permissive umask so the
-    only thing that can yield a 0700 directory is a restrictive create-time mode.
-    """
-    if os.name != "posix":
-        pytest.skip("directory permission semantics are POSIX-specific")
-
-    monkeypatch.setattr(credentials, "_chmod_best_effort", lambda *_a, **_k: None)
-    secrets_dir = tmp_path / "secrets"
-    old_umask = os.umask(0o000)
-    try:
-        store_provider_credential(
-            CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)),
-            preferred="plain_file",
-            capabilities=_HEADLESS_LINUX,
-            allow_plain_secrets=True,
-            plain_file_consent=True,
-            plain_file_backend=PlainFileCredentialBackend(
-                capabilities=_HEADLESS_LINUX,
-                allow_plain_secrets=True,
-                consent=True,
-                secrets_dir=secrets_dir,
-            ),
-        )
-    finally:
-        os.umask(old_umask)
-
-    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
-
-
-@pytest.mark.unit
-def test_plain_file_backend_defaults_to_awf_secrets_dir() -> None:
-    """Verify the default plain-file secrets directory is ``~/.awf/secrets``."""
-    backend = PlainFileCredentialBackend(
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=True,
-        consent=True,
-    )
-    assert backend._secrets_dir.name == "secrets"
-    assert backend._secrets_dir.parent.name == ".awf"
-
-
-@pytest.mark.unit
-def test_plain_file_backend_resolves_relative_secrets_dir() -> None:
-    """Verify a relative ``secrets_dir`` is resolved to an absolute path.
-
-    Plain-file refs must be ``plain-file://<abs-path>``; a relative input would
-    otherwise yield a relative ref that breaks if the working directory changes.
-    """
-    backend = PlainFileCredentialBackend(
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=True,
-        consent=True,
-        secrets_dir="relative/secrets",
-    )
-    assert backend._secrets_dir.is_absolute()
-    assert backend._secrets_dir == Path("relative/secrets").resolve()
-
-
-@pytest.mark.unit
-def test_plain_file_write_failure_is_reason_coded(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Verify low-level write failures map to a secret-free reason code."""
-
-    def _open_fails(*args: object, **kwargs: object) -> int:
-        """Raise an `OSError` to simulate a failed atomic secret write."""
-        raise OSError("disk full")
-
-    monkeypatch.setattr(credentials.os, "open", _open_fails)
-
-    backend = PlainFileCredentialBackend(
-        capabilities=_HEADLESS_LINUX,
-        allow_plain_secrets=True,
-        consent=True,
-        secrets_dir=tmp_path / "secrets",
-    )
-    with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
-
-    error = exc_info.value
-    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
-    assert error.details == {"error_type": "OSError"}
-    assert "disk full" not in str(error.to_dict())
-    assert _FAKE_TOKEN not in str(error.to_dict())
+    assert error.to_dict() == {
+        "status": "failed",
+        "reason_code": CREDENTIAL_BACKEND_UNAVAILABLE,
+        "message": "No usable credential backend.",
+    }
 
 
 # --------------------------------------------------------------------------- #
-# 6 & 7. Non-Linux and non-headless rejection for plain-file.
+# 10. Host capability detection.
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-@pytest.mark.parametrize("capabilities", [_MACOS, _WINDOWS, _DESKTOP_LINUX])
-def test_plain_file_rejected_on_unsupported_hosts(
-    capabilities: HostCredentialCapabilities,
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("system", "environ", "expected_headless", "expected_plain_file"),
+    [
+        ("Linux", {}, True, True),
+        ("Linux", {"DISPLAY": ":0"}, False, False),
+        ("Linux", {"WAYLAND_DISPLAY": "wayland-0"}, False, False),
+        ("Darwin", {}, False, False),
+        ("Windows", {}, False, False),
+    ],
+)
+def test_detect_host_credential_capabilities(
+    system: str,
+    environ: dict[str, str],
+    expected_headless: bool,
+    expected_plain_file: bool,
 ) -> None:
-    """Verify plain-file storage is refused off headless Linux even with consent."""
-    secrets_dir = tmp_path / "secrets"
-    backend = PlainFileCredentialBackend(
-        capabilities=capabilities,
-        allow_plain_secrets=True,
-        consent=True,
-        secrets_dir=secrets_dir,
-    )
-    assert backend.is_available() is False
-
-    with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
-
-    error = exc_info.value
-    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
-    assert not secrets_dir.exists()
-    assert _FAKE_TOKEN not in str(error.to_dict())
+    """Verify host capability detection classifies hosts deterministically."""
+    capabilities = detect_host_credential_capabilities(system=system, environ=environ)
+    assert capabilities.os_name == system
+    assert capabilities.is_headless is expected_headless
+    assert capabilities.supports_plain_file is expected_plain_file
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("capabilities", [_MACOS, _WINDOWS, _DESKTOP_LINUX])
-def test_plain_file_unsupported_host_reports_platform_before_consent(
-    capabilities: HostCredentialCapabilities,
-    tmp_path: Path,
-) -> None:
-    """Verify an unsupported host reports BACKEND_UNAVAILABLE even with no consent.
+def test_detect_host_credential_capabilities_uses_live_defaults() -> None:
+    """Verify detection falls back to the live platform and environment."""
+    capabilities = detect_host_credential_capabilities()
+    assert capabilities.os_name
+    assert isinstance(capabilities.is_headless, bool)
 
-    The platform restriction is the more fundamental gate, so a caller on macOS
-    or desktop Linux who also has not set the flag/consent should learn the host
-    is unsupported rather than be sent down the consent path — adding the flag
-    and consent on that host would still be rejected.
-    """
-    secrets_dir = tmp_path / "secrets"
-    backend = PlainFileCredentialBackend(
-        capabilities=capabilities,
-        allow_plain_secrets=False,
-        consent=False,
-        secrets_dir=secrets_dir,
+
+# --------------------------------------------------------------------------- #
+# 11. Config integration and metadata round-trip.
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_credential_ref_builds_provider_config_fields() -> None:
+    """Verify credential refs map to provider config fields with a default status."""
+    ref = CredentialRef(backend="env_ref", ref="env://GH_TOKEN")
+    assert ref.to_provider_config_fields() == {
+        "credential_ref": "env://GH_TOKEN",
+        "backend": "env_ref",
+        "status": "ready",
+    }
+    assert ref.to_provider_config_fields(status="configured")["status"] == "configured"
+
+
+@pytest.mark.unit
+def test_provider_config_round_trips_backend_metadata(tmp_path: Path) -> None:
+    """Verify backend metadata persists through write/read round-trips."""
+    ref = CredentialRef(backend="keyring", ref="keyring://awf/github/token")
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+
+    write_host_setup_config(
+        host_setup.HostSetupConfig(
+            providers={"github": ProviderConfig(**ref.to_provider_config_fields())}
+        ),
+        path=config_path,
     )
 
-    with pytest.raises(CredentialError) as exc_info:
-        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+    loaded = read_host_setup_config(path=config_path)
+    provider = loaded.providers["github"]
+    assert provider.credential_ref == "keyring://awf/github/token"
+    assert provider.backend == "keyring"
+    assert provider.status == "ready"
 
-    error = exc_info.value
-    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
-    assert not secrets_dir.exists()
-    assert _FAKE_TOKEN not in str(error.to_dict())
+
+@pytest.mark.unit
+def test_provider_config_backend_metadata_is_optional() -> None:
+    """Verify the backend metadata field stays optional for back-compat."""
+    assert ProviderConfig(credential_ref="env://GH_TOKEN").backend is None
+    assert ProviderConfig(credential_ref="env://GH_TOKEN", backend=None).backend is None
+
+
+@pytest.mark.unit
+def test_provider_config_rejects_unknown_backend() -> None:
+    """Verify provider config rejects unknown backend metadata."""
+    with pytest.raises(ValidationError):
+        ProviderConfig(credential_ref="env://GH_TOKEN", backend="bogus")
+
+
+@pytest.mark.unit
+def test_provider_config_still_rejects_raw_secret_credential_ref() -> None:
+    """Verify the existing raw-secret guard still holds with backend metadata."""
+    with pytest.raises(ValidationError):
+        ProviderConfig(credential_ref=_FAKE_GH_TOKEN, backend="env_ref")
+
+
+@pytest.mark.unit
+def test_credential_backends_match_provider_config_vocabulary() -> None:
+    """Verify the backend kinds stay in lockstep with provider config validation."""
+    assert CREDENTIAL_BACKENDS == ("keyring", "env_ref", "plain_file")
+    for backend in CREDENTIAL_BACKENDS:
+        assert ProviderConfig(credential_ref="env://GH_TOKEN", backend=backend).backend == backend
