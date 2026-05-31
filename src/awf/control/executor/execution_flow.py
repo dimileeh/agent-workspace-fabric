@@ -43,6 +43,7 @@ from awf.control.executor.git_ops import (
 )
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
+    _agent_run_model_for_workspace,
     _build_pr_body,
     _call_pr_monitor_factory,
     _existing_pr_remote_push_url,
@@ -50,6 +51,7 @@ from awf.control.executor.helpers import (
     _failure_reason_for_phase,
     _failure_salvage_payload,
     _profile_for_workspace,
+    _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -223,13 +225,13 @@ async def execute(
     expected_branch = ws.branch_name or f"awf/{workspace_id}"
     adapter: AgentAdapter | None = None
     defaults: AgentDefaults | None = None
-    default_model: str | None = None
+    run_model: str | None = None
     agent_command_evidence: list[str] = []
     try:
         agent = AgentRuntime(ws.agent)
         defaults = self._defaults_for(agent)
         adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
-        default_model = adapter_defaults.model if adapter_defaults is not None else None
+        run_model = _agent_run_model_for_workspace(ws)
         adapter = get_adapter(
             agent,
             runner=self._runner,
@@ -384,7 +386,7 @@ async def execute(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 worktree_path=worktree_path,
-                model=default_model,
+                model=run_model,
                 command_evidence=agent_command_evidence,
             )
             if isinstance(planning_failure, _PlanningValidationHandoff):
@@ -862,7 +864,7 @@ async def execute(
                                 adapter=adapter,
                                 compose_project=compose_project,
                                 compose_file=compose_file,
-                                model=default_model,
+                                model=run_model,
                                 allow_agent_repair=agent_run_failure_reason is None,
                                 ws=ws,
                                 command_evidence=agent_command_evidence,
@@ -1080,7 +1082,7 @@ async def execute(
         base_commit=base_commit,
         expected_branch=expected_branch,
         adapter=adapter,
-        default_model=default_model,
+        run_model=run_model,
         baseline_coverage=baseline_coverage,
         planning_validation_handoff=planning_validation_handoff,
         recovery=recovery,
@@ -1191,7 +1193,10 @@ async def execute(
                         profile=profile,
                         workspace=persisted,
                         provider_recovery_default_model=(
-                            defaults.model if defaults is not None else None
+                            _provider_recovery_default_model_for_monitor_handoff(
+                                adapter=adapter,
+                                defaults=defaults,
+                            )
                         ),
                     )
                 if _monitor is not None:
@@ -1403,7 +1408,12 @@ async def execute(
                 adapter=adapter,
                 profile=profile,
                 workspace=persisted,
-                provider_recovery_default_model=(defaults.model if defaults is not None else None),
+                provider_recovery_default_model=(
+                    _provider_recovery_default_model_for_monitor_handoff(
+                        adapter=adapter,
+                        defaults=defaults,
+                    )
+                ),
             )
 
         if monitor is not None:

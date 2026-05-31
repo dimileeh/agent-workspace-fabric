@@ -436,7 +436,9 @@ class _CcusageSampleContext(UsageSampleContext):
         # docker/agent-runtime.Dockerfile): ``ccusage <source> daily --json --offline
         # --config <neutral>``, where ``<source>`` is a positional provider
         # sub-command ("claude" / "codex" / "gemini" / "opencode"; see
-        # ``provider_ccusage_source``) and ``--config`` pins a neutral config so
+        # ``provider_ccusage_source``). Cursor is intentionally reported as
+        # unsupported until the pinned ccusage release adds a cursor source.
+        # ``--config`` pins a neutral config so
         # auto-discovered user/project ccusage configs can't filter per-run totals
         # (see ``_CCUSAGE_NEUTRAL_CONFIG_PATH``). A future pin that moves the provider
         # behind a flag (e.g. ``--source``) or renames/removes ``--config`` would make

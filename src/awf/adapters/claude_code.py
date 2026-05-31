@@ -25,8 +25,9 @@ class ClaudeCodeAdapter(AgentAdapter):
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["claude", "--dangerously-skip-permissions"]
-        if model:
-            args += ["--model", model]
+        selected_model = model or self._default_model
+        if selected_model:
+            args += ["--model", selected_model]
         if self._default_effort:
             args += ["--effort", _claude_effort_for_awf_effort(self._default_effort)]
         args.append("-p")

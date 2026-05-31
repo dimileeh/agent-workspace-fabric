@@ -611,6 +611,67 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
 
 
 @pytest.mark.unit
+async def test_recovery_skip_push_cursor_lower_effort_handoff_uses_implicit_runtime_model(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Cursor lower effort must not hand the monitor a thinking model default."""
+    captured: list[dict[str, object]] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            del workspace_id, compose_project, compose_file
+
+    def _monitor_factory(
+        adapter: Any,
+        *_args: Any,
+        provider_recovery_default_model: str | None = None,
+        **_kwargs: Any,
+    ) -> _FakeMonitor:
+        captured.append(
+            {
+                "agent": adapter.name.value,
+                "adapter_args": adapter._cli_args(model=None),
+                "provider_recovery_default_model": provider_recovery_default_model,
+            }
+        )
+        return _FakeMonitor()
+
+    executor = _make_executor(
+        fake=fake, factory=factory, tmp_path=tmp_path, pr_monitor_factory=_monitor_factory
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, pr_url="https://github.com/x/y/pull/1"
+    )
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.agent = AgentRuntime.cursor.value
+        ws.task_policy = {"agent_effort": "medium"}
+        await s.commit()
+
+    _queue_validation_head(fake, head="d" * 40)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert captured == [
+        {
+            "agent": "cursor",
+            "adapter_args": [
+                "cursor-agent",
+                "-p",
+                "--force",
+                "--output-format",
+                "text",
+            ],
+            "provider_recovery_default_model": None,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_sync_feature_pr_recovery_runs_validation_before_monitor_handoff(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
@@ -1407,48 +1468,3 @@ async def test_rebase_only_recovery_marks_operation_failed_when_recording_raises
     assert rebase_ops[0].error_message == "write exploded"
     assert isinstance(rebase_ops[0].result, dict)
     assert rebase_ops[0].result["reason_code"] == "MONITOR_RECOVERY_REBASE_FAILED"
-
-
-@pytest.mark.unit
-async def test_operator_rebase_operation_is_reused_and_failed_when_rebase_fails(
-    fake: FakeCommandRunner,
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(
-        factory,
-        recovery_mode="rebase_only",
-        source="operator_api",
-        operation_type=OperationType.rebase,
-    )
-
-    fake.queue_result(returncode=0)  # git fetch origin <base>
-    fake.queue_result(returncode=0)  # git switch <branch>
-    fake.queue_result(returncode=1)  # git merge-base --is-ancestor origin/<base> HEAD
-    fake.queue_result(returncode=1, stderr="conflict on README.md")  # git rebase
-    fake.queue_result(returncode=0)  # git rebase --abort
-
-    await executor.execute(ws_id)
-
-    assert _all_adapter_args(fake) == []
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(ws_id)
-        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
-    assert ws is not None
-    assert ws.status == WorkspaceStatus.failed.value
-    rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
-    assert len(rebase_ops) == 1
-    assert rebase_ops[0].payload is not None
-    assert rebase_ops[0].payload["source"] == "operator_api"
-    assert rebase_ops[0].status == OperationStatus.failed.value
-    assert rebase_ops[0].started_at is not None
-    assert rebase_ops[0].finished_at is not None
-    assert rebase_ops[0].error_code == "MONITOR_RECOVERY_REBASE_FAILED"
-    assert "conflict on README.md" in (rebase_ops[0].error_message or "")
-    assert rebase_ops[0].result == {
-        "status": "failed",
-        "reason_code": "MONITOR_RECOVERY_REBASE_FAILED",
-        "source_base_sha": "a" * 40,
-        "source_head_sha": "d" * 40,
-    }

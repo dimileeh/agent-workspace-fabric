@@ -36,7 +36,11 @@ class GrokAdapter(AgentAdapter):
             "--output-format",
             "plain",
         ]
-        if selected_model := _model_for_effort(model=model, effort=self._default_effort):
+        selected_model = self._selected_model_for_run(model=model)
+        if selected_model := _model_for_effort(
+            model=selected_model,
+            effort=self._default_effort,
+        ):
             args += ["-m", selected_model]
         return ["sh", "-c", _grok_launcher_script(), "awf-grok", *args]
 

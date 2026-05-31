@@ -1155,6 +1155,7 @@ def test_parse_memory_gb_handles_blank_units_and_invalid_values(
     ("agent", "model"),
     [
         (AgentRuntime.codex, "gpt-5.5"),
+        (AgentRuntime.cursor, "sonnet-4-thinking"),
         (AgentRuntime.gemini, "gemini-3.1-pro-preview"),
         (AgentRuntime.claude_code, "claude-opus-4-8"),
         (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud"),
@@ -1170,6 +1171,19 @@ def test_effective_agent_identity_uses_central_defaults(
     assert identity.effort == "xhigh"
     assert identity.model_source == "default"
     assert identity.effort_source == "default"
+
+
+@pytest.mark.unit
+def test_effective_agent_identity_cursor_lower_effort_uses_implicit_runtime_model() -> None:
+    identity = effective_agent_identity(
+        agent=AgentRuntime.cursor,
+        task_policy={"agent_effort": "medium"},
+    )
+
+    assert identity.model is None
+    assert identity.model_source == "default"
+    assert identity.effort == "medium"
+    assert identity.effort_source == "task_policy"
 
 
 @pytest.mark.unit

@@ -1,5 +1,5 @@
 # AWF agent-runtime image — the container that holds the repo worktree and
-# the coding CLIs (Codex, Claude Code, Gemini, OpenCode, Grok). Built multi-arch
+# the coding CLIs (Codex, Claude Code, Cursor, Gemini, OpenCode, Grok). Built multi-arch
 # for x86_64 and arm64 (DGX Spark target) via ``docker buildx build
 # --platform=...``.
 #
@@ -131,18 +131,20 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends "$gh_deb"; \
     gh --version
 
-# ── Stage 4: Node.js (for npm-based coding CLIs) ──────────────────────────
+# ── Stage 4: Node.js (for npm-backed coding CLIs) ─────────────────────────
 ARG NODE_VERSION
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node \
     && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/local/bin/node \
     && node --version \
     && npm --version
 
 # ── Stage 5: coding CLIs ──────────────────────────────────────────────────
 #
-# Each CLI is pinned to a version. Bump via PR so we can verify the output
-# format hasn't drifted in the adapters.
+# npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
+# output format hasn't drifted in the adapters.
 ARG CODEX_VERSION=0.130.0
 # 2.1.154+ is required for Claude Opus 4.8 (the default model in defaults.py);
 # older CLIs reject `--model claude-opus-4-8`. Keep this >= the default model's
@@ -154,6 +156,21 @@ ARG GROK_VERSION=0.2.14
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
+
+# Cursor CLI tracks the official installer because Cursor does not document a
+# stable standalone version pin for the Linux installer.
+RUN set -eux; \
+    install -d -m 0755 /opt/cursor; \
+    curl https://cursor.com/install -fsS | HOME=/opt/cursor bash; \
+    cursor_path="/opt/cursor/.local/bin/cursor-agent"; \
+    if [ ! -e "$cursor_path" ]; then \
+      echo "cursor-agent was not installed by the Cursor installer" >&2; \
+      exit 1; \
+    fi; \
+    ln -sf "$cursor_path" /usr/local/bin/cursor-agent; \
+    chmod -R a+rX /opt/cursor; \
+    chmod +x /usr/local/bin/cursor-agent; \
+    test -x /usr/local/bin/cursor-agent
 
 RUN set -eux; \
     max_attempts=3; \
@@ -176,13 +193,14 @@ RUN set -eux; \
       sleep 10; \
       attempt=$((attempt + 1)); \
     done; \
-    npm cache clean --force \
-    && codex --version || true \
-    && claude --version || true \
-    && gemini --version || true \
-    && opencode --version || true \
-    && grok --version || true \
-    && ccusage --version
+    npm cache clean --force; \
+    codex --version || true; \
+    claude --version || true; \
+    cursor-agent --version || true; \
+    gemini --version || true; \
+    opencode --version || true; \
+    grok --version || true; \
+    ccusage --version
 
 # Gemini CLI 0.42.0 only enables its ripgrep-backed search tool when a bundled
 # platform-specific rg binary exists; it does not fall back to the system rg on
@@ -221,6 +239,11 @@ RUN useradd --create-home --shell /bin/bash agent \
 
 USER agent
 WORKDIR /workspace
+
+RUN set -eux; \
+    command -v cursor-agent; \
+    test -x /usr/local/bin/cursor-agent; \
+    cursor-agent --version
 
 # tini reaps zombies when the CLI forks subprocesses (common in test runs).
 ENTRYPOINT ["/usr/bin/tini", "--"]

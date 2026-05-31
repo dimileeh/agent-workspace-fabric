@@ -6,12 +6,16 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from awf.adapters.base import AgentDefaults
+from awf.adapters.model_selection import CURSOR_DEFAULT_THINKING_MODEL
 from awf.db.enums import AgentRuntime
 
 DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     {
         AgentRuntime.claude_code: AgentDefaults(model="claude-opus-4-8", effort="xhigh"),
         AgentRuntime.codex: AgentDefaults(model="gpt-5.5", effort="xhigh"),
+        # Cursor documents model selection but not a portable effort flag.
+        # Use the thinking-capable Sonnet variant as AWF's high-effort default.
+        AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_THINKING_MODEL, effort="xhigh"),
         # Gemini CLI 0.39+ documents Gemini 3.1 Pro Preview as the direct
         # Pro-class model ID when the account has access.
         AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),

@@ -1,6 +1,6 @@
 """Coding-CLI adapters.
 
-AWF launches a coding CLI (Codex, Claude Code, Gemini, OpenCode, or Grok) inside
+AWF launches a coding CLI (Codex, Claude Code, Cursor, Gemini, OpenCode, or Grok) inside
 the agent container to do the actual code-writing work. Each adapter wraps one
 CLI and produces the right ``docker compose exec`` command for it.
 
