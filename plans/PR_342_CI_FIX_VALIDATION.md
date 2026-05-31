@@ -59,3 +59,65 @@ contract.
 ## Gaps
 
 No planned implementation gaps remain.
+
+## Iteration 2: Cursor Launcher Bundle Path
+
+### Requirement Status
+
+- Preserve strict `cursor-agent --version` smoke checks: Complete. The root and
+  non-root smoke checks remain strict; no `|| true`, skip, or weakening was
+  added.
+- Expose `cursor-agent` on the system PATH without copying the bundle launcher:
+  Complete. `docker/agent-runtime.Dockerfile` now creates
+  `/usr/local/bin/cursor-agent` as a symlink to
+  `/opt/cursor/.local/bin/cursor-agent`, preserving the Cursor installer bundle
+  path used to resolve bundled `node` and `index.js`.
+- Add focused regression coverage for the symlink contract: Complete.
+  `tests/unit/test_agent_runtime_dockerfile.py` now asserts the symlink and
+  rejects copying/installing the launcher into `/usr/local/bin`.
+- Run only focused local checks: Complete. No full coverage, full repository
+  test suite, frontend build, or CI-equivalent Docker image build was run
+  locally.
+
+### Evidence
+
+Additional files changed:
+
+- `docker/agent-runtime.Dockerfile`
+- `tests/unit/test_agent_runtime_dockerfile.py`
+- `plans/PR_342_CI_FIX_PLAN.md`
+- `plans/PR_342_CI_FIX_VALIDATION.md`
+
+Focused checks run:
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/test_agent_runtime_dockerfile.py::test_agent_runtime_installs_all_supported_coding_clis -q`
+  - Failed before implementation on the missing
+    `ln -sf "$cursor_path" /usr/local/bin/cursor-agent` assertion.
+  - Passed after the Dockerfile fix.
+- `uv run --python 3.12 --extra dev pytest tests/unit/test_agent_runtime_dockerfile.py -q`
+  - Passed: 7 tests.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/test_agent_runtime_dockerfile.py`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- Temporary installer probe outside the repo:
+  `curl https://cursor.com/install -fsS | HOME="$tmpdir" bash`, followed by a
+  symlinked launcher smoke check, returned Cursor version
+  `2026.05.28-a70ca7c`. This confirmed the installer-managed symlink preserves
+  the bundle-relative `index.js` lookup that failed in CI when the launcher was
+  copied.
+- Local `git commit` pre-commit hooks also ran and passed: trailing whitespace,
+  end-of-file, YAML/TOML checks where applicable, large-file check,
+  merge-conflict check, private-key detection, `ruff check`,
+  `ruff format --check`, and `mypy`.
+
+### Deferred Validation
+
+Full AWF/GitHub validation, including the actual CI Docker image build,
+`python-full-coverage`, `release-artifacts`, broad coverage, and frontend
+checks, is managed by AWF/GitHub after agent completion per the workspace
+contract.
+
+### Gaps
+
+No planned implementation gaps remain.

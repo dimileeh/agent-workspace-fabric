@@ -47,3 +47,32 @@ provider-readiness review-comment fixes intact.
 - Full coverage, full repository tests, frontend builds, and CI-equivalent
   image validation are intentionally left to AWF/GitHub per the workspace
   contract.
+
+## Assumptions/Changes
+
+### Iteration 2: Cursor launcher bundle path
+
+The latest CI run for PR #342 still fails in the agent-runtime Docker build, but
+the observed root cause has moved past `/usr/local/bin/node`. The Cursor
+installer creates `~/.local/bin/cursor-agent` as a symlink to a versioned bundle
+launcher. That launcher resolves `realpath "$0"` and expects its bundled
+`index.js` next to the resolved script. Copying the launcher into
+`/usr/local/bin/cursor-agent` makes it look for `/usr/local/bin/index.js`, which
+does not exist.
+
+Additional requirements:
+
+- Preserve strict `cursor-agent --version` smoke checks.
+- Expose `cursor-agent` on the system PATH without copying the bundle launcher
+  away from its versioned directory.
+- Add a focused regression assertion that the Dockerfile uses a symlink from
+  `/usr/local/bin/cursor-agent` to the installer-managed launcher.
+
+Additional implementation steps:
+
+1. Update the Dockerfile unit test to expect a symlinked Cursor launcher and to
+   reject copying/installing the launcher into `/usr/local/bin`.
+2. Confirm that test fails against the current Dockerfile.
+3. Replace the Dockerfile copy/install step with `ln -sf "$cursor_path"
+   /usr/local/bin/cursor-agent`.
+4. Run the focused Dockerfile unit test and record results in validation.

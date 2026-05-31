@@ -105,8 +105,8 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "install -d -m 0755 /opt/cursor" in dockerfile
     assert "curl https://cursor.com/install -fsS | HOME=/opt/cursor bash" in dockerfile
     assert 'cursor_path="/opt/cursor/.local/bin/cursor-agent"' in dockerfile
-    assert 'install -m 0755 "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
-    assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
+    assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
+    assert 'install -m 0755 "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
     assert "chmod -R a+rX /opt/cursor" in dockerfile
     assert 'cp "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
     assert "chmod +x /usr/local/bin/cursor-agent" in dockerfile
