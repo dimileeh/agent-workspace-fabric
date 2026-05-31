@@ -897,7 +897,9 @@ def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
     """Return a usable ``AWF_API_HOST_PORT`` override, or ``None`` when unusable.
 
     A missing, empty, whitespace-only, *surrounding-whitespace* (padded),
-    malformed, or out-of-range value yields ``None``. The override is "usable"
+    malformed (including Python-only spellings such as ``8_000`` or ``+8000``
+    that ``int`` accepts but Compose's decimal port syntax rejects), or
+    out-of-range value yields ``None``. The override is "usable"
     only when AWF can honor it identically across every layer, and a value with
     leading/trailing whitespace cannot be: this helper would ``strip`` it to a
     valid port, but Compose interpolates ``${AWF_API_HOST_PORT:-8000}:8000``
@@ -917,10 +919,16 @@ def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
     candidate = raw.strip()
     if not candidate or candidate != raw:
         return None
-    try:
-        parsed = int(candidate)
-    except ValueError:
+    # Compose's port short syntax accepts only plain ASCII decimal digits, but
+    # ``int()`` also accepts underscore grouping (``8_000``), a leading sign
+    # (``+8000``/``-8000``), and non-ASCII Unicode digits. Honoring such a value
+    # would probe the *parsed* port while Compose interpolates the literal into
+    # ``${AWF_API_HOST_PORT:-8000}:8000`` and ``awf start`` fails to parse and
+    # publish it, so reject anything that is not ASCII-decimal before parsing
+    # (this also makes ``int`` below total, so there is no dead error branch).
+    if not (candidate.isascii() and candidate.isdigit()):
         return None
+    parsed = int(candidate)
     if not 1 <= parsed <= 65535:
         return None
     return parsed
@@ -1021,7 +1029,9 @@ def _env_postgres_host_port(environ: Mapping[str, str]) -> int | None:
     """Return a usable ``AWF_POSTGRES_HOST_PORT`` override, or ``None`` when unusable.
 
     Mirrors :func:`_env_api_host_port` for the Postgres host port. A missing,
-    empty, whitespace-only, *surrounding-whitespace* (padded), malformed, or
+    empty, whitespace-only, *surrounding-whitespace* (padded), malformed
+    (including Python-only spellings such as ``5_433`` or ``+5433`` that ``int``
+    accepts but Compose's decimal port syntax rejects), or
     out-of-range value yields ``None`` — a padded value cannot be honored
     identically across layers because Compose interpolates
     ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432`` verbatim. Whether that
@@ -1037,10 +1047,16 @@ def _env_postgres_host_port(environ: Mapping[str, str]) -> int | None:
     candidate = raw.strip()
     if not candidate or candidate != raw:
         return None
-    try:
-        parsed = int(candidate)
-    except ValueError:
+    # Compose's port short syntax accepts only plain ASCII decimal digits, but
+    # ``int()`` also accepts underscore grouping (``5_433``), a leading sign
+    # (``+5433``/``-5433``), and non-ASCII Unicode digits. Honoring such a value
+    # would probe the *parsed* port while Compose interpolates the literal into
+    # ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432`` and ``awf start`` fails
+    # to parse and publish it, so reject anything that is not ASCII-decimal
+    # before parsing (this also makes ``int`` below total, no dead error branch).
+    if not (candidate.isascii() and candidate.isdigit()):
         return None
+    parsed = int(candidate)
     if not 1 <= parsed <= 65535:
         return None
     return parsed

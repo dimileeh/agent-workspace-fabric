@@ -1636,6 +1636,37 @@ def test_run_system_checks_blocks_on_padded_api_host_port_override(
 
 
 @pytest.mark.unit
+def test_run_system_checks_blocks_on_python_only_api_host_port_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Python-only ``AWF_API_HOST_PORT`` spelling blocks; it is not parsed-then-probed.
+
+    ``int()`` accepts underscore grouping (``8_000``) and a leading sign
+    (``+8000``), so the parser used to treat them as usable overrides and probe
+    the *parsed* port 8000 — letting ``awf setup --dry-run`` pass. But Compose's
+    port short syntax is plain decimal, so it interpolates the literal into
+    ``${AWF_API_HOST_PORT:-8000}:8000`` (``8_000:8000`` / ``+8000:8000``) and
+    ``awf start`` fails to publish it. The probe must reject the non-decimal
+    spelling instead of probing the wrong port and reporting it free.
+    """
+    for spelling in ("8_000", "+8000", "-8000", "0x1f40"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_port(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
+            work_dir=Path("/tmp"),
+            environ={"AWF_API_HOST_PORT": spelling},
+        )
+
+        ports = next(result for result in results if result.name == "ports")
+        assert ports.level is SetupCheckLevel.BLOCKED, repr(spelling)
+        assert ports.data["env_value"] == spelling
+        # The bind probe must not run for a port the operator never published.
+        assert "port" not in captured, repr(spelling)
+
+
+@pytest.mark.unit
 def test_run_system_checks_blocks_on_set_but_invalid_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1934,6 +1965,36 @@ def test_run_system_checks_blocks_on_padded_postgres_host_port_override(
         assert postgres.data["env_value"] == padded
         # The bind probe must not run for a port the operator never published.
         assert "postgres_port" not in captured, repr(padded)
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_python_only_postgres_host_port_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Python-only ``AWF_POSTGRES_HOST_PORT`` spelling blocks; not parsed-then-probed.
+
+    Mirrors ``test_run_system_checks_blocks_on_python_only_api_host_port_spelling``
+    for Postgres. ``int()`` accepts ``5_433`` and ``+5433``, but Compose's plain
+    decimal port syntax interpolates the literal into
+    ``127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432`` so ``awf start`` fails to
+    publish it. The probe must reject the non-decimal spelling rather than probe
+    the parsed port and report it free.
+    """
+    for spelling in ("5_433", "+5433", "-5433", "0x1531"):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(),
+            work_dir=Path("/tmp"),
+            environ={"AWF_POSTGRES_HOST_PORT": spelling},
+        )
+
+        postgres = next(result for result in results if result.name == "postgres_port")
+        assert postgres.level is SetupCheckLevel.BLOCKED, repr(spelling)
+        assert postgres.data["env_value"] == spelling
+        # The bind probe must not run for a port the operator never published.
+        assert "postgres_port" not in captured, repr(spelling)
 
 
 @pytest.mark.unit
