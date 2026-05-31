@@ -858,6 +858,162 @@ class TestOperatorControlRaces:
             )
             assert stale_skip_events[0].payload["orphan_containers_stopped"] is True
 
+    @pytest.mark.unit
+    async def test_orphan_stop_failure_records_false_in_payload(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+
+        force_destroyed_between_guard_and_launch = False
+
+        class _RecordingGit:
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "e" * 40
+
+        class _DelayedStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                nonlocal force_destroyed_between_guard_and_launch
+                self.requests.append(request)
+                assert force_destroyed_between_guard_and_launch, (
+                    "force-destroy must happen before launch starts for this test"
+                )
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_orphan_fail"),
+                    compose_file=Path("/tmp/awf-compose/ws_orphan_fail/compose.yml"),
+                )
+
+        async def _force_destroy_after_guard(
+            sf: async_sessionmaker[AsyncSession], workspace_id: str
+        ) -> None:
+            async with sf() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(workspace_id)
+                assert ws is not None
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.cancelled,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.destroying,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.destroyed,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.add_event(
+                    ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    payload={
+                        "compose_project_name": ws.compose_project_name,
+                        "workspace_status": WorkspaceStatus.destroyed.value,
+                        "cleanup": {
+                            "stack_stopped": False,
+                            "source": "force_destroy_workspace",
+                        },
+                    },
+                )
+                await s.commit()
+
+        class _ForceDestroyProvisioner(Provisioner):
+            async def _recheck_status(
+                self,
+                workspace_id: str,
+                *,
+                expected: WorkspaceStatus,
+                action: str,
+                reason_code: str,
+            ) -> bool:
+                return await super()._recheck_status(
+                    workspace_id,
+                    expected=expected,
+                    action=action,
+                    reason_code=reason_code,
+                )
+
+            async def _recheck_before_launch(self, workspace_id: str) -> bool:
+                result = await super()._recheck_before_launch(workspace_id)
+                if result:
+                    await _force_destroy_after_guard(session_factory, workspace_id)
+                    nonlocal force_destroyed_between_guard_and_launch
+                    force_destroyed_between_guard_and_launch = True
+                return result
+
+        async def _mock_stop_project_containers_fail(
+            compose_project_name: str,
+        ) -> None:
+            raise RuntimeError("docker stop failed")
+
+        launcher = _DelayedStackLauncher()
+        provisioner = _ForceDestroyProvisioner(
+            session_factory=session_factory,
+            git=_RecordingGit(),
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=_secret_profile().model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with patch(
+            "awf.node.provisioner.stop_project_containers",
+            new=_mock_stop_project_containers_fail,
+        ):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            stale_skip_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.stale_action_skipped"
+                and e.reason_code == "TERMINAL_CLEANUP_WON_DURING_LAUNCH"
+            ]
+            assert len(stale_skip_events) == 1
+            assert stale_skip_events[0].payload["orphan_containers_stopped"] is False
+            assert "orphan_stop_error" in stale_skip_events[0].payload
+
 
 class TestSecretLeaseIssueEdges:
     @pytest.mark.unit

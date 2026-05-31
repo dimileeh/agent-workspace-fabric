@@ -985,28 +985,35 @@ class Provisioner:
             workspace_id=workspace_id,
             reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
         )
+        orphan_stopped = True
+        orphan_stop_error = None
         try:
             await stop_project_containers(compose_project)
-        except Exception:
+        except Exception as exc:
+            orphan_stopped = False
+            orphan_stop_error = str(exc)
             _log.exception(
                 "provisioner.orphan_container_stop_failed",
                 workspace_id=workspace_id,
-                reason_code="ORPHAN_STOP_NON_FATAL",
+                reason_code="ORPHAN_STOP_FAILED",
             )
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
             if ws is not None:
+                payload: dict[str, object] = {
+                    "action": "provision",
+                    "expected_status": WorkspaceStatus.provisioning.value,
+                    "actual_status": ws.status,
+                    "orphan_containers_stopped": orphan_stopped,
+                }
+                if orphan_stop_error is not None:
+                    payload["orphan_stop_error"] = orphan_stop_error
                 await repo.add_event(
                     ws,
                     event_type="workspace.stale_action_skipped",
                     reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
-                    payload={
-                        "action": "provision",
-                        "expected_status": WorkspaceStatus.provisioning.value,
-                        "actual_status": ws.status,
-                        "orphan_containers_stopped": True,
-                    },
+                    payload=payload,
                 )
                 await session.commit()
         return True
