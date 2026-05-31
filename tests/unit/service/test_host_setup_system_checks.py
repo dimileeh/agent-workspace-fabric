@@ -407,6 +407,54 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
     assert isinstance(captured["disk_path"], Path)
 
 
+@pytest.mark.unit
+def test_run_system_checks_tolerates_unresolvable_work_dir_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A saved ``work_dir: ~olduser/...`` must not crash the readiness probe.
+
+    ``Path.expanduser`` raises ``RuntimeError`` for a ``~user`` component the host
+    cannot resolve. Aggregation runs before the reason-coded setup handlers, so an
+    unguarded expansion would abort ``awf setup --dry-run`` with a traceback
+    instead of producing the readiness payload.
+    """
+    import os.path
+
+    # Simulate a host that cannot resolve the ``~user`` component: os.path leaves
+    # the leading ``~user`` intact, which makes Path.expanduser raise RuntimeError.
+    monkeypatch.setattr(os.path, "expanduser", lambda value: value)
+
+    def fake_ok(name: str) -> SetupCheckResult:
+        return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
+
+    for name in (
+        "check_docker",
+        "check_compose",
+        "check_git",
+        "check_gh",
+        "check_python_runtime",
+        "check_shell_path",
+        "check_local_capacity",
+    ):
+        monkeypatch.setattr(system_checks, name, lambda name=name: fake_ok(name))
+    monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
+
+    captured: dict[str, object] = {}
+
+    def fake_disk(path: Path) -> SetupCheckResult:
+        captured["disk_path"] = path
+        return fake_ok("disk")
+
+    monkeypatch.setattr(system_checks, "check_disk", fake_disk)
+
+    config = HostSetupConfig(work_dir="~olduser/.awf/service")
+    results = run_system_checks(config=config)
+
+    assert [r.name for r in results].count("disk") == 1
+    # The unresolvable expansion falls back to the raw path rather than raising.
+    assert captured["disk_path"] == Path("~olduser/.awf/service")
+
+
 # --- Provider normalization ----------------------------------------------
 
 
@@ -798,6 +846,30 @@ def test_default_free_disk_bytes_returns_none_on_error(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(shutil, "disk_usage", boom)
     assert system_checks._default_free_disk_bytes("/anything") is None
+
+
+@pytest.mark.unit
+def test_default_free_disk_bytes_tolerates_unresolvable_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolvable ``~user`` work dir must probe parents, not raise RuntimeError."""
+    import os.path
+
+    monkeypatch.setattr(os.path, "expanduser", lambda value: value)
+    # Falls back to the raw path and walks up to an existing parent (the CWD).
+    assert system_checks._default_free_disk_bytes("~olduser/.awf/service") >= 0
+
+
+@pytest.mark.unit
+def test_safe_expanduser_falls_back_on_unresolvable_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_safe_expanduser`` returns the raw path when ``~user`` cannot be resolved."""
+    import os.path
+
+    assert system_checks._safe_expanduser("~/awf") == Path("~/awf").expanduser()
+    monkeypatch.setattr(os.path, "expanduser", lambda value: value)
+    assert system_checks._safe_expanduser("~olduser/.awf/service") == Path("~olduser/.awf/service")
 
 
 @pytest.mark.unit

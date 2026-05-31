@@ -172,13 +172,29 @@ def _default_port_probe(port: int) -> PortProbeResult:
         return PortProbeResult.UNAVAILABLE
 
 
+def _safe_expanduser(path: str | Path) -> Path:
+    """Expand a leading ``~``/``~user`` component, tolerating unresolvable users.
+
+    ``Path.expanduser`` raises ``RuntimeError`` when a ``~user`` component names a
+    user the host cannot resolve (e.g. a stale ``work_dir: ~olduser/.awf/service``
+    in a saved host config). The host checks are advisory and must still emit a
+    structured readiness payload, so fall back to the unexpanded path instead of
+    letting the traceback escape the reason-coded setup flow.
+    """
+    candidate = Path(path)
+    try:
+        return candidate.expanduser()
+    except RuntimeError:
+        return candidate
+
+
 def _default_free_disk_bytes(path: str | Path) -> int | None:
     """Return free bytes for ``path``, falling back to the nearest existing parent.
 
     The AWF work directory often does not exist yet at first-run setup time, so
     probe the path and then walk up its parents until one can be read.
     """
-    candidate = Path(path).expanduser()
+    candidate = _safe_expanduser(path)
     for ancestor in (candidate, *candidate.parents):
         try:
             return int(shutil.disk_usage(os.fspath(ancestor)).free)
@@ -604,7 +620,7 @@ def run_system_checks(
 ) -> list[SetupCheckResult]:
     """Run every host system check in a stable order and return the results."""
     resolved_port = config.api.host_port if port is None else port
-    resolved_work_dir = Path(config.work_dir).expanduser() if work_dir is None else work_dir
+    resolved_work_dir = _safe_expanduser(config.work_dir) if work_dir is None else work_dir
     return [
         check_docker(),
         check_compose(),
