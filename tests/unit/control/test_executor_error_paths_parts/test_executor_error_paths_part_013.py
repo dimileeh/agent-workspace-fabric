@@ -613,7 +613,7 @@ class TestExecutorMonitorHandoffSetup:
         assert "supersecret" not in message
 
     @pytest.mark.unit
-    async def test_handoff_setup_mark_failed_error_after_command_failure_is_local(
+    async def test_handoff_setup_mark_failed_error_after_command_failure_falls_back(
         self,
         tmp_path: Path,
     ) -> None:
@@ -642,7 +642,8 @@ class TestExecutorMonitorHandoffSetup:
 
             async def _mark_failed(self, **kwargs: Any) -> None:
                 mark_failed_calls.append(kwargs)
-                raise RuntimeError("database temporarily unavailable")
+                if len(mark_failed_calls) == 1:
+                    raise RuntimeError("detailed failure payload rejected")
 
         result = await _run_monitor_handoff_profile_setup(
             _Executor(),
@@ -654,11 +655,15 @@ class TestExecutorMonitorHandoffSetup:
         )
 
         assert result is False
-        assert len(mark_failed_calls) == 1
-        failure = mark_failed_calls[0]
-        assert failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
-        assert failure["message"] == "profile setup failed: uv sync --extra dev"
-        assert failure["details"]["retry_exhausted"] is True
+        assert len(mark_failed_calls) == 2
+        detailed_failure = mark_failed_calls[0]
+        assert detailed_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+        assert detailed_failure["message"] == "profile setup failed: uv sync --extra dev"
+        assert detailed_failure["details"]["retry_exhausted"] is True
+        fallback_failure = mark_failed_calls[1]
+        assert fallback_failure["reason_code"] == PR_MONITOR_SETUP_FAILED_REASON_CODE
+        assert fallback_failure["message"] == "profile setup failed: uv sync --extra dev"
+        assert "details" not in fallback_failure
 
     @pytest.mark.unit
     async def test_handoff_setup_cleanup_failure_marks_infrastructure_failure(
