@@ -60,7 +60,9 @@ _ALLOW_PLAIN_SECRETS_HELP = (
     "does not make plain-file storage the default."
 )
 _SOURCE_CHECKOUT_HELP = "Validate and use an AWF source checkout at this path."
-_FORMAT_HELP = "Output format. JSON unlocks scripting; pretty is the default."
+_FORMAT_HELP = (
+    "Output format. JSON writes to stdout for scripting; pretty writes to stderr (default)."
+)
 
 
 def setup_command(

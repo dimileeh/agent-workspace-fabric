@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from awf.host_setup.config import DEFAULT_API_HOST_PORT, HostSetupConfig
+
+# The reason-code constants below are rendering-layer contracts owned by
+# ``awf.host_setup.rendering``. They are imported here purely for internal use
+# (raised by ``normalize_provider``/``require_interactive`` and attached to
+# readiness issues) and are deliberately NOT re-exported via ``__all__`` so
+# ``rendering`` stays their single canonical public import path.
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_PROVIDER_UNKNOWN,
@@ -1456,15 +1462,12 @@ def _readiness_next_steps(*, blocked: bool) -> tuple[str, ...]:
 
 __all__ = [
     "DEFAULT_POSTGRES_HOST_PORT",
-    "INTERACTIVE_INPUT_REQUIRED",
     "KNOWN_SETUP_PROVIDERS",
     "MINIMUM_PYTHON",
     "MIN_FREE_DISK_BYTES",
     "MIN_MEMORY_BYTES",
     "MIN_USABLE_CPUS",
     "SETUP_COMMAND",
-    "SETUP_PROVIDER_UNKNOWN",
-    "SETUP_READINESS_FAILED",
     "CommandResult",
     "CommandRunner",
     "PortProbeResult",
