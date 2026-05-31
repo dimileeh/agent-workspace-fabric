@@ -75,6 +75,7 @@ DEFAULT_POSTGRES_HOST_PORT = 5433
 DEFAULT_OLLAMA_BRIDGE_LISTEN_PORT = 11434
 DEFAULT_OLLAMA_BRIDGE_TARGET_PORT = 11434
 DEFAULT_OLLAMA_BRIDGE_BIND_ADDRESS = "172.17.0.1"
+DEFAULT_OLLAMA_BRIDGE_TARGET_HOST = "127.0.0.1"
 
 _DOCKER_INSTALL_DOCS = "https://docs.docker.com/get-docker/"
 _DOCKER_DAEMON_DOCS = "https://docs.docker.com/config/daemon/"
@@ -1328,6 +1329,31 @@ def _invalid_ollama_bridge_bind_address(environ: Mapping[str, str]) -> str | Non
     return None
 
 
+def _invalid_ollama_bridge_target_host(environ: Mapping[str, str]) -> str | None:
+    """Return the raw ``AWF_OLLAMA_BRIDGE_TARGET_HOST`` when set to an unusable value.
+
+    Companion to :func:`_invalid_ollama_bridge_bind_address` for the *upstream*
+    half of the bridge. Compose interpolates the value verbatim into socat's
+    second endpoint ``TCP:<host>:<port>`` inside a single YAML command argument,
+    so any whitespace (which leaves an unresolvable host such as ``foo bar``) or
+    comma (which socat reads as the option separator, truncating the host and
+    corrupting the address) yields a target ``awf start`` cannot parse or connect
+    to. ``None`` when the override is unset or empty (a legitimate fall-back to
+    Compose's ``127.0.0.1`` default, matching
+    ``${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}``). Like the bind-address guard
+    the value is intentionally *not* parsed as an IP -- a bare IP, a loopback
+    address, or a resolvable hostname are all legitimate -- so only the
+    verbatim-interpolation hazards (whitespace, comma) are rejected, keeping AWF
+    core generic.
+    """
+    raw = environ.get("AWF_OLLAMA_BRIDGE_TARGET_HOST")
+    if not raw:
+        return None
+    if any(char.isspace() for char in raw) or "," in raw:
+        return raw
+    return None
+
+
 def check_ollama_bridge_listen_port(
     environ: Mapping[str, str] | None = None,
 ) -> SetupCheckResult | None:
@@ -1471,6 +1497,54 @@ def check_ollama_bridge_target_port(
         f"{resolved}; the configured AWF_OLLAMA_BRIDGE_TARGET_PORT is a usable value "
         "(reachability is checked at start time, not probed here).",
         data={"port": resolved, "available": True},
+    )
+
+
+def check_ollama_bridge_target_host(
+    environ: Mapping[str, str] | None = None,
+) -> SetupCheckResult | None:
+    """Validate the ollama-bridge upstream target host when that profile is active.
+
+    Companion to :func:`check_ollama_bridge_bind_address` for the *host* half of
+    the bridge's socat TCP target. Returns ``None`` when the ``ollama-bridge``
+    profile is inactive. When active, a set ``AWF_OLLAMA_BRIDGE_TARGET_HOST``
+    containing whitespace or a comma is interpolated verbatim into socat's second
+    endpoint ``TCP:${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:...`` and yields a
+    target ``awf start`` cannot parse or connect to, so readiness blocks instead
+    of reporting a false success. The host is not parsed as an IP (a bare IP, a
+    loopback address, or a resolvable hostname are all valid); only the
+    verbatim-interpolation hazards are rejected, and reachability is left to
+    start time.
+    """
+    env = os.environ if environ is None else environ
+    if not _ollama_bridge_profile_enabled(env):
+        return None
+    invalid = _invalid_ollama_bridge_target_host(env)
+    if invalid is not None:
+        return SetupCheckResult(
+            name="ollama_bridge_target_host",
+            level=SetupCheckLevel.BLOCKED,
+            summary=f"AWF_OLLAMA_BRIDGE_TARGET_HOST={invalid!r} is not a usable target host.",
+            detail="With COMPOSE_PROFILES=ollama-bridge the local-service Compose stack "
+            "interpolates AWF_OLLAMA_BRIDGE_TARGET_HOST verbatim into the bridge's socat TCP "
+            "target "
+            "(TCP:${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:${AWF_OLLAMA_BRIDGE_TARGET_PORT:-11434}), "
+            "so a value with whitespace or a comma corrupts the address and awf start fails to "
+            "publish the bridge.",
+            fix="Set AWF_OLLAMA_BRIDGE_TARGET_HOST to a whitespace- and comma-free host address "
+            "(an IP such as 127.0.0.1 or a resolvable hostname), or unset it to use the default "
+            "127.0.0.1, then re-run awf setup --dry-run.",
+            data={"host": None, "available": False, "env_value": invalid},
+        )
+    resolved = env.get("AWF_OLLAMA_BRIDGE_TARGET_HOST") or DEFAULT_OLLAMA_BRIDGE_TARGET_HOST
+    return SetupCheckResult(
+        name="ollama_bridge_target_host",
+        level=SetupCheckLevel.OK,
+        summary=f"Ollama bridge target host {resolved!r} is a usable literal.",
+        detail=f"COMPOSE_PROFILES enables ollama-bridge, which forwards to upstream host "
+        f"{resolved} via socat; the configured AWF_OLLAMA_BRIDGE_TARGET_HOST has no whitespace "
+        "or comma that would corrupt the socat target (reachability is left to start time).",
+        data={"host": resolved, "available": True},
     )
 
 
@@ -2130,12 +2204,13 @@ def run_system_checks(
     # ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``
     # and forwarded to the socat TCP target
     # ``${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:${AWF_OLLAMA_BRIDGE_TARGET_PORT:-11434}``.
-    # Validate the listen/target ports and bind address verbatim (each helper
+    # Validate the listen/target ports and bind/target hosts verbatim (each helper
     # returns ``None`` when the profile is off, so disabled-profile setups emit no
     # extra readiness line).
     ollama_bridge_port_check = check_ollama_bridge_listen_port(environ)
     ollama_bridge_bind_address_check = check_ollama_bridge_bind_address(environ)
     ollama_bridge_target_port_check = check_ollama_bridge_target_port(environ)
+    ollama_bridge_target_host_check = check_ollama_bridge_target_host(environ)
     invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
     invalid_work_dir_home = _invalid_work_dir_home_fallback(work_dir=work_dir, environ=environ)
     if invalid_work_dir is not None:
@@ -2202,6 +2277,7 @@ def run_system_checks(
             else []
         ),
         *([ollama_bridge_target_port_check] if ollama_bridge_target_port_check is not None else []),
+        *([ollama_bridge_target_host_check] if ollama_bridge_target_host_check is not None else []),
         disk_check,
         host_home_check,
         check_shell_path(),
@@ -2367,6 +2443,7 @@ def _readiness_next_steps(*, blocked: bool) -> tuple[str, ...]:
 __all__ = [
     "DEFAULT_OLLAMA_BRIDGE_BIND_ADDRESS",
     "DEFAULT_OLLAMA_BRIDGE_LISTEN_PORT",
+    "DEFAULT_OLLAMA_BRIDGE_TARGET_HOST",
     "DEFAULT_OLLAMA_BRIDGE_TARGET_PORT",
     "DEFAULT_POSTGRES_HOST_PORT",
     "KNOWN_SETUP_PROVIDERS",
@@ -2396,6 +2473,7 @@ __all__ = [
     "check_local_capacity",
     "check_ollama_bridge_bind_address",
     "check_ollama_bridge_listen_port",
+    "check_ollama_bridge_target_host",
     "check_ollama_bridge_target_port",
     "check_ports",
     "check_postgres_host_port_override",

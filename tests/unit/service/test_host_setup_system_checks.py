@@ -2941,11 +2941,13 @@ def test_ollama_bridge_checks_return_none_when_profile_disabled() -> None:
     assert system_checks.check_ollama_bridge_listen_port(environ={}) is None
     assert system_checks.check_ollama_bridge_bind_address(environ={}) is None
     assert system_checks.check_ollama_bridge_target_port(environ={}) is None
+    assert system_checks.check_ollama_bridge_target_host(environ={}) is None
     # A different enabled profile must not switch the bridge checks on.
     other = {"COMPOSE_PROFILES": "other", "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "nonsense"}
     assert system_checks.check_ollama_bridge_listen_port(environ=other) is None
     assert system_checks.check_ollama_bridge_bind_address(environ=other) is None
     assert system_checks.check_ollama_bridge_target_port(environ=other) is None
+    assert system_checks.check_ollama_bridge_target_host(environ=other) is None
 
 
 @pytest.mark.unit
@@ -3053,18 +3055,22 @@ def test_ollama_bridge_checks_default_to_process_env(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("AWF_OLLAMA_BRIDGE_LISTEN_PORT", raising=False)
     monkeypatch.delenv("AWF_OLLAMA_BRIDGE_BIND_ADDRESS", raising=False)
     monkeypatch.delenv("AWF_OLLAMA_BRIDGE_TARGET_PORT", raising=False)
+    monkeypatch.delenv("AWF_OLLAMA_BRIDGE_TARGET_HOST", raising=False)
     monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
     assert system_checks.check_ollama_bridge_listen_port() is None
     assert system_checks.check_ollama_bridge_bind_address() is None
     assert system_checks.check_ollama_bridge_target_port() is None
+    assert system_checks.check_ollama_bridge_target_host() is None
 
     monkeypatch.setenv("COMPOSE_PROFILES", "ollama-bridge")
     port_active = system_checks.check_ollama_bridge_listen_port()
     address_active = system_checks.check_ollama_bridge_bind_address()
     target_active = system_checks.check_ollama_bridge_target_port()
+    target_host_active = system_checks.check_ollama_bridge_target_host()
     assert port_active is not None and port_active.level is SetupCheckLevel.OK
     assert address_active is not None and address_active.level is SetupCheckLevel.OK
     assert target_active is not None and target_active.level is SetupCheckLevel.OK
+    assert target_host_active is not None and target_host_active.level is SetupCheckLevel.OK
 
 
 @pytest.mark.unit
@@ -3081,6 +3087,7 @@ def test_run_system_checks_omits_ollama_bridge_checks_when_profile_disabled(
     assert "ollama_bridge_port" not in names
     assert "ollama_bridge_bind_address" not in names
     assert "ollama_bridge_target_port" not in names
+    assert "ollama_bridge_target_host" not in names
 
 
 @pytest.mark.unit
@@ -3101,16 +3108,20 @@ def test_run_system_checks_validates_ollama_bridge_when_profile_active(
     assert "ollama_bridge_port" in names
     assert "ollama_bridge_bind_address" in names
     assert "ollama_bridge_target_port" in names
+    assert "ollama_bridge_target_host" in names
     port = next(result for result in results if result.name == "ollama_bridge_port")
     address = next(result for result in results if result.name == "ollama_bridge_bind_address")
     target = next(result for result in results if result.name == "ollama_bridge_target_port")
+    target_host = next(result for result in results if result.name == "ollama_bridge_target_host")
     assert port.level is SetupCheckLevel.OK
     assert address.level is SetupCheckLevel.OK
     assert target.level is SetupCheckLevel.OK
+    assert target_host.level is SetupCheckLevel.OK
     # The bridge checks sit with the other port checks, before disk.
     assert names.index("ollama_bridge_port") > names.index("postgres_port")
     assert names.index("ollama_bridge_bind_address") < names.index("disk")
     assert names.index("ollama_bridge_target_port") < names.index("disk")
+    assert names.index("ollama_bridge_target_host") < names.index("disk")
 
 
 @pytest.mark.unit
@@ -3241,3 +3252,82 @@ def test_run_system_checks_blocks_on_invalid_ollama_bridge_target_port_when_prof
     target = next(result for result in results if result.name == "ollama_bridge_target_port")
     assert target.level is SetupCheckLevel.BLOCKED
     assert target.data["env_value"] == "abc"
+
+
+# Regression for PR #332 review thread PRRT_kwDOSJAM6s6F8P2b: the socat target's
+# *host* half -- TCP:${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:... -- is also
+# interpolated verbatim, so a whitespace- or comma-bearing host corrupts the
+# socat address yet passed awf setup --dry-run. These tests pin the same
+# verbatim-interpolation guard the bind address already has, for the target host.
+
+
+@pytest.mark.unit
+def test_ollama_bridge_target_host_returns_none_when_profile_disabled() -> None:
+    """No target-host readiness line is emitted when the ollama-bridge profile is off."""
+    assert system_checks.check_ollama_bridge_target_host(environ={}) is None
+    # A different enabled profile must not switch the target-host check on.
+    other = {"COMPOSE_PROFILES": "other", "AWF_OLLAMA_BRIDGE_TARGET_HOST": "foo bar"}
+    assert system_checks.check_ollama_bridge_target_host(environ=other) is None
+
+
+@pytest.mark.unit
+def test_ollama_bridge_target_host_ok_when_profile_active_and_valid() -> None:
+    """An active profile with a usable (or unset) target host reports OK with the resolved host."""
+    default_ok = system_checks.check_ollama_bridge_target_host(
+        environ={"COMPOSE_PROFILES": "ollama-bridge"}
+    )
+    assert default_ok is not None
+    assert default_ok.name == "ollama_bridge_target_host"
+    assert default_ok.level is SetupCheckLevel.OK
+    assert default_ok.data["host"] == system_checks.DEFAULT_OLLAMA_BRIDGE_TARGET_HOST
+    assert default_ok.data["available"] is True
+
+    # A bare IP and a resolvable hostname are both legitimate -- the value is not
+    # parsed as an IP, only checked for the verbatim-interpolation hazards.
+    for host in ("10.0.0.5", "ollama.internal"):
+        override_ok = system_checks.check_ollama_bridge_target_host(
+            environ={
+                "COMPOSE_PROFILES": "ollama-bridge",
+                "AWF_OLLAMA_BRIDGE_TARGET_HOST": host,
+            }
+        )
+        assert override_ok is not None
+        assert override_ok.level is SetupCheckLevel.OK
+        assert override_ok.data["host"] == host
+
+
+@pytest.mark.unit
+def test_ollama_bridge_target_host_blocks_on_unusable_value() -> None:
+    """A whitespace- or comma-bearing target host corrupts the socat target and blocks."""
+    for invalid in (" 127.0.0.1", "127.0.0.1 ", "   ", "127.0.0.1,fork", "foo bar", "\t127"):
+        result = system_checks.check_ollama_bridge_target_host(
+            environ={
+                "COMPOSE_PROFILES": "ollama-bridge",
+                "AWF_OLLAMA_BRIDGE_TARGET_HOST": invalid,
+            }
+        )
+        assert result is not None, repr(invalid)
+        assert result.name == "ollama_bridge_target_host"
+        assert result.level is SetupCheckLevel.BLOCKED, repr(invalid)
+        assert result.data["env_value"] == invalid
+        assert result.data["available"] is False
+        assert result.fix is not None
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_invalid_ollama_bridge_target_host_when_profile_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed bridge target host blocks readiness only when the profile is active."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_TARGET_HOST": "foo bar"},
+    )
+
+    target = next(result for result in results if result.name == "ollama_bridge_target_host")
+    assert target.level is SetupCheckLevel.BLOCKED
+    assert target.data["env_value"] == "foo bar"
