@@ -292,6 +292,7 @@ def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
     assert cursor["signals"] == ["CURSOR_API_KEY"]
     assert cursor["credential_scope"] == "static_env_token"
     assert cursor["isolation"] == "service_env"
+    assert cursor["warnings"] == []
     assert "cursor_env_secret" not in json.dumps(payload, sort_keys=True)
 
 

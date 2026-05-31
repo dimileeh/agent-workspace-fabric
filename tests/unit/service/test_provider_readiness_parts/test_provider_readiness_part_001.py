@@ -1278,12 +1278,17 @@ def test_provider_readiness_env_fallbacks_report_security_warnings(
         http_get=_ollama_ok,
     )
 
-    for name in ("github", "codex", "claude_code", "cursor", "gemini", "opencode"):
+    for name in ("github", "codex", "claude_code", "gemini", "opencode"):
         provider = payload["providers"][name]
         assert provider["ok"] is True
         assert provider["credential_scope"] == "static_env_token"
         assert provider["isolation"] == "service_env"
         assert any(warning["reason"] == "STATIC_TOKEN_FALLBACK" for warning in provider["warnings"])
+    cursor = payload["providers"]["cursor"]
+    assert cursor["ok"] is True
+    assert cursor["credential_scope"] == "static_env_token"
+    assert cursor["isolation"] == "service_env"
+    assert cursor["warnings"] == []
     serialized = json.dumps(payload, sort_keys=True)
     for secret in env.values():
         assert secret not in serialized
