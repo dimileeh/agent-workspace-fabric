@@ -492,6 +492,85 @@ async def test_operator_hint_repair_marks_protected_scope_push_blocked_as_needs_
 
 
 @pytest.mark.unit
+async def test_operator_hint_repair_marks_diff_unavailable_push_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair could not compare protected scope",
+        operation_id="op_protected_scope_diff_unavailable_hint",
+        requested_at="2026-05-31T05:30:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fix_committed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _no_protected_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _diff_unavailable_push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="protected-scope diff unavailable blocked the operator hint repair push",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fix_committed)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_protected_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _diff_unavailable_push)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_diff_unavailable",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_diff_unavailable",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.terminal_monitor_failure is True
+    assert result.protected_scope_diff_unavailable is True
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="needs_human",
+        status_reason=("protected-scope diff unavailable blocked the operator hint repair push"),
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("reason_code", "status_reason"),
     [

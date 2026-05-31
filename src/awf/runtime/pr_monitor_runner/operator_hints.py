@@ -144,10 +144,16 @@ async def _run_operator_hint_cycle(
         )
     )
     if push_result.failed:
-        if push_result.reason_code == _PROTECTED_SCOPE_PUSH_BLOCKED_REASON:
-            reason = (
-                push_result.stderr or ""
-            ).strip() or "protected-scope policy blocked the operator hint repair push"
+        if (
+            push_result.reason_code == _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
+            or push_result.protected_scope_diff_unavailable
+        ):
+            default_reason = (
+                "protected-scope diff unavailable blocked the operator hint repair push"
+                if push_result.protected_scope_diff_unavailable
+                else "protected-scope policy blocked the operator hint repair push"
+            )
+            reason = (push_result.stderr or "").strip() or default_reason
             mark_operator_hint_needs_human(state, reason)
         return cast(_GitPushResult, push_result)
     if not push_result.pushed:
