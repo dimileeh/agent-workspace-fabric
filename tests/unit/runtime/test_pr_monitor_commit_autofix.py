@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,18 @@ from awf.runtime.pr_monitor_runner.commit_autofix import (
     _monitor_precommit_autofix_repair_paths,
     _retry_monitor_precommit_autofix_commit_once,
 )
+
+
+@pytest.mark.unit
+def test_monitor_commit_autofix_does_not_import_executor_quality_gates() -> None:
+    source_path = (
+        Path(__file__).resolve().parents[3] / "src/awf/runtime/pr_monitor_runner/commit_autofix.py"
+    )
+    tree = ast.parse(source_path.read_text())
+
+    imported_modules = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+
+    assert "awf.control.executor.quality_gates" not in imported_modules
 
 
 @pytest.mark.unit

@@ -7,9 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from awf.common.commands import CommandResult
-from awf.control.executor.quality_gates import (
-    _classify_post_agent_commit_failure,
-)
 from awf.runtime.pr_monitor_runner.comments import (
     _git_worktree_command,
 )
@@ -17,8 +14,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_porcelain,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
-
-_PRE_COMMIT_AUTOFIX_MARKER = "files were modified by this hook"
+from awf.runtime.pr_monitor_runner.precommit_autofix import (
+    monitor_precommit_autofix_repair_paths,
+)
 
 
 def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
@@ -40,23 +38,7 @@ def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
 
 
 def _monitor_precommit_autofix_repair_paths(commit_result: CommandResult) -> tuple[str, ...]:
-    output = f"{commit_result.stdout or ''}\n{commit_result.stderr or ''}"
-    if _PRE_COMMIT_AUTOFIX_MARKER not in output:
-        return ()
-
-    classification = _classify_post_agent_commit_failure(commit_result)
-    if classification.repair_strategy != "deterministic":
-        return ()
-
-    return tuple(
-        dict.fromkeys(
-            (
-                *classification.normalizer_repair_files,
-                *classification.format_repair_files,
-                *classification.autofix_repair_files,
-            )
-        )
-    )
+    return monitor_precommit_autofix_repair_paths(commit_result)
 
 
 async def _retry_monitor_precommit_autofix_commit_once(
