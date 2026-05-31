@@ -1132,6 +1132,16 @@ export function OperatorControlsBlock({
           <span className="mono ml-2 text-emerald-800">{compactId(state.operationId, 10)}</span>
         </div>
       ) : null}
+      {state.status === "success" && state.warnings.length > 0 ? (
+        <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-900">
+          {state.warnings.map((warning) => (
+            <div key={`${warning.warning_code}:${warning.message}`} className="flex min-w-0 items-start gap-1.5">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+              <span className="min-w-0 break-words">{warning.message || warning.warning_code}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {state.status === "error" ? (
         <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-red-900">
           {state.message}

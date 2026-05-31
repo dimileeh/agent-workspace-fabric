@@ -27,6 +27,7 @@ Workspace,
 WorkspaceEvent,
 WorkspaceLogRead,
 WorkspaceLogStream,
+WorkspaceControlWarning,
 WorkspaceOperatorAction,
 WorkspaceOverview,
 WorkspaceRuntime,
@@ -252,6 +253,7 @@ export type OperatorActionState =
       operationId: string;
       operationStatus: string;
       message: string;
+      warnings: WorkspaceControlWarning[];
     }
   | { status: "error"; action: WorkspaceOperatorAction; errorCode: string | null; message: string };
 

@@ -42,6 +42,7 @@ _PROVIDER_AUTH_ENV_KEYS = (
     "OPENAI_API_TOKEN",
     "CODEX_API_KEY",
     "CODEX_AUTH_TOKEN",
+    "CURSOR_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
 )
@@ -1118,6 +1119,7 @@ class TestWorkspaceControls:
             "operation_status": "succeeded",
             "status": "cancelled",
             "message": "workspace cancellation requested",
+            "warnings": [],
         }
 
     @pytest.mark.unit
@@ -1154,6 +1156,7 @@ class TestWorkspaceControls:
             "operation_status": "succeeded",
             "status": "cancelled",
             "message": "workspace stack stopped",
+            "warnings": [],
         }
 
     @pytest.mark.unit
@@ -1194,6 +1197,7 @@ class TestWorkspaceControls:
             "operation_status": "succeeded",
             "status": "destroyed",
             "message": "workspace destroyed",
+            "warnings": [],
         }
 
     @pytest.mark.unit

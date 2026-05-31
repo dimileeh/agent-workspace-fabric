@@ -625,6 +625,31 @@ async def test_unsupported_provider_records_reason_without_running_ccusage(
 
 
 @pytest.mark.unit
+async def test_cursor_records_unsupported_source_until_ccusage_adds_cursor(
+    tmp_path: Path,
+) -> None:
+    """Cursor usage records unsupported ccusage source snapshots."""
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_cursor_usage",
+        provider=AgentRuntime.cursor,
+    )
+
+    assert runner.calls == []
+    await ctx.finalize(status="success")
+    snap = read_latest_usage_snapshot("ws_cursor_usage", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.provider == "cursor"
+    assert snap.phase == "final"
+    assert snap.ccusage_source is None
+    assert snap.reason == "ccusage_source_unsupported"
+    assert snap.status == "unavailable"
+
+
+@pytest.mark.unit
 async def test_grok_records_unsupported_ccusage_source_without_running_ccusage(
     tmp_path: Path,
 ) -> None:

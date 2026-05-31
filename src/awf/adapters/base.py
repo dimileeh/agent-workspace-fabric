@@ -166,6 +166,11 @@ class AgentAdapter(ABC):
         """Return the default model for this adapter."""
         return self._default_model
 
+    @property
+    def provider_recovery_default_model(self) -> str | None:
+        """Return the implicit model identity provider recovery should attribute."""
+        return self._selected_model_for_run(model=None)
+
     @abstractmethod
     def get_provider(self, model: str | None) -> str:
         """Return the canonical provider identifier for a model."""
@@ -179,7 +184,16 @@ class AgentAdapter(ABC):
         must not place it in argv: review comments can exceed Linux's per-arg
         length limit, and argv prompt transport leaks large prompts into process
         listings.
+
+        ``model`` is the explicit per-run override. Implementations that should
+        use a configured default model must apply ``self._default_model``
+        themselves so they can still distinguish explicit overrides from
+        effort-derived defaults.
         """
+
+    def _selected_model_for_run(self, *, model: str | None) -> str | None:
+        """Return the model explicitly selected for this run, if any."""
+        return model or self._default_model
 
     async def run(
         self,
@@ -207,7 +221,8 @@ class AgentAdapter(ABC):
         """
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
-        cli_args = self._cli_args(model=model or self._default_model)
+        selected_model = self._selected_model_for_run(model=model)
+        cli_args = self._cli_args(model=model)
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
             compose_file=compose_file,
@@ -222,7 +237,7 @@ class AgentAdapter(ABC):
             agent=self.name.value,
             compose_project=compose_project,
             workspace_id=workspace_id,
-            model=model or self._default_model,
+            model=selected_model,
             effort=self._default_effort,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
@@ -378,7 +393,8 @@ class AgentAdapter(ABC):
 
         if not result.ok:
             provider = self.get_provider(model)
-            selected_model = model or self._default_model or "unknown"
+            selected_model = self._selected_model_for_run(model=model)
+            reported_model = selected_model or "unknown"
             provider_failure = classify_provider_failure(
                 reason_code=_failure_reason_for_result(result),
                 stdout=result.stdout,
@@ -417,7 +433,7 @@ class AgentAdapter(ABC):
                 recovery_metadata = provider_failure.to_metadata()
                 details = {
                     "provider": recovery_metadata.get("provider", provider),
-                    "model": recovery_metadata.get("model", selected_model),
+                    "model": recovery_metadata.get("model", reported_model),
                     "retryable": True,
                     "recommended_action": str(recovery_metadata["recommended_action"]),
                     "provider_recovery": recovery_metadata,
@@ -446,7 +462,7 @@ class AgentAdapter(ABC):
 
 # ── Registry ──────────────────────────────────────────────────────────────
 
-# Populated by awf.adapters.codex / .claude_code / .gemini / .opencode / .grok on
+# Populated by awf.adapters.codex / .claude_code / .cursor / .gemini / .opencode / .grok on
 # import. Keyed by AgentRuntime enum so callers that receive a Workspace.agent
 # string just map through the enum.
 _REGISTRY: dict[AgentRuntime, type[AgentAdapter]] = {}

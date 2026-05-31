@@ -28,12 +28,13 @@ class GeminiAdapter(AgentAdapter):
         # its value is appended to stdin, so AWF keeps the real prompt on
         # stdin and uses an empty value only as the headless-mode trigger.
         args = ["--skip-trust", "--yolo", "-p", ""]
-        if model:
-            args += ["--model", model]
+        selected_model = model or self._default_model
+        if selected_model:
+            args += ["--model", selected_model]
         if not self._default_effort:
             return ["gemini", *args]
 
-        settings = _settings_for_effort(model=model, effort=self._default_effort)
+        settings = _settings_for_effort(model=selected_model, effort=self._default_effort)
         script = (
             "set -eu\n"
             'settings_path="${TMPDIR:-/tmp}/awf-gemini-settings-${WORKSPACE_ID:-default}.json"\n'

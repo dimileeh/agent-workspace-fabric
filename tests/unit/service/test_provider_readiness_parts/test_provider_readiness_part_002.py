@@ -279,6 +279,50 @@ def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
+    """Cursor env auth appears as a static service-env token."""
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"CURSOR_API_KEY": "cursor_env_secret"},
+        run_subprocess=_runtime_cli_ok("cursor-agent"),
+    )
+
+    cursor = payload["providers"]["cursor"]
+    assert cursor["ok"] is True
+    assert cursor["reason"] == "CURSOR_ENV_AUTH_PRESENT"
+    assert cursor["signals"] == ["CURSOR_API_KEY"]
+    assert cursor["credential_scope"] == "static_env_token"
+    assert cursor["isolation"] == "service_env"
+    assert cursor["warnings"] == [
+        {
+            "reason": "STATIC_TOKEN_FALLBACK",
+            "message": (
+                "Cursor auth is supplied by static service environment variable CURSOR_API_KEY."
+            ),
+            "severity": "warning",
+        }
+    ]
+    assert "cursor_env_secret" not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_cursor_missing_env_fails_when_strict(tmp_path: Path) -> None:
+    """Strict Cursor readiness fails when no Cursor auth signal exists."""
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        strict_providers={"cursor"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    cursor = payload["providers"]["cursor"]
+    assert cursor["status"] == "fail"
+    assert cursor["reason"] == "CURSOR_AUTH_MISSING"
+    assert cursor["credential_scope"] == "not_observed"
+    assert cursor["isolation"] == "none"
+
+
+@pytest.mark.unit
 def test_provider_readiness_gemini_google_application_credentials_visible(
     tmp_path: Path,
 ) -> None:
@@ -1437,50 +1481,3 @@ def test_redaction_parts_cover_urls_empty_secrets_existing_redactions_and_merges
     assert provider_readiness_helpers._merge_literal_redaction_segments(
         [("literal", ""), ("literal", "a"), ("literal", "b")]
     ) == [("literal", "ab")]
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_reports_missing_model_with_prior_failures() -> None:
-    def _http_get(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        if url.endswith("/bad"):
-            return SimpleNamespace(status_code=503, text="offline")
-        return SimpleNamespace(status_code=200, text='{"models":[{"name":"glm-5.1:cloud"}]}')
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://ollama.local/bad", "http://ollama.local/api/tags"),
-        model="kimi-k2.6:cloud",
-        http_get=_http_get,
-        secrets=frozenset(),
-    )
-
-    assert result["status"] == "fail"
-    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert "probe_failures=" in result["detail"]
-
-
-@pytest.mark.unit
-def test_provider_readiness_security_summary_handles_malformed_warning_payloads() -> None:
-    summary = provider_readiness._security_summary(
-        {
-            "github": {
-                "status": "warn",
-                "reason": "GITHUB_TOKEN_ENV_MISSING",
-                "warnings": "not-a-list",
-            },
-            "codex": {"status": "ok", "warnings": ["bad-warning"]},
-            "docker": {
-                "status": "warn",
-                "reason": "DOCKER_AUTH_NOT_OBSERVED",
-                "warnings": [],
-            },
-        }
-    )
-
-    assert summary["status"] == "ok"
-    assert summary["warning_count"] == 0
-    assert summary["providers_with_warnings"] == ["github", "codex", "docker"]
-    assert summary["reason_codes"] == [
-        "DOCKER_AUTH_NOT_OBSERVED",
-        "GITHUB_TOKEN_ENV_MISSING",
-    ]

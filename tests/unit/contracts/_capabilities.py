@@ -31,6 +31,10 @@ from tests.unit.mcp._parity_utils import (
     _strip_backticks,
 )
 
+_WORKSPACE_CONTROL_RESPONSE_FIELDS = frozenset(
+    {"workspace_id", "operation_id", "operation_status", "status", "message", "warnings"}
+)
+
 
 @dataclass(frozen=True)
 class ContractCapability:
@@ -112,9 +116,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             }
         ),
         cli_arguments=frozenset({"workspace_id"}),
-        response_fields=frozenset(
-            {"workspace_id", "operation_id", "operation_status", "status", "message"}
-        ),
+        response_fields=_WORKSPACE_CONTROL_RESPONSE_FIELDS,
         auth_required=True,
     ),
     ContractCapability(
@@ -142,9 +144,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
         cli_options=frozenset({"--reason", "--idempotency-key", "--if-match", "--api-token"}),
         cli_arguments=frozenset({"workspace_id"}),
-        response_fields=frozenset(
-            {"workspace_id", "operation_id", "operation_status", "status", "message"}
-        ),
+        response_fields=_WORKSPACE_CONTROL_RESPONSE_FIELDS,
         auth_required=True,
     ),
     ContractCapability(
@@ -194,9 +194,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             }
         ),
         cli_arguments=frozenset({"workspace_id"}),
-        response_fields=frozenset(
-            {"workspace_id", "operation_id", "operation_status", "status", "message"}
-        ),
+        response_fields=_WORKSPACE_CONTROL_RESPONSE_FIELDS,
         auth_required=True,
     ),
     ContractCapability(
@@ -230,9 +228,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
         cli_options=frozenset({"--reason", "--idempotency-key", "--if-match", "--api-token"}),
         cli_arguments=frozenset({"workspace_id"}),
-        response_fields=frozenset(
-            {"workspace_id", "operation_id", "operation_status", "status", "message"}
-        ),
+        response_fields=_WORKSPACE_CONTROL_RESPONSE_FIELDS,
         auth_required=True,
     ),
     ContractCapability(

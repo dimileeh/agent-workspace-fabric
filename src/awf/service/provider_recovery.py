@@ -650,6 +650,8 @@ def parse_provider_recovery_state(
 
 
 def provider_for_agent_model(agent: str, model: str | None) -> str | None:
+    if agent == "cursor":
+        return "cursor"
     inferred = infer_provider(model=model)
     if inferred is not None:
         return inferred

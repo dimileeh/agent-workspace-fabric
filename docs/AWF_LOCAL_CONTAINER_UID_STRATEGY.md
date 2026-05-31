@@ -83,6 +83,8 @@ read-only credential paths:
   granted only to the API and worker services. They work for both root and
   non-root because read-only access only needs file mode bits to allow
   other-readable.
+- Cursor auth is env-only (`CURSOR_API_KEY`) and does not require a host-home
+  credential mount.
 - Per-workspace seeded auth directories (`work_dir/auth/<workspace_id>/...`)
   are copied from the read-only host-home sources and then chowned to the
   agent UID by `src/awf/node/auth_mounts.py:_chown_workspace_auth_sources`

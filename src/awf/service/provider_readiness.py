@@ -19,6 +19,7 @@ ProviderName = Literal[
     "github",
     "codex",
     "claude_code",
+    "cursor",
     "gemini",
     "opencode",
     "grok",
@@ -29,6 +30,7 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
     "github",
     "codex",
     "claude_code",
+    "cursor",
     "gemini",
     "opencode",
     "grok",
@@ -55,6 +57,7 @@ _CLAUDE_ENV_KEYS = (
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
+_CURSOR_ENV_KEYS = ("CURSOR_API_KEY",)
 _GEMINI_ENV_KEYS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -68,6 +71,7 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         *_GITHUB_TOKEN_ENV_KEYS,
         *_CODEX_ENV_KEYS,
         *_CLAUDE_ENV_KEYS,
+        *_CURSOR_ENV_KEYS,
         *_GEMINI_ENV_KEYS,
         *_OPENCODE_ENV_KEYS,
         *_XAI_ENV_KEYS,
@@ -99,6 +103,7 @@ TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(_KNOWN_TOKEN_PATTERNS) + r
 _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.codex: "codex",
     AgentRuntime.claude_code: "claude_code",
+    AgentRuntime.cursor: "cursor",
     AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
     AgentRuntime.grok: "grok",
@@ -251,6 +256,7 @@ def selected_provider_readiness_preflight(
         run_subprocess=resolved_run,
         http_get=resolved_http_get,
         secrets=secrets,
+        probe_runtime_cli=False,
     )
     probe = _selected_launch_probe(
         provider,
@@ -262,16 +268,19 @@ def selected_provider_readiness_preflight(
         http_get=resolved_http_get,
         secrets=secrets,
     )
+    model_required = _selected_model_required(provider=provider, model=identity.model)
 
     reason_code = _preflight_reason_code(
         provider_result=provider_result,
         probe=probe,
         model=identity.model,
+        model_required=model_required,
     )
     message = _preflight_message(
         provider_result=provider_result,
         probe=probe,
         model=identity.model,
+        model_required=model_required,
     )
 
     return _launch_preflight_payload(
@@ -283,6 +292,7 @@ def selected_provider_readiness_preflight(
         probe=probe,
         reason_code=reason_code,
         message=message,
+        model_required=model_required,
         override=override,
         override_reason=override_reason,
         checked_at=checked,
@@ -351,6 +361,7 @@ def _check_provider_readiness(
     run_subprocess: SubprocessRun,
     http_get: HttpGet,
     secrets: frozenset[str],
+    probe_runtime_cli: bool = True,
 ) -> dict[str, Any]:
     if provider == "github":
         return _check_github(
@@ -372,6 +383,20 @@ def _check_provider_readiness(
         return _check_claude(
             environ=environ,
             host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    if provider == "cursor":
+        if probe_runtime_cli:
+            return _check_cursor_readiness(
+                settings,
+                environ=environ,
+                strict=strict,
+                run_subprocess=run_subprocess,
+                secrets=secrets,
+            )
+        return _check_cursor(
+            environ=environ,
             strict=strict,
             secrets=secrets,
         )
@@ -418,7 +443,9 @@ def _selected_launch_probe(
     http_get: HttpGet,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
-    if not provider_result.get("ok") or not model:
+    if not provider_result.get("ok"):
+        return {"status": "skipped"}
+    if not model and provider != "cursor":
         return {"status": "skipped"}
     executable = _agent_runtime_cli_executable(provider)
     if executable is not None:
@@ -432,7 +459,7 @@ def _selected_launch_probe(
         )
         if runtime_probe.get("status") != "ok":
             return runtime_probe
-        if provider in {"codex", "claude_code", "gemini", "grok"}:
+        if provider in {"codex", "claude_code", "cursor", "gemini", "grok"}:
             return runtime_probe
     if provider == "opencode":
         return _probe_ollama_model(
@@ -448,171 +475,11 @@ def _agent_runtime_cli_executable(provider: ProviderName) -> str | None:
     return {
         "codex": "codex",
         "claude_code": "claude",
+        "cursor": "cursor-agent",
         "gemini": "gemini",
         "opencode": "opencode",
         "grok": "grok",
     }.get(provider)
-
-
-def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
-    return {
-        "codex": "CODEX",
-        "claude_code": "CLAUDE",
-        "gemini": "GEMINI",
-        "opencode": "OPENCODE",
-        "grok": "GROK",
-    }.get(provider, "PROVIDER")
-
-
-def _probe_agent_runtime_cli(
-    settings: ServiceSettings,
-    *,
-    executable: str,
-    provider: ProviderName,
-    environ: Mapping[str, str],
-    run_subprocess: SubprocessRun,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    reason_prefix = _agent_runtime_cli_reason_prefix(provider)
-    args = [
-        "docker",
-        "run",
-        "--rm",
-        "--entrypoint",
-        "sh",
-        settings.agent_runtime_image,
-        "-lc",
-        f"command -v {executable}",
-    ]
-    try:
-        result = run_subprocess(
-            args,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
-            env=environ,
-        )
-    except FileNotFoundError:
-        return {
-            "status": "fail",
-            "reason_code": "DOCKER_CLI_NOT_FOUND",
-            "message": (
-                "Docker CLI was not found while probing the configured agent runtime image."
-            ),
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "fail",
-            "reason_code": f"{reason_prefix}_RUNTIME_CLI_PROBE_TIMEOUT",
-            "message": (
-                f"Agent runtime CLI probe for {executable!r} exceeded "
-                f"{_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
-            ),
-        }
-    except Exception as exc:
-        _log_redacted_exception(
-            "provider_readiness.agent_runtime_cli_probe_exception",
-            exc,
-            secrets,
-        )
-        detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
-        return {
-            "status": "fail",
-            "reason_code": f"{reason_prefix}_RUNTIME_CLI_PROBE_ERROR",
-            "message": "Agent runtime CLI probe failed before completion.",
-            "detail": detail,
-        }
-
-    if result.returncode == 0:
-        return {
-            "status": "ok",
-            "reason_code": f"{reason_prefix}_RUNTIME_CLI_AVAILABLE",
-            "detail": _redact(_truncate(result.stdout.strip()), secrets)
-            if result.stdout.strip()
-            else None,
-        }
-
-    detail = _redact(
-        _truncate(result.stderr or result.stdout or f"{executable} was not found"),
-        secrets,
-    )
-    return {
-        "status": "fail",
-        "reason_code": f"{reason_prefix}_RUNTIME_CLI_NOT_FOUND",
-        "message": (
-            f"The configured agent runtime image {settings.agent_runtime_image!r} "
-            f"does not expose the {executable!r} CLI required by provider {provider!r}."
-        ),
-        "detail": detail,
-    }
-
-
-def _probe_cli_auth_status(
-    *,
-    provider_label: str,
-    args: list[str],
-    failure_reason: str,
-    timeout_reason: str,
-    missing_reason: str,
-    error_reason: str,
-    environ: Mapping[str, str],
-    run_subprocess: SubprocessRun,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    try:
-        result = run_subprocess(
-            args,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
-            env=environ,
-        )
-    except FileNotFoundError:
-        return {
-            "status": "fail",
-            "reason_code": missing_reason,
-            "message": f"{provider_label} CLI was not found for auth status probing.",
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "fail",
-            "reason_code": timeout_reason,
-            "message": (
-                f"{provider_label} auth status probe exceeded {_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
-            ),
-        }
-    except Exception as exc:
-        _log_redacted_exception(
-            "provider_readiness.cli_auth_probe_exception",
-            exc,
-            secrets,
-        )
-        detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
-        return {
-            "status": "fail",
-            "reason_code": error_reason,
-            "message": f"{provider_label} auth status probe failed before completion.",
-            "detail": detail,
-        }
-
-    if result.returncode == 0:
-        return {
-            "status": "ok",
-            "reason_code": f"{failure_reason.removesuffix('_FAILED')}_OK",
-        }
-
-    detail = _redact(
-        _truncate(result.stderr or result.stdout or "auth status exited non-zero"),
-        secrets,
-    )
-    return {
-        "status": "fail",
-        "reason_code": failure_reason,
-        "message": f"{provider_label} auth status probe reported unusable auth.",
-        "detail": detail,
-    }
 
 
 def _preflight_reason_code(
@@ -620,8 +487,9 @@ def _preflight_reason_code(
     provider_result: Mapping[str, Any],
     probe: Mapping[str, Any],
     model: str | None,
+    model_required: bool = True,
 ) -> str:
-    if not model:
+    if model_required and not model:
         return "MODEL_NOT_SELECTED"
     if provider_result.get("ok") is not True:
         return str(provider_result.get("reason") or "PROVIDER_AUTH_NOT_READY")
@@ -635,8 +503,9 @@ def _preflight_message(
     provider_result: Mapping[str, Any],
     probe: Mapping[str, Any],
     model: str | None,
+    model_required: bool = True,
 ) -> str:
-    if not model:
+    if model_required and not model:
         return "No effective model was selected for the workspace agent."
     if provider_result.get("ok") is not True:
         return str(
@@ -661,9 +530,10 @@ def _launch_preflight_payload(
     override_reason: str | None,
     checked_at: datetime,
     secrets: frozenset[str],
+    model_required: bool = True,
 ) -> dict[str, Any]:
     auth_ok = provider_result is not None and provider_result.get("ok") is True
-    model_ok = bool(model)
+    model_ok = bool(model) or not model_required
     probe_status = str(probe.get("status") or "skipped")
     probe_ok = probe_status in {"ok", "unavailable"}
     override_required = not (auth_ok and model_ok and probe_ok)
@@ -715,6 +585,12 @@ def _launch_preflight_payload(
     if isinstance(warnings, list):
         payload["warnings"] = [warning for warning in warnings if isinstance(warning, Mapping)]
     return payload
+
+
+def _selected_model_required(*, provider: ProviderName, model: str | None) -> bool:
+    """Return whether launch admission requires an AWF-selected model."""
+
+    return not (provider == "cursor" and model is None)
 
 
 def _auth_status(provider_result: Mapping[str, Any] | None) -> str:
@@ -1048,6 +924,110 @@ def _check_claude(
         credential_scope="not_observed",
         isolation="none",
     )
+
+
+def _check_cursor(
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    """Check whether Cursor API-key auth is visible to the service."""
+    signal = _first_present_env(environ, _CURSOR_ENV_KEYS)
+    if signal is not None:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="CURSOR_ENV_AUTH_PRESENT",
+            message="Cursor auth is visible through service environment variables.",
+            signals=[signal],
+            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=[
+                _security_warning(
+                    "STATIC_TOKEN_FALLBACK",
+                    f"Cursor auth is supplied by static service environment variable {signal}.",
+                )
+            ],
+        )
+
+    return _provider_result(
+        ok=False,
+        strict=strict,
+        reason="CURSOR_AUTH_MISSING",
+        message="No Cursor auth signal was visible. Set CURSOR_API_KEY.",
+        secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
+    )
+
+
+def _check_cursor_readiness(
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    """Combine Cursor env auth with the runtime CLI availability probe."""
+    cursor_result = _check_cursor(environ=environ, strict=strict, secrets=secrets)
+    if cursor_result.get("ok") is not True:
+        return cursor_result
+
+    probe = _probe_agent_runtime_cli(
+        settings,
+        executable="cursor-agent",
+        provider="cursor",
+        environ=environ,
+        run_subprocess=run_subprocess,
+        secrets=secrets,
+    )
+    runtime_cli_probe = _runtime_cli_probe_payload(probe)
+    if probe.get("status") == "ok":
+        cursor_result["runtime_cli_probe"] = runtime_cli_probe
+        return cursor_result
+
+    reason = str(probe.get("reason_code") or "CURSOR_RUNTIME_CLI_NOT_FOUND")
+    message = str(probe.get("message") or "Cursor auth was found but cursor-agent is unavailable.")
+    result = _provider_result(
+        ok=False,
+        strict=strict,
+        reason=reason,
+        message=message,
+        detail=str(probe.get("detail") or "") or None,
+        signals=[
+            *[signal for signal in cursor_result.get("signals", []) if isinstance(signal, str)],
+            "cursor-agent",
+        ],
+        secrets=secrets,
+        credential_sources=_credential_sources(cursor_result),
+        credential_scope=str(cursor_result.get("credential_scope") or "static_env_token"),
+        isolation=str(cursor_result.get("isolation") or "service_env"),
+        warnings=[
+            *[
+                warning
+                for warning in cursor_result.get("warnings", [])
+                if isinstance(warning, Mapping)
+            ],
+            _security_warning(
+                reason,
+                _redact(message, secrets),
+                severity="error" if strict else "warning",
+            ),
+        ],
+    )
+    result["runtime_cli_probe"] = runtime_cli_probe
+    return result
 
 
 def _check_gemini(
@@ -1457,12 +1437,15 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _ordered_names,
     _primary_credential_scope,
     _primary_isolation,
+    _probe_agent_runtime_cli,
+    _probe_cli_auth_status,
     _probe_ollama,
     _probe_ollama_model,
     _redact,
     _redact_with_redaction_parts,
     _redacted_warning,
     _run_subprocess,
+    _runtime_cli_probe_payload,
     _secret_values,
     _security_summary,
     _security_warning,
@@ -1479,5 +1462,6 @@ __all__ = [
     "selected_provider_readiness_preflight",
     "validate_provider_names",
     "_redact",
+    "_probe_cli_auth_status",
     "_secret_values",
 ]
