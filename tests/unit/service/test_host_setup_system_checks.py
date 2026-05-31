@@ -646,6 +646,42 @@ def test_default_port_available_detects_in_use_and_free() -> None:
 
 
 @pytest.mark.unit
+def test_default_port_available_detects_non_loopback_listener() -> None:
+    """Verify the probe matches Docker's all-interface bind, not just loopback.
+
+    ``docker/compose/local-service.yml`` publishes the API port without a host
+    IP (``${AWF_API_HOST_PORT:-8000}:8000``), so Docker reserves it on every
+    host interface (``0.0.0.0``). A listener on a non-loopback address must
+    therefore be reported as in-use; a loopback-only (``127.0.0.1``) probe would
+    miss it and let ``awf start`` fail later to publish the port.
+    """
+    import socket
+
+    def _non_loopback_ipv4() -> str | None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as discover:
+                discover.connect(("8.8.8.8", 80))
+                address = discover.getsockname()[0]
+        except OSError:
+            return None
+        return address if address and not address.startswith("127.") else None
+
+    host_ip = _non_loopback_ipv4()
+    if host_ip is None:
+        pytest.skip("no non-loopback IPv4 interface available to bind")
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((host_ip, 0))
+    port = listener.getsockname()[1]
+    listener.listen(1)
+    try:
+        assert system_checks._default_port_available(port) is False
+    finally:
+        listener.close()
+
+
+@pytest.mark.unit
 def test_default_free_disk_bytes_real_and_parent_fallback(tmp_path: Path) -> None:
     """Verify free-disk reads a real path and falls back to an existing parent."""
     assert system_checks._default_free_disk_bytes(tmp_path) >= 0

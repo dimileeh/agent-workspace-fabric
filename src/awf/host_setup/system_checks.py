@@ -126,13 +126,21 @@ def _default_command_runner(
 
 
 def _default_port_available(port: int) -> bool:
-    """Return whether ``127.0.0.1:<port>`` can be bound right now."""
+    """Return whether ``<port>`` can be bound on all host interfaces right now.
+
+    The probe binds the IPv4 wildcard address (``0.0.0.0``) rather than just
+    loopback because the local-service Compose file publishes the API port
+    without a host IP (``${AWF_API_HOST_PORT:-8000}:8000``), so Docker reserves
+    it on every host interface. A loopback-only probe would report the port free
+    even when something is listening on another interface, only for ``awf start``
+    to fail later when Docker tries to publish the all-interface bind.
+    """
     import socket
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind(("127.0.0.1", port))
+            probe.bind(("0.0.0.0", port))  # all interfaces — match Docker's published bind
         return True
     except OSError:
         return False
@@ -336,14 +344,14 @@ def check_ports(
             name="ports",
             level=SetupCheckLevel.OK,
             summary=f"API host port {port} is free.",
-            detail=f"127.0.0.1:{port} could be bound for the local AWF API.",
+            detail=f"0.0.0.0:{port} (all interfaces) could be bound for the local AWF API.",
             data={"port": port, "available": True},
         )
     return SetupCheckResult(
         name="ports",
         level=SetupCheckLevel.WARNING,
         summary=f"API host port {port} is already in use.",
-        detail=f"127.0.0.1:{port} is currently bound by another process.",
+        detail=f"0.0.0.0:{port} (all interfaces) is currently bound by another process.",
         fix="Free the port or set a different api.host_port; AWF can also start on another port.",
         data={"port": port, "available": False},
     )
