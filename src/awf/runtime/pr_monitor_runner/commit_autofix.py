@@ -21,6 +21,24 @@ from awf.runtime.pr_monitor_runner.logging import _log
 _PRE_COMMIT_AUTOFIX_MARKER = "files were modified by this hook"
 
 
+def _worktree_modified_paths_from_porcelain(status_stdout: str) -> list[str]:
+    """Extract paths with unstaged worktree changes from porcelain output."""
+    paths: list[str] = []
+    for line in status_stdout.splitlines():
+        if not line:
+            continue
+        if line.startswith("?? ") or (len(line) >= 4 and line[2] == " " and line[1] != " "):
+            path = line[3:]
+        else:
+            continue
+        if " -> " in path:
+            old_path, new_path = path.split(" -> ", 1)
+            paths.extend([old_path, new_path])
+        else:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
 def _monitor_precommit_autofix_repair_paths(commit_result: CommandResult) -> tuple[str, ...]:
     output = f"{commit_result.stdout or ''}\n{commit_result.stderr or ''}"
     if _PRE_COMMIT_AUTOFIX_MARKER not in output:
@@ -75,25 +93,41 @@ async def _retry_monitor_precommit_autofix_commit_once(
     dirty_path_set = set(dirty_paths)
     repair_path_set = set(repair_paths)
     operation_dirty_path_set = set(operation_dirty_paths)
-    if not dirty_path_set <= repair_path_set or not dirty_path_set <= operation_dirty_path_set:
+    worktree_modified_paths = tuple(_worktree_modified_paths_from_porcelain(dirty_status.stdout))
+    worktree_modified_path_set = set(worktree_modified_paths)
+    if (
+        not dirty_path_set <= operation_dirty_path_set
+        or not worktree_modified_path_set <= repair_path_set
+    ):
         _log.warning(
             "monitor.dirty_commit_autofix_retry_skipped_unsafe",
             workspace_id=workspace_id,
             dirty_paths=sorted(dirty_path_set),
             repair_paths=sorted(repair_path_set),
             operation_dirty_paths=sorted(operation_dirty_path_set),
+            worktree_modified_paths=sorted(worktree_modified_path_set),
         )
         return None
 
-    add = await runner.run(_git_worktree_command(worktree_path, "add", "--", *dirty_paths))
+    restage_paths = tuple(path for path in dirty_paths if path in repair_path_set)
+    if not restage_paths:
+        _log.info(
+            "monitor.dirty_commit_autofix_retry_skipped_no_repair_paths",
+            workspace_id=workspace_id,
+            dirty_paths=list(dirty_paths),
+            repair_paths=list(repair_paths),
+        )
+        return None
+
+    add = await runner.run(_git_worktree_command(worktree_path, "add", "--", *restage_paths))
     if not add.ok:
         _log.warning(
             "monitor.dirty_commit_autofix_add_failed",
             workspace_id=workspace_id,
-            paths=list(dirty_paths),
+            paths=list(restage_paths),
             stderr=add.stderr[:400],
         )
         return None
 
     retry = await runner.run(_git_worktree_command(worktree_path, "commit", "-m", message))
-    return retry, dirty_paths
+    return retry, restage_paths
