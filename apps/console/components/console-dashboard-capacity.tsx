@@ -337,6 +337,8 @@ export function MergeQueuePanel({
       title="Merge Queue"
       icon={<GitPullRequest size={16} aria-hidden />}
       stale={stale}
+      fill
+      className="2xl:h-full"
       action={
         <span className="rounded-[var(--radius-control)] border border-line bg-surface-2 px-2.5 py-1 text-[11px] text-fg-muted">
           {summary}
@@ -350,7 +352,7 @@ export function MergeQueuePanel({
       ) : !hasSnapshot ? (
         <MutedLine>No PR-backed merge candidates are queued.</MutedLine>
       ) : (
-        <div className="grid gap-2">
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
           {error ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               Showing last merge queue snapshot. Refresh failed: {error}
@@ -361,7 +363,7 @@ export function MergeQueuePanel({
               Showing first {items.length} merge candidates. More are queued.
             </div>
           ) : null}
-          <div className="grid max-h-[460px] gap-2 overflow-auto pr-1">
+          <div className="grid max-h-[460px] min-h-0 gap-2 overflow-auto pr-1 2xl:max-h-none 2xl:flex-1">
             {items.map((item, index) => {
               const rowKey = item.candidate_id ?? item.workspace_id;
               const expanded = expandedRows.has(rowKey);

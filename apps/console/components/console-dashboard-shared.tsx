@@ -275,6 +275,8 @@ export function Panel({
   action,
   stale = false,
   staleLabel = "stale",
+  fill = false,
+  className = "",
   children,
 }: {
   title: string;
@@ -282,6 +284,10 @@ export function Panel({
   action?: React.ReactNode;
   stale?: boolean;
   staleLabel?: string;
+  // When true the panel is a flex column so a scrollable child can grow to
+  // fill the panel height (used where a grid column is stretched to a sibling).
+  fill?: boolean;
+  className?: string;
   children: React.ReactNode;
 }) {
   const variant = useContext(PanelContext);
@@ -290,7 +296,7 @@ export function Panel({
   return (
     <section
       data-awf-stale={stale ? "true" : undefined}
-      className={`min-w-0 w-full max-w-full ${isGhost ? "" : "rounded-[var(--radius-panel)] border border-line bg-surface"}`}
+      className={`min-w-0 w-full max-w-full ${fill ? "flex min-h-0 flex-col " : ""}${isGhost ? "" : "rounded-[var(--radius-panel)] border border-line bg-surface"} ${className}`}
     >
       <div
         className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 ${
@@ -314,7 +320,9 @@ export function Panel({
           {action}
         </div>
       </div>
-      <div className={`min-w-0 ${isGhost ? "py-3" : "p-3"}`}>{children}</div>
+      <div className={`min-w-0 ${fill ? "flex min-h-0 flex-1 flex-col " : ""}${isGhost ? "py-3" : "p-3"}`}>
+        {children}
+      </div>
     </section>
   );
 }

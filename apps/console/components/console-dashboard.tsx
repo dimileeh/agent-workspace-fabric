@@ -928,14 +928,19 @@ const searchParams = useSearchParams();
                 workspaceSummaryError={workspaceSummaryError}
               />
             </div>
-            <div id="awf-merge-queue" className="min-w-0 scroll-mt-4">
-              <MergeQueuePanel
-                items={mergeQueue}
-                hasMore={mergeQueueHasMore}
-                status={mergeQueueStatus}
-                error={mergeQueueError}
-                stale={dataStale}
-              />
+            {/* 2xl: the panel overlays the cell (absolute) so the long merge
+                list never drives the row height — Capacity sets the height and
+                the list scrolls to fill it. Below 2xl it is normal flow. */}
+            <div id="awf-merge-queue" className="min-w-0 scroll-mt-4 2xl:relative">
+              <div className="2xl:absolute 2xl:inset-0">
+                <MergeQueuePanel
+                  items={mergeQueue}
+                  hasMore={mergeQueueHasMore}
+                  status={mergeQueueStatus}
+                  error={mergeQueueError}
+                  stale={dataStale}
+                />
+              </div>
             </div>
             <div id="awf-failures" className="scroll-mt-4 2xl:col-span-2">
               <FailureAnalysisPanel
