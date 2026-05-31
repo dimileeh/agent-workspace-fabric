@@ -16,6 +16,7 @@ from scripts.generate_install_manifest import (
     _default_generated_at,
     _validate_checksum_content,
     resolve_channel,
+    write_manifest,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -180,6 +181,48 @@ def test_manifest_generator_emits_deterministic_manifest_from_dist_and_checksums
     assert [artifact["name"] for artifact in artifacts] == sorted(file.name for file in files)
     assert [artifact["kind"] for artifact in artifacts] == ["wheel", "sdist"]
     assert json.dumps(manifest, indent=2, sort_keys=True) + "\n" == text
+
+
+@pytest.mark.unit
+def test_write_manifest_emits_objects_with_sorted_keys(tmp_path: Path) -> None:
+    """write_manifest sorts every object's keys.
+
+    The jq-free awk wheel parser in packaging/install.sh keys off "kind" being
+    emitted before an artifact's "name"/"sha256"/"url" fields. Sorted-key output
+    guarantees that ordering; if a future change dropped sort_keys=True (even
+    though build_manifest happens to assemble keys alphabetically today), the
+    installer would silently mis-parse. Feed write_manifest an intentionally
+    unsorted dict so this invariant is pinned independent of build order.
+    """
+    output = tmp_path / "awf-install-manifest.json"
+    write_manifest(
+        {
+            "version": "0.1.0",
+            "channel": "stable",
+            "artifacts": [
+                {"url": "u", "sha256": "s", "name": "n", "kind": "wheel"},
+            ],
+            "source": {"tag": "v0.1.0", "repository": "r", "commit": None},
+        },
+        output,
+    )
+    text = output.read_text(encoding="utf-8")
+
+    # The awk parser relies on "kind" preceding the artifact's other fields.
+    assert text.index('"kind"') < text.index('"name"')
+    assert text.index('"kind"') < text.index('"sha256"')
+    assert text.index('"kind"') < text.index('"url"')
+
+    unsorted_objects: list[list[str]] = []
+
+    def _record_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        keys = [key for key, _ in pairs]
+        if keys != sorted(keys):
+            unsorted_objects.append(keys)
+        return dict(pairs)
+
+    json.loads(text, object_pairs_hook=_record_object)
+    assert unsorted_objects == [], f"objects emitted with unsorted keys: {unsorted_objects}"
 
 
 @pytest.mark.unit
