@@ -1301,10 +1301,68 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
             continue
         if " -> " in path:
             old_path, new_path = path.split(" -> ", 1)
-            paths.extend([old_path, new_path])
+            paths.extend(
+                [
+                    _unquote_porcelain_path(old_path),
+                    _unquote_porcelain_path(new_path),
+                ]
+            )
         else:
-            paths.append(path)
+            paths.append(_unquote_porcelain_path(path))
     return list(dict.fromkeys(paths))
+
+
+_PORCELAIN_C_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "t": 0x09,
+    "n": 0x0A,
+    "v": 0x0B,
+    "f": 0x0C,
+    "r": 0x0D,
+    '"': 0x22,
+    "\\": 0x5C,
+}
+
+
+def _unquote_porcelain_path(path: str) -> str:
+    """Decode Git's C-quoted porcelain path form when present."""
+    if len(path) < 2 or path[0] != '"' or path[-1] != '"':
+        return path
+
+    raw = bytearray()
+    end = len(path) - 1
+    i = 1
+    while i < end:
+        char = path[i]
+        if char != "\\":
+            raw.extend(char.encode("utf-8", "surrogateescape"))
+            i += 1
+            continue
+
+        i += 1
+        if i >= end:
+            raw.append(ord("\\"))
+            break
+
+        escaped = path[i]
+        if escaped in _PORCELAIN_C_ESCAPES:
+            raw.append(_PORCELAIN_C_ESCAPES[escaped])
+            i += 1
+            continue
+
+        if "0" <= escaped <= "7":
+            j = i + 1
+            while j < end and j < i + 3 and "0" <= path[j] <= "7":
+                j += 1
+            raw.append(int(path[i:j], 8))
+            i = j
+            continue
+
+        raw.extend(escaped.encode("utf-8", "surrogateescape"))
+        i += 1
+
+    return bytes(raw).decode("utf-8", "surrogateescape")
 
 
 def _porcelain_z_records(status_stdout: str) -> list[tuple[str, str, str | None]]:
@@ -1383,7 +1441,7 @@ def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
     for line in status_stdout.splitlines():
         if not line.startswith("?? "):
             continue
-        paths.append(line[3:])
+        paths.append(_unquote_porcelain_path(line[3:]))
     return list(dict.fromkeys(paths))
 
 
