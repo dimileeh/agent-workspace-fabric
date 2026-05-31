@@ -1203,6 +1203,62 @@ def check_host_port_conflict(api_port: int, postgres_port: int) -> SetupCheckRes
     )
 
 
+def check_ollama_bridge_api_port_conflict(
+    api_port: int, bridge_listen_port: int
+) -> SetupCheckResult | None:
+    """Block when the API and ollama-bridge host ports resolve to the same value.
+
+    The local-service Compose stack publishes the API on every interface
+    (``${AWF_API_HOST_PORT:-8000}:8000`` -> ``0.0.0.0``), and the optional
+    ``ollama-bridge`` profile runs a host-networking socat that binds
+    ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``
+    directly on the host. ``awf service bootstrap`` brings the bridge up *before*
+    it publishes the API (the ``ollama_bridge`` stage precedes ``api_worker``), so
+    socat holds the listen port first; a wildcard ``0.0.0.0`` reservation overlaps
+    every specific address on the same port, so when the two ports match Docker
+    cannot publish the API and ``awf start`` fails. :func:`check_ports` and
+    :func:`check_ollama_bridge_listen_port` each validate their port in isolation,
+    so neither catches the collision -- this cross-check closes that
+    dry-run-passes / start-fails gap, mirroring :func:`check_host_port_conflict`
+    for the API/Postgres pair.
+
+    The comparison is intentionally port-only: the API side is *always* the
+    wildcard ``0.0.0.0`` publish (the Compose mapping carries no host IP), which
+    overlaps the bridge's bind address whatever it resolves to, so no address
+    comparison is needed for soundness. (The Postgres pair is left to
+    :func:`check_host_port_conflict`; Postgres and the bridge bind two distinct
+    *specific* addresses by default, so they would not collide on a shared port.)
+
+    Returns ``None`` when the two ports differ (the common case -- the bridge
+    defaults to 11434 and the API to 8000 -- so no extra readiness line is
+    emitted) and a BLOCKED result when they collide.
+    """
+    if api_port != bridge_listen_port:
+        return None
+    return SetupCheckResult(
+        name="ollama_bridge_port_conflict",
+        level=SetupCheckLevel.BLOCKED,
+        summary=f"API and ollama-bridge host ports both resolve to {api_port}.",
+        detail=(
+            f"The local-service Compose stack publishes the API on 0.0.0.0:{api_port} "
+            "(${AWF_API_HOST_PORT:-8000}:8000) and, with COMPOSE_PROFILES=ollama-bridge, runs a "
+            f"host-networking socat that binds host port {bridge_listen_port} "
+            "(${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}). "
+            "awf service bootstrap starts the bridge before it publishes the API, so socat holds "
+            "the port first, and a wildcard 0.0.0.0 reservation conflicts with any specific-address "
+            "reservation on the same port, so Docker refuses to publish the API and start fails. The "
+            "single-port probes bind and release each port independently, so both pass in isolation."
+        ),
+        fix="Set AWF_API_HOST_PORT and AWF_OLLAMA_BRIDGE_LISTEN_PORT to different ports (the "
+        "defaults are 8000 and 11434), then re-run awf setup --dry-run.",
+        data={
+            "api_port": api_port,
+            "ollama_bridge_listen_port": bridge_listen_port,
+            "conflict": True,
+        },
+    )
+
+
 def _ollama_bridge_profile_enabled(environ: Mapping[str, str]) -> bool:
     """Return whether the optional ``ollama-bridge`` Compose profile is active.
 
@@ -2280,6 +2336,29 @@ def run_system_checks(
     ollama_bridge_bind_address_check = check_ollama_bridge_bind_address(environ)
     ollama_bridge_target_port_check = check_ollama_bridge_target_port(environ)
     ollama_bridge_target_host_check = check_ollama_bridge_target_host(environ)
+    # Cross-check the API host port against the bridge listen port. The bridge
+    # comes up before the API publish (bootstrap orders ollama_bridge ahead of
+    # api_worker), and the API publishes on the wildcard 0.0.0.0, which overlaps
+    # any specific bridge bind address on the same port, so a shared port breaks
+    # awf start while both isolated probes still pass. Only applicable when the
+    # bridge profile is on and both ports resolve -- skip when either override is
+    # invalid (its own blocker already fires and there is no resolved port to
+    # compare), mirroring the API/Postgres port_conflict gating above.
+    bridge_env = os.environ if environ is None else environ
+    resolved_bridge_listen_port: int | None = None
+    if (
+        resolved_port is not None
+        and _ollama_bridge_profile_enabled(bridge_env)
+        and _invalid_ollama_bridge_listen_port_override(bridge_env) is None
+    ):
+        resolved_bridge_listen_port = (
+            _env_ollama_bridge_listen_port(bridge_env) or DEFAULT_OLLAMA_BRIDGE_LISTEN_PORT
+        )
+    ollama_bridge_port_conflict_check = (
+        check_ollama_bridge_api_port_conflict(resolved_port, resolved_bridge_listen_port)
+        if resolved_port is not None and resolved_bridge_listen_port is not None
+        else None
+    )
     invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
     invalid_work_dir_home = _invalid_work_dir_home_fallback(work_dir=work_dir, environ=environ)
     if invalid_work_dir is not None:
@@ -2347,6 +2426,11 @@ def run_system_checks(
         ),
         *([ollama_bridge_target_port_check] if ollama_bridge_target_port_check is not None else []),
         *([ollama_bridge_target_host_check] if ollama_bridge_target_host_check is not None else []),
+        *(
+            [ollama_bridge_port_conflict_check]
+            if ollama_bridge_port_conflict_check is not None
+            else []
+        ),
         disk_check,
         host_home_check,
         check_required_service_env(environ=environ),
@@ -2549,6 +2633,7 @@ __all__ = [
     "check_host_port_conflict",
     "check_host_work_dir_override",
     "check_local_capacity",
+    "check_ollama_bridge_api_port_conflict",
     "check_ollama_bridge_bind_address",
     "check_ollama_bridge_listen_port",
     "check_ollama_bridge_target_host",

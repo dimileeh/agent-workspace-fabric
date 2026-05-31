@@ -2232,6 +2232,162 @@ def test_run_system_checks_skips_port_conflict_when_an_override_is_invalid(
     assert ports.level is SetupCheckLevel.BLOCKED
 
 
+@pytest.mark.unit
+def test_check_ollama_bridge_api_port_conflict_blocks_when_ports_equal() -> None:
+    """A shared API/ollama-bridge host port is a hard blocker carrying both ports.
+
+    The local-service Compose stack publishes the API on every interface
+    (``${AWF_API_HOST_PORT:-8000}:8000`` -> ``0.0.0.0``) and, with the
+    ``ollama-bridge`` profile on, runs a host-networking socat that binds
+    ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``
+    *before* the API is published. A wildcard 0.0.0.0 reservation overlaps every
+    specific address on the same port, so a shared port makes ``awf start`` fail
+    even though the isolated single-port probes each pass. The cross-check blocks.
+    """
+    result = system_checks.check_ollama_bridge_api_port_conflict(8000, 8000)
+
+    assert result is not None
+    assert result.name == "ollama_bridge_port_conflict"
+    assert result.level is SetupCheckLevel.BLOCKED
+    assert result.data["api_port"] == 8000
+    assert result.data["ollama_bridge_listen_port"] == 8000
+    assert "8000" in result.summary
+    assert result.fix is not None
+    assert "AWF_API_HOST_PORT" in result.fix
+    assert "AWF_OLLAMA_BRIDGE_LISTEN_PORT" in result.fix
+
+
+@pytest.mark.unit
+def test_check_ollama_bridge_api_port_conflict_passes_when_ports_differ() -> None:
+    """Distinct API/ollama-bridge host ports add no readiness line (the common case)."""
+    assert system_checks.check_ollama_bridge_api_port_conflict(8000, 11434) is None
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_when_api_and_ollama_bridge_ports_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the bridge profile on, a shared API/bridge port surfaces as a blocker.
+
+    Setting ``AWF_OLLAMA_BRIDGE_LISTEN_PORT`` to the default API host port (8000)
+    makes socat and the API publish claim the same host port. The bridge comes up
+    first, so ``awf start`` cannot publish the API; only the cross-check catches
+    it (the per-port probes each report FREE in isolation).
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "8000"},
+    )
+
+    conflict = next(result for result in results if result.name == "ollama_bridge_port_conflict")
+    assert conflict.level is SetupCheckLevel.BLOCKED
+    assert conflict.data["api_port"] == 8000
+    assert conflict.data["ollama_bridge_listen_port"] == 8000
+    # The cross-check is additive: the standalone probes still run.
+    assert any(result.name == "ports" for result in results)
+    assert any(result.name == "ollama_bridge_port" for result in results)
+    # It sits with the other port checks, before disk.
+    names = [result.name for result in results]
+    assert names.index("ollama_bridge_port_conflict") < names.index("disk")
+    assert names.index("ollama_bridge_port_conflict") > names.index("postgres_port")
+
+
+@pytest.mark.unit
+def test_run_system_checks_omits_ollama_bridge_port_conflict_when_profile_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge port equal to the API port is harmless when the profile is off.
+
+    ``awf start`` never appends the bridge stage with the profile disabled, so
+    there is no socat bind to collide with the API publish and no extra readiness
+    line is emitted even when the ports would match.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"AWF_OLLAMA_BRIDGE_LISTEN_PORT": "8000"},
+    )
+
+    assert all(result.name != "ollama_bridge_port_conflict" for result in results)
+
+
+@pytest.mark.unit
+def test_run_system_checks_omits_ollama_bridge_port_conflict_when_ports_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An active bridge profile on its default port adds no conflict line."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"COMPOSE_PROFILES": "ollama-bridge"},
+    )
+
+    assert all(result.name != "ollama_bridge_port_conflict" for result in results)
+
+
+@pytest.mark.unit
+def test_run_system_checks_skips_ollama_bridge_port_conflict_when_api_override_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid API port override blocks on its own; the bridge cross-check is skipped.
+
+    When ``AWF_API_HOST_PORT`` cannot be parsed there is no resolved API port to
+    compare against the bridge listen port, so the collision cross-check must not
+    run (and must not crash) -- the override blocker already wedges readiness.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={
+            "COMPOSE_PROFILES": "ollama-bridge",
+            "AWF_API_HOST_PORT": "abc",
+            "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "8000",
+        },
+    )
+
+    assert all(result.name != "ollama_bridge_port_conflict" for result in results)
+    ports = next(result for result in results if result.name == "ports")
+    assert ports.level is SetupCheckLevel.BLOCKED
+
+
+@pytest.mark.unit
+def test_run_system_checks_skips_ollama_bridge_port_conflict_when_bridge_override_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed bridge listen port blocks on its own; the cross-check is skipped.
+
+    When ``AWF_OLLAMA_BRIDGE_LISTEN_PORT`` cannot be parsed there is no resolved
+    bridge port to compare, so the collision cross-check must not run -- the
+    listen-port blocker already fires.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_postgres_port(monkeypatch, captured)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        work_dir=Path("/tmp"),
+        environ={"COMPOSE_PROFILES": "ollama-bridge", "AWF_OLLAMA_BRIDGE_LISTEN_PORT": "abc"},
+    )
+
+    assert all(result.name != "ollama_bridge_port_conflict" for result in results)
+    port = next(result for result in results if result.name == "ollama_bridge_port")
+    assert port.level is SetupCheckLevel.BLOCKED
+    assert port.data["env_value"] == "abc"
+
+
 def _patch_probes_capture_disk_path(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, object],
