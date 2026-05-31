@@ -119,7 +119,7 @@ async def _finish_pending_validate_operations(
     *,
     workspace_id: str,
     status: OperationStatus,
-    validation_run_id: str,
+    validation_run_id: str | None,
     requested_tier: int,
     reason_code: str | None,
     error_message: str | None = None,
@@ -145,7 +145,7 @@ async def _finish_pending_validate_operations_in_session(
     *,
     workspace_id: str,
     status: OperationStatus,
-    validation_run_id: str,
+    validation_run_id: str | None,
     requested_tier: int,
     reason_code: str | None,
     error_message: str | None = None,
@@ -165,12 +165,16 @@ async def _finish_pending_validate_operations_in_session(
         status=OperationStatus.running,
         limit=100,
     )
-    result = {
+    result: dict[str, object] = {
         "validation_run_id": validation_run_id,
         "requested_tier": requested_tier,
         "reason_code": reason_code,
     }
-    validation_run = await ValidationRunRepository(session).get(validation_run_id)
+    validation_run = (
+        await ValidationRunRepository(session).get(validation_run_id)
+        if validation_run_id is not None
+        else None
+    )
     if validation_run is not None and isinstance(validation_run.log_stream_refs, dict):
         result["log_stream_refs"] = dict(validation_run.log_stream_refs)
     if coverage is not None:

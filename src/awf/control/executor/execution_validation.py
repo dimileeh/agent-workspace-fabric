@@ -92,18 +92,19 @@ async def _fail_validation_worktree_guard(
     self: Any,
     *,
     workspace_id: str,
-    validation_run_id: str,
+    validation_run_id: str | None,
     validation_tier: int,
     reason_code: str,
     message: str,
 ) -> ExecutionValidationResult:
     """Record and surface a fatal validation-worktree guard failure."""
     failure_message = f"{reason_code}: {message}"
-    await self._finish_validation_run(
-        validation_run_id,
-        status="failed",
-        reason_code=reason_code,
-    )
+    if validation_run_id is not None:
+        await self._finish_validation_run(
+            validation_run_id,
+            status="failed",
+            reason_code=reason_code,
+        )
     await self._finish_pending_validate_operations(
         workspace_id=workspace_id,
         status=OperationStatus.failed,
@@ -311,7 +312,7 @@ async def run_validation_and_fix_cycle(
             return await _fail_validation_worktree_guard(
                 self,
                 workspace_id=workspace_id,
-                validation_run_id=validation_run_id,
+                validation_run_id=None,
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
