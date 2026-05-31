@@ -118,6 +118,7 @@ class TestAddressThread:
 
     @pytest.mark.unit
     def test_thread_prompt_renders_owned_protected_paths_as_editable(self) -> None:
+        """Verify thread prompts list owned protected paths as editable."""
         thread = ReviewThread(
             thread_id="T",
             path=".github/workflows/publish.yml",
@@ -354,6 +355,7 @@ class TestAddressReviewComment:
 
     @pytest.mark.unit
     def test_review_comment_prompt_renders_owned_protected_paths_as_editable(self) -> None:
+        """Verify review-comment prompts list owned protected paths as editable."""
         c = ReviewComment(comment_id="C", body_excerpt="update publish workflow")
         prompt = address_review_comment_prompt(
             pr_number=1,
@@ -642,6 +644,7 @@ class TestFixCiPrompt:
 
     @pytest.mark.unit
     def test_ci_prompt_renders_owned_protected_paths_as_editable(self) -> None:
+        """Verify CI prompts list owned protected paths as editable."""
         failures = (
             CheckFailure(
                 name="publish",

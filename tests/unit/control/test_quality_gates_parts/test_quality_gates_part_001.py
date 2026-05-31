@@ -72,6 +72,7 @@ def test_diff_classified_protected_paths_normalizes_and_deduplicates() -> None:
 
 @pytest.mark.unit
 def test_diff_classified_protected_paths_excludes_owned_protected_paths() -> None:
+    """Verify owned protected paths are omitted from diff-classified paths."""
     paths = diff_classified_protected_paths(
         [
             ".github/workflows/publish.yml",

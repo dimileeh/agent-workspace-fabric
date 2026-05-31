@@ -374,6 +374,7 @@ def diff_classified_protected_paths(
     *,
     owned_paths: Sequence[str] = (),
 ) -> tuple[str, ...]:
+    """Return unowned protected paths that require protected diff classification."""
     paths: list[str] = []
     for raw_path in changed_paths:
         path = _normalize_path(raw_path)

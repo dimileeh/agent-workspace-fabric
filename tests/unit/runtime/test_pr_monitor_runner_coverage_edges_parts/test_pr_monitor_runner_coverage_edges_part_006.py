@@ -666,6 +666,7 @@ async def test_execute_ci_fix_workflow_scope_push_failure_is_terminal(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify CI repair workflow-scope push failures are terminal."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     cmd.queue_result(

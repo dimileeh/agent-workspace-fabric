@@ -28,6 +28,7 @@ from tests.unit.runtime.test_pr_monitor import _status
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a database session factory for PR monitor regressions."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -46,6 +47,7 @@ def _monitor_runner(tmp_path: Path, fake: FakeCommandRunner) -> PullRequestMonit
 async def test_protected_status_diff_skips_owned_protected_paths(
     tmp_path: Path,
 ) -> None:
+    """Verify protected status diffs skip owned protected paths."""
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
@@ -69,6 +71,7 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify workflow-scope push rejections map to terminal push results."""
     cmd = FakeCommandRunner()
     stderr = (
         "remote: refusing to allow a Personal Access Token to create or update workflow "
@@ -106,6 +109,7 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fix cycles prefetch owned paths once for a comment batch."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     for _ in range(4):
@@ -186,6 +190,7 @@ async def test_workflow_scope_push_failure_preserves_needs_human_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify workflow-scope push failures preserve needs-human thread state."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
@@ -241,6 +246,7 @@ async def test_workflow_scope_push_failure_preserves_false_positive_thread_state
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify workflow-scope push failures preserve false-positive thread state."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: reviewer misread the diff")
@@ -302,6 +308,7 @@ async def test_workflow_scope_push_failure_preserves_false_positive_thread_state
 
 @pytest.mark.unit
 def test_workflow_scope_needs_human_marking_preserves_non_fix_verdicts() -> None:
+    """Verify workflow-scope marking preserves non-fix verdicts."""
     state = MonitorState(
         threads_addressed_ids={
             "T_false_positive": "false_positive",
@@ -328,6 +335,7 @@ def test_workflow_scope_needs_human_marking_preserves_non_fix_verdicts() -> None
 
 @pytest.mark.unit
 def test_notify_human_reason_prefers_stored_needs_human_reason() -> None:
+    """Verify human notifications prefer stored needs-human reasons."""
     thread = ReviewThread(
         thread_id="T_workflow",
         path=".github/workflows/publish.yml",

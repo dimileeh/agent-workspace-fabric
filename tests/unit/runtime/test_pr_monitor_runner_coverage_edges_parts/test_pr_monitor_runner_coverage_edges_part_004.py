@@ -355,6 +355,7 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify sync-base workflow-scope push failures are terminal."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort

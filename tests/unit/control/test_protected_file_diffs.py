@@ -144,6 +144,7 @@ async def test_protected_file_diffs_for_committed_paths_loads_only_classified_pa
 async def test_protected_file_diffs_for_committed_paths_skips_owned_protected_paths(
     tmp_path,
 ) -> None:
+    """Verify owned protected paths are excluded from committed diff loading."""
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0)
     runner.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')

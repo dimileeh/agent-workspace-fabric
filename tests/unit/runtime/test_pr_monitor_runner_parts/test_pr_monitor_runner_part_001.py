@@ -175,6 +175,8 @@ def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:
 
 @pytest.mark.unit
 async def test_owned_paths_for_prompt_propagates_session_factory_type_error() -> None:
+    """Verify owned-path prompt loading preserves session factory TypeError."""
+
     def _broken_session_factory() -> object:
         raise TypeError("session factory contract changed")
 
@@ -575,6 +577,7 @@ async def test_address_review_comment_prompt_receives_workspace_runtime_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify review-comment prompts receive workspace runtime context."""
     context = "Workspace runtime context\n- Use `$AWF_TEST_DATABASE_URL`."
     runner = _monitor_runner(
         tmp_path,

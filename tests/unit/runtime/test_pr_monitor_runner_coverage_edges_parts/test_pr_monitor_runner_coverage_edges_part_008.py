@@ -1158,6 +1158,7 @@ async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
 
 @pytest.mark.unit
 async def test_address_thread_stashes_only_defer_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify thread handling stashes only actionable defer reasons."""
     # _address_thread stashes the agent's DEFER reason in state (for the
     # deferred-capture issue) only when there is a reason, the verdict is defer,
     # and state is present — never otherwise.
