@@ -253,6 +253,12 @@ class Provisioner:
                     reason_code="PROVISIONER_STALE_STATUS",
                 ):
                     return
+                async with self._session_factory() as pre_launch_session:
+                    pre_launch_repo = WorkspaceRepository(pre_launch_session)
+                    pre_launch_ws = await pre_launch_repo.get(workspace_id)
+                    if pre_launch_ws is not None and pre_launch_ws.compose_project_name is None:
+                        pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
+                        await pre_launch_session.commit()
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
@@ -313,6 +319,12 @@ class Provisioner:
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
             )
+            async with self._session_factory() as compose_fail_session:
+                compose_fail_repo = WorkspaceRepository(compose_fail_session)
+                compose_fail_ws = await compose_fail_repo.get(workspace_id)
+                if compose_fail_ws is not None and compose_fail_ws.compose_project_name is None:
+                    compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
+                    await compose_fail_session.commit()
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
             # Best-effort and must never mask the original ComposeOperationError.
