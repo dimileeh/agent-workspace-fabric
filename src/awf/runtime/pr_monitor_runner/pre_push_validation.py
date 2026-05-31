@@ -271,8 +271,8 @@ async def _run_pre_push_validation_with_fix_passes(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
     )
-    last_result: _PrePushValidationResult | None = None
-    for pass_index in range(max_fix_passes + 1):
+    pass_index = 0
+    while True:
         validation_result = await _run_pre_push_validation(
             self,
             workspace_id=workspace_id,
@@ -283,7 +283,6 @@ async def _run_pre_push_validation_with_fix_passes(
         )
         if validation_result.passed:
             return validation_result
-        last_result = validation_result
         if validation_result.reason_code == PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON:
             return validation_result
         if validation_result.reason_code == PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
@@ -291,7 +290,7 @@ async def _run_pre_push_validation_with_fix_passes(
         if validation_result.first_failure is None:
             return validation_result
         if pass_index >= max_fix_passes:
-            break
+            return validation_result
         committed = await _run_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
@@ -314,8 +313,7 @@ async def _run_pre_push_validation_with_fix_passes(
                     f"{pass_index + 1}/{max_fix_passes} attempts: {validation_result.message}"
                 ),
             )
-    assert last_result is not None
-    return last_result
+        pass_index += 1
 
 
 async def _pre_push_validation_commands(

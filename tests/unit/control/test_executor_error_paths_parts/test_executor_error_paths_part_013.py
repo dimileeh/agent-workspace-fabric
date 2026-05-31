@@ -707,3 +707,46 @@ class TestExecutorMonitorHandoffSetup:
             assert "monitor handoff profile setup failed" in (ws.failure_message or "")
             assert "ghp_FAKESECRET0000000" not in (ws.failure_message or "")
             assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_monitor_factory_none_marks_unavailable_after_setup(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _RecordingValidation()
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: None,
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_message == (
+                "adopted PR monitor handoff failed: no PR monitor configured"
+            )
+            assert ws.events[-1].reason_code == "PR_ADOPTION_MONITOR_UNAVAILABLE"
