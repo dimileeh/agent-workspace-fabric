@@ -1544,6 +1544,11 @@ async def test_stop_workspace_records_terminal_runtime_released(
 ) -> None:
     """After a successful stop, the terminal_runtime_released event is
     recorded so the cancelled workspace no longer blocks host ports."""
+    from awf.db.repositories.base import (
+        PROVISIONING_LAUNCHING_EVENT_TYPE,
+        PROVISIONING_LAUNCHING_REASON_CODE,
+    )
+
     factory = make_session_factory(engine)
     async with factory() as session:
         workspace = await _create_control_workspace(
@@ -1560,6 +1565,14 @@ async def test_stop_workspace_records_terminal_runtime_released(
                 }
             ]
         }
+        await session.flush()
+        repo = WorkspaceRepository(session)
+        await repo.add_event(
+            workspace,
+            event_type=PROVISIONING_LAUNCHING_EVENT_TYPE,
+            reason_code=PROVISIONING_LAUNCHING_REASON_CODE,
+            payload={"workspace_id": workspace.id},
+        )
         await session.flush()
         service = controls.WorkspaceControlService(
             session,
@@ -1721,4 +1734,108 @@ async def test_cancel_workspace_records_terminal_runtime_released_when_launching
         assert len(release_events) == 1, (
             "terminal_runtime_released must be recorded after stop_stack=True "
             "even when provisioning_launching guard exists"
+        )
+
+
+@pytest.mark.unit
+async def test_stop_workspace_skips_terminal_runtime_released_when_no_launching(
+    engine: AsyncEngine,
+) -> None:
+    """When no provisioning_launching event exists, stop_workspace must not
+    record terminal_runtime_released because the compose project was never
+    started and ports were never actually bound."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.provisioning,
+            compose_project_name="awf_ws_stop_no_launching",
+        )
+        workspace.task_policy = {
+            "companions": [
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "ports": [[80, 8091]],
+                }
+            ]
+        }
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        await service.stop_workspace(
+            workspace.id,
+            reason="stop before compose-up",
+            idempotency_key="stop-no-launching",
+        )
+
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 0, (
+            "terminal_runtime_released must not be recorded when "
+            "provisioning_launching guard does not exist"
+        )
+
+
+@pytest.mark.unit
+async def test_stop_workspace_records_terminal_runtime_released_when_launching(
+    engine: AsyncEngine,
+) -> None:
+    """When provisioning_launching event exists, stop_workspace records
+    terminal_runtime_released because the compose project was at least
+    partially started and the stop actually freed the ports."""
+    from awf.db.repositories.base import (
+        PROVISIONING_LAUNCHING_EVENT_TYPE,
+        PROVISIONING_LAUNCHING_REASON_CODE,
+    )
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.provisioning,
+            compose_project_name="awf_ws_stop_with_launching",
+        )
+        workspace.task_policy = {
+            "companions": [
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "ports": [[80, 8092]],
+                }
+            ]
+        }
+        await session.flush()
+        repo = WorkspaceRepository(session)
+        await repo.add_event(
+            workspace,
+            event_type=PROVISIONING_LAUNCHING_EVENT_TYPE,
+            reason_code=PROVISIONING_LAUNCHING_REASON_CODE,
+            payload={"workspace_id": workspace.id},
+        )
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        await service.stop_workspace(
+            workspace.id,
+            reason="stop while launching",
+            idempotency_key="stop-launching-guard",
+        )
+
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 1, (
+            "terminal_runtime_released must be recorded when provisioning_launching guard exists"
         )
