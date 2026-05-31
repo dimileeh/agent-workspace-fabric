@@ -343,6 +343,45 @@ def test_plain_file_writes_secret_with_conservative_permissions(
 
 
 @pytest.mark.unit
+def test_plain_file_creates_secrets_dir_restrictively(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the secrets dir is *created* 0700, not loosened-then-tightened.
+
+    ``mkdir`` honours the caller's umask, so a permissive umask would otherwise
+    expose the directory listing (provider names/structure) until the later
+    ``_chmod_best_effort`` tightens it — a TOCTOU window on multi-user hosts.
+    Neutralise the post-``mkdir`` chmod and use a fully permissive umask so the
+    only thing that can yield a 0700 directory is a restrictive create-time mode.
+    """
+    if os.name != "posix":
+        pytest.skip("directory permission semantics are POSIX-specific")
+
+    monkeypatch.setattr(credentials, "_chmod_best_effort", lambda *_a, **_k: None)
+    secrets_dir = tmp_path / "secrets"
+    old_umask = os.umask(0o000)
+    try:
+        store_provider_credential(
+            CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)),
+            preferred="plain_file",
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=True,
+            plain_file_consent=True,
+            plain_file_backend=PlainFileCredentialBackend(
+                capabilities=_HEADLESS_LINUX,
+                allow_plain_secrets=True,
+                consent=True,
+                secrets_dir=secrets_dir,
+            ),
+        )
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.unit
 def test_plain_file_backend_defaults_to_awf_secrets_dir() -> None:
     """Verify the default plain-file secrets directory is ``~/.awf/secrets``."""
     backend = PlainFileCredentialBackend(

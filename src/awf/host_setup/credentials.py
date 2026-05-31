@@ -545,7 +545,13 @@ def _write_secret_file(target: Path, secret: str) -> None:
     secrets_dir = target.parent
     tmp_path: Path | None = None
     try:
-        secrets_dir.mkdir(parents=True, exist_ok=True)
+        # Create the leaf 0o700 at mkdir time, not loosened-then-tightened: a
+        # plain ``mkdir`` honours the caller's umask (often 0o755), briefly
+        # exposing the directory listing (provider names/structure) to other
+        # users on a multi-user host until the chmod below lands. The chmod is
+        # still needed for the ``exist_ok=True`` case, where ``mkdir`` leaves an
+        # already-present looser directory untouched.
+        secrets_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         _chmod_best_effort(secrets_dir, 0o700)
         tmp_path = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
