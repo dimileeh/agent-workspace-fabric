@@ -317,16 +317,19 @@ async def retry_workspace_row(
         )
     if host_ports:
         await repo.acquire_host_port_admission_lock(host_ports=host_ports)
-        conflicts = await repo.find_host_port_conflicts(
-            host_ports=host_ports,
-            excluding_workspace_id=source.id,
-            node_id=target_node_id,
-        )
-        if conflicts:
-            raise workspaces.WorkspaceCreateHostPortConflictError(
-                host_port=conflicts[0].host_port,
-                conflicting_workspace_id=conflicts[0].workspace_id,
+        if target_node_id is None:
+            pass
+        else:
+            conflicts = await repo.find_host_port_conflicts(
+                host_ports=host_ports,
+                excluding_workspace_id=source.id,
+                node_id=target_node_id,
             )
+            if conflicts:
+                raise workspaces.WorkspaceCreateHostPortConflictError(
+                    host_port=conflicts[0].host_port,
+                    conflicting_workspace_id=conflicts[0].workspace_id,
+                )
 
     retried = await repo.create(
         repo_url=source.repo_url,
