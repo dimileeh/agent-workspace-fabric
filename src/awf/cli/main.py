@@ -59,8 +59,9 @@ __all__ = [
 
 _DX_FIRST_PATH_HELP = """
 For first-time users: the current runnable first path is
-`awf service bootstrap`, then `awf init <path>` to prepare your project
-repository. `awf setup` and `awf start` are reserved future command surfaces.
+`awf service bootstrap` (or the friendly `awf start` wrapper), then
+`awf init <path>` to prepare your project repository. `awf setup` is a
+reserved future command surface.
 """
 
 _MUTATES_GLOBAL_HELP = """
@@ -99,9 +100,10 @@ app.command(
 app.command(
     "start",
     help=(
-        "Start local AWF Core after setup. "
-        "Reserved before service startup lands. "
-        "Current runnable path: awf service bootstrap, then awf init <path>."
+        "Start local AWF Core. A friendly wrapper over the existing service "
+        "bootstrap engine that renders a first-run success panel or a "
+        "reason-coded failure. The expert commands awf service "
+        "bootstrap/status/doctor remain available."
     ),
 )(start_command)
 
