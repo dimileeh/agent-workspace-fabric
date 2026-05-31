@@ -50,19 +50,17 @@ from awf.runtime.validation_types import (
     ValidationCoverageResult,
     ValidationResult,
 )
+from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
+)
 
 if TYPE_CHECKING:
     from awf.runtime.validation_worktree import (
         ValidationWorktreeCheck,
         ValidationWorktreeCleanup,
     )
-
-
-# Keep worktree reason codes local to avoid importing `validation_worktree` while it is
-# still initializing via package import side effects.
-VALIDATION_WORKTREE_CLEANUP_FAILED = "VALIDATION_WORKTREE_CLEANUP_FAILED"
-VALIDATION_WORKTREE_PRE_EXISTING_DIRTY = "VALIDATION_WORKTREE_PRE_EXISTING_DIRTY"
-VALIDATION_WORKTREE_STATUS_FAILED = "VALIDATION_WORKTREE_STATUS_FAILED"
 
 _log = get_logger(__name__)
 
