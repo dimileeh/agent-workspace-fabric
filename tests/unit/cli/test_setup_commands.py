@@ -14,7 +14,9 @@ from typer.testing import CliRunner
 from awf.cli import setup_commands
 from awf.cli.main import app
 from awf.host_setup.config import HostSetupConfig, HostSetupConfigError
+from awf.host_setup.rendering import SETUP_READINESS_FAILED
 from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_INVALID,
     SOURCE_CHECKOUT_MARKERS,
     SourceCheckoutAssetMetadata,
     validate_source_checkout,
@@ -501,6 +503,61 @@ def test_setup_source_checkout_invalid_blocks_with_missing_markers(
     ]
     assert source_issues
     assert source_issues[0]["details"]["missing_markers"]
+
+
+@pytest.mark.unit
+def test_setup_invalid_source_checkout_skips_default_discovery_probes(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed checkout validation surfaces the error without default-discovery probes.
+
+    Regression for PRRT_kwDOSJAM6s6F7ys0: ``awf start`` exits from
+    ``_resolve_start_source_checkout`` before it reaches
+    ``_resolve_start_bootstrap_inputs``/default discovery for an invalid
+    selection, so ``awf setup`` must mirror that. When the source checkout fails
+    validation it must NOT call ``run_system_checks`` against the
+    default-discovered compose env, so it cannot add unrelated default port/disk
+    blockers (for example the default 8000 in use) the matching ``awf start``
+    would never hit. Only the source-checkout error remains.
+    """
+    # Exercise the real env resolver so a regression that reintroduces the probe
+    # also reintroduces its default-discovery IO, not just the call.
+    monkeypatch.setattr(setup_commands, "_readiness_environ", _real_readiness_environ)
+
+    bad_root = tmp_path / "not-awf"
+    bad_root.mkdir()
+
+    probe_calls: list[object] = []
+
+    def fake_checks(**kwargs: object) -> list[SetupCheckResult]:
+        probe_calls.append(kwargs.get("environ"))
+        # A default-discovery probe would report this port blocker; it must never
+        # reach the payload when the checkout itself failed validation.
+        return [
+            SetupCheckResult(
+                name="ports",
+                level=SetupCheckLevel.BLOCKED,
+                summary="default API host port 8000 is already in use",
+                detail="0.0.0.0:8000 already bound",
+                fix="free the port",
+            )
+        ]
+
+    monkeypatch.setattr(setup_commands, "run_system_checks", fake_checks)
+    result = _runner.invoke(
+        app,
+        ["setup", "--dry-run", "--source-checkout", str(bad_root), "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    # The default-discovery host probes never ran, so no unrelated port/disk
+    # blocker leaks into the payload; only the source-checkout error remains.
+    assert probe_calls == []
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert reason_codes == [SOURCE_CHECKOUT_INVALID]
+    assert SETUP_READINESS_FAILED not in reason_codes
 
 
 # --- Dry-run no mutation / A1 --------------------------------------------

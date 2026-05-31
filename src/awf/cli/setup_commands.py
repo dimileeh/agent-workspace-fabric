@@ -118,6 +118,25 @@ def _run_setup(
         source_checkout, config
     )
 
+    # A selected or persisted source checkout that fails validation surfaces as a
+    # blocked readiness issue *without* the default-discovery host probes, exactly
+    # as ``awf start`` exits from ``_resolve_start_source_checkout`` before it
+    # reaches ``_resolve_start_bootstrap_inputs``/default discovery. With
+    # ``probe_source`` ``None`` here, running the checks would call
+    # ``_readiness_environ(None)`` and probe the *default-discovered* compose env,
+    # so setup could add unrelated port/disk blockers (for example the default
+    # 8000 in use) the matching ``awf start`` would never hit -- the same divergence
+    # the source-checkout resolver documents it avoids. The "no selection at all"
+    # case (``source_error`` ``None``) still falls through to default discovery.
+    if source_error is not None:
+        return build_setup_readiness_payload(
+            (),
+            selected_providers=selected_providers,
+            allow_plain_secrets=allow_plain_secrets,
+            dry_run=dry_run,
+            source_checkout_error=source_error,
+        )
+
     # Probe the port/disk ``awf start`` will actually use. The documented
     # local-service flow keeps ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` in
     # ``docker/compose/.env`` for Compose interpolation; ``_readiness_environ``
