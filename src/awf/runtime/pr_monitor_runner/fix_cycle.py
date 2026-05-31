@@ -546,15 +546,20 @@ def _requeue_workflow_scope_publish_dependent_items(
     """Clear publish-dependent review states after workflow-scope failure.
 
     GitHub rejects workflow-file pushes before the local commits reach the PR.
-    Drop every item the fix cycle marked publish-dependent so unresolved review
-    items route back through ``AddressComments`` after the operator grants a
-    token with workflow scope. The explicit defer-filed markers are separate
-    state keys, so ``_clear_addressed_state_by_id`` still preserves inline defer
-    idempotency while clearing verdict/body/reason state.
+    Drop inline threads that still require GitHub resolution, and review-comment
+    ``fix_committed`` verdicts whose fixes did not publish. Preserve already
+    recorded review-comment ``false_positive`` verdicts because they do not
+    depend on a successful workflow-file push. The explicit defer-filed markers
+    are separate state keys, so ``_clear_addressed_state_by_id`` still preserves
+    inline defer idempotency while clearing verdict/body/reason state.
     """
-    del inline_thread_ids
+    inline_thread_id_set = set(inline_thread_ids)
     for item_id in item_ids:
-        _clear_addressed_state_by_id(state, item_id)
+        if (
+            item_id in inline_thread_id_set
+            or state.threads_addressed_ids.get(item_id) == "fix_committed"
+        ):
+            _clear_addressed_state_by_id(state, item_id)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:

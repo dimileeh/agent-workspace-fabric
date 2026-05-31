@@ -707,11 +707,11 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_restores_false_positive_review_comment_resolution(
+async def test_workflow_scope_push_failure_preserves_false_positive_review_comment_resolution(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify failed pushes do not lose durable false-positive review verdicts."""
+    """Verify workflow-scope pushes preserve durable false-positive review verdicts."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: existing code already handles it")
@@ -755,8 +755,8 @@ async def test_workflow_scope_push_failure_restores_false_positive_review_commen
 
     assert result.failed is True
     assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert "issue:workflow" not in state.threads_addressed_ids
-    assert "__review_comment_body_hash__:issue:workflow" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:workflow"] == "false_positive"
+    assert "__review_comment_body_hash__:issue:workflow" in state.threads_addressed_ids
     assert "__needs_human_reason__:issue:workflow" not in state.threads_addressed_ids
 
     async with factory() as session:
@@ -782,7 +782,7 @@ async def test_workflow_scope_push_failure_restores_false_positive_review_commen
         state=state,
     )
 
-    assert changed is True
+    assert changed is False
     assert state.threads_addressed_ids["issue:workflow"] == "false_positive"
     assert _review_comment_body_state_key("issue:workflow") in state.threads_addressed_ids
 
@@ -875,12 +875,14 @@ def test_workflow_scope_requeue_clears_inline_threads_dependent_on_resolution() 
             "__needs_human_reason__:T_workflow": "old reason",
             "issue:1": "false_positive",
             "__review_comment_body_hash__:issue:1": "comment-hash",
+            "issue:fixed": "fix_committed",
+            "__review_comment_body_hash__:issue:fixed": "fixed-comment-hash",
         }
     )
 
     _requeue_workflow_scope_publish_dependent_items(
         state,
-        ["T_false_positive", "T_defer", "T_workflow", "issue:1"],
+        ["T_false_positive", "T_defer", "T_workflow", "issue:1", "issue:fixed"],
         inline_thread_ids=["T_false_positive", "T_defer", "T_workflow"],
     )
 
@@ -895,8 +897,10 @@ def test_workflow_scope_requeue_clears_inline_threads_dependent_on_resolution() 
     assert "T_workflow" not in state.threads_addressed_ids
     assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
     assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
-    assert "issue:1" not in state.threads_addressed_ids
-    assert "__review_comment_body_hash__:issue:1" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:1"] == "false_positive"
+    assert state.threads_addressed_ids["__review_comment_body_hash__:issue:1"] == "comment-hash"
+    assert "issue:fixed" not in state.threads_addressed_ids
+    assert "__review_comment_body_hash__:issue:fixed" not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
