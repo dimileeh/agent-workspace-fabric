@@ -633,9 +633,7 @@ class TestOperatorControlRaces:
             async def _recheck_before_launch(self, workspace_id: str) -> bool:
                 result = await super()._recheck_before_launch(workspace_id)
                 if result:
-                    await _force_cancel_provisioning_workspace(
-                        session_factory, workspace_id
-                    )
+                    await _force_cancel_provisioning_workspace(session_factory, workspace_id)
                     nonlocal cancelled_between_guard_and_launch
                     cancelled_between_guard_and_launch = True
                 return result
