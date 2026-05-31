@@ -414,6 +414,11 @@ class Provisioner:
                     reason_code="COMPOSE_FAIL_COMMIT_NON_FATAL",
                     error=str(commit_exc),
                 )
+                # If this commit also fails, compose_project_name stays null.
+                # find_host_port_conflicts then ignores the terminal workspace
+                # and the cleanup worker also skips it, so ports from a
+                # partial compose failure may be transiently undetectable
+                # until Docker itself rejects the bind on the next compose-up.
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
             # Best-effort and must never mask the original ComposeOperationError.
