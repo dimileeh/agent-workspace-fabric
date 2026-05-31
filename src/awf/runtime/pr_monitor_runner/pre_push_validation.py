@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from awf.adapters.base import AgentRunError
 from awf.common.command_evidence import append_command_evidence
@@ -49,17 +49,19 @@ from awf.runtime.validation_types import (
     ValidationCoverageResult,
     ValidationResult,
 )
-from awf.runtime.validation_worktree import (
-    VALIDATION_WORKTREE_CLEANUP_FAILED,
-    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
-    VALIDATION_WORKTREE_STATUS_FAILED,
-    ValidationWorktreeCheck,
-    ValidationWorktreeCleanup,
-    check_validation_worktree_clean,
-    cleanup_validation_worktree_side_effects,
-    validation_worktree_cleanup_failure_message,
-    validation_worktree_preexisting_dirty_message,
-)
+
+if TYPE_CHECKING:
+    from awf.runtime.validation_worktree import (
+        ValidationWorktreeCheck,
+        ValidationWorktreeCleanup,
+    )
+
+
+# Keep worktree reason codes local to avoid importing `validation_worktree` while it is
+# still initializing via package import side effects.
+VALIDATION_WORKTREE_CLEANUP_FAILED = "VALIDATION_WORKTREE_CLEANUP_FAILED"
+VALIDATION_WORKTREE_PRE_EXISTING_DIRTY = "VALIDATION_WORKTREE_PRE_EXISTING_DIRTY"
+VALIDATION_WORKTREE_STATUS_FAILED = "VALIDATION_WORKTREE_STATUS_FAILED"
 
 _log = get_logger(__name__)
 
@@ -249,6 +251,8 @@ async def _pre_push_validation_worktree_check(
     async def _run_git(args: list[str]) -> Any:
         return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
 
+    from awf.runtime.validation_worktree import check_validation_worktree_clean
+
     return await check_validation_worktree_clean(run_git=_run_git, worktree_path=worktree_path)
 
 
@@ -260,6 +264,8 @@ async def _pre_push_validation_cleanup(
 ) -> ValidationWorktreeCleanup:
     async def _run_git(args: list[str]) -> Any:
         return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
+
+    from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
 
     return await cleanup_validation_worktree_side_effects(
         run_git=_run_git,
@@ -273,6 +279,8 @@ def _pre_push_dirty_result(
     workspace_head_sha: str | None,
     check: ValidationWorktreeCheck,
 ) -> _PrePushValidationResult:
+    from awf.runtime.validation_worktree import validation_worktree_preexisting_dirty_message
+
     reason_code = check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     message = (
         check.message
@@ -298,6 +306,8 @@ def _pre_push_cleanup_result(
     workspace_head_sha: str | None,
     cleanup: ValidationWorktreeCleanup,
 ) -> _PrePushValidationResult:
+    from awf.runtime.validation_worktree import validation_worktree_cleanup_failure_message
+
     return _PrePushValidationResult(
         passed=False,
         validation_run_id=validation_run_id,

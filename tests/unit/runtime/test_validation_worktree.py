@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 
 from awf.runtime.validation_worktree import (
-    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_CLEANUP_FAILED,
-    cleanup_validation_worktree_side_effects,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     check_validation_worktree_clean,
+    cleanup_validation_worktree_side_effects,
 )
 
 
@@ -45,7 +45,9 @@ async def test_check_validation_worktree_clean_handles_none_stdout_as_clean(tmp_
 
 
 @pytest.mark.unit
-async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(tmp_path: Path) -> None:
+async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
+    tmp_path: Path,
+) -> None:
     """Untracked files are pre-existing dirt and should be rejected by the guard."""
 
     worktree = _init_fake_worktree(tmp_path)
@@ -71,7 +73,9 @@ def _init_fake_worktree(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
-async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stderr(tmp_path: Path) -> None:
+async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stderr(
+    tmp_path: Path,
+) -> None:
     """A failed git restore should not crash if stderr is None."""
 
     worktree = _init_fake_worktree(tmp_path)
@@ -83,7 +87,9 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
             return _CommandResultLike(1, "", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
-    cleanup = await cleanup_validation_worktree_side_effects(run_git=run_git, worktree_path=worktree)
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git, worktree_path=worktree
+    )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command == "git restore"
@@ -91,7 +97,9 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
 
 
 @pytest.mark.unit
-async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stderr(tmp_path: Path) -> None:
+async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stderr(
+    tmp_path: Path,
+) -> None:
     """A failed git clean should not crash if stderr is None."""
 
     worktree = _init_fake_worktree(tmp_path)
@@ -103,7 +111,9 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
             return _CommandResultLike(1, "", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
-    cleanup = await cleanup_validation_worktree_side_effects(run_git=run_git, worktree_path=worktree)
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git, worktree_path=worktree
+    )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command == "git clean"
@@ -130,7 +140,9 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
             return _CommandResultLike(0, "", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
-    cleanup = await cleanup_validation_worktree_side_effects(run_git=run_git, worktree_path=worktree)
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git, worktree_path=worktree
+    )
 
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command is None
