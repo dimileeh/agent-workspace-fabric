@@ -103,7 +103,7 @@ async def stop_project_containers(compose_project_name: str | None) -> None:
 
 
 async def _docker_process(*args: str, operation: str) -> asyncio.subprocess.Process:
-    from awf.service.controls import WorkspaceStackStopError
+    from awf.service.controls_errors import WorkspaceStackStopError
 
     try:
         return await asyncio.create_subprocess_exec(
@@ -133,7 +133,7 @@ async def _communicate(
     *,
     operation: str,
 ) -> tuple[str, str]:
-    from awf.service.controls import WorkspaceStackStopError
+    from awf.service.controls_errors import WorkspaceStackStopError
 
     stdout_bytes, stderr_bytes = await proc.communicate()
     stdout = stdout_bytes.decode("utf-8", errors="replace")

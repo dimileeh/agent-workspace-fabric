@@ -17,7 +17,7 @@ from awf.service.controls import (
     WorkspaceRebaseStateError,
 )
 from tests.postgres import postgres_test_session
-from tests.unit.service.test_controls_lifecycle_parts.test_controls_lifecycle_part_001 import (
+from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
     _events,
     _operations,
     _service,
