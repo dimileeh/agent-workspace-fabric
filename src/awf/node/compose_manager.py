@@ -283,6 +283,11 @@ class ComposeManager:
             {
                 "name": c.name,
                 "image": c.image,
+                # Companion ``awf-companion-*`` tags are pre-built on the host
+                # daemon and never exist in a registry, so the rendered ``image:``
+                # must pin ``pull_policy: never`` -- an absent local image then
+                # fails clearly instead of triggering a confusing registry pull.
+                "local_image": True,
                 "build_context": c.build_context,
                 "dockerfile": c.dockerfile,
                 "env_file": c.env_file,
@@ -702,6 +707,10 @@ class ComposeManager:
         return {
             "name": service.name,
             "image": service.image,
+            # Profile-declared services reference registry images (postgres,
+            # redis, the DinD daemon, ...) that Compose must be free to pull, so
+            # they never get ``pull_policy: never``.
+            "local_image": False,
             "build_context": service.build_context,
             "dockerfile": service.dockerfile,
             "env_file": service.env_file,

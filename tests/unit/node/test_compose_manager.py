@@ -341,6 +341,55 @@ class TestRender:
         assert "image" not in backend
 
     @pytest.mark.unit
+    def test_companion_prebuilt_image_pins_pull_policy_never(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A companion's locally pre-built tag is never pulled from a registry.
+
+        Companion ``awf-companion-*`` tags only ever exist on the host daemon,
+        so Compose must not try to pull them. ``pull_policy: never`` turns an
+        absent local image into a clear local-image-missing error instead of a
+        confusing (and slow) registry pull that fails with "not found".
+        """
+        spec = _spec(
+            tmp_path,
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    image="awf-companion-backend:abc123def456",
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        backend = parsed["services"]["backend"]
+        assert backend["image"] == "awf-companion-backend:abc123def456"
+        assert backend["pull_policy"] == "never"
+
+    @pytest.mark.unit
+    def test_profile_registry_image_is_still_pullable(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Profile services reference registry images and must stay pullable.
+
+        ``pull_policy: never`` is scoped to locally pre-built companion images;
+        pinning it on a profile-declared registry image (postgres, redis, ...)
+        would wrongly block the registry pull the service depends on.
+        """
+        spec = _spec(
+            tmp_path,
+            services=(ComposeService(name="redis", image="redis:7"),),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        redis = parsed["services"]["redis"]
+        assert redis["image"] == "redis:7"
+        assert "pull_policy" not in redis
+
+    @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
         # Container names embed the workspace_id so operators can ``docker ps
         # --filter name=awf-ws_test123`` to find the stack.
