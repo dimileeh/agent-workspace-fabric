@@ -379,6 +379,16 @@ class PlainFileCredentialBackend:
         self._allow_plain_secrets = allow_plain_secrets
         self._consent = consent
         raw_secrets_dir = Path(secrets_dir) if secrets_dir is not None else _default_secrets_dir()
+        # Expand a leading ``~``/``~user`` *before* absolutising. An explicit
+        # ``secrets_dir="~/.awf/secrets"`` would otherwise have ``Path.absolute``
+        # anchor the literal ``~`` under the cwd (``<repo>/~/.awf/secrets``),
+        # stranding the approved secret in the workspace and pointing the
+        # ``plain-file://`` ref away from the operator's host setup location.
+        # ``expanduser`` only substitutes the home prefix; like ``absolute`` it
+        # never traverses a symlink (only ``Path.resolve`` does), so the un-followed
+        # path is preserved for the write-time guard below. The default path is
+        # already expanded by ``_default_secrets_dir``, so this is a no-op there.
+        #
         # Make the path absolute *without* following symlinks. ``Path.resolve``
         # would canonicalise a pre-planted ``~/.awf/secrets -> /attacker`` symlink
         # into its target here, stripping the very information
@@ -387,7 +397,7 @@ class PlainFileCredentialBackend:
         # ``secrets_dir`` still yields an absolute ``plain-file://`` ref) and never
         # traverses a link, preserving the un-followed path for the write-time
         # symlink check.
-        self._secrets_dir = raw_secrets_dir.absolute()
+        self._secrets_dir = raw_secrets_dir.expanduser().absolute()
 
     def is_available(self) -> bool:
         """Return whether flag, consent, and a headless-Linux host all hold."""

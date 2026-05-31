@@ -815,6 +815,29 @@ def test_plain_file_backend_resolves_relative_secrets_dir() -> None:
 
 
 @pytest.mark.unit
+def test_plain_file_backend_expands_home_in_secrets_dir() -> None:
+    """Verify an explicit ``~``-prefixed ``secrets_dir`` expands to the home dir.
+
+    Without expansion ``Path("~/.awf/secrets").absolute()`` anchors the literal
+    ``~`` under the cwd (e.g. ``<repo>/~/.awf/secrets``), stranding the approved
+    plain-file secret in the workspace and pointing the ``plain-file://`` ref away
+    from the operator's host setup location. ``~`` must expand *before*
+    absolutisation, and expansion must not follow symlinks (``expanduser`` only
+    substitutes the home prefix; it never resolves links), preserving the
+    write-time ``_mkdir_secure`` symlink guard.
+    """
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir="~/.awf/secrets",
+    )
+    expanded = Path("~/.awf/secrets").expanduser()
+    assert backend._secrets_dir == expanded
+    assert "~" not in backend._secrets_dir.parts
+
+
+@pytest.mark.unit
 def test_plain_file_write_failure_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
