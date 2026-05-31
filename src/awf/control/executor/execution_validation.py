@@ -517,6 +517,7 @@ async def run_validation_and_fix_cycle(
                     has_known_non_plan_output=has_known_non_plan_output,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
+                    check_callback_after_cleanup=True,
                 )
             ) is not None:
                 return cleanup_guard_result

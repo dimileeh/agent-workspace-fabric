@@ -530,6 +530,57 @@ class _StaleValidationSuccessRunner:
         )
 
 
+class _TerminalDuringCleanupCommandRunner(FakeCommandRunner):
+    """Command runner that marks the workspace terminal when restore runs."""
+
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        terminal_status: WorkspaceStatus,
+    ) -> None:
+        """Capture the workspace factory and terminal status used in this test."""
+        super().__init__()
+        self._factory = factory
+        self._terminal_status = terminal_status
+        self._triggered = False
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        result = await super().run(args, input_bytes=input_bytes, cwd=cwd)
+        if self._triggered:
+            return result
+        if "restore" not in args:
+            return result
+        if "-C" not in args:
+            return result
+        command_idx = args.index("-C")
+        if command_idx + 1 >= len(args):
+            return result
+        worktree_path = Path(args[command_idx + 1])
+        workspace_id = worktree_path.name
+        async with self._factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            if self._terminal_status == WorkspaceStatus.cancelled:
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.cancelled,
+                    reason_code="OPERATOR_CANCEL",
+                )
+            else:
+                ws.status = WorkspaceStatus.destroying.value
+            await session.commit()
+        self._triggered = True
+        return result
+
+
 def _mark_git_worktree(worktree_path: Path) -> None:
     """Create a minimal `.git` control file at the worktree root."""
     worktree_path.mkdir(parents=True, exist_ok=True)
@@ -786,6 +837,53 @@ class TestValidationSideEffectCleanup:
             assert ws is not None
             assert ws.status == terminal_status.value
             assert ws.failure_reason is None
+
+    @pytest.mark.unit
+    async def test_executor_cleanup_callback_terminal_after_stale_status_during_cleanup(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Late terminal transitions during cleanup should stop instead of failing."""
+        validation = _ValidationSideEffectRunner(
+            artifacts_dir=tmp_path / "artifacts",
+            results=[True],
+        )
+        fake = _TerminalDuringCleanupCommandRunner(
+            factory=factory,
+            terminal_status=WorkspaceStatus.cancelled,
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        _mark_git_worktree(worktree_path)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=0, stdout="")  # clean before validation
+        fake.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+        fake.queue_result(returncode=1, stderr="restore failed")
+
+        await executor.execute(ws_id)
+
+        joined_calls = [" ".join(call.args) for call in fake.calls]
+        assert any(
+            "restore --source deadbeef01 --staged --worktree -- apps/console/next-env.d.ts" in call
+            for call in joined_calls
+        )
+        assert all("push" not in call for call in joined_calls)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.failure_reason is None
+            runs = await ValidationRunRepository(session).list_for_workspace(ws_id)
+            assert runs[-1].reason_code == "STALE_CALLBACK_IGNORED"
 
 
 class TestFixCycleRecoversAfterOneFailure:
