@@ -177,6 +177,7 @@ class TestFindHostPortConflicts:
 
     @pytest.mark.asyncio
     async def test_multiple_companions(self, session: AsyncSession) -> None:
+        """When the new request has two companions but only one collides."""
         repo = WorkspaceRepository(session)
         existing = await _make_workspace(
             session,
@@ -193,7 +194,7 @@ class TestFindHostPortConflicts:
             },
         )
         conflicts = await repo.find_host_port_conflicts(
-            host_ports=[6379],
+            host_ports=[6379, 8080],
             excluding_workspace_id=None,
         )
         assert len(conflicts) == 1
