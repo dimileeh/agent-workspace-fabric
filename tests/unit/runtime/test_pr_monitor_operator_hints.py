@@ -418,6 +418,96 @@ async def test_operator_hint_repair_marks_protected_scope_push_blocked_as_needs_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("reason_code", "status_reason"),
+    [
+        (
+            "PROTECTED_SCOPE_PUSH_BLOCKED",
+            "operator hint repair touched protected workflow",
+        ),
+        (
+            "PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+            "protected-scope policy could not verify the operator hint repair push",
+        ),
+    ],
+)
+async def test_operator_hint_terminal_failure_persists_needs_human_status(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason_code: str,
+    status_reason: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair would edit a protected workflow",
+        operation_id="op_terminal_protected_scope_hint",
+        requested_at="2026-05-31T02:40:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
+        await session.commit()
+
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _terminal_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        state_arg = kwargs["state"]
+        assert isinstance(state_arg, MonitorState)
+        operator_hints.mark_operator_hint_needs_human(state_arg, status_reason)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=status_reason,
+            reason_code=reason_code,
+        )
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _terminal_operator_hint_cycle)
+
+    terminal = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.failed.value
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+    assert persisted_hint == {
+        "operation_id": "op_terminal_protected_scope_hint",
+        "reason": "operator hint repair would edit a protected workflow",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": "2026-05-31T02:40:00+00:00",
+        "status": "needs_human",
+        "status_reason": status_reason,
+    }
+
+
+@pytest.mark.unit
 async def test_operator_hint_repair_records_agent_failed_verdict_as_agent_failed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -1053,6 +1053,7 @@ async def _execute(
                 error_message=push_result.error_message,
             )
             if push_result.terminal_monitor_failure:
+                await self._persist_state(workspace_id, state)
                 await self._terminate_failed(
                     workspace_id,
                     message=push_result.error_message or push_result.reason_code,
