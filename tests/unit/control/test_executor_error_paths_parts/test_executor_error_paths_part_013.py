@@ -17,7 +17,10 @@ from awf.control.executor.constants import (
 )
 from awf.control.executor.monitor_handoff import _build_handoff_pr_monitor
 from awf.control.executor.monitor_handoff_audit import _record_setup_dependency_network_events
-from awf.control.executor.monitor_handoff_setup import _run_monitor_handoff_profile_setup
+from awf.control.executor.monitor_handoff_setup import (
+    _MonitorHandoffSetupFailureError,
+    _run_monitor_handoff_profile_setup,
+)
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.ownership import (
@@ -827,7 +830,7 @@ class TestExecutorMonitorHandoffSetup:
         assert "details" not in fallback_failure
 
     @pytest.mark.unit
-    async def test_handoff_setup_mark_failed_fallback_error_after_command_failure_is_local(
+    async def test_handoff_setup_mark_failed_fallback_error_after_command_failure_reraises(
         self,
         tmp_path: Path,
     ) -> None:
@@ -858,16 +861,18 @@ class TestExecutorMonitorHandoffSetup:
                 mark_failed_calls.append(kwargs)
                 raise RuntimeError("workspace failure state unavailable")
 
-        result = await _run_monitor_handoff_profile_setup(
-            _Executor(),
-            workspace_id="ws-db-down",
-            profile=object(),
-            compose_project="awf_x",
-            compose_file=tmp_path / "compose.yml",
-            worktree_path=tmp_path,
-        )
+        with pytest.raises(_MonitorHandoffSetupFailureError) as exc_info:
+            await _run_monitor_handoff_profile_setup(
+                _Executor(),
+                workspace_id="ws-db-down",
+                profile=object(),
+                compose_project="awf_x",
+                compose_file=tmp_path / "compose.yml",
+                worktree_path=tmp_path,
+            )
 
-        assert result is False
+        assert exc_info.value.reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+        assert exc_info.value.details is None
         assert len(mark_failed_calls) == 2
         detailed_failure = mark_failed_calls[0]
         assert detailed_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE

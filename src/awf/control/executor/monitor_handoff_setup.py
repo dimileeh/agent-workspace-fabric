@@ -186,4 +186,5 @@ async def _run_monitor_handoff_profile_setup(
                 workspace_id=workspace_id,
                 setup_failure_reason_code=setup_failure_reason_code,
             )
+            raise
     return False
