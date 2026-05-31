@@ -387,6 +387,7 @@ async def cleanup_validation_worktree_side_effects(
         )
 
     tracked_paths = check.tracked_paths
+    untracked_paths = check.untracked_paths
     if tracked_paths:
         restore = await run_git(
             ["restore", "--source", restore_ref, "--staged", "--worktree", "--", *tracked_paths]
@@ -455,6 +456,20 @@ async def cleanup_validation_worktree_side_effects(
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             message=(
                 "AWF validation modified tracked files, then restored them. "
+                "Result was validated on a working tree that is no longer "
+                "present in the workspace."
+            ),
+            verify_check=verify,
+        )
+
+    if untracked_paths:
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=check,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=(
+                "AWF validation generated untracked files, then removed them. "
                 "Result was validated on a working tree that is no longer "
                 "present in the workspace."
             ),

@@ -367,6 +367,38 @@ async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_fai
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_marks_untracked_files_as_failure(
+    tmp_path: Path,
+) -> None:
+    """Untracked validation artifacts that are cleaned up after execution should fail cleanup."""
+    worktree = _init_fake_worktree(tmp_path)
+    status_calls: int = 0
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a validation side effect that creates and then removes an untracked file."""
+        nonlocal status_calls
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            status_calls += 1
+            if status_calls == 1:
+                return _CommandResultLike(0, "?? untracked.py\n", None)
+            return _CommandResultLike(0, "", None)
+        if args == ["clean", "-fd", "--", "untracked.py"]:
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleanup_command is None
+    assert "AWF validation generated untracked files, then removed them." in cleanup.message
+    assert cleanup.verify_check is not None
+    assert cleanup.verify_check.clean
+
+
+@pytest.mark.unit
 def test_validation_worktree_cleanup_failure_message_prefers_verify_paths() -> None:
     """Human-readable cleanup failures should report remaining dirty paths when verification runs."""
     cleanup = ValidationWorktreeCleanup(
