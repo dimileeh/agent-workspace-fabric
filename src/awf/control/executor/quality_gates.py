@@ -202,8 +202,16 @@ def _is_nothing_to_commit(result: CommandResult) -> bool:
     NOT a real git error — it means the agent (or a prior repair step)
     already committed the work, so the post-agent commit should fall
     through to the rev-list check instead of failing the workspace.
+
+    Returns False if the command succeeded (no failure to explain) or
+    if a pre-commit hook failure is present in the output, since either
+    case means the "nothing to commit" substring is not the real signal.
     """
+    if result.ok:
+        return False
     combined = f"{result.stdout or ''}\n{result.stderr or ''}"
+    if _PRE_COMMIT_HOOK_ID_PATTERN.search(combined):
+        return False
     return bool(_NOTHING_TO_COMMIT_PATTERN.search(combined))
 
 

@@ -354,6 +354,26 @@ class TestNothingToCommitDetection:
         assert _is_nothing_to_commit(result) is False
 
     @pytest.mark.unit
+    def test_is_nothing_to_commit_returns_false_on_ok(self) -> None:
+        from awf.control.executor.quality_gates import _is_nothing_to_commit
+
+        result = CommandResult(
+            returncode=0, stdout="", stderr="nothing to commit, working tree clean\n"
+        )
+        assert _is_nothing_to_commit(result) is False
+
+    @pytest.mark.unit
+    def test_is_nothing_to_commit_returns_false_with_pre_commit_hook_failure(self) -> None:
+        from awf.control.executor.quality_gates import _is_nothing_to_commit
+
+        result = CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="- hook id: ruff\nnothing to commit, working tree clean\n",
+        )
+        assert _is_nothing_to_commit(result) is False
+
+    @pytest.mark.unit
     def test_nothing_to_commit_classification_reason_code(self) -> None:
         classification = _classify_post_agent_commit_failure(
             _commit_result(stderr="nothing to commit, working tree clean\n")
