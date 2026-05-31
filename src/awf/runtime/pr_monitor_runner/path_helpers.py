@@ -74,9 +74,16 @@ def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
 
 def _changed_paths_from_name_only_z(diff_stdout: str) -> tuple[str, ...]:
     """Extract changed paths from ``git diff --name-only -z`` output."""
+    if not diff_stdout:
+        return ()
+    if "\0" not in diff_stdout:
+        raise ProtectedScopeDiffError(
+            "expected NUL-delimited output from `git diff --name-only -z`"
+        )
+    if not diff_stdout.endswith("\0"):
+        raise ProtectedScopeDiffError("truncated `--name-only -z` output: missing terminating NUL")
     parts = diff_stdout.split("\0")
-    if parts and parts[-1] == "":
-        parts = parts[:-1]
+    parts = parts[:-1]
     if any(part == "" for part in parts):
         raise ProtectedScopeDiffError("empty path in `--name-only -z` output")
     return tuple(dict.fromkeys(parts))
