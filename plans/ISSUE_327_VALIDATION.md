@@ -78,7 +78,7 @@ resolved.
 
 ## Focused test results
 
-```
+```text
 tests/unit/control/test_executor_post_agent_commit_classifier.py::test_is_nothing_to_commit_detects_benign_clean_tree  PASSED (13 cases)
 tests/unit/control/test_executor_post_agent_commit_classifier.py::test_is_nothing_to_commit_rejects_real_errors  PASSED (4 cases)
 tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_002.py::TestSelfCommittedAgent  PASSED (4 tests)
