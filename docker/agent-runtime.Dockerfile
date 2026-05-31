@@ -164,7 +164,7 @@ RUN set -eux; \
       echo "cursor-agent was not installed by the Cursor installer" >&2; \
       exit 1; \
     fi; \
-    ln -sf "$cursor_path" /usr/local/bin/cursor-agent; \
+    install -m 0755 "$cursor_path" /usr/local/bin/cursor-agent; \
     chmod -R a+rX /opt/cursor; \
     chmod +x /usr/local/bin/cursor-agent; \
     test -x /usr/local/bin/cursor-agent
