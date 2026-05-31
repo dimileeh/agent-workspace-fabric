@@ -2233,19 +2233,33 @@ def test_run_system_checks_explicit_work_dir_suppresses_whitespace_override_bloc
 
 
 @pytest.mark.unit
-def test_run_system_checks_default_work_dir_expands_home_when_unset(
+def test_run_system_checks_blocks_on_unset_home_work_dir_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without ``HOME`` the default mirrors Compose expanding ``~`` to the user home."""
+    """An unset ``HOME`` blocks the work-dir default; Compose anchors it at ``/``.
+
+    With ``AWF_HOST_WORK_DIR`` unset the local-service Compose stack binds
+    ``${HOME}/.awf/service``, and ``${HOME}`` itself has no ``:-`` default — an
+    unset ``HOME`` interpolates to nothing, so Compose binds ``/.awf/service`` (the
+    filesystem root) while the readiness probe would expand ``~`` to the account
+    home. The probe must block instead of reporting disk readiness for a directory
+    ``awf start`` never mounts. ``AWF_HOST_HOME`` is pinned absolute so only the
+    work-dir fallback is exercised.
+    """
     captured: dict[str, object] = {}
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
-    run_system_checks(
+    results = run_system_checks(
         config=HostSetupConfig(work_dir="/persisted/state"),
-        environ={},
+        environ={"AWF_HOST_HOME": "/home/op"},
     )
 
-    assert captured["disk_path"] == Path("~/.awf/service").expanduser()
+    disk = next(result for result in results if result.name == "disk")
+    assert disk.level is SetupCheckLevel.BLOCKED
+    assert disk.data["env_value"] == ""
+    assert "unset or empty" in disk.summary
+    # The disk probe must not run for a path awf start never mounts.
+    assert "disk_path" not in captured
 
 
 # --- AWF_HOST_HOME override validation ------------------------------------
@@ -2518,18 +2532,18 @@ def test_run_system_checks_home_fallback_ok_when_absolute(
 
 
 @pytest.mark.unit
-def test_run_system_checks_home_fallback_ok_when_unset_or_empty(
+def test_run_system_checks_blocks_on_unset_or_empty_home_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unset or empty ``HOME`` is left to the ``~``-expansion fallback, not blocked.
+    """An unset or empty ``HOME`` blocks both fallbacks; Compose anchors them at ``/``.
 
     ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` and ``${AWF_HOST_HOME:-${HOME}}``
-    substitute their default only when the override is unset or empty, and a
-    missing/empty ``HOME`` makes Compose interpolate ``${HOME}`` as nothing — the
-    readiness probe deliberately mirrors that by expanding ``~`` to the user home
-    (an absolute path) rather than blocking. Guards against the HOME-fallback
-    validation over-reaching into the unset/empty case the override checks treat as
-    a legitimate fall-back.
+    fall back to ``${HOME}``, but ``${HOME}`` itself has no ``:-`` default: an unset
+    or empty ``HOME`` interpolates to nothing, so Compose binds the work dir at
+    ``/.awf/service`` and the auth mounts at ``/.config/gh`` (the filesystem root),
+    not the directories under the account home. The readiness probe would instead
+    expand ``~`` to the account home, so both checks must block rather than report
+    readiness for directories ``awf start`` never mounts.
     """
     for empty in (None, ""):
         captured: dict[str, object] = {}
@@ -2545,9 +2559,12 @@ def test_run_system_checks_home_fallback_ok_when_unset_or_empty(
 
         disk = next(result for result in results if result.name == "disk")
         host_home = next(result for result in results if result.name == "host_home")
-        assert disk.level is SetupCheckLevel.OK, repr(empty)
-        assert host_home.level is SetupCheckLevel.OK, repr(empty)
-        assert captured["disk_path"] == Path("~/.awf/service").expanduser(), repr(empty)
+        assert disk.level is SetupCheckLevel.BLOCKED, repr(empty)
+        assert host_home.level is SetupCheckLevel.BLOCKED, repr(empty)
+        assert disk.data["env_value"] == "", repr(empty)
+        assert host_home.data["env_value"] == "", repr(empty)
+        # Neither probe runs for paths awf start never mounts.
+        assert "disk_path" not in captured, repr(empty)
 
 
 @pytest.mark.unit

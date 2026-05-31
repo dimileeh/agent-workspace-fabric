@@ -1171,14 +1171,15 @@ def _default_compose_work_dir(environ: Mapping[str, str]) -> Path:
 
     Mirrors the no-override side of the local-service bind source
     ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``: Compose interpolates
-    ``${HOME}`` from the same merged environment the readiness probe sees, so
-    resolve the default from that ``HOME`` (falling back to ``~`` expansion when
-    it is unset or blank). ``_safe_expanduser`` keeps an unresolvable home from
-    aborting the advisory probe with a traceback.
+    ``${HOME}`` from the same merged environment the readiness probe sees.
+
+    Reached only after :func:`_invalid_work_dir_home_fallback` has confirmed the
+    ``${HOME}`` fall-back is a usable absolute path -- a relative, ``~``-prefixed,
+    whitespace-padded, *or* empty/unset ``HOME`` already blocks upstream -- so
+    ``HOME`` is a non-empty absolute string here and the default resolves directly
+    from it (no ``~`` expansion or normalization is left to do).
     """
-    home = environ.get("HOME")
-    base = Path(home) if home else Path("~")
-    return _safe_expanduser(base) / ".awf" / "service"
+    return Path(environ["HOME"]) / ".awf" / "service"
 
 
 def _invalid_home_fallback(environ: Mapping[str, str]) -> str | None:
@@ -1194,15 +1195,23 @@ def _invalid_home_fallback(environ: Mapping[str, str]) -> str | None:
     readiness probe would expand or normalize it before declaring the machine
     ready.
 
-    Returns the raw ``HOME`` for those unusable values and ``None`` when ``HOME``
-    is unset, empty, or an absolute path with no surrounding whitespace. An unset
-    or empty ``HOME`` is left to the existing ``~``-expansion fallback (Compose
-    substitutes nothing into ``${HOME}``), mirroring the same empty-vs-set split
-    the ``AWF_HOST_*`` override checks use so every layer agrees.
+    Unlike the ``AWF_HOST_*`` overrides, ``${HOME}`` itself has *no* ``:-``
+    default, so an unset or empty ``HOME`` is **not** a legitimate fall-back:
+    Compose substitutes nothing, anchoring the bind at the filesystem root
+    (``${HOME}/.awf/service`` -> ``/.awf/service``, ``${HOME}/.config/gh`` ->
+    ``/.config/gh``) while the readiness probe expands ``~`` to the account home.
+    That divergence is the same dry-run-passes / start-mounts-the-wrong-directory
+    trap the other ``HOME`` shapes hit, so the empty/unset case must block too.
+
+    Returns ``None`` only when ``HOME`` is an absolute path with no surrounding
+    whitespace (the sole usable fall-back). For an unset or empty ``HOME`` it
+    returns the empty string ``""`` (the root-anchored marker the ``check_*``
+    fallbacks render distinctly); for a relative, ``~``-prefixed, or
+    whitespace-padded ``HOME`` it returns the raw value.
     """
     raw = environ.get("HOME")
     if not raw:
-        return None
+        return ""
     candidate = raw.strip()
     if candidate and candidate == raw and Path(candidate).is_absolute():
         return None
@@ -1379,14 +1388,36 @@ def check_work_dir_home_fallback(raw_home: str) -> SetupCheckResult:
     With ``AWF_HOST_WORK_DIR`` unset, the local-service Compose stack binds
     ``${HOME}/.awf/service`` as *both* the bind source and the (absolute-required)
     mount target, interpolating ``${HOME}`` verbatim. A relative or ``~``-prefixed
-    ``HOME`` yields a non-absolute bind path Docker rejects, and a
-    surrounding-whitespace ``HOME`` reaches Docker unstripped, so either way
-    ``awf start`` mounts (or fails on) a path the readiness probe would otherwise
-    normalize. The probe blocks rather than reporting disk readiness for a
-    directory ``awf start`` never mounts.
+    ``HOME`` yields a non-absolute bind path Docker rejects, a
+    surrounding-whitespace ``HOME`` reaches Docker unstripped, and an unset or
+    empty ``HOME`` (which has no ``:-`` default of its own) makes Compose
+    substitute nothing and bind ``/.awf/service`` at the filesystem root -- so in
+    every case ``awf start`` mounts (or fails on) a path the readiness probe would
+    otherwise normalize or expand. The probe blocks rather than reporting disk
+    readiness for a directory ``awf start`` never mounts.
     """
     candidate = raw_home.strip()
-    if candidate and candidate == raw_home:
+    if not raw_home:
+        # Unset or empty HOME: ${HOME} has no ``:-`` default, so Compose
+        # substitutes nothing and anchors the bind at the filesystem root.
+        summary = (
+            "HOME is unset or empty, so the ${HOME}/.awf/service work dir "
+            "resolves to /.awf/service at the filesystem root."
+        )
+        detail = (
+            "With AWF_HOST_WORK_DIR unset and HOME unset or empty, the local-service Compose "
+            "stack interpolates ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service} as /.awf/service -- "
+            "anchored at the filesystem root, not your account home. ${HOME} has no :- default "
+            "of its own, so Compose substitutes nothing for an unset or empty HOME and awf start "
+            "binds /.awf/service, while the readiness probe expands ~ to your account home. The "
+            "probe must block rather than report disk readiness for a directory awf start never "
+            "mounts."
+        )
+        fix = (
+            "Set HOME to your absolute home directory (for example /home/you), or set "
+            "AWF_HOST_WORK_DIR to an absolute work directory, then re-run awf setup --dry-run."
+        )
+    elif candidate and candidate == raw_home:
         # Non-empty with no surrounding whitespace, but not absolute: a relative
         # path or a leading ``~`` Compose keeps verbatim as the bind path.
         summary = (
@@ -1566,13 +1597,36 @@ def check_auth_mount_home_fallback(raw_home: str) -> SetupCheckResult:
     as *both* the host source and the (absolute-required) container target for
     every auth mount (gh, gcloud, git, ssh, and the agent CLI directories),
     verbatim. A relative or ``~``-prefixed ``HOME`` yields a non-absolute mount
-    target Docker rejects, and a surrounding-whitespace ``HOME`` reaches Docker
-    unstripped, so either way ``awf start`` fails to mount the auth directories
-    the readiness probe would otherwise normalize. The probe blocks rather than
-    reporting auth mounts that are never bound.
+    target Docker rejects, a surrounding-whitespace ``HOME`` reaches Docker
+    unstripped, and an unset or empty ``HOME`` (which has no ``:-`` default of its
+    own) makes Compose substitute nothing and anchor the auth mounts at the
+    filesystem root (``/.config/gh``, ``/.ssh``, ...) -- so in every case
+    ``awf start`` fails to mount (or binds the wrong) auth directories the
+    readiness probe would otherwise normalize or expand. The probe blocks rather
+    than reporting auth mounts that are never bound.
     """
     candidate = raw_home.strip()
-    if candidate and candidate == raw_home:
+    if not raw_home:
+        # Unset or empty HOME: ${AWF_HOST_HOME:-${HOME}} resolves to nothing, so
+        # every auth mount anchors at the filesystem root instead of the home dir.
+        summary = (
+            "HOME is unset or empty, so the ${HOME} auth mounts resolve to "
+            "/.config/gh, /.ssh, ... at the filesystem root."
+        )
+        detail = (
+            "With AWF_HOST_HOME unset and HOME unset or empty, the local-service Compose stack "
+            "interpolates ${AWF_HOST_HOME:-${HOME}} as nothing, so every auth mount (for example "
+            "${AWF_HOST_HOME:-${HOME}}/.config/gh) resolves to a root-anchored path such as "
+            "/.config/gh -- not the directories under your account home. ${HOME} has no :- "
+            "default of its own, so awf start binds those root paths while the readiness probe "
+            "expands ~ to your account home. The probe must block rather than report auth mounts "
+            "awf start never binds."
+        )
+        fix = (
+            "Set HOME to your absolute home directory (for example /home/you), or set "
+            "AWF_HOST_HOME to an absolute directory path, then re-run awf setup --dry-run."
+        )
+    elif candidate and candidate == raw_home:
         # Non-empty with no surrounding whitespace, but not absolute: a relative
         # path or a leading ``~`` Compose mounts verbatim.
         summary = (
@@ -1623,9 +1677,11 @@ def check_host_home() -> SetupCheckResult:
     Reached only when neither :func:`_invalid_host_home_override` nor
     :func:`_invalid_auth_mount_home_fallback` finds a blocker: ``AWF_HOST_HOME``
     is an absolute path with no surrounding whitespace, or it is unset/empty and
-    the ``${HOME}`` fall-back is itself usable (unset/empty so Compose substitutes
-    nothing, or an absolute path). Every ``${AWF_HOST_HOME:-${HOME}}`` auth mount
-    therefore resolves to an absolute target ``awf start`` can bind.
+    the ``${HOME}`` fall-back is itself an absolute path with no surrounding
+    whitespace (an unset/empty ``HOME`` now blocks, because Compose would
+    substitute nothing and anchor the auth mounts at the filesystem root). Every
+    ``${AWF_HOST_HOME:-${HOME}}`` auth mount therefore resolves to an absolute
+    target ``awf start`` can bind.
     """
     return SetupCheckResult(
         name="host_home",
