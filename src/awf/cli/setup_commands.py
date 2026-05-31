@@ -169,14 +169,22 @@ def _run_setup(
         # never persisted (``explicit_source`` is ``None`` on a resolution error,
         # so only the consent flag is recorded; any existing persisted metadata is
         # preserved untouched).
-        try:
-            _persist_safe_config(
-                config,
-                source_checkout=None,
-                allow_plain_secrets=allow_plain_secrets,
-            )
-        except HostSetupConfigError as error:
-            return _readiness_with_config_write_failure(blocked_payload, error)
+        #
+        # Guard the write on there being consent to record: this branch only ever
+        # records the plain-file flag (``source_checkout`` is ``None`` here), so
+        # with neither an explicit ``--allow-plain-secrets`` nor a plain-file
+        # consent already on disk (the common fresh-machine state) the write would
+        # merely re-persist an identical config. Skip it rather than create/touch
+        # the config file for nothing.
+        if allow_plain_secrets or config.consent.plain_file_secrets:
+            try:
+                _persist_safe_config(
+                    config,
+                    source_checkout=None,
+                    allow_plain_secrets=allow_plain_secrets,
+                )
+            except HostSetupConfigError as error:
+                return _readiness_with_config_write_failure(blocked_payload, error)
         return blocked_payload
 
     # Probe the port/disk ``awf start`` will actually use. The documented
@@ -313,10 +321,17 @@ def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[s
 
     if verified_source is None:
         compose_file, raw_env_file, _ = resolve_service_compose_paths()
+        # Only the read-env (first return value) is used here; the trusted
+        # Compose env-file half is discarded. The default-discovery paths are not
+        # verified to exist either (the no-asset-root fallback yields relative
+        # ``.env``/``.env.example``), so pass ``paths_verified=False`` rather than
+        # assert a verification setup never performs. Unlike ``awf start`` /
+        # ``init`` / ``service``, which consume the Compose env-file half and pass
+        # ``True``, the flag has no effect on the read-env this branch returns.
         default_read_env, _ = resolve_service_runtime_env_files(
             compose_file,
             raw_env_file,
-            paths_verified=True,
+            paths_verified=False,
         )
         return local_service_environ(env_file=default_read_env)
 

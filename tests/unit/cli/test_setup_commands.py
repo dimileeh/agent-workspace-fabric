@@ -748,6 +748,35 @@ def test_setup_source_checkout_failure_folds_consent_write_failure(
     assert "Traceback" not in result.stdout
 
 
+@pytest.mark.unit
+def test_setup_source_checkout_failure_skips_redundant_consent_write(
+    harness: _Harness, tmp_path: Path
+) -> None:
+    """Verify a blocked source checkout with nothing to record writes no config.
+
+    Regression for review comment issue:4585200251: a non-dry-run
+    ``--source-checkout <bad>`` run with no ``--allow-plain-secrets`` (and no
+    plain-file consent already on disk) has nothing safe to persist on the
+    blocked early return -- the failed checkout is never recorded and the only
+    other field is the plain-file flag -- so it must not create or rewrite the
+    host config file for an identical, no-op write.
+    """
+    bad_root = tmp_path / "not-awf"
+    bad_root.mkdir()
+    result = _runner.invoke(
+        app,
+        ["setup", "--source-checkout", str(bad_root), "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    reason_codes = [issue["reason_code"] for issue in payload["issues"]]
+    assert SOURCE_CHECKOUT_INVALID in reason_codes
+    # No consent to record, so the blocked early return leaves the config untouched.
+    assert harness.writes == []
+
+
 # --- Dry-run no mutation / A1 --------------------------------------------
 
 
