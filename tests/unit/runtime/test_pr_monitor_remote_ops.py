@@ -29,6 +29,7 @@ from awf.runtime.validation_worktree import (
 
 
 def _make_push_result(reason_code: str) -> _GitPushResult:
+    """Build a failure push-result payload for push-outcome mapping tests."""
     return _GitPushResult(
         pushed=False,
         failed=True,
