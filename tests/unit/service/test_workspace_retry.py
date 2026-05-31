@@ -1719,15 +1719,14 @@ async def test_retry_allows_when_source_compose_project_name_is_none(
 
 
 @pytest.mark.unit
-async def test_retry_rejects_runtime_not_released_even_when_no_host_ports(
+async def test_retry_allows_retried_when_no_host_ports_even_without_runtime_release(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
     """A source workspace with compose_project_name set but no host ports
-    (no companions, no resolved-profile ports) must still raise
-    WorkspaceRetrySourceRuntimeNotReleasedError when no
-    terminal_runtime_released event exists.  The runtime-release guard
-    must not be gated on the presence of host ports."""
+    (no companions, no resolved-profile ports) should not raise
+    WorkspaceRetrySourceRuntimeNotReleasedError — the runtime-release
+    guard is meaningful only when host ports need protection."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
 
@@ -1752,12 +1751,12 @@ async def test_retry_rejects_runtime_not_released_even_when_no_host_ports(
         await session.commit()
 
     async with factory() as session:
-        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
-            await retry_workspace_row(
-                session,
-                source.id,
-                settings=settings,
-                provider_readiness_override=True,
-                provider_readiness_override_reason="no-host-ports runtime guard test",
-                provider_environ={},
-            )
+        retried = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="no-host-ports runtime guard test",
+            provider_environ={},
+        )
+        assert retried is not None

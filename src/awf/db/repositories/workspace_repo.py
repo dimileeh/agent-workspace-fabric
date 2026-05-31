@@ -579,6 +579,15 @@ class WorkspaceRepository:
         this method is called (see ``acquire_host_port_admission_lock``).
         Concurrent requests for the same host port are serialized by that
         lock.
+
+        SCALE CONSTRAINT: This method performs a full-table scan of all
+        active and terminal-unreleased workspaces (including their
+        ``task_policy`` and ``resolved_profile`` JSON blobs), then parses
+        ports in Python.  There is no WHERE clause that prunes by port
+        value.  As workspace count grows, every admission check becomes
+        more expensive.  When this becomes a bottleneck, consider adding
+        a JSONB index on the relevant port fields or a denormalized
+        ``host_ports`` integer-array column with a GIN index.
         """
         if not host_ports:
             return []
