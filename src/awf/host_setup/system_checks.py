@@ -932,6 +932,7 @@ def require_interactive(non_interactive: bool, what: str) -> None:
 def build_setup_readiness_payload(
     results: Sequence[SetupCheckResult],
     *,
+    command: str = _SETUP_COMMAND,
     selected_providers: Sequence[str] = (),
     allow_plain_secrets: bool = False,
     dry_run: bool = False,
@@ -968,7 +969,7 @@ def build_setup_readiness_payload(
     next_steps = _readiness_next_steps(blocked=bool(blocked))
 
     return first_run_report_payload(
-        command=_SETUP_COMMAND,
+        command=command,
         summary=summary,
         issues=issues,
         details=details,

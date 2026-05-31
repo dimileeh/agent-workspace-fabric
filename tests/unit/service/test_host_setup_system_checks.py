@@ -645,6 +645,20 @@ def test_build_payload_success_when_all_ok() -> None:
 
 
 @pytest.mark.unit
+def test_build_payload_command_label_is_overridable() -> None:
+    """Verify the rendered command label is injectable, defaulting to ``awf setup``.
+
+    The CLI layer owns the command name; the domain builder now accepts it as a
+    parameter instead of hardcoding a presentation detail, so a command rename
+    stays a single-source edit.
+    """
+    assert build_setup_readiness_payload([_ok("docker")]).command == "awf setup"
+    assert (
+        build_setup_readiness_payload([_ok("docker")], command="awf check").command == "awf check"
+    )
+
+
+@pytest.mark.unit
 def test_build_payload_blocked_with_mixed_results() -> None:
     """Verify blockers and warnings become issues with a blocked status."""
     docker_blocked = SetupCheckResult(

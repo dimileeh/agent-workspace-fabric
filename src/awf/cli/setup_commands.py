@@ -36,14 +36,13 @@ from awf.host_setup.source_assets import (
     verified_source_from_metadata,
 )
 from awf.host_setup.system_checks import (
+    _SETUP_COMMAND,
     SetupCheckError,
     build_setup_readiness_payload,
     normalize_providers,
     require_interactive,
     run_system_checks,
 )
-
-_SETUP_COMMAND = "awf setup"
 
 _PROVIDER_HELP = (
     "Target a single provider (repeatable). Validated and forwarded so later "
