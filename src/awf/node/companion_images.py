@@ -91,12 +91,28 @@ def companion_image_prune_command(retention_hours: int) -> list[str]:
     last used to launch a workspace -- Docker exposes no "last used" filter for
     ``image prune``. So a cached image built more than ``retention_hours`` ago can
     be pruned even though a workspace launched from it recently, as long as no
-    container is currently running off it. This is harmless: the next dispatch for
-    that companion sees the tag is gone, rebuilds it once, and provisioning
-    continues correctly -- the only cost is an unexpected cold build. An operator
-    who observes a companion rebuilding sooner than the retention window seems to
-    imply is seeing creation-age eviction of a stopped-but-not-destroyed
-    workspace's image, not a bug.
+    container is currently running off it. For a *future* dispatch this is benign:
+    it sees the tag is gone, rebuilds it once, and provisioning continues correctly
+    -- the only cost is an unexpected cold build. An operator who observes a
+    companion rebuilding sooner than the retention window seems to imply is seeing
+    creation-age eviction of a stopped-but-not-destroyed workspace's image, not a
+    bug.
+
+    It is *not* harmless for a dispatch that is already in flight, though. Once
+    :meth:`CompanionImageBuilder.ensure` resolves a cached tag, the stack renders
+    that companion with ``image:`` + ``pull_policy: never`` and no inline
+    ``build:`` fallback (the inline fallback only covers an ``ensure`` that returns
+    ``None`` -- no resolvable commit or a build failure -- not a tag pruned after
+    it resolves). A prune that races into the narrow window between ``ensure``'s
+    ``companion_image_exists`` check and the subsequent ``docker compose up``
+    removes the only local copy, so compose up fails with a missing-image
+    :class:`~awf.node.compose_manager.ComposeOperationError` instead of rebuilding,
+    and *that* workspace's provisioning fails (it is preserved as ``failed``; a
+    later provisioning attempt rebuilds the now-missing tag). The window is small
+    and requires no live container off the shared tag, but it is a real
+    prune/dispatch race rather than a guaranteed cold build. Because the eviction
+    self-corrects on the next build, callers do not retry compose up against the
+    pinned image -- doing so would hide genuine compose failures behind a retry.
     """
     return [
         "docker",
