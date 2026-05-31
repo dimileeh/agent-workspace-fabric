@@ -7,7 +7,6 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
@@ -17,7 +16,6 @@ from awf.db.models import (
     Task,
     TaskAttempt,
     Workspace,
-    WorkspaceEvent,
 )
 from awf.db.repositories import (
     OperationRepository,
@@ -27,10 +25,7 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.repositories.base import (
-    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-)
+from awf.db.repositories.base import has_terminal_runtime_released_event
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -104,16 +99,7 @@ async def _source_runtime_not_yet_released(
         return False
     if source.compose_project_name is None:
         return False
-    stmt = (
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == source.id,
-            WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-            WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none() is None
+    return not await has_terminal_runtime_released_event(session, source.id)
 
 
 async def retry_workspace_row(

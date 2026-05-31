@@ -52,6 +52,7 @@ from awf.db.models import (
     ProviderModelCircuitBreaker,
     ResourceReservation,
     Workspace,
+    WorkspaceEvent,
     WorkspaceSecretLease,
 )
 from awf.service.scheduler import (
@@ -610,6 +611,25 @@ PROVISIONING_LAUNCHING_EVENT_TYPE: Final = "workspace.provisioning_launching"
 PROVISIONING_LAUNCHING_REASON_CODE: Final = "PROVISIONING_LAUNCHING"
 TERMINAL_RUNTIME_RELEASE_EVENT_TYPE: Final = "workspace.terminal_runtime_released"
 TERMINAL_RUNTIME_RELEASE_REASON_CODE: Final = "TERMINAL_RUNTIME_RELEASED"
+
+
+async def has_terminal_runtime_released_event(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    """Return True if a ``terminal_runtime_released`` event exists for *workspace_id*."""
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
 SECRET_LEASE_AUDIT_SCHEMA: Final = "secret_lease_audit.v1"
 SECRET_LEASE_STATUS_ISSUED: Final = "issued"
