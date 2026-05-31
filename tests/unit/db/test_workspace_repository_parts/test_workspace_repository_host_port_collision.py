@@ -304,6 +304,12 @@ async def test_has_terminal_runtime_released_event_revoked(
         "revoked release must cause has_terminal_runtime_released_event to return False"
     )
 
+
+class TestCrossNodeAndEdgeCases:
+    """Cross-node filtering, terminal release statuses, profile service ports,
+    and pre-runtime terminal workspace tests for host-port conflict detection.
+    """
+
     @pytest.mark.asyncio
     async def test_queued_workspace_not_cross_node_port_holder(
         self,
