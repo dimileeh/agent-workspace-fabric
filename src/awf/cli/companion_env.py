@@ -165,7 +165,14 @@ def _build_name_index(companions: list[dict[str, object]]) -> dict[str, int]:
     for i, c in enumerate(companions):
         name = c.get("name")
         if name is not None:
-            index[str(name).strip()] = i
+            normalized = str(name).strip()
+            if normalized in index:
+                prev = companions[index[normalized]].get("name", normalized)
+                raise ValueError(
+                    f"duplicate companion name after trimming whitespace: "
+                    f"{normalized!r} (indices {index[normalized]}={prev!r} and {i}={name!r})"
+                )
+            index[normalized] = i
     return index
 
 

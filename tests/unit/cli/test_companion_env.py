@@ -523,6 +523,23 @@ def test_no_spurious_warning_for_payload_overridden_keys(
 
 
 @pytest.mark.unit
+def test_duplicate_companion_name_after_stripping(tmp_path: Path) -> None:
+    """Two companion names that normalize to the same stripped value raise ValueError."""
+    companions = [
+        {"name": "app", "repo_url": "git@x:app.git", "environment": {}},
+        {"name": " app ", "repo_url": "git@x:app2.git", "environment": {}},
+    ]
+    env_file = tmp_path / ".env"
+    env_file.write_text("KEY=val\n")
+    with pytest.raises(ValueError, match="duplicate companion name after trimming whitespace"):
+        merge_companion_env(
+            companions,
+            env_from=[("app", str(env_file))],
+            env_exclude=[],
+        )
+
+
+@pytest.mark.unit
 def test_companion_name_whitespace_exclude(tmp_path: Path) -> None:
     """Companion name with trailing whitespace works for env-exclude."""
     companions = [
