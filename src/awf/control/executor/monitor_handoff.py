@@ -31,9 +31,9 @@ from awf.common.github_client import (
     PullRequestMetadataError,
     RepoRef,
 )
+from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor.constants import (
     _DEPRECATED_TASK_KIND_REASON_CODE,
-    _EXECUTOR_AUDIT_ACTOR,
     _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
     _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
     _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
@@ -44,8 +44,6 @@ from awf.control.executor.constants import (
     _RELEASE_SYNC_REPO_INVALID_REASON_CODE,
     _SUPPORTED_TASK_KINDS,
     _UNSUPPORTED_TASK_KIND_REASON_CODE,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
 )
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
@@ -61,10 +59,6 @@ from awf.control.executor.helpers import (
     _sync_feature_pr_adoption_metadata,
     _sync_feature_pr_missing_metadata_message,
     _with_release_sync_pr_metadata,
-)
-from awf.control.executor.logging_ops import (
-    _setup_dependency_network_details,
-    _setup_dependency_network_event_payload,
 )
 from awf.control.executor.metadata import _metadata_int
 from awf.control.executor.protocols import _MonitorRunnerProto
@@ -99,10 +93,11 @@ from awf.runtime.release_pr_sync import (
     release_pr_body,
     release_pr_title,
 )
-from awf.runtime.validation import (
-    SETUP_DEPENDENCY_NETWORK_RETRY,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
-    ValidationResult,
+
+_add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
+_record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_audit_event
+_record_setup_dependency_network_events = (
+    _monitor_handoff_audit._record_setup_dependency_network_events
 )
 
 
@@ -713,148 +708,6 @@ def _compose_environment_list_item_targets(item: object, targets: set[str]) -> b
         return False
     key = item.split("=", 1)[0]
     return key in targets
-
-
-async def _record_executor_pr_audit_event(
-    self: Any,
-    workspace_id: str,
-    *,
-    event_type: str,
-    action: str,
-    outcome: str,
-    reason_code: str,
-    branch_name: str | None = None,
-    remote_branch: str | None = None,
-    pr_number: int | None = None,
-    pr_url: str | None = None,
-    source_head_sha: str | None = None,
-    source_base_sha: str | None = None,
-    operation_id: str | None = None,
-    operation_type: str | None = None,
-    evidence: Mapping[str, Any] | None = None,
-) -> None:
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:  # pragma: no cover - destroyed mid-flight
-            return
-        await self._add_executor_pr_audit_event(
-            repo,
-            workspace,
-            event_type=event_type,
-            action=action,
-            outcome=outcome,
-            reason_code=reason_code,
-            branch_name=branch_name,
-            remote_branch=remote_branch,
-            pr_number=pr_number,
-            pr_url=pr_url,
-            source_head_sha=source_head_sha,
-            source_base_sha=source_base_sha,
-            operation_id=operation_id,
-            operation_type=operation_type,
-            evidence=evidence,
-        )
-        await session.commit()
-
-
-async def _add_executor_pr_audit_event(
-    self: Any,
-    repo: WorkspaceRepository,
-    workspace: Workspace,
-    *,
-    event_type: str,
-    action: str,
-    outcome: str,
-    reason_code: str,
-    branch_name: str | None = None,
-    remote_branch: str | None = None,
-    pr_number: int | None = None,
-    pr_url: str | None = None,
-    source_head_sha: str | None = None,
-    source_base_sha: str | None = None,
-    operation_id: str | None = None,
-    operation_type: str | None = None,
-    evidence: Mapping[str, Any] | None = None,
-) -> None:
-    _ = self
-    resolved_branch_name = branch_name or workspace.branch_name
-    resolved_remote_branch = remote_branch or workspace.remote_push_branch or workspace.branch_name
-    await repo.add_audit_event(
-        workspace,
-        event_type=event_type,
-        actor=_EXECUTOR_AUDIT_ACTOR,
-        action=action,
-        outcome=outcome,
-        reason_code=reason_code,
-        operation_id=operation_id,
-        operation_type=operation_type,
-        pr_number=pr_number if pr_number is not None else workspace.pr_number,
-        pr_url=pr_url or workspace.pr_url,
-        source_head_sha=source_head_sha,
-        source_base_sha=source_base_sha or workspace.base_commit,
-        target_branch=workspace.branch_base,
-        remote_branch=resolved_remote_branch,
-        branch_name=resolved_branch_name,
-        evidence=evidence,
-    )
-
-
-async def _record_setup_dependency_network_events(
-    self: Any,
-    *,
-    workspace_id: str,
-    result: ValidationResult,
-) -> None:
-    event_specs: list[tuple[str, str, dict[str, Any]]] = []
-    commands = getattr(result, "commands", None)
-    if not commands:
-        return
-    for command in commands:
-        details = _setup_dependency_network_details(command)
-        if details is None:
-            continue
-        retry_count = _metadata_int(details, "retry_count") or 0
-        if retry_count > 0:
-            # Exhausted attempts intentionally emit both the retry event and
-            # the exhausted event from the same redacted retry metadata.
-            event_specs.append(
-                (
-                    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
-                    SETUP_DEPENDENCY_NETWORK_RETRY,
-                    _setup_dependency_network_event_payload(
-                        details,
-                        reason_code=SETUP_DEPENDENCY_NETWORK_RETRY,
-                    ),
-                )
-            )
-        if details.get("retry_exhausted") is True:
-            event_specs.append(
-                (
-                    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
-                    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
-                    _setup_dependency_network_event_payload(
-                        details,
-                        reason_code=SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
-                    ),
-                )
-            )
-    if not event_specs:
-        return
-
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:  # pragma: no cover - destroyed mid-flight
-            return
-        for event_type, reason_code, payload in event_specs:
-            await repo.add_event(
-                workspace,
-                event_type=event_type,
-                reason_code=reason_code,
-                payload=payload,
-            )
-        await session.commit()
 
 
 async def _reject_unsupported_task_kind(
