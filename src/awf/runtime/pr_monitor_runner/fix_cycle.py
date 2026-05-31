@@ -282,7 +282,14 @@ async def _run_fix_cycle(
             # thread path: the agent already judged this comment needs a human,
             # so a push failure must not clear that verdict and force a pointless
             # re-address next cycle.
-            if verdict not in {"needs_human", "defer", "agent_failed"}:
+            if verdict in {"needs_human", "agent_failed"}:
+                # A review comment re-addressed in a later pass may have been
+                # queued for rollback by an earlier fix_committed pass. Drop it
+                # from that stale queue so the latest non-publish-dependent
+                # verdict survives push-failure cleanup.
+                if c.comment_id in publish_dependent_ids:
+                    publish_dependent_ids.remove(c.comment_id)
+            elif verdict != "defer":
                 publish_dependent_ids.append(c.comment_id)
 
         # 2) Settle window — small sleep, then re-poll for new activity.

@@ -27,12 +27,14 @@ from awf.runtime.pr_monitor_runner.fix_cycle import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _needs_human_reason_state_key,
     _notify_human_reason,
+    _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _workflow_scope_push_block
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
+    issue_comment_node,
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
@@ -501,6 +503,71 @@ async def test_fix_cycle_stores_needs_human_reasons_for_threads_and_reviews(
         state.threads_addressed_ids[_needs_human_reason_state_key("issue:needs")]
         == "review needs operator approval"
     )
+
+
+@pytest.mark.unit
+async def test_generic_push_failure_preserves_review_comment_needs_human_after_later_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify stale publish rollback does not clear a later review needs-human verdict."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: initial repair committed")
+    adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: reviewer follow-up needs operator input")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(
+            comments=[
+                issue_comment_node(
+                    cid=4585067239,
+                    author="greptile-apps",
+                    body="updated review summary now needs operator input",
+                )
+            ]
+        ),
+    )
+    cmd.queue_result(returncode=0, stdout=pr_payload(comments=[]))
+    cmd.queue_result(returncode=1, stderr="remote: pre-receive hook declined")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    comment = ReviewComment(
+        comment_id="issue:4585067239",
+        body_excerpt="initial review summary asks for a code fix",
+        body="initial review summary asks for a code fix",
+        author="greptile-apps",
+        source_kind="issue",
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "GIT_PUSH_FAILED"
+    assert state.threads_addressed_ids["issue:4585067239"] == "needs_human"
+    assert (
+        state.threads_addressed_ids[_needs_human_reason_state_key("issue:4585067239")]
+        == "reviewer follow-up needs operator input"
+    )
+    assert _review_comment_body_state_key("issue:4585067239") in state.threads_addressed_ids
+    assert len(adapter.calls) == 2
 
 
 @pytest.mark.unit
