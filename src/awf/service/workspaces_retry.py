@@ -264,7 +264,7 @@ async def retry_workspace_row(
     host_ports: list[int] = []
     host_ports.extend(
         workspaces.host_ports_from_task_policy_companions(
-            source.task_policy,
+            retried_task_policy,
         )
     )
     host_ports.extend(
