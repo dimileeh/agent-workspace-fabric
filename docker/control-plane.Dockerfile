@@ -6,6 +6,11 @@ ENV PATH="/app/.venv/bin:${PATH}"
 
 ARG DOCKER_CE_CLI_VERSION=5:29.4.1-1~debian.12~bookworm
 ARG DOCKER_COMPOSE_PLUGIN_VERSION=5.1.3-1~debian.12~bookworm
+# Buildx is the client-side plugin Compose uses to drive BuildKit builds.
+# The control plane runs `docker compose up` for the outer workspace stack
+# (which builds managed companions), so it needs buildx to avoid the legacy
+# builder and the "requires buildx plugin" warning.
+ARG DOCKER_BUILDX_PLUGIN_VERSION=0.34.1-1~debian.12~bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -26,8 +31,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         "docker-ce-cli=${DOCKER_CE_CLI_VERSION}" \
         "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}" \
+        "docker-buildx-plugin=${DOCKER_BUILDX_PLUGIN_VERSION}" \
         gh \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version \
+    && docker compose version \
+    && docker buildx version
 
 WORKDIR /app
 
