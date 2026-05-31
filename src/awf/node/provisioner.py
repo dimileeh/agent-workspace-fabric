@@ -278,6 +278,13 @@ class Provisioner:
                             pre_launch_ws is not None
                             and pre_launch_ws.compose_project_name is None
                             and pre_launch_ws.status == WorkspaceStatus.provisioning.value
+                            # Guard: a cancel/stop that won the race between
+                            # _check_auto_resolved_profile_host_ports (advisory
+                            # lock released on commit) and this commit will have
+                            # transitioned the workspace to a terminal state,
+                            # causing this branch to be skipped and leaving
+                            # compose_project_name null — the correct outcome.
+                            # Do not weaken or reorder this guard.
                         ):
                             pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
                             if (
