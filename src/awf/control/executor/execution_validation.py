@@ -469,33 +469,25 @@ async def run_validation_and_fix_cycle(
             ignore_ignored_paths=pre_validation_check.ignored_paths,
         )
         if not cleanup_result.ok:
-            if await self._finish_validation_callback_if_terminal(
+            callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
                 requested_tier=validation_tier,
-            ):
-                _log.warning(
-                    "executor.validation_cleanup_failed_after_stale_validation_callback",
+            )
+            if (
+                cleanup_guard_result := await _handle_validation_cleanup_guard(
+                    self,
                     workspace_id=workspace_id,
                     validation_run_id=validation_run_id,
-                    reason_code=cleanup_result.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED,
-                )
-                return ExecutionValidationResult(
-                    stop=True,
+                    validation_tier=validation_tier,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     has_known_non_plan_output=has_known_non_plan_output,
+                    callback_ignored=callback_ignored,
+                    cleanup_result=cleanup_result,
                 )
-            reason_code = cleanup_result.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
-            message = validation_worktree_cleanup_failure_message(cleanup_result)
-            return await _fail_validation_worktree_guard(
-                self,
-                workspace_id=workspace_id,
-                validation_run_id=validation_run_id,
-                validation_tier=validation_tier,
-                reason_code=reason_code,
-                message=message,
-            )
+            ) is not None:
+                return cleanup_guard_result
         if await self._finish_validation_callback_if_terminal(
             workspace_id=workspace_id,
             validation_run_id=validation_run_id,
