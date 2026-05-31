@@ -718,6 +718,7 @@ async def test_execution_validation_fails_when_workspace_head_sha_cannot_be_capt
     )
 
     async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        """Stub resolved profile lookup for head-capture failure path."""
         return profile
 
     monkeypatch.setattr(
@@ -812,9 +813,11 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
     )
 
     async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        """Stub resolved profile lookup for dirty-worktree preflight test."""
         return profile
 
     async def _check_worktree_clean(*_args: object, **_kwargs: object) -> ValidationWorktreeCheck:
+        """Return a pre-existing dirty-worktree result for this test case."""
         return ValidationWorktreeCheck(
             clean=False,
             reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
