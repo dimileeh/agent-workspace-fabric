@@ -678,6 +678,75 @@ def test_check_local_capacity_fix_names_only_the_starved_resource() -> None:
     assert unknown_cpu_only.fix == "Verify the host environment exposes CPU information."
 
 
+@pytest.mark.unit
+def test_check_local_capacity_unknown_cpu_and_unknown_memory_names_both() -> None:
+    """Both an unknown CPU count and an unknown memory total must surface together.
+
+    Regression for PR #332 review (comment issue:4585200251): when both
+    ``os.cpu_count()`` and the memory estimate returned no value, only the CPU
+    gap was reported — the summary, detail, and fix all omitted memory, so an
+    operator who fixed CPU reporting would discover the memory gap only on a
+    follow-up run, a step-debug loop for two independent unknowns.
+    """
+    result = check_local_capacity(
+        cpu_count=lambda: None,
+        total_memory_bytes=lambda: None,
+    )
+    assert result.level is SetupCheckLevel.WARNING
+    assert "cpus" not in result.data
+    assert "memory_bytes" not in result.data
+    assert result.summary == (
+        "CPU count and memory total could not be determined for AWF workspaces."
+    )
+    assert "os.cpu_count() returned no value" in result.detail
+    assert "total memory could not be determined" in result.detail
+    # Neither dimension is a confirmed shortfall, so the only action is to expose
+    # the host's CPU *and* memory information, not provision anything.
+    assert result.fix == "Verify the host environment exposes CPU and memory information."
+
+
+@pytest.mark.unit
+def test_check_local_capacity_low_cpu_and_unknown_memory_surfaces_memory() -> None:
+    """A confirmed CPU shortfall with an unknown memory total must still surface memory.
+
+    Symmetric to the unknown-CPU / low-memory case: the unknown dimension never
+    widens the *fix* (an unknown total is not a confirmed shortfall, so the only
+    actionable step is the confirmed CPU shortfall), yet it must still appear in
+    the summary and detail so the gap is not invisible until a follow-up run.
+    """
+    result = check_local_capacity(
+        cpu_count=lambda: 1,
+        total_memory_bytes=lambda: None,
+    )
+    assert result.level is SetupCheckLevel.WARNING
+    assert "memory_bytes" not in result.data
+    assert result.summary == (
+        "Detected fewer CPUs than recommended and an unknown memory total for AWF workspaces."
+    )
+    assert "usable CPU(s) is below the recommended" in result.detail
+    assert "total memory could not be determined" in result.detail
+    # An unknown memory total is not a confirmed shortfall, so the fix names the
+    # confirmed CPU shortfall alone (mirroring unknown-CPU + low-memory).
+    assert result.fix == "Provision more CPU or expect slower, lower-concurrency workspaces."
+
+
+@pytest.mark.unit
+def test_check_local_capacity_unknown_memory_alone_stays_ok() -> None:
+    """An unknown memory total with adequate CPUs must stay OK, not warn.
+
+    Guards the boundary the issue:4585200251 fix must not cross: the memory gap
+    is folded into an existing capacity warning, but on its own it is advisory —
+    the OK branch already notes it — and must not promote a healthy host to a
+    warning.
+    """
+    result = check_local_capacity(
+        cpu_count=lambda: 8,
+        total_memory_bytes=lambda: None,
+    )
+    assert result.level is SetupCheckLevel.OK
+    assert "memory capacity could not be determined" in result.detail
+
+
 # --- run_system_checks wiring --------------------------------------------
 
 
@@ -2740,3 +2809,18 @@ def test_run_system_checks_home_fallback_suppressed_by_explicit_work_dir(
     assert captured["disk_path"] == Path("/explicit/state")
     assert host_home.level is SetupCheckLevel.BLOCKED
     assert host_home.data["env_value"] == "tmp"
+
+
+@pytest.mark.unit
+def test_resolve_work_dir_without_home_returns_relative_default_not_keyerror() -> None:
+    """``_resolve_work_dir`` must not ``KeyError`` on a ``HOME``-less mapping.
+
+    Regression for PR #332 review (comment issue:4585200251): the
+    ``${HOME}/.awf/service`` default helper read ``environ["HOME"]`` directly.
+    ``run_system_checks`` guards ``HOME`` (present + absolute) before this helper
+    runs, but a direct internal/test call with a ``HOME``-less mapping (for
+    example ``{}``) must fall through the normal path with an empty ``HOME``
+    rather than raising an unguarded ``KeyError``.
+    """
+    resolved = system_checks._resolve_work_dir(work_dir=None, environ={})
+    assert resolved == Path(".awf") / "service"

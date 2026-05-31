@@ -821,6 +821,7 @@ def check_local_capacity(
     low_cpu = cpus is not None and cpus < minimum_cpus
     low_memory = memory is not None and memory < minimum_memory_bytes
     unknown_cpu = cpus is None
+    unknown_memory = memory is None
 
     # Collect every capacity issue instead of early-returning on the first one,
     # so an operator sees all problems in a single run rather than uncovering
@@ -832,6 +833,17 @@ def check_local_capacity(
         issues.append(f"{memory} bytes of memory is below the recommended {minimum_memory_bytes}")
     if unknown_cpu:
         issues.append("os.cpu_count() returned no value; capacity could not be estimated")
+    # An unknown memory total is advisory on its own -- the OK branch below notes
+    # it without warning -- but once a confirmed CPU/memory shortfall (or an
+    # unknown CPU count) is already forcing a warning, fold the memory gap into
+    # the *same* report. Otherwise an operator who fixes the first issue would
+    # discover memory reporting also failed only on a follow-up run, turning two
+    # independent unknowns into the step-debug loop the issues list exists to
+    # avoid. ``unknown_memory`` cannot coexist with ``low_memory`` (memory is
+    # either ``None`` or a number), so the two never double-count.
+    report_unknown_memory = unknown_memory and bool(issues)
+    if report_unknown_memory:
+        issues.append("total memory could not be determined")
 
     if issues:
         # Name every starved dimension in the summary, not just the first the
@@ -845,6 +857,16 @@ def check_local_capacity(
             # memory shortfall keeps the operator from chasing a CPU problem
             # they may not have while the real memory gap stays visible.
             summary = "Detected less memory and an unknown CPU count for AWF workspaces."
+        elif low_cpu and report_unknown_memory:
+            # Confirmed CPU shortfall alongside an undeterminable memory total:
+            # name both so the memory gap is not invisible until a follow-up run.
+            summary = (
+                "Detected fewer CPUs than recommended and an unknown memory total "
+                "for AWF workspaces."
+            )
+        elif unknown_cpu and report_unknown_memory:
+            # Neither dimension could be measured; surface both unknowns at once.
+            summary = "CPU count and memory total could not be determined for AWF workspaces."
         elif low_cpu or unknown_cpu:
             summary = (
                 "Detected fewer CPUs than recommended for AWF workspaces."
@@ -856,11 +878,16 @@ def check_local_capacity(
         # Narrow the remediation hint to the dimension(s) actually below floor,
         # the way the summary already does. Telling an operator to provision
         # "more CPU or memory" when only one is short implies both need
-        # attention. An unknown CPU count is not a confirmed shortfall, so it
-        # never widens the hint: with adequate memory the only action is to
-        # expose CPU info; with low memory the hint names memory alone.
+        # attention. An unknown CPU count (or memory total) is not a confirmed
+        # shortfall, so it never widens a *provision* hint: with low memory the
+        # hint names memory alone even when CPU is unknown, and a confirmed CPU
+        # shortfall names CPU alone even when memory is undeterminable. Only when
+        # nothing is confirmed low does the hint switch to "expose ... info", and
+        # there it names every undeterminable dimension.
         # (low_cpu and unknown_cpu are mutually exclusive, so no branch is dead.)
-        if unknown_cpu and not low_memory:
+        if unknown_cpu and report_unknown_memory:
+            fix = "Verify the host environment exposes CPU and memory information."
+        elif unknown_cpu and not low_memory:
             fix = "Verify the host environment exposes CPU information."
         elif low_cpu and low_memory:
             fix = "Provision more CPU or memory or expect slower, lower-concurrency workspaces."
@@ -1219,8 +1246,15 @@ def _default_compose_work_dir(environ: Mapping[str, str]) -> Path:
     whitespace-padded, *or* empty/unset ``HOME`` already blocks upstream -- so
     ``HOME`` is a non-empty absolute string here and the default resolves directly
     from it (no ``~`` expansion or normalization is left to do).
+
+    The lookup uses ``environ.get("HOME", "")`` rather than ``environ["HOME"]`` so
+    that the upstream-guard precondition is explicit, not implicit: a direct
+    internal or test call via :func:`_resolve_work_dir` with a ``HOME``-less
+    mapping resolves to the relative ``.awf/service`` (the same empty-``HOME``
+    treatment :func:`_invalid_home_fallback` applies) instead of raising an
+    unguarded ``KeyError`` outside the structured-error path.
     """
-    return Path(environ["HOME"]) / ".awf" / "service"
+    return Path(environ.get("HOME", "")) / ".awf" / "service"
 
 
 def _invalid_home_fallback(environ: Mapping[str, str]) -> str | None:
