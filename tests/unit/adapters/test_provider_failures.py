@@ -153,6 +153,17 @@ def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
     assert infer_provider(model=None, output="cursor-agent: unauthorized") == "cursor"
 
 
+def test_cursor_provider_inference_takes_precedence_over_google_markers() -> None:
+    assert (
+        infer_provider(
+            model=None,
+            output="cursor-agent failed with RESOURCE_EXHAUSTED RetryableQuotaError",
+        )
+        == "cursor"
+    )
+    assert infer_provider(model=None, output="RESOURCE_EXHAUSTED RetryableQuotaError") == "google"
+
+
 def test_cursor_provider_inference_requires_specific_cursor_marker() -> None:
     """Cursor inference ignores generic cursor words without auth context."""
     assert infer_provider(model=None, output="cursor pagination failed") is None

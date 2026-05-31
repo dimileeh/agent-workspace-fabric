@@ -200,10 +200,10 @@ def classify_provider_failure(
 
 def infer_provider(*, model: str | None, output: str | None = None) -> str | None:
     text = f"{model or ''}\n{output or ''}".lower()
-    if any(marker in text for marker in _GOOGLE_MARKERS):
-        return "google"
     if any(marker in text for marker in _CURSOR_MARKERS):
         return "cursor"
+    if any(marker in text for marker in _GOOGLE_MARKERS):
+        return "google"
     if any(marker in text for marker in _ANTHROPIC_MARKERS):
         return "anthropic"
     if any(marker in text for marker in _OLLAMA_MARKERS):
