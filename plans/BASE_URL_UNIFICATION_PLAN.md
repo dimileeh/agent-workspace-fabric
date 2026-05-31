@@ -58,6 +58,11 @@ not add MCP HTTP configuration.
   the original objects. To make the requested broad gate meaningful, update
   those import-order tests to use pytest `monkeypatch` cleanup. This is a test
   isolation fix only and does not change AWF runtime behavior.
+- Post-validation conformance attempt 1 reported a validation-evidence-only gap
+  for the repository 99% coverage gate. The retry prompt explicitly named the
+  required `--cov-fail-under=99` gate, so run that exact profile coverage command
+  with the configured effective parallelism and record the result in
+  `plans/BASE_URL_UNIFICATION_VALIDATION.md`.
 
 ## Verification Commands And Pass Criteria
 

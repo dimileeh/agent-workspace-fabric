@@ -104,6 +104,21 @@ uv run --python 3.12 --extra dev pytest
 The 7 skips are Docker/Compose-dependent integration tests skipped because the
 Docker daemon or Compose plugin is unavailable in this workspace.
 
+Post-validation conformance coverage remediation:
+
+```bash
+uv run --python 3.12 --extra dev pytest -n 3 --dist=loadscope --timeout=300 --cov=awf --cov-report=term-missing --cov-fail-under=99
+# TOTAL 45548 240 13964 342 99.01%
+# Required test coverage of 99% reached. Total coverage: 99.01%
+# 9288 passed, 7 skipped in 1337.29s (0:22:17)
+```
+
+This command is the profile coverage gate with the configured effective
+parallelism. This closes the post-validation conformance gap by recording the
+99% coverage gate output; the full log was captured at
+`/tmp/awf-validation-evidence/base-url-unification-coverage.log` during this
+workspace attempt.
+
 ## Files Changed
 
 - CLI/config: `src/awf/cli/common.py`, `src/awf/cli/__init__.py`,
