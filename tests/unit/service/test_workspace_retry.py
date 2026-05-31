@@ -1569,8 +1569,8 @@ async def test_retry_allows_same_port_when_source_is_only_holder(
     tmp_path,
 ) -> None:
     """Retrying must succeed when the only workspace holding the companion host
-    port is the failed source itself.  The source is excluded from the conflict
-    check because the retry replaces it."""
+    port is the failed source itself and its terminal runtime has been
+    released (compose stack torn down).  Only then is the host port free."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
     companion_req = {
@@ -1597,6 +1597,17 @@ async def test_retry_allows_same_port_when_source_is_only_holder(
     await _mark_failed(factory, source.id)
 
     async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.add_event(
+            ws,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+        )
+        await session.commit()
+
+    async with factory() as session:
         retry = await retry_workspace_row(
             session,
             source.id,
@@ -1606,3 +1617,48 @@ async def test_retry_allows_same_port_when_source_is_only_holder(
             provider_environ={},
         )
         assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_rejects_host_port_conflict_with_source(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying a failed workspace that still holds its companion host port
+    (no terminal_runtime_released event) must raise
+    WorkspaceCreateHostPortConflictError.  The source's compose stack may
+    still be running, so excluding it from port-conflict detection hides
+    the resource most likely to collide at compose-up."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="host port source conflict test",
+                provider_environ={},
+            )
