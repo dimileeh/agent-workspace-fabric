@@ -65,6 +65,55 @@ def test_uninstall_removes_both_managers_when_both_manage(
 
 
 @pytest.mark.unit
+def test_uninstall_fails_when_pipx_removal_fails_after_uv_succeeds(
+    harness: InstallerHarness,
+) -> None:
+    """A pipx removal failing after a successful uv removal fails the run.
+
+    When both managers own the package the uv copy is removed first and pipx
+    second. If pipx then fails, the uv copy is already gone while the pipx copy
+    may remain, so the run must surface ``INSTALL_METHOD_FAILED`` (non-zero)
+    rather than let a still-runnable ``awf`` hide behind a success exit.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n", uninstall_rc=0)
+    harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n", uninstall_rc=1)
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode != 0
+    assert "INSTALL_METHOD_FAILED" in result.stderr
+    joined = "\n".join(harness.calls())
+    # Both removals are attempted even though pipx ultimately fails.
+    assert f"uv tool uninstall {PACKAGE}" in joined
+    assert f"pipx uninstall {PACKAGE}" in joined
+
+
+@pytest.mark.unit
+def test_uninstall_still_attempts_pipx_when_uv_removal_fails(
+    harness: InstallerHarness,
+) -> None:
+    """A uv removal failure must not short-circuit the pipx removal.
+
+    Failing fast on the first manager would leave a pipx-managed copy untouched
+    — the partial uninstall the dual-manager probe exists to prevent. Both
+    removals must run; the run then exits non-zero because uv failed.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n", uninstall_rc=1)
+    harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n", uninstall_rc=0)
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode != 0
+    assert "INSTALL_METHOD_FAILED" in result.stderr
+    joined = "\n".join(harness.calls())
+    # The uv failure must not skip the pipx removal: both commands run.
+    assert f"uv tool uninstall {PACKAGE}" in joined
+    assert f"pipx uninstall {PACKAGE}" in joined
+
+
+@pytest.mark.unit
 def test_dry_run_uninstall_previews_both_managers_when_both_manage(
     harness: InstallerHarness,
 ) -> None:

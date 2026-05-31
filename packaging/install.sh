@@ -650,15 +650,31 @@ uninstall_awf() {
         # below. That is a policy check, not a mutation, so it still applies
         # under --dry-run.
     else
+        # Attempt every manager that owns the package before deciding the exit
+        # status. Failing fast on the first manager's uninstall would skip the
+        # second, leaving its copy installed — the partial uninstall the
+        # dual-manager probe exists to prevent. Remove from each owner that can
+        # be removed, then fail if any removal failed so a still-runnable awf is
+        # never masked by a success exit.
+        local failed_via=""
         if [ "$uv_managed" -eq 1 ]; then
-            uv tool uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "uv tool uninstall failed for $PACKAGE"
-            say "Uninstalled ${PACKAGE} via uv."
-            removed=1
+            if uv tool uninstall "$PACKAGE"; then
+                say "Uninstalled ${PACKAGE} via uv."
+                removed=1
+            else
+                failed_via="uv"
+            fi
         fi
         if [ "$pipx_managed" -eq 1 ]; then
-            pipx uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "pipx uninstall failed for $PACKAGE"
-            say "Uninstalled ${PACKAGE} via pipx."
-            removed=1
+            if pipx uninstall "$PACKAGE"; then
+                say "Uninstalled ${PACKAGE} via pipx."
+                removed=1
+            else
+                failed_via="${failed_via:+$failed_via and }pipx"
+            fi
+        fi
+        if [ -n "$failed_via" ]; then
+            fail INSTALL_METHOD_FAILED "uninstall via ${failed_via} failed for $PACKAGE; awf may remain installed"
         fi
         [ "$removed" -eq 1 ] && return 0
     fi
