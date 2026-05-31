@@ -678,6 +678,45 @@ class TestFindHostPortConflicts:
         assert all(c.workspace_id == existing.id for c in conflicts)
 
     @pytest.mark.asyncio
+    async def test_duplicate_port_in_companion_and_profile_deduped(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Same host port in companion and profile service produces one conflict, not two."""
+        repo = WorkspaceRepository(session)
+        existing = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.running,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 5432]],
+                    }
+                ]
+            },
+            resolved_profile={
+                "name": "test-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 5432]],
+                    }
+                ],
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[5432],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 5432
+        assert conflicts[0].workspace_id == existing.id
+
+    @pytest.mark.asyncio
     async def test_profile_service_without_ports_no_conflict(
         self,
         session: AsyncSession,

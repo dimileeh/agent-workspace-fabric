@@ -558,6 +558,7 @@ class WorkspaceRepository:
         rows = (await self._session.execute(stmt)).all()
 
         conflicts: builtins.list[HostPortConflict] = []
+        seen: builtins.set[builtins.tuple[str, int]] = set()
         for row in rows:
             task_policy = row.task_policy
             if task_policy and isinstance(task_policy, dict):
@@ -576,14 +577,20 @@ class WorkspaceRepository:
                                 except (ValueError, TypeError):
                                     continue
                                 if hp in host_ports_set:
-                                    conflicts.append(
-                                        HostPortConflict(host_port=hp, workspace_id=row.id)
-                                    )
+                                    key = (row.id, hp)
+                                    if key not in seen:
+                                        seen.add(key)
+                                        conflicts.append(
+                                            HostPortConflict(host_port=hp, workspace_id=row.id)
+                                        )
 
             resolved_profile = row.resolved_profile
             for hp in host_ports_from_resolved_profile(resolved_profile):
                 if hp in host_ports_set:
-                    conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
+                    key = (row.id, hp)
+                    if key not in seen:
+                        seen.add(key)
+                        conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
 
         return conflicts
 
