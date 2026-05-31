@@ -336,7 +336,12 @@ class Settings(BaseSettings):
     companion_image_retention_hours: int = Field(
         default=168,
         ge=1,
-        description="Age after which unused cached companion images are pruned by GC.",
+        description=(
+            "Creation age after which cached companion images are pruned by GC. "
+            "Keyed on image creation time, not last use (Docker has no last-used "
+            "filter), so a still-current image built earlier may be evicted and "
+            "rebuilt cold on the next dispatch."
+        ),
     )
     work_dir: str = Field(
         default=".awf",

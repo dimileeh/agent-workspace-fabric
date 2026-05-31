@@ -83,6 +83,17 @@ def companion_image_prune_command(retention_hours: int) -> list[str]:
     ``image prune`` never removes an image backing a live container, so images
     for active workspaces are protected automatically; only unreferenced
     companion builds older than the retention window are removed.
+
+    ``--filter until=<h>h`` keys on the image's *creation* time, not when it was
+    last used to launch a workspace -- Docker exposes no "last used" filter for
+    ``image prune``. So a cached image built more than ``retention_hours`` ago can
+    be pruned even though a workspace launched from it recently, as long as no
+    container is currently running off it. This is harmless: the next dispatch for
+    that companion sees the tag is gone, rebuilds it once, and provisioning
+    continues correctly -- the only cost is an unexpected cold build. An operator
+    who observes a companion rebuilding sooner than the retention window seems to
+    imply is seeing creation-age eviction of a stopped-but-not-destroyed
+    workspace's image, not a bug.
     """
     return [
         "docker",

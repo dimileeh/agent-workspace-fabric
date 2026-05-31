@@ -976,8 +976,13 @@ subprocess cap the inline `docker compose up` build uses, so raising that knob f
 slow cold-cache builds raises both the cached and inline build allowances together
 and the pre-build never times out earlier than the inline build it would replace.
 Cached images carry an `awf.managed-companion=true` label, and `awf service gc` prunes
-unused ones older than `companion_image_retention_hours` (Docker never removes an
-image backing a live container, so active workspaces are protected). Set
+ones older than `companion_image_retention_hours` (Docker never removes an
+image backing a live container, so active workspaces are protected). The window is
+keyed on image *creation* time, not last use — Docker exposes no last-used filter for
+`image prune` — so a still-current image built before the window can be evicted and
+rebuilt cold on the next dispatch (a slower launch, not a correctness issue). If you
+see a companion rebuild sooner than the retention window implies, it is creation-age
+eviction of a stopped-but-not-destroyed workspace's image, not a bug. Set
 `companion_image_cache_enabled=false` to disable caching and always build inline.
 
 ## Observability
