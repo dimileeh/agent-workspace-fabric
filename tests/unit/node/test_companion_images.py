@@ -200,3 +200,93 @@ async def test_ensure_forwards_capture_timeout_to_build() -> None:
     )
 
     assert compose.build_calls[0]["capture_timeout_seconds"] == 1860.0
+
+
+@pytest.mark.unit
+async def test_ensure_shares_one_build_across_a_failing_concurrent_wave() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F506l: a failing build must be attempted
+    # once per concurrent wave and propagated to every waiter, not retried
+    # sequentially once per waiter -- a broken companion would otherwise block
+    # the worker queue for N * timeout.
+    compose = _FakeCompose(
+        exists=False,
+        build_error=ComposeOperationError(
+            operation="build",
+            returncode=1,
+            stdout="",
+            stderr="boom",
+        ),
+    )
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    results = await asyncio.gather(
+        *(
+            builder.ensure(
+                name="backend",
+                commit_sha="abc123def456",
+                build_context="/ctx",
+                dockerfile="Dockerfile",
+                capture_timeout_seconds=660.0,
+            )
+            for _ in range(4)
+        )
+    )
+
+    assert results == [None, None, None, None]
+    assert len(compose.build_calls) == 1  # the wave shares one failing build
+
+
+@pytest.mark.unit
+async def test_ensure_retries_build_after_a_failed_wave() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F506l: a failed build is dropped from the
+    # in-flight registry so a later dispatch retries it instead of replaying a
+    # cached failure forever.
+    compose = _FakeCompose(
+        exists=False,
+        build_error=ComposeOperationError(
+            operation="build",
+            returncode=1,
+            stdout="",
+            stderr="boom",
+        ),
+    )
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    first = await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ctx",
+        dockerfile="Dockerfile",
+        capture_timeout_seconds=660.0,
+    )
+    second = await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ctx",
+        dockerfile="Dockerfile",
+        capture_timeout_seconds=660.0,
+    )
+
+    assert first is None
+    assert second is None
+    assert len(compose.build_calls) == 2  # the second wave retried the build
+
+
+@pytest.mark.unit
+async def test_ensure_does_not_retain_finished_build_tasks() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F506l: the in-flight registry must not grow
+    # without bound -- a finished build (here a success) is dropped so only
+    # in-flight builds are ever held.
+    compose = _FakeCompose(exists=False)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ctx",
+        dockerfile="Dockerfile",
+        capture_timeout_seconds=660.0,
+    )
+    await asyncio.sleep(0)  # let the done-callback drop the finished task
+
+    assert builder._builds == {}  # noqa: SLF001

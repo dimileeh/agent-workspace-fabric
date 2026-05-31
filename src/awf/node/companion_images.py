@@ -5,12 +5,16 @@ Companions build on the shared host Docker daemon (the control plane runs
 locally is reusable by every workspace via an ``image:`` reference -- no
 registry is required. This builder derives a deterministic tag per
 ``(companion name, commit sha)``, builds it once (deduping concurrent dispatch
-waves with a per-tag lock), and skips the build when the tag already exists.
+waves by sharing a single in-flight build task per tag), and skips the build
+when the tag already exists.
 
 Coordination is in-process only: the single-node local Core runs one worker, so
-an :class:`asyncio.Lock` per tag is sufficient. A future multi-node deployment
-would need a registry plus a distributed lock; that is intentionally out of
-scope here.
+sharing one :class:`asyncio.Task` per tag is sufficient. The shared task is
+dropped as soon as it finishes, so the registry only ever holds in-flight
+builds: a failed build is retried by the next dispatch wave instead of being
+cached as a permanent failure, and the registry cannot grow without bound. A
+future multi-node deployment would need a registry plus a distributed lock; that
+is intentionally out of scope here.
 """
 
 from __future__ import annotations
@@ -65,16 +69,7 @@ class CompanionImageBuilder:
     def __init__(self, compose: ComposeManager) -> None:
         """Store the compose manager used to run host-daemon docker commands."""
         self._compose = compose
-        self._locks: dict[str, asyncio.Lock] = {}
-
-    def _lock_for(self, tag: str) -> asyncio.Lock:
-        # No ``await`` between get and set, so this is atomic on the event loop:
-        # concurrent provisions for the same tag share one lock and build once.
-        lock = self._locks.get(tag)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[tag] = lock
-        return lock
+        self._builds: dict[str, asyncio.Task[str | None]] = {}
 
     async def ensure(
         self,
@@ -92,6 +87,14 @@ class CompanionImageBuilder:
         uses, so the cache pre-build can never time out earlier than the inline
         build it replaces.
 
+        Concurrent dispatches for the same tag share one in-flight build task, so
+        the underlying ``docker build`` runs (and any failure is logged) exactly
+        once per wave instead of once per waiter -- a broken companion can no
+        longer block the worker queue with N sequential rebuild attempts. The
+        shared task is dropped when it finishes, so the registry only holds
+        in-flight builds: a success is re-checked cheaply by the next wave and a
+        failure is retried, and the registry never grows without bound.
+
         Returns ``None`` when caching cannot be applied (no resolvable commit or
         a build failure); the caller falls back to an inline ``build:`` service
         so provisioning stays correct.
@@ -99,29 +102,60 @@ class CompanionImageBuilder:
         if not commit_sha.strip():
             return None
         tag = companion_image_tag(name, commit_sha)
-        async with self._lock_for(tag):
-            if await self._compose.companion_image_exists(tag):
-                _log.info("companion_image.cache_hit", companion=name, tag=tag)
-                return tag
-            try:
-                await self._compose.build_companion_image(
+        # No ``await`` between get and set, so registering the shared task is
+        # atomic on the event loop: a concurrent wave for the same tag awaits the
+        # one task and builds once.
+        task = self._builds.get(tag)
+        if task is None:
+            task = asyncio.create_task(
+                self._ensure_build(
                     tag=tag,
+                    name=name,
                     build_context=build_context,
                     dockerfile=dockerfile,
-                    labels={
-                        COMPANION_IMAGE_MANAGED_LABEL: "true",
-                        COMPANION_IMAGE_NAME_LABEL: name,
-                    },
                     capture_timeout_seconds=capture_timeout_seconds,
                 )
-            except ComposeOperationError as exc:
-                _log.warning(
-                    "companion_image.build_failed",
-                    companion=name,
-                    tag=tag,
-                    reason_code=exc.reason_code,
-                    stderr=exc.stderr[:1000],
-                )
-                return None
-            _log.info("companion_image.built", companion=name, tag=tag)
+            )
+            self._builds[tag] = task
+            # Drop the finished task either way: a failure must be retriable by
+            # the next wave rather than cached forever, and a success need not
+            # linger (the next wave re-checks the tag cheaply), so the registry
+            # only ever holds in-flight builds.
+            task.add_done_callback(lambda _task: self._builds.pop(tag, None))
+        return await task
+
+    async def _ensure_build(
+        self,
+        *,
+        tag: str,
+        name: str,
+        build_context: str,
+        dockerfile: str,
+        capture_timeout_seconds: float,
+    ) -> str | None:
+        """Reuse the tag when it already exists, otherwise build it once."""
+        if await self._compose.companion_image_exists(tag):
+            _log.info("companion_image.cache_hit", companion=name, tag=tag)
             return tag
+        try:
+            await self._compose.build_companion_image(
+                tag=tag,
+                build_context=build_context,
+                dockerfile=dockerfile,
+                labels={
+                    COMPANION_IMAGE_MANAGED_LABEL: "true",
+                    COMPANION_IMAGE_NAME_LABEL: name,
+                },
+                capture_timeout_seconds=capture_timeout_seconds,
+            )
+        except ComposeOperationError as exc:
+            _log.warning(
+                "companion_image.build_failed",
+                companion=name,
+                tag=tag,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            return None
+        _log.info("companion_image.built", companion=name, tag=tag)
+        return tag
