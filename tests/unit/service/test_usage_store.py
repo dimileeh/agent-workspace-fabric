@@ -70,6 +70,11 @@ def test_provider_ccusage_source_unknown_returns_none() -> None:
 
 
 @pytest.mark.unit
+def test_provider_ccusage_source_grok_is_explicitly_unsupported() -> None:
+    assert provider_ccusage_source(AgentRuntime.grok) is None
+
+
+@pytest.mark.unit
 def test_normalize_ccusage_json_reads_totals() -> None:
     raw = json.dumps(
         {

@@ -32,6 +32,41 @@ def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None
     assert "<redacted>" in classification.failure_fingerprint
 
 
+def test_classifies_xai_grok_auth_failure_and_redacts_secret_fingerprint() -> None:
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="XAI_API_KEY=xai-provider-secret was rejected: unauthorized",
+        provider=None,
+        model="grok-build-0.1",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "xai"
+    assert classification.model == "grok-build-0.1"
+    assert classification.retryable is True
+    assert "xai-provider-secret" not in classification.failure_fingerprint
+    assert "<redacted>" in classification.failure_fingerprint
+
+
+def test_classifies_xai_rate_limit_from_model_marker() -> None:
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="Grok Build request failed: 429 too many requests. Retry-After: 60",
+        provider=None,
+        model="grok-build-0.1",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED
+    assert classification.failure_type == "quota"
+    assert classification.provider == "xai"
+    assert classification.retry_after_seconds == 60
+
+
 def test_classifies_quota_capacity_with_retry_after() -> None:
     classification = classify_provider_failure(
         reason_code=None,
@@ -128,6 +163,8 @@ def test_timeout_without_provider_or_model_is_not_recovery_metadata() -> None:
 def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
     assert infer_provider(model="claude-sonnet-4.5", output=None) == "anthropic"
     assert infer_provider(model=None, output="ollama local model is unavailable") == "ollama"
+    assert infer_provider(model="grok-build-0.1", output=None) == "xai"
+    assert infer_provider(model=None, output="xAI Grok rate limit") == "xai"
 
 
 def test_failure_fingerprint_truncates_long_output_after_redaction() -> None:

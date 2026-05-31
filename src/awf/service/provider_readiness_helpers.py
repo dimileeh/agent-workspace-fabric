@@ -354,6 +354,63 @@ def _truncate(value: str, *, limit: int = 240) -> str:
     return stripped[: limit - 1] + "…"
 
 
+def _security_warning(
+    reason: str,
+    message: str,
+    *,
+    severity: str = "warning",
+) -> dict[str, str]:
+    return {"reason": reason, "message": message, "severity": severity}
+
+
+def _redacted_warning(warning: Mapping[str, str], secrets: frozenset[str]) -> dict[str, str]:
+    return {
+        "reason": _redact(str(warning.get("reason", "UNKNOWN")), secrets),
+        "message": _redact(str(warning.get("message", "")), secrets),
+        "severity": _redact(str(warning.get("severity", "warning")), secrets),
+    }
+
+
+def _static_env_warnings(
+    *,
+    provider_label: str,
+    signals: Iterable[str],
+) -> list[dict[str, str]]:
+    return [
+        _security_warning(
+            "STATIC_TOKEN_FALLBACK",
+            f"{provider_label} auth is supplied by static service environment variable {signal}.",
+        )
+        for signal in signals
+    ]
+
+
+def _primary_credential_scope(sources: Iterable[Mapping[str, str]]) -> str:
+    scopes = [str(source.get("credential_scope", "")) for source in sources]
+    for preferred in (
+        "isolated_workspace",
+        "read_only_host_path",
+        "docker_host_control",
+        "static_env_token",
+    ):
+        if preferred in scopes:
+            return preferred
+    return "not_observed"
+
+
+def _primary_isolation(sources: Iterable[Mapping[str, str]]) -> str:
+    isolations = [str(source.get("isolation", "")) for source in sources]
+    for preferred in (
+        "per_workspace_copy",
+        "read_only_bind",
+        "host_daemon",
+        "service_env",
+    ):
+        if preferred in isolations:
+            return preferred
+    return "none"
+
+
 def _ollama_version_url(environ: Mapping[str, str]) -> str:
     return _ollama_version_urls(environ)[0]
 
