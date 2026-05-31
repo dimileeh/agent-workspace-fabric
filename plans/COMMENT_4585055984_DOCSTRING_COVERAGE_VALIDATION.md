@@ -65,5 +65,26 @@ Plan reference: `plans/COMMENT_4585055984_DOCSTRING_COVERAGE_PLAN.md`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_006.py::test_workflow_scope_push_failure_requeues_fix_committed_thread_state tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_006.py::test_workflow_scope_requeue_preserves_non_fix_verdicts -q`:
   2 passed.
 
+## Line-Limit Follow-up Validation
+
+- After the later PR monitor line-limit decomposition commit, the diff-scoped
+  `ruff --select D` audit over Python files changed in
+  `origin/development...HEAD`, intersected with actual PR-added lines, reported
+  three remaining findings:
+  `tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_007.py:35`,
+  `:72`, and `:126`.
+- Added behavior-neutral docstrings to the PostgreSQL test fixture and the two
+  auto-merge validation recovery tests in
+  `test_pr_monitor_runner_part_007.py`.
+- Re-ran the diff-scoped `ruff --select D` audit over all 26 Python files
+  changed in `origin/development...HEAD`, intersected with actual PR-added
+  lines: `diff_added_d_findings=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_007.py`:
+  passed.
+- `uv run --python 3.12 --extra dev ruff format --check tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_007.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_007.py::test_auto_merge_dispatches_validation_recovery_before_merge tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_007.py::test_auto_merge_waits_for_reviewer_settle_before_validation_recovery -q`:
+  2 passed.
+
 Full AWF/GitHub validation, coverage gates, frontend builds, and CI-equivalent
 commands were intentionally not run in this agent phase.

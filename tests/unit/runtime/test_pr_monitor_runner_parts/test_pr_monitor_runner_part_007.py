@@ -33,6 +33,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a PostgreSQL-backed async session factory for monitor tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -73,6 +74,7 @@ async def test_auto_merge_dispatches_validation_recovery_before_merge(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Queue validation recovery when auto-merge lacks fresh validation."""
     pr_number = 81
     head_sha = "b" * 40
     cmd = FakeCommandRunner()
@@ -127,6 +129,7 @@ async def test_auto_merge_waits_for_reviewer_settle_before_validation_recovery(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Wait through reviewer settle before queueing validation recovery."""
     pr_number = 811
     head_sha = "8" * 40
     cmd = FakeCommandRunner()
