@@ -19,6 +19,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.repositories.base import (
+    HOST_PORT_TERMINAL_RELEASE_STATUSES,
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     has_terminal_runtime_released_event,
@@ -257,6 +258,7 @@ class WorkspaceControlService:
         if (
             stop_stack
             and workspace.compose_project_name is not None
+            and _cancel_final_status in HOST_PORT_TERMINAL_RELEASE_STATUSES
             and not await has_terminal_runtime_released_event(self._session, workspace.id)
         ):
             await repo.add_event(

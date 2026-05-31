@@ -1020,7 +1020,7 @@ class Provisioner:
             )
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
+            ws = await repo.get_for_update(workspace_id)
             if ws is not None:
                 payload: dict[str, object] = {
                     "action": "provision",

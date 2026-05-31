@@ -91,13 +91,18 @@ async def _source_runtime_not_yet_released(
 ) -> bool:
     """Return True if the source workspace's compose runtime has not been released yet.
 
-    A workspace in a terminal status (failed, cancelled, completed, destroyed)
-    without a ``terminal_runtime_released`` event still holds host ports, so a
-    retry would collide at Docker Compose time.  A workspace in ``destroying``
-    state also still holds its runtime — its compose stack is alive and the
-    cleanup sweep has not yet finished, so a retry dispatched while the source
-    is ``destroying`` would collide at compose time rather than being rejected
-    at dispatch with a 409.
+    Only ``failed`` and ``cancelled`` workspaces reach this function — the
+    ``RETRYABLE_WORKSPACE_STATUSES`` guard in ``retry_workspace_row`` rejects
+    ``completed`` and ``destroyed`` before this point.  The
+    ``HOST_PORT_TERMINAL_RELEASE_STATUSES`` check below therefore only matches
+    ``failed`` / ``cancelled`` in practice; ``completed`` and ``destroyed``
+    are listed there for the shared constant's semantics, not because they
+    flow through here.
+
+    A workspace in ``destroying`` state also still holds its runtime — its
+    compose stack is alive and the cleanup sweep has not yet finished, so a
+    retry dispatched while the source is ``destroying`` would collide at
+    compose time rather than being rejected at dispatch with a 409.
     """
     source_status = WorkspaceStatus(source.status)
     if (
