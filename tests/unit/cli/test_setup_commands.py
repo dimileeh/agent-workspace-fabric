@@ -23,6 +23,10 @@ from awf.host_setup.system_checks import SetupCheckLevel, SetupCheckResult
 
 _runner = CliRunner()
 
+# Captured before the ``harness`` fixture stubs it so the env-merge regression
+# tests can opt back into the real resolver.
+_real_readiness_environ = setup_commands._readiness_environ
+
 
 def _ok(name: str) -> SetupCheckResult:
     return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
@@ -69,6 +73,13 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
 
     monkeypatch.setattr(setup_commands, "write_host_setup_config", fake_write)
     monkeypatch.setattr(setup_commands, "run_system_checks", _all_ok)
+    # Default to a hermetic, no-IO readiness environ. The real ``_readiness_environ``
+    # resolves the bootstrap asset root and reads ``docker/compose/.env`` from disk on
+    # every harness-based test, even though the stubbed ``run_system_checks`` ignores
+    # the kwarg — pointless I/O coupled to bootstrap-asset resolution. The env-merge
+    # regression tests re-enable the real resolver explicitly via
+    # ``_real_readiness_environ``.
+    monkeypatch.setattr(setup_commands, "_readiness_environ", lambda *_a: {})
     return state
 
 
@@ -151,6 +162,9 @@ def test_setup_merges_compose_env_when_probing_api_port(
 
     merged = {"AWF_API_HOST_PORT": "9100"}
     monkeypatch.setattr(service_config, "local_service_environ", lambda *_a, **_kw: merged)
+    # The harness stubs _readiness_environ for hermetic isolation; this test
+    # proves the real resolver forwards the merged compose env to the checks.
+    monkeypatch.setattr(setup_commands, "_readiness_environ", _real_readiness_environ)
 
     captured: dict[str, object] = {}
 
@@ -182,6 +196,8 @@ def test_setup_probes_selected_source_checkout_env(
     compose_env = root / "docker" / "compose" / ".env"
     compose_env.parent.mkdir(parents=True, exist_ok=True)
     compose_env.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    # The harness stubs _readiness_environ; this test exercises the real resolver.
+    monkeypatch.setattr(setup_commands, "_readiness_environ", _real_readiness_environ)
 
     captured: dict[str, object] = {}
 
@@ -222,6 +238,8 @@ def test_setup_probes_persisted_source_checkout_env(
 
     persisted = HostSetupConfig(source_checkout=validate_source_checkout(root).to_metadata())
     monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: persisted)
+    # The harness stubs _readiness_environ; this test exercises the real resolver.
+    monkeypatch.setattr(setup_commands, "_readiness_environ", _real_readiness_environ)
 
     captured: dict[str, object] = {}
 
@@ -262,6 +280,8 @@ def test_setup_no_checkout_probes_bootstrap_asset_root_env(
 
     monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: asset_root)
     monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+    # The harness stubs _readiness_environ; this test exercises the real resolver.
+    monkeypatch.setattr(setup_commands, "_readiness_environ", _real_readiness_environ)
 
     captured: dict[str, object] = {}
 
