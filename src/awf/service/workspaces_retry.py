@@ -98,6 +98,8 @@ async def _source_runtime_not_yet_released(
     if WorkspaceStatus(source.status) not in (
         WorkspaceStatus.failed,
         WorkspaceStatus.cancelled,
+        WorkspaceStatus.completed,
+        WorkspaceStatus.destroyed,
     ):
         return False
     if source.compose_project_name is None:
