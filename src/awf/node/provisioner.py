@@ -253,19 +253,28 @@ class Provisioner:
                     reason_code="PROVISIONER_STALE_STATUS",
                 ):
                     return
-                async with self._session_factory() as pre_launch_session:
-                    pre_launch_repo = WorkspaceRepository(pre_launch_session)
-                    pre_launch_ws = await pre_launch_repo.get(workspace_id)
-                    if pre_launch_ws is not None and pre_launch_ws.compose_project_name is None:
-                        pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
-                        if (
-                            profile_resolution is not None
-                            and pre_launch_ws.resolved_profile is None
-                        ):
-                            pre_launch_ws.resolved_profile = profile_resolution.profile.model_dump(
-                                mode="json", by_alias=True
-                            )
-                        await pre_launch_session.commit()
+                try:
+                    async with self._session_factory() as pre_launch_session:
+                        pre_launch_repo = WorkspaceRepository(pre_launch_session)
+                        pre_launch_ws = await pre_launch_repo.get(workspace_id)
+                        if pre_launch_ws is not None and pre_launch_ws.compose_project_name is None:
+                            pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
+                            if (
+                                profile_resolution is not None
+                                and pre_launch_ws.resolved_profile is None
+                            ):
+                                pre_launch_ws.resolved_profile = (
+                                    profile_resolution.profile.model_dump(
+                                        mode="json", by_alias=True
+                                    )
+                                )
+                            await pre_launch_session.commit()
+                except Exception:
+                    _log.warning(
+                        "provisioner.pre_launch_commit_failed",
+                        workspace_id=workspace_id,
+                        reason_code="PRE_LAUNCH_COMMIT_NON_FATAL",
+                    )
                 if not await self._recheck_status(
                     workspace_id,
                     expected=WorkspaceStatus.provisioning,
