@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ _PORCELAIN_C_ESCAPES = {
     '"': 0x22,
     "\\": 0x5C,
 }
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 
 
 def _split_porcelain_rename_paths(path: str) -> tuple[str, str] | None:
@@ -105,6 +107,11 @@ def _resolve_head_sha(result: CommandResult, *, ref: str) -> tuple[str | None, s
         return (
             None,
             f"Could not resolve HEAD for `{ref}` from git rev-parse output.",
+        )
+    if "\x00" in sha or not _GIT_SHA_RE.fullmatch(sha):
+        return (
+            None,
+            "Could not resolve HEAD from git rev-parse output: invalid object id.",
         )
     return sha, ""
 

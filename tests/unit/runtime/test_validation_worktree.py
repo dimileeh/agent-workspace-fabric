@@ -184,6 +184,35 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_rejects_invalid_head_output(
+    tmp_path: Path,
+) -> None:
+    """Malformed ``git rev-parse`` output must fail as status-check validation."""
+
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "deadbeef01"
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, "M\x00src/fix.py\0", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert cleanup.message == (
+        "Could not verify validation worktree HEAD: "
+        "Could not resolve HEAD from git rev-parse output: invalid object id."
+    )
+
+
+@pytest.mark.unit
 async def test_cleanup_validation_worktree_fails_when_head_changes(
     tmp_path: Path,
 ) -> None:
