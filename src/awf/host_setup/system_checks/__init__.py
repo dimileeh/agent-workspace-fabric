@@ -119,8 +119,7 @@ from awf.host_setup.system_checks.primitives import (
     SetupCheckLevel,
     SetupCheckResult,
     WhichFn,
-    _docker_probe_runner,
-    _docker_probe_which,
+    _docker_probe_helpers,
 )
 
 
@@ -252,9 +251,10 @@ def run_system_checks(
     # ``env['PATH']`` for executable resolution), so the binary-presence gate must
     # search that same PATH -- otherwise a ``docker`` reachable only through the
     # service env's PATH would be reported "not installed" before the runner is
-    # even tried.
-    docker_runner = _docker_probe_runner(environ)
-    docker_which = _docker_probe_which(environ)
+    # even tried. The runner and ``which`` are built together from a single
+    # resolved probe env (``_docker_probe_helpers``), so the daemon-selection
+    # resolution runs once for both rather than once per helper.
+    docker_runner, docker_which = _docker_probe_helpers(environ)
     docker_check = check_docker(which=docker_which, run=docker_runner)
     # When the Docker CLI binary is absent, the ``docker compose`` plugin cannot
     # exist either: check_compose would re-probe the same missing binary and

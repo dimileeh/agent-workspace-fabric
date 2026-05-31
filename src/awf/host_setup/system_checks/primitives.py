@@ -227,47 +227,48 @@ def _docker_probe_environ(environ: Mapping[str, str] | None) -> dict[str, str] |
     return resolved
 
 
-def _docker_probe_runner(environ: Mapping[str, str] | None) -> CommandRunner:
-    """Return a probe runner that targets the Docker daemon ``awf start`` will use.
+def _docker_probe_helpers(
+    environ: Mapping[str, str] | None,
+) -> tuple[CommandRunner, WhichFn]:
+    """Build the Docker probe runner and ``which`` from one resolved probe env.
+
+    ``run_system_checks`` needs both the ``docker`` / ``docker compose`` *runner*
+    and the binary-presence *which*, and both must target the daemon the resolved
+    service environment selects. The probe env is resolved by
+    :func:`_docker_probe_environ` exactly once here and shared by both, so the
+    ``{**os.environ, **environ}`` merge and the ``AWF_DOCKER_HOST`` /
+    ``DOCKER_HOST`` daemon-selection scrub run a single time per
+    ``run_system_checks`` call instead of once per helper -- the result is
+    identical both ways.
 
     When the resolved service environment selects a Docker host (or clears an
-    inherited one), the ``docker`` / ``docker compose`` probes run with that env so
-    setup reports readiness for the same daemon ``awf start`` uses; otherwise the
-    default runner (which inherits the caller environment) is returned unchanged.
+    inherited one), the runner runs the probes with that env so setup reports
+    readiness for the same daemon ``awf start`` uses, and the ``which`` resolves
+    the ``docker`` binary against that env's PATH -- ``subprocess`` honours
+    ``env['PATH']`` for executable resolution, exactly as ``awf start`` hands its
+    merged service env to the Docker subprocesses, so the binary-presence gate
+    must search that same PATH. Falling back to ``shutil.which`` against the bare
+    process environment would report "Docker CLI is not installed" for a
+    ``docker`` reachable only through the resolved service env's PATH, falsely
+    blocking ``awf setup --dry-run`` for a startup configuration that would
+    succeed.
+
+    When no service environment is supplied (direct/test callers,
+    :func:`_docker_probe_environ` returns ``None``), the default runner (which
+    inherits the caller environment) and the bare ``shutil.which`` are returned
+    unchanged.
     """
     probe_env = _docker_probe_environ(environ)
     if probe_env is None:
-        return _default_command_runner
+        return _default_command_runner, shutil.which
 
     def run(args: Sequence[str]) -> CommandResult | None:
         return _default_command_runner(args, env=probe_env)
 
-    return run
-
-
-def _docker_probe_which(environ: Mapping[str, str] | None) -> WhichFn:
-    """Return a ``which`` that resolves the Docker binary against the probe PATH.
-
-    The Docker readiness runner locates ``docker`` via the resolved service
-    environment's PATH -- ``subprocess`` honours ``env['PATH']`` for executable
-    resolution, exactly as ``awf start`` hands its merged service env to the
-    Docker subprocesses. The binary-presence gate must therefore search that same
-    PATH; falling back to ``shutil.which`` against the bare process environment
-    would report "Docker CLI is not installed" for a ``docker`` reachable only
-    through the resolved service env's PATH, falsely blocking
-    ``awf setup --dry-run`` for a startup configuration that would succeed.
-
-    Returns ``shutil.which`` unchanged when no service environment is supplied
-    (direct/test callers), mirroring :func:`_docker_probe_runner`'s pass-through.
-    """
-    probe_env = _docker_probe_environ(environ)
-    if probe_env is None:
-        return shutil.which
-
     def which(cmd: str) -> str | None:
         return shutil.which(cmd, path=probe_env.get("PATH"))
 
-    return which
+    return run, which
 
 
 def _probe_port_bind(port: int, host: str) -> PortProbeResult:

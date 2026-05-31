@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -275,6 +275,61 @@ def test_run_system_checks_docker_binary_lookup_uses_resolved_path(
     assert docker_check.data["available"] is True
     # The gate searched the resolved service-env PATH, not the bare process PATH.
     assert any(path is not None and "/opt/docker/bin" in path for path in seen)
+
+
+@pytest.mark.unit
+def test_run_system_checks_resolves_docker_probe_env_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon-selection probe env is resolved once and shared by both helpers.
+
+    Regression for review comment issue:4585200251: the separate
+    ``_docker_probe_runner`` and ``_docker_probe_which`` helpers each resolved
+    ``_docker_probe_environ`` independently, so the ``{**os.environ, **environ}``
+    merge and the ``AWF_DOCKER_HOST`` / ``DOCKER_HOST`` daemon-selection scrub ran
+    twice per ``run_system_checks`` call for an identical result.
+    ``_docker_probe_helpers`` now resolves it once and hands the same env to both
+    the runner and the binary-presence ``which``.
+    """
+    real_probe_environ = primitives._docker_probe_environ
+    resolved_envs: list[Mapping[str, str] | None] = []
+
+    def counting_probe_environ(
+        environ: Mapping[str, str] | None,
+    ) -> dict[str, str] | None:
+        resolved_envs.append(environ)
+        return real_probe_environ(environ)
+
+    monkeypatch.setattr(primitives, "_docker_probe_environ", counting_probe_environ)
+
+    class _Completed:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_run(
+        args: Sequence[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        errors: str,
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> _Completed:
+        return _Completed()
+
+    monkeypatch.setattr(primitives.subprocess, "run", fake_run)
+    monkeypatch.setattr(primitives.shutil, "which", lambda _cmd, **_kwargs: "/usr/bin/docker")
+    _stub_non_docker_checks_ok(monkeypatch)
+
+    # Pass a service env so the resolver returns a non-None probe env (the path
+    # that previously ran the merge twice, once per helper).
+    run_system_checks(environ={"AWF_DOCKER_HOST": "tcp://remote:2375"})
+
+    # One resolution feeds both the docker/compose runner and the ``which`` gate.
+    assert len(resolved_envs) == 1
 
 
 # --- Compose --------------------------------------------------------------
