@@ -229,6 +229,20 @@ async def find_host_port_conflicts(
     more expensive.  When this becomes a bottleneck, consider adding
     a JSONB index on the relevant port fields or a denormalized
     ``host_ports`` integer-array column with a GIN index.
+
+    NODE-FILTER GAP: When *node_id* is provided, workspaces whose
+    ``node_id`` is NULL *and* have no ``ResourceReservation`` row at
+    all are silently excluded because
+    ``COALESCE(Workspace.node_id, active_reservation_node,
+    latest_reservation_node)`` returns NULL and ``NULL == node_id`` is
+    never true.  In practice, ``Provisioner._mark_failed`` stamps
+    ``node_id`` on the failure path, so new terminal rows always
+    carry the launching node.  Legacy rows persisted before that fix
+    and rows that failed at the DB layer before reservation creation
+    are the remaining gap.  For the current single-node topology this
+    is low-risk because all such workspaces share the same Docker
+    daemon; for multi-node deployments, a node-ownership claim or
+    fallback inclusion strategy will be needed.
     """
     if not host_ports:
         return []
