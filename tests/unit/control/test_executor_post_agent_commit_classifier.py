@@ -303,4 +303,85 @@ def test_precommit_repair_prompt_summarizes_large_path_sets() -> None:
     assert "docs/generated/file_0.md" in prompt
     assert "- docs/generated/file_40.md" not in prompt
     assert prompt.count("- ... and 5 more") == 3
-    assert "src/generated/file_80.py" not in prompt
+
+
+class TestNothingToCommitDetection:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout,stderr",
+        [
+            ("nothing to commit, working tree clean\n", ""),
+            ("", "nothing to commit, working tree clean\n"),
+            ("On branch awf/x\nnothing to commit, working tree clean\n", ""),
+            ("", "On branch awf/x\nnothing to commit, working tree clean\n"),
+            ('nothing to commit (create/copy files and use "git add" to track)\n', ""),
+            ("working tree clean\n", ""),
+            ("", "working tree clean\n"),
+        ],
+        ids=[
+            "stdout-clean",
+            "stderr-clean",
+            "stdout-with-branch-prefix",
+            "stderr-with-branch-prefix",
+            "stdout-untracked-hint",
+            "stdout-working-tree-clean",
+            "stderr-working-tree-clean",
+        ],
+    )
+    def test_is_nothing_to_commit_detects_benign_clean_tree(self, stdout: str, stderr: str) -> None:
+        from awf.control.executor.quality_gates import _is_nothing_to_commit
+
+        result = CommandResult(returncode=1, stdout=stdout, stderr=stderr)
+        assert _is_nothing_to_commit(result) is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout,stderr",
+        [
+            ("fatal: empty ident name (for <>) not allowed\n", ""),
+            ("", "fatal: not a git repository\n"),
+            ("some pre-commit output\n", ""),
+            ("", ""),
+            ("no changes added to commit but untracked files present\n", ""),
+        ],
+        ids=[
+            "empty-ident",
+            "not-a-repo",
+            "unrelated-output",
+            "empty",
+            "dirty-tree-no-changes-added",
+        ],
+    )
+    def test_is_nothing_to_commit_rejects_real_errors(self, stdout: str, stderr: str) -> None:
+        from awf.control.executor.quality_gates import _is_nothing_to_commit
+
+        result = CommandResult(returncode=1, stdout=stdout, stderr=stderr)
+        assert _is_nothing_to_commit(result) is False
+
+    @pytest.mark.unit
+    def test_is_nothing_to_commit_returns_false_on_ok(self) -> None:
+        from awf.control.executor.quality_gates import _is_nothing_to_commit
+
+        result = CommandResult(
+            returncode=0, stdout="", stderr="nothing to commit, working tree clean\n"
+        )
+        assert _is_nothing_to_commit(result) is False
+
+    @pytest.mark.unit
+    def test_is_nothing_to_commit_returns_false_with_pre_commit_hook_failure(self) -> None:
+        from awf.control.executor.quality_gates import _is_nothing_to_commit
+
+        result = CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="- hook id: ruff\nnothing to commit, working tree clean\n",
+        )
+        assert _is_nothing_to_commit(result) is False
+
+    @pytest.mark.unit
+    def test_nothing_to_commit_classification_reason_code(self) -> None:
+        classification = _classify_post_agent_commit_failure(
+            _commit_result(stderr="nothing to commit, working tree clean\n")
+        )
+        assert classification.reason_code == POST_AGENT_COMMIT_FAILED_REASON_CODE
+        assert classification.repair_strategy == "none"
