@@ -5,11 +5,12 @@ This module produces safe credential *references* (``keyring://``, ``env://``,
 prints raw secret values, and it never prompts: missing required input in a
 non-interactive run fails with ``INTERACTIVE_INPUT_REQUIRED``.
 
-The keyring backend uses a lazy, optional import and dependency injection, so
-the module and its tests work whether or not the ``keyring`` library is
-installed. Tests inject fakes and never touch a real OS keychain. Credential
-*resolution* (reading values back) and interactive prompting belong to the
-setup/provider CLI flows (T04/T07), not here.
+The keyring backend uses dependency injection and a lazy import, so tests
+inject fakes and never touch a real OS keychain. ``keyring>=24`` is now a
+required package dependency; the lazy import still degrades gracefully if it is
+somehow missing, but that path is unreachable in a correctly installed
+environment. Credential *resolution* (reading values back) and interactive
+prompting belong to the setup/provider CLI flows (T04/T07), not here.
 """
 
 from __future__ import annotations
