@@ -581,8 +581,17 @@ def check_local_capacity(
         # CPU and memory are low understates the problem.
         if low_cpu and low_memory:
             summary = "Detected fewer CPUs and less memory than recommended for AWF workspaces."
+        elif unknown_cpu and low_memory:
+            # An unknown CPU count is not "fewer" CPUs; pairing it with the
+            # memory shortfall keeps the operator from chasing a CPU problem
+            # they may not have while the real memory gap stays visible.
+            summary = "Detected less memory and an unknown CPU count for AWF workspaces."
         elif low_cpu or unknown_cpu:
-            summary = "Detected fewer CPUs than recommended for AWF workspaces."
+            summary = (
+                "Detected fewer CPUs than recommended for AWF workspaces."
+                if low_cpu
+                else "CPU count could not be determined for AWF workspaces."
+            )
         else:
             summary = "Detected less memory than recommended for AWF workspaces."
         # Point operators at host CPU introspection only when an unknown CPU

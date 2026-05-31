@@ -365,6 +365,31 @@ def test_check_local_capacity_reports_cpu_and_memory_issues_together() -> None:
     )
 
 
+@pytest.mark.unit
+def test_check_local_capacity_unknown_cpu_and_low_memory_names_both() -> None:
+    """An unknown CPU count plus low memory must name memory, not claim 'fewer CPUs'.
+
+    Regression: the summary branch fired ``elif low_cpu or unknown_cpu`` and
+    emitted 'Detected fewer CPUs than recommended' whenever the CPU count was
+    merely unknown. With low memory too, that one-liner both misreported the
+    CPU count as 'fewer' (it is unknown, not low) and dropped the memory
+    shortfall entirely, steering an operator to provision CPUs they may not
+    need while leaving the real memory problem invisible.
+    """
+    result = check_local_capacity(
+        cpu_count=lambda: None,
+        total_memory_bytes=lambda: 1 * 1024**3,
+    )
+    assert result.level is SetupCheckLevel.WARNING
+    assert "cpus" not in result.data
+    assert "bytes of memory is below the recommended" in result.detail
+    assert "os.cpu_count() returned no value" in result.detail
+    # The summary must surface the memory shortfall and describe the CPU count
+    # as unknown rather than 'fewer'.
+    assert result.summary == "Detected less memory and an unknown CPU count for AWF workspaces."
+    assert "fewer CPUs" not in result.summary
+
+
 # --- run_system_checks wiring --------------------------------------------
 
 
