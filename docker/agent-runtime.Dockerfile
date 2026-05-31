@@ -194,7 +194,7 @@ RUN set -eux; \
     npm cache clean --force; \
     codex --version || true; \
     claude --version || true; \
-    cursor-agent --version; \
+    cursor-agent --version || true; \
     gemini --version || true; \
     opencode --version || true; \
     ccusage --version
