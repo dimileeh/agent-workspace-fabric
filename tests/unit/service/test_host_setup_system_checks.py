@@ -989,6 +989,22 @@ def test_normalize_provider_known_and_alias() -> None:
 
 
 @pytest.mark.unit
+def test_normalize_provider_accepts_grok_and_xai_alias() -> None:
+    """Verify the supported Grok runtime is selectable through setup.
+
+    Grok is a first-class provider everywhere else (provider readiness,
+    ``awf service`` help, the agent adapters), so ``awf setup --provider grok``
+    must resolve instead of failing ``SETUP_PROVIDER_UNKNOWN``. ``xai`` mirrors
+    the brand alias every other provider carries and matches the credential key
+    Grok uses across the codebase.
+    """
+    assert normalize_provider("grok") == "grok"
+    assert "grok" in KNOWN_SETUP_PROVIDERS
+    assert normalize_provider("xai") == "grok"
+    assert normalize_provider("XAI") == "grok"
+
+
+@pytest.mark.unit
 def test_normalize_provider_unknown_raises_reason_coded() -> None:
     """Verify an unknown provider raises a reason-coded SetupCheckError."""
     with pytest.raises(SetupCheckError) as excinfo:
