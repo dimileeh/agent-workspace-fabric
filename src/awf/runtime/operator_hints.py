@@ -96,6 +96,20 @@ def mark_operator_hint_needs_human(state: MonitorState, reason: str) -> None:
     )
 
 
+def mark_operator_hint_agent_failed(state: MonitorState, reason: str) -> None:
+    hint = state.pending_operator_hint
+    if hint is None:
+        return
+    state.pending_operator_hint = OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        reason_code=hint.reason_code,
+        status="agent_failed",
+        status_reason=reason,
+    )
+
+
 def remonitor_has_elapsed_settle(
     threads_addressed: dict[str, str],
     *,

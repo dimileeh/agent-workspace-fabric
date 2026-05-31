@@ -170,14 +170,6 @@ def _merge_concurrent_operator_hint(
     return persist_operator_hint(threads_addressed, db_hint)
 
 
-async def _refresh_operator_hint_from_workspace(
-    self: Any,
-    workspace_id: str,
-    state: MonitorState,
-) -> bool:
-    return await _refresh_operator_state_from_workspace(self, workspace_id, state)
-
-
 async def _refresh_operator_state_from_workspace(
     self: Any,
     workspace_id: str,

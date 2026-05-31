@@ -253,6 +253,69 @@ async def test_operator_hint_repair_converts_protected_scope_diff_error_to_push_
 
 
 @pytest.mark.unit
+async def test_operator_hint_repair_records_agent_failed_verdict_as_agent_failed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair should preserve agent failures",
+        operation_id="op_agent_failed_hint",
+        requested_at="2026-05-31T01:10:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _agent_failed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="agent_failed", reason="adapter crashed")
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_failed)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_agent_failed",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_agent_failed",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result == _GitPushResult(pushed=False, failed=False, returncode=0)
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="agent_failed",
+        status_reason="adapter crashed",
+    )
+
+
+@pytest.mark.unit
 async def test_operator_hint_repair_uses_captured_operation_start_head_for_protected_scope(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

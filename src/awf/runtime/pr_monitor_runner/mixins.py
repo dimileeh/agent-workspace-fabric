@@ -55,7 +55,6 @@ class RunnerDelegatesMixin:
 
     _load_workspace = _lifecycle._load_workspace
     _load_state = _lifecycle._load_state
-    _refresh_operator_hint_from_workspace = _lifecycle._refresh_operator_hint_from_workspace
     _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
     _terminate_completed = _lifecycle._terminate_completed

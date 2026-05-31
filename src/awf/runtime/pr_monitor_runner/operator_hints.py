@@ -9,6 +9,7 @@ from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
 from awf.runtime.operator_hints import (
+    mark_operator_hint_agent_failed,
     mark_operator_hint_needs_human,
     mark_operator_hint_processed,
 )
@@ -93,7 +94,11 @@ async def _run_operator_hint_cycle(
             stderr=str(exc),
             reason_code=exc.reason_code,
         )
-    if verdict.verdict in {"needs_human", "defer", "agent_failed", "false_positive"}:
+    if verdict.verdict == "agent_failed":
+        reason = _operator_hint_block_reason(verdict)
+        mark_operator_hint_agent_failed(state, reason)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+    if verdict.verdict in {"needs_human", "defer", "false_positive"}:
         reason = _operator_hint_block_reason(verdict)
         mark_operator_hint_needs_human(state, reason)
         return _GitPushResult(pushed=False, failed=False, returncode=0)
@@ -151,4 +156,4 @@ def _operator_hint_block_reason(verdict: VerdictResult) -> str:
         return verdict.reason or "agent deferred the operator hint"
     if verdict.verdict == "needs_human":
         return verdict.reason or "agent requested human input for the operator hint"
-    return "agent failed while processing the operator hint"
+    return verdict.reason or "agent failed while processing the operator hint"
