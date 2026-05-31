@@ -842,7 +842,13 @@ async def test_failed_pre_push_validation_cleans_before_fix_pass(
         nonlocal fix_called
         fix_called = True
         assert any(
-            call.args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]
+            call.args[-4:]
+            == [
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ]
             for call in cmd.calls
         )
         return False, None

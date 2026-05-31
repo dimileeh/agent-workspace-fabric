@@ -18,6 +18,13 @@ from awf.runtime.validation_worktree import (
     validation_worktree_cleanup_failure_message,
 )
 
+_VALIDATION_STATUS_ARGS = (
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+    "--ignored=matching",
+)
+
 
 @dataclass
 class _CommandResultLike:
@@ -41,7 +48,7 @@ async def test_check_validation_worktree_clean_handles_none_stdout_as_clean(tmp_
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate a status command returning no output."""
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, None, "")
         raise AssertionError(f"unexpected git command: {args!r}")
 
@@ -60,7 +67,7 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate a status command reporting an untracked file."""
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? untracked.py\n", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
@@ -70,6 +77,27 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
     assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert check.paths == ("untracked.py",)
     assert check.untracked_paths == ("untracked.py",)
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_treats_ignored_paths_as_dirty(
+    tmp_path: Path,
+) -> None:
+    """Ignored files are treated as pre-existing dirt for validation worktree checks."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command reporting an ignored file."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! ignored-output/fixture.json\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.paths == ("ignored-output/fixture.json",)
+    assert check.untracked_paths == ("ignored-output/fixture.json",)
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:
@@ -90,7 +118,7 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate restore failure after a dirty tracked file is reported."""
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M tracked.py\n", "")
         if args[:1] == ["restore"]:
             return _CommandResultLike(1, "", None)
@@ -116,7 +144,7 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate clean failure while removing untracked artifacts."""
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "?? untracked.py\n", "")
         if args[:1] == ["clean"]:
             return _CommandResultLike(1, "", None)
@@ -144,7 +172,7 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Track status/restore calls while verification still reports dirt."""
         calls.append(tuple(args))
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             if len(calls) == 1:
                 return _CommandResultLike(0, " M tracked.py\n", "")
             return _CommandResultLike(0, " M tracked.py\n", "")
@@ -175,7 +203,7 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate a status failure on the post-cleanup verification step."""
         calls.append(tuple(args))
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             if len(calls) == 1:
                 return _CommandResultLike(0, " M tracked.py\n", "")
             return _CommandResultLike(1, "", "status command failed")
@@ -212,7 +240,7 @@ async def test_cleanup_validation_worktree_rejects_invalid_head_output(
 
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Return malformed HEAD output during restore-reference checks."""
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, "M\x00src/fix.py\0", None)
@@ -244,7 +272,7 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Return commands representing a moved HEAD without cleanup side effects."""
         calls.append(tuple(args))
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
@@ -275,7 +303,7 @@ async def test_cleanup_validation_worktree_treats_clean_state_as_noop_when_resto
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate a clean tree with no captured restore ref."""
         calls.append(tuple(args))
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, "", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
@@ -286,7 +314,7 @@ async def test_cleanup_validation_worktree_treats_clean_state_as_noop_when_resto
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
     assert cleanup.message == ""
-    assert calls == [("status", "--porcelain=v1", "--untracked-files=all")]
+    assert calls == [tuple(_VALIDATION_STATUS_ARGS)]
 
 
 @pytest.mark.unit
@@ -302,11 +330,11 @@ async def test_cleanup_validation_worktree_detects_head_change_after_dirty_clean
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate a full cleanup flow that still changes HEAD."""
         calls.append(tuple(args))
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             if len(calls) == 1:
                 return _CommandResultLike(0, "?? untracked.py\n", "")
             return _CommandResultLike(0, "", None)
-        if args == ["clean", "-fd", "--", "untracked.py"]:
+        if args == ["clean", "-fdx", "--", "untracked.py"]:
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
@@ -340,7 +368,7 @@ async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_cle
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate a validation side effect that is restored before reporting success."""
         calls.append(tuple(args))
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             if len(calls) == 1:
                 return _CommandResultLike(0, " M tracked.py\n", None)
             return _CommandResultLike(0, "", None)
@@ -385,12 +413,12 @@ async def test_cleanup_validation_worktree_marks_untracked_files_as_clean_after_
     async def run_git(args: list[str]) -> _CommandResultLike:
         """Simulate a validation side effect that creates and then removes an untracked file."""
         nonlocal status_calls
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args == list(_VALIDATION_STATUS_ARGS):
             status_calls += 1
             if status_calls == 1:
                 return _CommandResultLike(0, "?? untracked.py\n", None)
             return _CommandResultLike(0, "", None)
-        if args == ["clean", "-fd", "--", "untracked.py"]:
+        if args == ["clean", "-fdx", "--", "untracked.py"]:
             return _CommandResultLike(0, "", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 

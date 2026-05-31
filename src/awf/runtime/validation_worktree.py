@@ -155,10 +155,10 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
 
 
 def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
-    """Extract untracked paths from ``git status --porcelain`` output."""
+    """Extract untracked and ignored paths from ``git status --porcelain`` output."""
     paths: list[str] = []
     for line in status_stdout.splitlines():
-        if not line.startswith("?? "):
+        if not (line.startswith("?? ") or line.startswith("!! ")):
             continue
         paths.append(_unquote_porcelain_path(line[3:]))
     return list(dict.fromkeys(paths))
@@ -243,7 +243,9 @@ async def check_validation_worktree_clean(
     if not (worktree_path / ".git").exists():
         return ValidationWorktreeCheck(clean=True, skipped=True)
 
-    status = await run_git(["status", "--porcelain=v1", "--untracked-files=all"])
+    status = await run_git(
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"]
+    )
     if not status.ok:
         stderr = (status.stderr or "")[:1000]
         return ValidationWorktreeCheck(
@@ -423,7 +425,7 @@ async def cleanup_validation_worktree_side_effects(
             )
 
     if check.untracked_paths:
-        clean = await run_git(["clean", "-fd", "--", *check.untracked_paths])
+        clean = await run_git(["clean", "-fdx", "--", *check.untracked_paths])
         if not clean.ok:
             return ValidationWorktreeCleanup(
                 cleaned=False,
