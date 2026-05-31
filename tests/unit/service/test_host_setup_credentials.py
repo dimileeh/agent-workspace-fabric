@@ -816,6 +816,52 @@ def test_plain_file_closes_fd_when_fdopen_fails(
     assert _FAKE_TOKEN not in str(error.to_dict())
 
 
+@pytest.mark.unit
+def test_plain_file_refuses_to_follow_preexisting_temp_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the temp secret write refuses a symlink pre-placed at the temp path.
+
+    The temp file is opened with ``O_EXCL`` so the kernel creates a fresh inode
+    and refuses the open if anything already exists at the temp path — including a
+    symlink an attacker planted to redirect the write elsewhere. Without ``O_EXCL``
+    the ``O_CREAT`` open would traverse the link and write the secret to the
+    attacker-controlled target; with it the open fails, the secret never reaches
+    the link target, the failure is a secret-free reason code, and the stale link
+    is cleaned up. The 0o700 secrets dir plus the random suffix already make this
+    extremely unlikely, but the defence-in-depth is cheap for a secrets path.
+    """
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir(mode=0o700)
+    # Pin the random temp suffix so the would-be temp path is predictable and a
+    # symlink can be planted there ahead of the write.
+    monkeypatch.setattr(credentials.secrets, "token_hex", lambda _n: "deadbeefdeadbeef")
+    target = secrets_dir / "openai.default"
+    temp_link = secrets_dir / f".{target.name}.deadbeefdeadbeef.tmp"
+    attacker_target = tmp_path / "attacker-owned"
+    attacker_target.write_text("original", encoding="utf-8")
+    temp_link.symlink_to(attacker_target)
+
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The secret never followed the symlink to the attacker-controlled target.
+    assert attacker_target.read_text(encoding="utf-8") == "original"
+    # The published target was never created and the stale temp link was removed.
+    assert not target.exists()
+    assert not temp_link.is_symlink()
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
 # --------------------------------------------------------------------------- #
 # 6 & 7. Non-Linux and non-headless rejection for plain-file.
 # --------------------------------------------------------------------------- #

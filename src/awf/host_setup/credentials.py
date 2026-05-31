@@ -740,7 +740,14 @@ def _write_secret_file(target: Path, secret: str) -> None:
     try:
         _mkdir_secure(secrets_dir)
         tmp_path = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # ``O_EXCL`` makes the kernel create a fresh inode and refuse the open if
+        # anything already exists at ``tmp_path`` — including a symlink an attacker
+        # planted to redirect this secret write to a path they control. The 0o700
+        # secrets dir and 8-byte random suffix already make that extremely
+        # unlikely, but ``O_EXCL`` is cheap defence-in-depth for a secrets write.
+        # A pre-existing temp path then raises ``FileExistsError`` (an ``OSError``),
+        # cleaned up and reason-coded by the ``except OSError`` below.
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_EXCL, 0o600)
         # ``os.fdopen`` takes ownership of ``fd`` only once it returns; if it
         # raises (e.g. an invalid mode or an implementation-level error) the raw
         # descriptor would leak. CPython closes it internally on an ``os.fdopen``
