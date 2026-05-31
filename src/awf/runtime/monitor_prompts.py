@@ -195,6 +195,8 @@ def operator_hint_prompt(
         f"{_PROTECTED_FILE_POLICY}\n"
         "Address what the hint says, commit any code changes locally, reply to any relevant "
         "unresolved review threads, and only then consider this PR ready to merge.\n"
+        "If you complete the hint with code changes or only no-code/GitHub-side work, "
+        "print `AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
         "If you cannot safely complete the operator hint, leave the branch unchanged "
         "and print `AWF-VERDICT: NEEDS_HUMAN: <what you need>`.\n"
         f"{_FOOTER}"

@@ -485,6 +485,17 @@ class TestOperatorHintPrompt:
         ) in prompt
         assert "Do NOT push" in prompt
 
+    @pytest.mark.unit
+    def test_prescribes_fixed_verdict_for_successful_code_or_no_code_hints(self) -> None:
+        prompt = operator_hint_prompt(
+            pr_number=329,
+            repo_slug="dimileeh/awf",
+            reason="reply to the relevant unresolved review thread without code changes",
+        )
+
+        assert "AWF-VERDICT: FIXED:" in prompt
+        assert "code changes or only no-code" in prompt
+
 
 class TestFixCiPrompt:
     """Tests for fix-ci prompt rendering from structured check failure evidence."""
