@@ -670,6 +670,24 @@ class TestServiceStartupDiagnostics:
         assert REDACTION_MARKER in event["error"]
         assert secret_value not in json.dumps(event, default=str)
 
+        # The structlog field is only half the surface. ``str(exc)`` embeds the
+        # raw docker ``stderr`` (``ComposeOperationError`` folds it into the
+        # message), and the provisioner fallback writes ``f"{reason_code}: {exc}"``
+        # straight into ``companion_logs_capture_error._top_level`` before
+        # ``redact_audit_value`` runs. Assert the persisted DB row — the
+        # highest-risk surface — never carries the raw secret either.
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
+            assert failed_event.payload is not None
+            payload_blob = json.dumps(failed_event.payload, default=str)
+            assert secret_value not in payload_blob
+            # Persisted payloads use the ``redact_audit_value`` marker
+            # (``[redacted]``), not the live-log ``redact_secrets`` marker.
+            assert "[redacted]" in payload_blob
+
     @pytest.mark.unit
     async def test_unexpected_capture_error_does_not_mask_original_error(
         self,
