@@ -23,8 +23,6 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.repositories.base import (
-    PROVISIONING_LAUNCHING_EVENT_TYPE,
-    PROVISIONING_LAUNCHING_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
 )
@@ -100,22 +98,6 @@ async def _has_terminal_runtime_released_event(
             WorkspaceEvent.workspace_id == workspace_id,
             WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
             WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
-
-
-async def _has_provisioning_launching_event(
-    session: AsyncSession,
-    workspace_id: str,
-) -> bool:
-    stmt = (
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == PROVISIONING_LAUNCHING_EVENT_TYPE,
-            WorkspaceEvent.reason_code == PROVISIONING_LAUNCHING_REASON_CODE,
         )
         .limit(1)
     )
