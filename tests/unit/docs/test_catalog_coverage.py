@@ -17,6 +17,7 @@ ALLOWLIST = {
     "GITHUB_AUTH_OK": "Success states do not need failure documentation.",
     "CODEX_AUTH_OK": "Success states do not need failure documentation.",
     "CLAUDE_CODE_AUTH_OK": "Success states do not need failure documentation.",
+    "CURSOR_AUTH_OK": "Success states do not need failure documentation.",
     "GEMINI_AUTH_OK": "Success states do not need failure documentation.",
     "OPENCODE_AUTH_OK": "Success states do not need failure documentation.",
     "PORT_OPEN": "Success states do not need failure documentation.",

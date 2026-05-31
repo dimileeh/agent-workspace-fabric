@@ -40,6 +40,8 @@ AGENT_AUTH_ENV_VARS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
+    # Cursor CLI headless auth.
+    "CURSOR_API_KEY",
     # Gemini CLI headless auth.
     "GEMINI_API_KEY",
     "GEMINI_API_KEY_AUTH_MECHANISM",

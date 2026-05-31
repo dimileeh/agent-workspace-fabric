@@ -625,6 +625,29 @@ async def test_unsupported_provider_records_reason_without_running_ccusage(
 
 
 @pytest.mark.unit
+async def test_cursor_records_unsupported_source_until_ccusage_adds_cursor(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_cursor_usage",
+        provider=AgentRuntime.cursor,
+    )
+
+    assert runner.calls == []
+    await ctx.finalize(status="success")
+    snap = read_latest_usage_snapshot("ws_cursor_usage", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.provider == "cursor"
+    assert snap.ccusage_source is None
+    assert snap.reason == "ccusage_source_unsupported"
+    assert snap.status == "unavailable"
+
+
+@pytest.mark.unit
 async def test_finalize_is_idempotent(tmp_path: Path) -> None:
     runner = _ccusage_runner(
         json.dumps({"totals": {"totalTokens": 1}}),

@@ -41,7 +41,8 @@
         +------------------------------------+
         | Coding Agent CLI                   |
         |                                    |
-        | codex / claude / gemini            |
+        | codex / claude / cursor / gemini   |
+        | opencode                           |
         | edits files                        |
         | commits changes                    |
         | fixes review comments              |
@@ -142,9 +143,9 @@ instead of relying on an agent-specific interactive plan mode:
 4. Iterate execution while the report says plan gaps remain.
 5. Fail the workspace if the plan is not satisfied within the configured budget.
 
-This works the same way for Codex, Claude Code, Gemini, and future adapters
-because the control plane invokes normal non-interactive agent runs for each
-phase and stores the plan/report inside the workspace.
+This works the same way for Codex, Claude Code, Cursor, Gemini, OpenCode, and
+future adapters because the control plane invokes normal non-interactive agent
+runs for each phase and stores the plan/report inside the workspace.
 
 Preview the profile AWF would resolve for a checkout:
 
@@ -451,10 +452,10 @@ curl "${AWF_API_BASE_URL}/release-readiness"
 ```
 
 `awf service status` and `/readyz` include an `agent_readiness` section for
-GitHub, Codex, Claude Code, Gemini, OpenCode/Ollama, and Docker. Each provider
-reports redacted `credential_sources`, `credential_scope`, `isolation`, and
-structured warnings. Missing optional providers and local least-privilege
-downgrades are warnings by default. Pass `--provider <name>` or
+GitHub, Codex, Claude Code, Cursor, Gemini, OpenCode/Ollama, and Docker. Each
+provider reports redacted `credential_sources`, `credential_scope`,
+`isolation`, and structured warnings. Missing optional providers and local
+least-privilege downgrades are warnings by default. Pass `--provider <name>` or
 `?provider=<name>` to make that provider strict for scheduling or rollout
 checks.
 

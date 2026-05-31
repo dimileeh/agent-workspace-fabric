@@ -84,8 +84,9 @@ def _runtime_cli_ok(expected_executable: str) -> Any:
 
 @pytest.mark.unit
 def test_provider_readiness_validates_aliases_and_rejects_unknown() -> None:
-    assert validate_provider_names(["claude", "opencode", "codex", "docker", ""]) == {
+    assert validate_provider_names(["claude", "cursor", "opencode", "codex", "docker", ""]) == {
         "claude_code",
+        "cursor",
         "opencode",
         "codex",
         "docker",
@@ -109,6 +110,7 @@ def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path)
         "github",
         "codex",
         "claude_code",
+        "cursor",
         "gemini",
         "opencode",
         "docker",
@@ -240,7 +242,10 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     (home / ".claude").mkdir()
     (home / ".gemini").mkdir()
     (home / ".config" / "opencode").mkdir(parents=True)
-    env = {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"}
+    env = {
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+        "CURSOR_API_KEY": "cursor_secret",
+    }
     probe_calls: list[list[str]] = []
 
     def _run(args: list[str], **_kwargs: object) -> Any:
@@ -250,6 +255,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     cases = [
         ("codex", "codex", "gpt-custom", "ok"),
         ("claude_code", "claude_code", "claude-opus-4-8", "ok"),
+        ("cursor", "cursor", "sonnet-4-thinking", "ok"),
         ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
     ]
@@ -298,6 +304,16 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         "sh",
         "awf-agent-runtime:latest",
         "-lc",
+        "command -v cursor-agent",
+    ] in probe_calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "awf-agent-runtime:latest",
+        "-lc",
         "command -v gemini",
     ] in probe_calls
     assert [
@@ -310,6 +326,80 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         "-lc",
         "command -v opencode",
     ] in probe_calls
+
+
+@pytest.mark.unit
+def test_selected_cursor_preflight_requires_env_key_and_runtime_cli(
+    tmp_path: Path,
+) -> None:
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={},
+        environ={"CURSOR_API_KEY": "cursor_secret"},
+        run_subprocess=_runtime_cli_ok("cursor-agent"),
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["agent"] == "cursor"
+    assert result["model"] == "sonnet-4-thinking"
+    assert result["model_source"] == "default"
+    assert result["readiness_status"] == "ready"
+    assert result["auth_status"] == "ok"
+    assert result["auth_source"] == "CURSOR_API_KEY"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+    serialized = json.dumps(result, sort_keys=True)
+    assert "cursor_secret" not in serialized
+
+
+@pytest.mark.unit
+def test_selected_cursor_preflight_blocks_missing_env_key(tmp_path: Path) -> None:
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["agent"] == "cursor"
+    assert result["model"] == "sonnet-4-thinking"
+    assert result["readiness_status"] == "blocked"
+    assert result["auth_status"] == "fail"
+    assert result["auth_source"] == "not_observed"
+    assert result["probe_status"] == "skipped"
+    assert result["reason_code"] == "CURSOR_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_cursor_preflight_blocks_missing_runtime_cli(tmp_path: Path) -> None:
+    secret = "cursor_missing_cli_secret"
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        assert args[-1] == "command -v cursor-agent"
+        assert kwargs["env"]["CURSOR_API_KEY"] == secret
+        return _completed(returncode=1, stderr=f"cursor-agent missing with {secret}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={},
+        environ={"CURSOR_API_KEY": secret},
+        run_subprocess=_run,
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "CURSOR_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
+    serialized = json.dumps(result, sort_keys=True)
+    assert secret not in serialized
+    assert "<redacted>" in serialized
 
 
 @pytest.mark.unit
@@ -929,11 +1019,13 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
     (home / ".ollama" / "config.json").write_text("ollama-file-secret")
     github_secret = "ghp_green_secret"
     anthropic_secret = "sk-ant-green-secret"
+    cursor_secret = "cursor_green_secret"
     gemini_secret = "gemini_green_secret"
     ollama_secret = "ollama_green_secret"
     env = {
         "AWF_GITHUB_TOKEN": github_secret,
         "ANTHROPIC_API_KEY": anthropic_secret,
+        "CURSOR_API_KEY": cursor_secret,
         "GEMINI_API_KEY": gemini_secret,
         "OLLAMA_API_KEY": ollama_secret,
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
@@ -958,7 +1050,15 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
 
     assert payload["status"] == "ok"
     providers = payload["providers"]
-    assert set(providers) == {"github", "codex", "claude_code", "gemini", "opencode", "docker"}
+    assert set(providers) == {
+        "github",
+        "codex",
+        "claude_code",
+        "cursor",
+        "gemini",
+        "opencode",
+        "docker",
+    }
     assert all(provider["ok"] is True for provider in providers.values())
     assert providers["github"]["capabilities"] == ["pr_create", "comment", "merge"]
     assert subprocess_calls == [["gh", "auth", "status", "--hostname", "github.com"]]
@@ -967,6 +1067,7 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
         github_secret,
         "codex_file_secret",
         anthropic_secret,
+        cursor_secret,
         gemini_secret,
         ollama_secret,
     ):
@@ -1164,6 +1265,7 @@ def test_provider_readiness_env_fallbacks_report_security_warnings(
         "AWF_GITHUB_TOKEN": "ghp_env_fallback_secret",
         "OPENAI_API_KEY": "sk-proj-codex-fallback-secret",
         "ANTHROPIC_API_KEY": "sk-ant-env-fallback-secret",
+        "CURSOR_API_KEY": "cursor-env-fallback-secret",
         "GEMINI_API_KEY": "gemini-env-fallback-secret",
         "OLLAMA_API_KEY": "ollama-env-fallback-secret",
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
@@ -1176,7 +1278,7 @@ def test_provider_readiness_env_fallbacks_report_security_warnings(
         http_get=_ollama_ok,
     )
 
-    for name in ("github", "codex", "claude_code", "gemini", "opencode"):
+    for name in ("github", "codex", "claude_code", "cursor", "gemini", "opencode"):
         provider = payload["providers"][name]
         assert provider["ok"] is True
         assert provider["credential_scope"] == "static_env_token"

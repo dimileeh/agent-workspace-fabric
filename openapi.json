@@ -41,6 +41,7 @@
           "codex",
           "claude_code",
           "gemini",
+          "cursor",
           "opencode"
         ],
         "title": "AgentRuntime",

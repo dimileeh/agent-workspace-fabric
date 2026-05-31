@@ -15,12 +15,21 @@ from awf.db.enums import AgentRuntime
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
 
-ProviderName = Literal["github", "codex", "claude_code", "gemini", "opencode", "docker"]
+ProviderName = Literal[
+    "github",
+    "codex",
+    "claude_code",
+    "cursor",
+    "gemini",
+    "opencode",
+    "docker",
+]
 
 PROVIDER_NAMES: tuple[ProviderName, ...] = (
     "github",
     "codex",
     "claude_code",
+    "cursor",
     "gemini",
     "opencode",
     "docker",
@@ -46,6 +55,7 @@ _CLAUDE_ENV_KEYS = (
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
+_CURSOR_ENV_KEYS = ("CURSOR_API_KEY",)
 _GEMINI_ENV_KEYS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -58,6 +68,7 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         *_GITHUB_TOKEN_ENV_KEYS,
         *_CODEX_ENV_KEYS,
         *_CLAUDE_ENV_KEYS,
+        *_CURSOR_ENV_KEYS,
         *_GEMINI_ENV_KEYS,
         *_OPENCODE_ENV_KEYS,
         *_DOCKER_AUTH_ENV_KEYS,
@@ -88,6 +99,7 @@ TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(_KNOWN_TOKEN_PATTERNS) + r
 _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.codex: "codex",
     AgentRuntime.claude_code: "claude_code",
+    AgentRuntime.cursor: "cursor",
     AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
 }
@@ -363,6 +375,12 @@ def _check_provider_readiness(
             strict=strict,
             secrets=secrets,
         )
+    if provider == "cursor":
+        return _check_cursor(
+            environ=environ,
+            strict=strict,
+            secrets=secrets,
+        )
     if provider == "gemini":
         return _check_gemini(
             environ=environ,
@@ -414,7 +432,7 @@ def _selected_launch_probe(
         )
         if runtime_probe.get("status") != "ok":
             return runtime_probe
-        if provider in {"codex", "claude_code", "gemini"}:
+        if provider in {"codex", "claude_code", "cursor", "gemini"}:
             return runtime_probe
     if provider == "opencode":
         return _probe_ollama_model(
@@ -430,6 +448,7 @@ def _agent_runtime_cli_executable(provider: ProviderName) -> str | None:
     return {
         "codex": "codex",
         "claude_code": "claude",
+        "cursor": "cursor-agent",
         "gemini": "gemini",
         "opencode": "opencode",
     }.get(provider)
@@ -439,6 +458,7 @@ def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
     return {
         "codex": "CODEX",
         "claude_code": "CLAUDE",
+        "cursor": "CURSOR",
         "gemini": "GEMINI",
         "opencode": "OPENCODE",
     }.get(provider, "PROVIDER")
@@ -1024,6 +1044,50 @@ def _check_claude(
             "No Claude Code auth signal was visible. Set ANTHROPIC_API_KEY, "
             "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or mount ~/.claude."
         ),
+        secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
+    )
+
+
+def _check_cursor(
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    signal = _first_present_env(environ, _CURSOR_ENV_KEYS)
+    if signal is not None:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="CURSOR_ENV_AUTH_PRESENT",
+            message="Cursor auth is visible through service environment variables.",
+            signals=[signal],
+            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=[
+                _security_warning(
+                    "STATIC_TOKEN_FALLBACK",
+                    f"Cursor auth is supplied by static service environment variable {signal}.",
+                )
+            ],
+        )
+
+    return _provider_result(
+        ok=False,
+        strict=strict,
+        reason="CURSOR_AUTH_MISSING",
+        message="No Cursor auth signal was visible. Set CURSOR_API_KEY.",
         secrets=secrets,
         credential_scope="not_observed",
         isolation="none",

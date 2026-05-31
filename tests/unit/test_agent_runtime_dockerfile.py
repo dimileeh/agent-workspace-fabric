@@ -91,6 +91,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "ARG CLAUDE_CODE_VERSION=2.1.158" in dockerfile
     assert "ARG GEMINI_VERSION=0.42.0" in dockerfile
     assert "ARG OPENCODE_VERSION=1.15.2" in dockerfile
+    assert "Cursor CLI tracks the official installer" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
     assert "ARG GEMINI_VERSION=latest" not in dockerfile
@@ -99,8 +100,14 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in dockerfile
     assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile
     assert "opencode-ai@${OPENCODE_VERSION}" in dockerfile
+    assert "cursor-agent" in dockerfile
+    assert "curl https://cursor.com/install -fsS | bash" in dockerfile
+    assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
+    assert "test -x /usr/local/bin/cursor-agent" in dockerfile
+    assert "npm install -g cursor-agent" not in dockerfile
     assert "codex --version" in dockerfile
     assert "claude --version" in dockerfile
+    assert "cursor-agent --version" in dockerfile
     assert "gemini --version" in dockerfile
     assert "opencode --version" in dockerfile
 

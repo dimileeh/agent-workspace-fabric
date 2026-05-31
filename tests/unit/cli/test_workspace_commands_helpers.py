@@ -207,6 +207,67 @@ def test_workspace_create_builds_minimal_development_payload(
 
 
 @pytest.mark.unit
+def test_workspace_create_accepts_cursor_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify workspace_create forwards the Cursor runtime name unchanged."""
+    captured: dict[str, object] = {}
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        captured["method"] = method
+        captured["path"] = path
+        captured.update(kwargs)
+        return httpx.Response(202, json={"id": "ws"})
+
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    workspace_commands.workspace_create(
+        repo_url="git@example.com:repo/app.git",
+        task_title="title",
+        task_prompt="prompt",
+        branch_base=None,
+        task_kind=TaskKind.feature_branch_pr.value,
+        source_branch=None,
+        agent="cursor",
+        model=None,
+        effort=None,
+        task_class=None,
+        priority=None,
+        human_boost=None,
+        out_of_scope_changes_json=None,
+        provider_recovery_json=None,
+        owned_paths=None,
+        external_id=None,
+        cpu=None,
+        memory=None,
+        steady_state_cpu_cores=None,
+        steady_state_memory_gb=None,
+        peak_cpu_cores=None,
+        peak_memory_gb=None,
+        disk_mb=None,
+        profile_ref="auto",
+        test_commands=[],
+        requires_database=False,
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        provider_readiness_override=False,
+        provider_readiness_override_reason=None,
+        companion_json=None,
+        companion_env_from=None,
+        companion_env_exclude=None,
+        idempotency_key=None,
+        api_token=None,
+        base_url=None,
+        fmt=OutputFormat.json,
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/v1/workspaces"
+    assert captured["json"]["task"]["agent"] == "cursor"  # type: ignore[index]
+
+
+@pytest.mark.unit
 def test_workspace_create_merges_env_from_into_companion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -481,3 +542,43 @@ def test_workspace_adopt_pr_requires_exactly_one_selector(
             base_url=None,
             fmt=OutputFormat.json,
         )
+
+
+@pytest.mark.unit
+def test_workspace_adopt_pr_accepts_cursor_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify adopt-pr forwards the Cursor runtime name unchanged."""
+    captured: dict[str, object] = {}
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        captured["method"] = method
+        captured["path"] = path
+        captured.update(kwargs)
+        return httpx.Response(202, json={"id": "ws"})
+
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    workspace_commands.workspace_adopt_pr(
+        repo="owner/repo",
+        pr_number=310,
+        pr_url=None,
+        agent="cursor",
+        model=None,
+        effort=None,
+        owned_paths=None,
+        profile_ref="auto",
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        task_title=None,
+        task_prompt=None,
+        reason=None,
+        api_token=None,
+        base_url=None,
+        fmt=OutputFormat.json,
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/v1/workspaces/adopt-pr"
+    assert captured["json"]["agent"] == "cursor"  # type: ignore[index]

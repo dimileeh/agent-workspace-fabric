@@ -178,6 +178,9 @@ class AgentRuntime(StrEnum):
     gemini = "gemini"
     """Google Gemini CLI — ``gemini --yolo``."""
 
+    cursor = "cursor"
+    """Cursor CLI — ``cursor-agent -p --force`` for non-interactive workspace edits."""
+
     opencode = "opencode"
     """OpenCode CLI — ``opencode run`` with an AWF-managed provider config."""
 

@@ -219,6 +219,9 @@ def test_provider_cooldown_not_before_normalises_timezone_to_utc() -> None:
 
 def test_provider_for_agent_model_falls_back_to_known_agent_provider() -> None:
     assert provider_for_agent_model("codex", None) == "openai"
+    assert provider_for_agent_model("cursor", None) == "cursor"
+    assert provider_for_agent_model("cursor", "sonnet-4-thinking") == "cursor"
+    assert provider_for_agent_model("cursor", "gpt-5") == "cursor"
     assert provider_for_agent_model("gemini", None) == "google"
     assert provider_for_agent_model("claude_code", None) == "anthropic"
     assert provider_for_agent_model("opencode", None) == "opencode"

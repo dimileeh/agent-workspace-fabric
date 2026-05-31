@@ -32,6 +32,27 @@ def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None
     assert "<redacted>" in classification.failure_fingerprint
 
 
+def test_classifies_cursor_auth_failure_and_redacts_secret_fingerprint() -> None:
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr=(
+            "cursor-agent failed: CURSOR_API_KEY=cursor_api_key_secret "
+            "is invalid; please authenticate"
+        ),
+        provider=None,
+        model="sonnet-4-thinking",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "cursor"
+    assert classification.model == "sonnet-4-thinking"
+    assert "cursor_api_key_secret" not in classification.failure_fingerprint
+    assert "<redacted>" in classification.failure_fingerprint
+
+
 def test_classifies_quota_capacity_with_retry_after() -> None:
     classification = classify_provider_failure(
         reason_code=None,
@@ -128,6 +149,7 @@ def test_timeout_without_provider_or_model_is_not_recovery_metadata() -> None:
 def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
     assert infer_provider(model="claude-sonnet-4.5", output=None) == "anthropic"
     assert infer_provider(model=None, output="ollama local model is unavailable") == "ollama"
+    assert infer_provider(model=None, output="cursor-agent: unauthorized") == "cursor"
 
 
 def test_failure_fingerprint_truncates_long_output_after_redaction() -> None:

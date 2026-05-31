@@ -279,6 +279,39 @@ def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"CURSOR_API_KEY": "cursor_env_secret"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    cursor = payload["providers"]["cursor"]
+    assert cursor["ok"] is True
+    assert cursor["reason"] == "CURSOR_ENV_AUTH_PRESENT"
+    assert cursor["signals"] == ["CURSOR_API_KEY"]
+    assert cursor["credential_scope"] == "static_env_token"
+    assert cursor["isolation"] == "service_env"
+    assert "cursor_env_secret" not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_cursor_missing_env_fails_when_strict(tmp_path: Path) -> None:
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        strict_providers={"cursor"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    cursor = payload["providers"]["cursor"]
+    assert cursor["status"] == "fail"
+    assert cursor["reason"] == "CURSOR_AUTH_MISSING"
+    assert cursor["credential_scope"] == "not_observed"
+    assert cursor["isolation"] == "none"
+
+
+@pytest.mark.unit
 def test_provider_readiness_gemini_google_application_credentials_visible(
     tmp_path: Path,
 ) -> None:

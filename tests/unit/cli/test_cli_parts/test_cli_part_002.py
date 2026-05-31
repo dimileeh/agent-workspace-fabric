@@ -463,7 +463,7 @@ class TestWorkspaceList:
                     "--status",
                     "ready",
                     "--agent",
-                    "gemini",
+                    "cursor",
                     "--repo-url",
                     "git@github.com:example/app.git",
                     "--limit",
@@ -476,7 +476,7 @@ class TestWorkspaceList:
         assert kwargs["params"] == [
             ("limit", 9),
             ("status", "ready"),
-            ("agent", "gemini"),
+            ("agent", "cursor"),
             ("repo_url", "git@github.com:example/app.git"),
         ]
 

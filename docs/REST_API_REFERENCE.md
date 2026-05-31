@@ -68,7 +68,7 @@ Returns `200` when the release is ready, `503` otherwise. Supports query params
 `provider`, `failure_window_hours`, `slo_window_hours`.
 
 ```bash
-curl "http://localhost:8000/release-readiness?provider=codex&provider=claude_code"
+curl "http://localhost:8000/release-readiness?provider=codex&provider=cursor"
 ```
 
 ---
