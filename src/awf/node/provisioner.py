@@ -400,11 +400,12 @@ class Provisioner:
                         ):
                             compose_fail_ws.resolved_profile = resolved_profile_dict
                     await compose_fail_session.commit()
-            except Exception:
+            except Exception as commit_exc:
                 _log.warning(
                     "provisioner.compose_fail_commit_failed",
                     workspace_id=workspace_id,
                     reason_code="COMPOSE_FAIL_COMMIT_NON_FATAL",
+                    error=str(commit_exc),
                 )
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
@@ -890,12 +891,6 @@ class Provisioner:
                 node_id=self._config.node_id,
             )
             if conflicts:
-                _log.error(
-                    "provisioner.auto_profile_host_port_conflict",
-                    workspace_id=workspace_id,
-                    host_port=conflicts[0].host_port,
-                    conflicting_workspace_id=conflicts[0].workspace_id,
-                )
                 raise WorkspaceCreateHostPortConflictError(
                     host_port=conflicts[0].host_port,
                     conflicting_workspace_id=conflicts[0].workspace_id,
