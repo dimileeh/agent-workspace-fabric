@@ -263,7 +263,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### HOST_PORT_CONFLICT
 **Problem:** AWF rejected a workspace create or retry because a host port needed by the new workspace is already in use by another active or unreleased workspace.
-**Likely Cause:** Another workspace's profile services or companions bind the same Docker host port and its compose stack is still running, or the workspace is terminal but has not yet released its runtime resources (no `workspace.terminal_runtime_released` event exists).
+**Likely Cause:** Another workspace's profile services or companions bind the same Docker host port and its compose stack is still running, or the workspace is terminal but has not yet released its runtime resources (no `workspace.terminal_runtime_released` event exists). For auto-resolved profiles, the conflict may also be detected at provision time by the provisioner's host-port re-check (``_check_auto_resolved_profile_host_ports``) rather than at dispatch, surfacing as an ``INFRASTRUCTURE_FAILURE`` instead of a 409.
 **Operator Fix:** Wait for the conflicting workspace to release its ports (destroy, complete, or have its runtime released), then retry. Use `awf workspace show <conflicting_workspace_id>` to check its status and events.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#host_port_conflict](#host_port_conflict)
