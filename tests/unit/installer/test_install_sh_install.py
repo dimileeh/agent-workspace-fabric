@@ -60,6 +60,12 @@ def test_reachability_failure_does_not_claim_success(harness: InstallerHarness) 
     assert "AWF_NOT_REACHABLE" in result.stderr
     # The exact shell fix must be printed so the user can recover.
     assert "export PATH=" in result.stderr
+    # The advice must not falsely claim awf *is* installed in the bin dir: it was
+    # never found there, so "awf is installed in <dir>, which is not on your
+    # PATH" would directly contradict the "no awf binary was found" failure the
+    # user sees on the next line. The not-found branch must use an honest,
+    # context-aware opening instead.
+    assert "is installed in" not in result.stderr
 
 
 @pytest.mark.unit

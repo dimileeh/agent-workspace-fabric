@@ -648,7 +648,11 @@ print_path_advice() {
     # Threading the cached value in avoids a second `uv tool dir --bin` /
     # `pipx environment` subprocess per successful install without changing the
     # advice itself.
-    local bindir="${1:-}" shell rc line login_rc="" candidate
+    # An optional second argument overrides the opening line. verify_awf passes a
+    # context-aware message in the "binary not found" branch, where the default
+    # "awf is installed in ${bindir}" wording would be factually wrong (nothing
+    # was placed there) and contradict the AWF_NOT_REACHABLE failure that follows.
+    local bindir="${1:-}" opening="${2:-}" shell rc line login_rc="" candidate
     [ -n "$bindir" ] || bindir="$(default_bin_dir)"
     # Strip a trailing slash so the suggested `export PATH=` line never embeds a
     # double slash (e.g. ".../bin/:$PATH") when --install-dir or a uv/pipx bin
@@ -687,7 +691,11 @@ print_path_advice() {
             line="export PATH=\"${bindir}:\$PATH\""
             ;;
     esac
-    warn "awf is installed in ${bindir}, which is not on your PATH."
+    if [ -n "$opening" ]; then
+        warn "$opening"
+    else
+        warn "awf is installed in ${bindir}, which is not on your PATH."
+    fi
     warn "Add it by appending this line to ${rc}:"
     warn "    ${line}"
     if [ -n "$login_rc" ]; then
@@ -729,7 +737,11 @@ verify_awf() {
     fi
 
     if [ -z "$resolved" ]; then
-        print_path_advice "$bindir"
+        # No awf was found at ${bindir}/awf, at --install-dir, or on PATH. Do not
+        # claim it "is installed in ${bindir}" — it is not. Give an honest,
+        # conditional opening but still emit the exact PATH-export line so a user
+        # whose uv/pipx did drop the binary into ${bindir} can recover.
+        print_path_advice "$bindir" "awf was not found after install; if uv/pipx placed it in ${bindir}, add that directory to your PATH."
         fail AWF_NOT_REACHABLE "awf is not runnable after install; install reported success but no awf binary was found"
     fi
 
