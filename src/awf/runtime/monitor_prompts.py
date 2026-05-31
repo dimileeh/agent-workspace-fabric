@@ -194,6 +194,45 @@ def address_review_comment_prompt(
     )
 
 
+def operator_hint_prompt(
+    *,
+    pr_number: int,
+    repo_slug: str,
+    reason: str,
+    operation_id: str | None = None,
+    workspace_runtime_context: str = "",
+) -> str:
+    """Prompt the CLI to process an operator remonitor hint."""
+    evidence = render_untrusted_evidence(
+        UntrustedEvidence(
+            source_kind="operator_remonitor_hint",
+            source_name="AWF operator remonitor hint",
+            source_id=operation_id,
+            location=f"{repo_slug}#{pr_number}",
+            metadata=(
+                ("repo", repo_slug),
+                ("pr", f"#{pr_number}"),
+                ("operation_id", operation_id),
+            ),
+            text=reason,
+        )
+    )
+    return (
+        f"An operator manually requested re-monitoring this PR with the following hint:\n\n"
+        f"{evidence}\n\n"
+        f"{_workspace_runtime_context_section(workspace_runtime_context)}"
+        f"{_SAFETY_POLICY}\n"
+        f"{_protected_file_policy()}\n"
+        "Address what the hint says, commit any code changes locally, reply to any relevant "
+        "unresolved review threads, and only then consider this PR ready to merge.\n"
+        "If you complete the hint with code changes or only no-code/GitHub-side work, "
+        "print `AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
+        "If you cannot safely complete the operator hint, leave the branch unchanged "
+        "and print `AWF-VERDICT: NEEDS_HUMAN: <what you need>`.\n"
+        f"{_FOOTER}"
+    )
+
+
 def sync_base_conflict_prompt(
     *,
     pr_number: int,

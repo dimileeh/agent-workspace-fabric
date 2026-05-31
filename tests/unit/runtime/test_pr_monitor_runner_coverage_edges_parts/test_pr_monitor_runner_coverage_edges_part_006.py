@@ -39,6 +39,7 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _changed_paths_from_name_only_z,
     _changed_paths_from_name_status_z,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -909,6 +910,14 @@ def test_changed_paths_from_name_status_z_deduplicates_valid_nul_records() -> No
 
 
 @pytest.mark.unit
+def test_changed_paths_from_name_only_z_deduplicates_valid_nul_records() -> None:
+    assert _changed_paths_from_name_only_z("src/fix.py\0src/fix.py\0tests/test_fix.py\0") == (
+        "src/fix.py",
+        "tests/test_fix.py",
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("diff_stdout", "expected_error", "message"),
     [
@@ -928,6 +937,23 @@ def test_changed_paths_from_name_status_z_rejects_malformed_z_output(
 ) -> None:
     with pytest.raises(expected_error, match=message):
         _changed_paths_from_name_status_z(diff_stdout)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("diff_stdout", "message"),
+    [
+        ("src/fix.py\n", "expected NUL-delimited output"),
+        ("src/fix.py\0tests/test_fix.py", "missing terminating NUL"),
+        ("src/fix.py\0\0", "empty path"),
+    ],
+)
+def test_changed_paths_from_name_only_z_rejects_malformed_z_output(
+    diff_stdout: str,
+    message: str,
+) -> None:
+    with pytest.raises(ProtectedScopeDiffError, match=message):
+        _changed_paths_from_name_only_z(diff_stdout)
 
 
 @pytest.mark.unit

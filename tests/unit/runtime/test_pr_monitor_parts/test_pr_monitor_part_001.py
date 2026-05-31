@@ -10,6 +10,7 @@ from awf.runtime.pr_monitor import (
     Abort,
     AbortReason,
     AddressComments,
+    AddressOperatorHint,
     CheckFailure,
     CheckState,
     Merge,
@@ -18,6 +19,7 @@ from awf.runtime.pr_monitor import (
     MonitorConfig,
     MonitorState,
     NotifyHuman,
+    OperatorHint,
     PRStatus,
     ReportCiFailure,
     RerunTransientCI,
@@ -264,6 +266,68 @@ class TestNoBudgetCaps:
     def test_long_wall_clock_does_not_abort(self) -> None:
         state = MonitorState(started_at=time.monotonic() - 48 * 3600)
         assert isinstance(decide(_status(), state, MonitorConfig()), Merge)
+
+
+class TestOperatorHints:
+    @pytest.mark.unit
+    def test_pending_operator_hint_dispatches_repair_before_merge(self) -> None:
+        hint = OperatorHint(
+            reason="the docs CTA URL 404s; use https://example.test/docs",
+            operation_id="op_hint",
+            requested_at="2026-05-30T12:00:00+00:00",
+        )
+        state = MonitorState(pending_operator_hint=hint)
+
+        action = decide(_status(), state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, AddressOperatorHint)
+        assert action.hint == hint
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_pending_operator_hint_does_not_block_sync_base_for_stale_pr(
+        self,
+        status: PRStatus,
+    ) -> None:
+        hint = OperatorHint(
+            reason="the docs CTA URL 404s; use https://example.test/docs",
+            operation_id="op_hint",
+            requested_at="2026-05-30T12:00:00+00:00",
+        )
+        state = MonitorState(pending_operator_hint=hint)
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_processed_operator_hint_allows_green_pr_to_merge(self) -> None:
+        action = decide(_status(), MonitorState(), MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_unprocessed_operator_hint_needing_human_blocks_merge(self) -> None:
+        hint = OperatorHint(
+            reason="the docs CTA URL 404s; use https://example.test/docs",
+            status="needs_human",
+            status_reason="agent could not produce a fix commit",
+        )
+        state = MonitorState(pending_operator_hint=hint)
+
+        action = decide(_status(), state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "operator remonitor hint" in action.message
+        assert "agent could not produce a fix commit" in action.message
 
 
 class TestAddressComments:

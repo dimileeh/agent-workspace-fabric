@@ -14,6 +14,7 @@ import type {
   WorkspaceAppEndpointHealth,
   WorkspaceCoordinationWarning,
   WorkspaceControlResponse,
+  WorkspaceControlWarning,
   WorkspaceEgressAudit,
   WorkspaceOperatorAction,
   WorkspaceOperatorRequest,
@@ -224,12 +225,26 @@ type WorkspaceOperatorActionUnionIsExplicit = Expect<
 
 type WorkspaceControlResponseShape = Expect<
   Equal<
-    Pick<WorkspaceControlResponse, "workspace_id" | "operation_id" | "operation_status" | "status" | "message">,
+    Pick<
+      WorkspaceControlResponse,
+      "workspace_id" | "operation_id" | "operation_status" | "status" | "message" | "warnings"
+    >,
     {
       workspace_id: string;
       operation_id: string;
       operation_status: string;
       status: Workspace["status"];
+      message: string;
+      warnings: WorkspaceControlWarning[];
+    }
+  >
+>;
+
+type WorkspaceControlWarningShape = Expect<
+  Equal<
+    WorkspaceControlWarning,
+    {
+      warning_code: string;
       message: string;
     }
   >
@@ -249,6 +264,7 @@ type WorkspaceOperatorRequestShape = Expect<
 
 export const workspaceOperatorActionUnionIsExplicit: WorkspaceOperatorActionUnionIsExplicit = true;
 export const workspaceControlResponseShape: WorkspaceControlResponseShape = true;
+export const workspaceControlWarningShape: WorkspaceControlWarningShape = true;
 export const workspaceOperatorRequestShape: WorkspaceOperatorRequestShape = true;
 
 type WorkspaceSecretLeaseShape = Expect<

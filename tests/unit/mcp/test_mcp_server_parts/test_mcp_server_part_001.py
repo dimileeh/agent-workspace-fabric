@@ -1119,6 +1119,7 @@ class TestWorkspaceControls:
             "operation_status": "succeeded",
             "status": "cancelled",
             "message": "workspace cancellation requested",
+            "warnings": [],
         }
 
     @pytest.mark.unit
@@ -1155,6 +1156,7 @@ class TestWorkspaceControls:
             "operation_status": "succeeded",
             "status": "cancelled",
             "message": "workspace stack stopped",
+            "warnings": [],
         }
 
     @pytest.mark.unit
@@ -1195,6 +1197,7 @@ class TestWorkspaceControls:
             "operation_status": "succeeded",
             "status": "destroyed",
             "message": "workspace destroyed",
+            "warnings": [],
         }
 
     @pytest.mark.unit

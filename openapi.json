@@ -7334,6 +7334,13 @@
           "status": {
             "$ref": "#/components/schemas/WorkspaceStatus"
           },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceControlWarningResponse"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
           "workspace_id": {
             "title": "Workspace Id",
             "type": "string"
@@ -7347,6 +7354,24 @@
           "message"
         ],
         "title": "WorkspaceControlResponse",
+        "type": "object"
+      },
+      "WorkspaceControlWarningResponse": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "warning_code": {
+            "title": "Warning Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "warning_code",
+          "message"
+        ],
+        "title": "WorkspaceControlWarningResponse",
         "type": "object"
       },
       "WorkspaceCoordinationWarningResponse": {
