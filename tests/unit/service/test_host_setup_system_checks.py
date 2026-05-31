@@ -1147,19 +1147,23 @@ def test_run_system_checks_explicit_port_overrides_env(
 def test_run_system_checks_falls_back_to_compose_default_when_override_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing or blank ``AWF_API_HOST_PORT`` falls back to Compose's default.
+    """A missing or empty ``AWF_API_HOST_PORT`` falls back to Compose's default.
 
     Compose interpolates ``${AWF_API_HOST_PORT:-8000}`` and ``awf start`` never
     reads the persisted ``config.api.host_port`` — it publishes that Compose
-    default from the resolved service env. So an absent or whitespace-only
-    override probes Compose's built-in ``8000`` rather than blocking, and a
-    non-default ``config.api.host_port`` is deliberately ignored: probing it
-    would report readiness for a port ``awf start`` would never publish.
+    default from the resolved service env. ``${VAR:-8000}`` substitutes the
+    default only when the variable is *unset or empty* (a zero-length string),
+    so an absent or genuinely-empty override probes Compose's built-in ``8000``
+    rather than blocking. A whitespace-only value is a non-empty literal Compose
+    rejects, so it blocks instead — see
+    ``test_run_system_checks_blocks_on_whitespace_only_override``. A non-default
+    ``config.api.host_port`` is deliberately ignored: probing it would report
+    readiness for a port ``awf start`` would never publish.
     """
     captured: dict[str, object] = {}
     _patch_probes_capture_port(monkeypatch, captured)
 
-    for blank in (None, "", "   "):
+    for blank in (None, ""):
         environ = {} if blank is None else {"AWF_API_HOST_PORT": blank}
         run_system_checks(
             config=HostSetupConfig(api=ApiConfig(host_port=8123)),
@@ -1167,6 +1171,39 @@ def test_run_system_checks_falls_back_to_compose_default_when_override_absent(
             environ=environ,
         )
         assert captured["port"] == DEFAULT_API_HOST_PORT, repr(blank)
+
+
+@pytest.mark.unit
+def test_run_system_checks_blocks_on_whitespace_only_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only ``AWF_API_HOST_PORT`` blocks; it is not a blank fall-back.
+
+    Docker Compose ``${AWF_API_HOST_PORT:-8000}`` substitutes the ``8000`` default
+    only when the variable is *unset or empty* (a zero-length string). A
+    whitespace-only value such as ``"   "`` is a non-empty string, so Compose
+    interpolates it verbatim into ``"   :8000"`` and ``awf start`` fails to
+    publish the port. ``awf service`` settings parse the same override and reject
+    it too (``_default_local_service_api_base_url`` reaches ``int("   ")``, which
+    raises). The readiness probe must therefore block on it rather than strip it
+    to blank and silently probe the default ``8000``, reporting the wrong port as
+    free.
+    """
+    for whitespace in ("   ", "\t", " \t "):
+        captured: dict[str, object] = {}
+        _patch_probes_capture_port(monkeypatch, captured)
+
+        results = run_system_checks(
+            config=HostSetupConfig(api=ApiConfig(host_port=8123)),
+            work_dir=Path("/tmp"),
+            environ={"AWF_API_HOST_PORT": whitespace},
+        )
+
+        ports = next(result for result in results if result.name == "ports")
+        assert ports.level is SetupCheckLevel.BLOCKED, repr(whitespace)
+        assert ports.data["env_value"] == whitespace
+        # The bind probe must not run for a port the operator never published.
+        assert "port" not in captured, repr(whitespace)
 
 
 @pytest.mark.unit

@@ -674,12 +674,14 @@ def check_local_capacity(
 def _env_api_host_port(environ: Mapping[str, str]) -> int | None:
     """Return a usable ``AWF_API_HOST_PORT`` override, or ``None`` when unusable.
 
-    A missing, blank, malformed, or out-of-range value yields ``None``. Callers
-    distinguish an *absent or blank* override (a legitimate fall-back to
-    Compose's ``8000`` default, mirroring ``${AWF_API_HOST_PORT:-8000}``) from a
-    *set but invalid* value via
-    :func:`_invalid_api_host_port_override`, which the readiness probe surfaces
-    as a startup blocker instead of silently probing the default port.
+    A missing, empty, whitespace-only, malformed, or out-of-range value yields
+    ``None``. Whether that ``None`` means a legitimate fall-back to Compose's
+    ``8000`` default (only an *unset or empty* override, mirroring
+    ``${AWF_API_HOST_PORT:-8000}``) or a startup blocker (any other set-but-
+    unusable value, including whitespace-only, which Compose interpolates
+    verbatim) is decided by :func:`_invalid_api_host_port_override`, which the
+    readiness probe surfaces as a blocker instead of silently probing the default
+    port.
     """
     raw = environ.get("AWF_API_HOST_PORT")
     if raw is None:
@@ -735,20 +737,25 @@ def _invalid_api_host_port_override(
     """Return the raw ``AWF_API_HOST_PORT`` when it is set to an unusable value.
 
     Returns ``None`` (no configuration error) when an explicit caller ``port``
-    wins, when the override is unset, or when it is blank/whitespace-only — the
-    last case is a legitimate fall-back to Compose's ``8000`` default because
-    Compose interpolates ``${AWF_API_HOST_PORT:-8000}``. Only a *non-empty* value
-    that
-    does not parse to a ``1..65535`` TCP port is returned: Compose publishes it
-    verbatim into ``<value>:8000`` and ``awf start``/``awf service`` settings
-    reject the same override, so the readiness probe must block on it instead of
-    silently probing the default port.
+    wins, when the override is unset, or when it is *genuinely empty* (a
+    zero-length string) — the empty case is a legitimate fall-back to Compose's
+    ``8000`` default because ``${AWF_API_HOST_PORT:-8000}`` substitutes the
+    default only when the variable is unset or empty. Any other set value that
+    does not parse to a ``1..65535`` TCP port is returned, *including a
+    whitespace-only value*: Compose treats ``"   "`` as a non-empty literal and
+    publishes it verbatim into ``"   :8000"`` (so ``awf start`` fails), and
+    ``awf service`` settings parse the same override and reject it
+    (``_default_local_service_api_base_url`` reaches ``int("   ")``, which
+    raises). The readiness probe must block on it instead of silently probing the
+    default port and reporting the wrong port as free. The ``not raw`` guard
+    mirrors ``awf service``'s own ``if not host_port`` fall-back so the two
+    layers agree on empty-vs-whitespace.
     """
     if port is not None:
         return None
     env = os.environ if environ is None else environ
     raw = env.get("AWF_API_HOST_PORT")
-    if raw is None or not raw.strip():
+    if not raw:
         return None
     if _env_api_host_port(env) is not None:
         return None
