@@ -38,6 +38,17 @@ from awf.host_setup.rendering import (
 )
 from awf.host_setup.source_assets import SourceCheckoutError, VerifiedSourceCheckout
 
+# Docker daemon-selection primitives shared with ``awf start``. The readiness
+# Docker/Compose probes must talk to the *same* daemon ``awf start`` does
+# (``service.bootstrap._docker_cli_environ``); reusing these primitives keeps the
+# probe's resolution from drifting from start's. The probes themselves stay
+# stdlib-only -- this only resolves which daemon they target.
+from awf.service.environment import (
+    cleared_docker_cli_client_keys,
+    env_lookup,
+    non_empty_env_value,
+)
+
 SETUP_COMMAND = "awf setup"
 _AWF_ENTRY_POINT = "awf"
 _PROBE_TIMEOUT_SECONDS = 5.0
@@ -134,8 +145,15 @@ def _default_command_runner(
     args: Sequence[str],
     *,
     timeout: float = _PROBE_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
 ) -> CommandResult | None:
-    """Run a bounded probe command, returning ``None`` when it cannot launch."""
+    """Run a bounded probe command, returning ``None`` when it cannot launch.
+
+    When ``env`` is provided it replaces the subprocess environment so the Docker
+    readiness probes can target the daemon selected by the resolved service
+    environment (see :func:`_docker_probe_environ`); when ``None`` the probe
+    inherits the caller environment, as every non-Docker probe does.
+    """
     try:
         completed = subprocess.run(
             list(args),
@@ -144,6 +162,7 @@ def _default_command_runner(
             text=True,
             errors="replace",
             timeout=timeout,
+            env=dict(env) if env is not None else None,
         )
     except (subprocess.TimeoutExpired, OSError):
         # ``FileNotFoundError`` (missing binary) is an ``OSError`` subclass, so it
@@ -154,6 +173,70 @@ def _default_command_runner(
         stdout=completed.stdout,
         stderr=completed.stderr,
     )
+
+
+def _docker_probe_environ(environ: Mapping[str, str] | None) -> dict[str, str] | None:
+    """Resolve the subprocess environment the Docker readiness probes must use.
+
+    ``awf start`` chooses which Docker daemon to talk to from the *resolved service
+    environment* -- an ``AWF_DOCKER_HOST`` override, or a service env that blanks an
+    inherited ``DOCKER_HOST`` -- in ``awf.service.bootstrap._docker_cli_environ``.
+    The ``docker info`` / ``docker compose version`` readiness probes must target
+    that same daemon, or ``awf setup --dry-run`` would block on (or pass against) a
+    daemon ``awf start`` never uses -- the same port/disk divergence
+    ``_readiness_environ`` already closes for the other probes, but for Docker host
+    selection.
+
+    Returns ``None`` when no service environment is supplied (direct/test callers),
+    so the probe inherits the caller environment exactly as before. Otherwise the
+    returned mapping reproduces the daemon-selection scrubbing ``awf start``
+    applies, reusing the shared ``awf.service.environment`` primitives so the
+    resolution cannot drift from start's: ``AWF_DOCKER_HOST`` wins and is
+    materialised as ``DOCKER_HOST`` with the conflicting ``DOCKER_CONTEXT`` removed,
+    an explicitly blanked ``DOCKER_HOST`` drops the inherited value, and any Docker
+    CLI client keys the service env clears are removed.
+    """
+    if environ is None:
+        return None
+    resolved = {**os.environ, **environ}
+    docker_host = non_empty_env_value(resolved, "AWF_DOCKER_HOST") or non_empty_env_value(
+        resolved, "DOCKER_HOST"
+    )
+    scrubbed_keys = {"AWF_DOCKER_HOST", *cleared_docker_cli_client_keys(resolved)}
+    caller_host_found, caller_host_value = env_lookup(os.environ, "DOCKER_HOST")
+    docker_host_found, docker_host_value = env_lookup(resolved, "DOCKER_HOST")
+    clears_docker_host = (
+        docker_host_found
+        and not docker_host_value
+        and caller_host_found
+        and bool(caller_host_value)
+    )
+    if docker_host or clears_docker_host:
+        scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
+    for key in list(resolved):
+        if key.upper() in scrubbed_keys:
+            del resolved[key]
+    if docker_host:
+        resolved["DOCKER_HOST"] = docker_host
+    return resolved
+
+
+def _docker_probe_runner(environ: Mapping[str, str] | None) -> CommandRunner:
+    """Return a probe runner that targets the Docker daemon ``awf start`` will use.
+
+    When the resolved service environment selects a Docker host (or clears an
+    inherited one), the ``docker`` / ``docker compose`` probes run with that env so
+    setup reports readiness for the same daemon ``awf start`` uses; otherwise the
+    default runner (which inherits the caller environment) is returned unchanged.
+    """
+    probe_env = _docker_probe_environ(environ)
+    if probe_env is None:
+        return _default_command_runner
+
+    def run(args: Sequence[str]) -> CommandResult | None:
+        return _default_command_runner(args, env=probe_env)
+
+    return run
 
 
 def _probe_port_bind(port: int, host: str) -> PortProbeResult:
@@ -1281,7 +1364,12 @@ def run_system_checks(
     else:
         resolved_work_dir = _resolve_work_dir(work_dir=work_dir, environ=environ)
         disk_check = check_disk(resolved_work_dir)
-    docker_check = check_docker()
+    # Probe the daemon ``awf start`` will use: the resolved service env can point
+    # Docker at a different host (``AWF_DOCKER_HOST``) or blank an inherited
+    # ``DOCKER_HOST``, so feed that selection into both the docker and compose
+    # probes instead of silently inheriting the bare process environment.
+    docker_runner = _docker_probe_runner(environ)
+    docker_check = check_docker(run=docker_runner)
     # When the Docker CLI binary is absent, the ``docker compose`` plugin cannot
     # exist either: check_compose would re-probe the same missing binary and
     # append a second BLOCKED result for one root cause (a missing Docker
@@ -1289,7 +1377,9 @@ def run_system_checks(
     # that root cause surfaces exactly once. A reachable binary whose daemon is
     # down keeps ``available`` true, so the plugin is still probed --
     # ``docker compose version`` reports the plugin without contacting the daemon.
-    compose_checks = [check_compose()] if docker_check.data.get("available") else []
+    compose_checks = (
+        [check_compose(run=docker_runner)] if docker_check.data.get("available") else []
+    )
     return [
         docker_check,
         *compose_checks,

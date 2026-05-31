@@ -101,6 +101,145 @@ def test_check_docker_blocked_when_probe_cannot_run() -> None:
     assert result.data["daemon"] is False
 
 
+# --- Docker probe environment (resolved daemon selection) -----------------
+
+
+@pytest.mark.unit
+def test_docker_probe_environ_returns_none_without_service_env() -> None:
+    """No resolved service env means the probe inherits the caller environment."""
+    assert system_checks._docker_probe_environ(None) is None
+
+
+@pytest.mark.unit
+def test_docker_probe_environ_materializes_awf_docker_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AWF_DOCKER_HOST`` becomes ``DOCKER_HOST`` and scrubs conflicting context.
+
+    ``awf start`` selects the daemon from the resolved service env via
+    ``bootstrap._docker_cli_environ``; the readiness probe must reproduce that same
+    selection so it talks to the daemon ``awf start`` will use.
+    """
+    monkeypatch.setenv("DOCKER_CONTEXT", "desktop-linux")
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+
+    resolved = system_checks._docker_probe_environ({"AWF_DOCKER_HOST": "tcp://remote:2375"})
+
+    assert resolved is not None
+    assert resolved["DOCKER_HOST"] == "tcp://remote:2375"
+    assert "AWF_DOCKER_HOST" not in resolved
+    assert "DOCKER_CONTEXT" not in resolved
+
+
+@pytest.mark.unit
+def test_docker_probe_environ_clears_inherited_docker_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service env that blanks ``DOCKER_HOST`` drops the inherited daemon.
+
+    Mirrors ``awf start``: when the resolved env explicitly clears an inherited
+    ``DOCKER_HOST``, the probe must fall back to the default local daemon rather
+    than the inherited remote one.
+    """
+    monkeypatch.setenv("DOCKER_HOST", "tcp://inherited:2375")
+    monkeypatch.setenv("DOCKER_CONTEXT", "remote")
+
+    resolved = system_checks._docker_probe_environ({"DOCKER_HOST": ""})
+
+    assert resolved is not None
+    assert "DOCKER_HOST" not in resolved
+    assert "DOCKER_CONTEXT" not in resolved
+
+
+@pytest.mark.unit
+def test_run_system_checks_docker_probe_targets_resolved_docker_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Docker/Compose readiness probes target the daemon ``awf start`` will use.
+
+    ``check_docker`` previously ran ``docker info`` with the bare process
+    environment, so a resolved service env that points Docker at a different
+    daemon (``AWF_DOCKER_HOST``) was ignored and ``awf setup --dry-run`` could
+    block on (or pass against) a daemon ``awf start`` never uses. Aggregation now
+    threads the resolved env into both probes.
+    """
+    calls: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+
+    class _Completed:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_run(
+        args: Sequence[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        errors: str,
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> _Completed:
+        calls.append((tuple(args), env))
+        return _Completed()
+
+    monkeypatch.setattr(system_checks.subprocess, "run", fake_run)
+    monkeypatch.setattr(system_checks.shutil, "which", lambda _cmd: "/usr/bin/docker")
+    _stub_non_docker_checks_ok(monkeypatch)
+
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        environ={"AWF_DOCKER_HOST": "tcp://remote:2375"},
+    )
+
+    names = [r.name for r in results]
+    assert names[:2] == ["docker", "compose"]
+    info_env = next(env for args, env in calls if args[:2] == ("docker", "info"))
+    compose_env = next(env for args, env in calls if args == ("docker", "compose", "version"))
+    assert info_env is not None
+    assert info_env["DOCKER_HOST"] == "tcp://remote:2375"
+    assert "AWF_DOCKER_HOST" not in info_env
+    assert compose_env is not None
+    assert compose_env["DOCKER_HOST"] == "tcp://remote:2375"
+
+
+@pytest.mark.unit
+def test_run_system_checks_docker_probe_inherits_env_without_service_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no resolved service env the probe inherits the caller environment."""
+    calls: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+
+    class _Completed:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_run(
+        args: Sequence[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        errors: str,
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> _Completed:
+        calls.append((tuple(args), env))
+        return _Completed()
+
+    monkeypatch.setattr(system_checks.subprocess, "run", fake_run)
+    monkeypatch.setattr(system_checks.shutil, "which", lambda _cmd: "/usr/bin/docker")
+    _stub_non_docker_checks_ok(monkeypatch)
+
+    run_system_checks(config=HostSetupConfig())
+
+    info_env = next(env for args, env in calls if args[:2] == ("docker", "info"))
+    assert info_env is None
+
+
 # --- Compose --------------------------------------------------------------
 
 
@@ -497,7 +636,7 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         system_checks,
         "check_docker",
-        lambda: SetupCheckResult(
+        lambda **_kwargs: SetupCheckResult(
             name="docker",
             level=SetupCheckLevel.OK,
             summary="ok",
@@ -505,7 +644,7 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
             data={"available": True},
         ),
     )
-    monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
+    monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
@@ -584,13 +723,13 @@ def test_run_system_checks_omits_compose_when_docker_binary_absent(
     )
     compose_calls: list[int] = []
 
-    def tracking_compose() -> SetupCheckResult:
+    def tracking_compose(**_kwargs: object) -> SetupCheckResult:
         compose_calls.append(1)
         return SetupCheckResult(
             name="compose", level=SetupCheckLevel.BLOCKED, summary="x", detail="x"
         )
 
-    monkeypatch.setattr(system_checks, "check_docker", lambda: docker_absent)
+    monkeypatch.setattr(system_checks, "check_docker", lambda **_kwargs: docker_absent)
     monkeypatch.setattr(system_checks, "check_compose", tracking_compose)
     _stub_non_docker_checks_ok(monkeypatch)
 
@@ -630,11 +769,11 @@ def test_run_system_checks_keeps_compose_when_docker_daemon_down(
         detail="daemon down",
         data={"binary": "docker", "available": True, "daemon": False},
     )
-    monkeypatch.setattr(system_checks, "check_docker", lambda: docker_daemon_down)
+    monkeypatch.setattr(system_checks, "check_docker", lambda **_kwargs: docker_daemon_down)
     monkeypatch.setattr(
         system_checks,
         "check_compose",
-        lambda: SetupCheckResult(
+        lambda **_kwargs: SetupCheckResult(
             name="compose", level=SetupCheckLevel.OK, summary="ok", detail="ok"
         ),
     )
@@ -677,7 +816,7 @@ def test_run_system_checks_blocks_unresolvable_work_dir_user(
         "check_shell_path",
         "check_local_capacity",
     ):
-        monkeypatch.setattr(system_checks, name, lambda name=name: fake_ok(name))
+        monkeypatch.setattr(system_checks, name, lambda name=name, **_kwargs: fake_ok(name))
     monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
     monkeypatch.setattr(
         system_checks, "check_postgres_port", lambda _port: fake_ok("postgres_port")
@@ -1284,7 +1423,7 @@ def _patch_probes_capture_port(
     monkeypatch.setattr(
         system_checks,
         "check_docker",
-        lambda: SetupCheckResult(
+        lambda **_kwargs: SetupCheckResult(
             name="docker",
             level=SetupCheckLevel.OK,
             summary="ok",
@@ -1292,7 +1431,7 @@ def _patch_probes_capture_port(
             data={"available": True},
         ),
     )
-    monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
+    monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
@@ -1519,7 +1658,7 @@ def _patch_probes_capture_postgres_port(
     monkeypatch.setattr(
         system_checks,
         "check_docker",
-        lambda: SetupCheckResult(
+        lambda **_kwargs: SetupCheckResult(
             name="docker",
             level=SetupCheckLevel.OK,
             summary="ok",
@@ -1527,7 +1666,7 @@ def _patch_probes_capture_postgres_port(
             data={"available": True},
         ),
     )
-    monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
+    monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
@@ -1651,7 +1790,7 @@ def test_run_system_checks_probes_postgres_default_host_port(
         "check_shell_path",
         "check_local_capacity",
     ):
-        monkeypatch.setattr(system_checks, name, lambda name=name: fake_ok(name))
+        monkeypatch.setattr(system_checks, name, lambda name=name, **_kwargs: fake_ok(name))
     monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
     monkeypatch.setattr(system_checks, "check_disk", lambda _path: fake_ok("disk"))
     monkeypatch.setattr(system_checks, "check_postgres_port", fake_postgres_port)
@@ -1882,7 +2021,7 @@ def _patch_probes_capture_disk_path(
     monkeypatch.setattr(
         system_checks,
         "check_docker",
-        lambda: SetupCheckResult(
+        lambda **_kwargs: SetupCheckResult(
             name="docker",
             level=SetupCheckLevel.OK,
             summary="ok",
@@ -1890,7 +2029,7 @@ def _patch_probes_capture_disk_path(
             data={"available": True},
         ),
     )
-    monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
+    monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
     monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
