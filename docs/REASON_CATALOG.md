@@ -261,6 +261,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.x.ai/build/cli](https://docs.x.ai/build/cli)
 
+### HOST_PORT_CONFLICT
+**Problem:** AWF rejected a workspace create or retry because a host port needed by the new workspace is already in use by another active or unreleased workspace.
+**Likely Cause:** Another workspace's profile services or companions bind the same Docker host port and its compose stack is still running, or the workspace is terminal but has not yet released its runtime resources (no `workspace.terminal_runtime_released` event exists).
+**Operator Fix:** Wait for the conflicting workspace to release its ports (destroy, complete, or have its runtime released), then retry. Use `awf workspace show <conflicting_workspace_id>` to check its status and events.
+**Related Command:** `awf workspace list`
+**Docs Link:** [docs/REASON_CATALOG.md#host_port_conflict](#host_port_conflict)
+
 ### HOST_SETUP_CONFIG_CORRUPT
 **Problem:** AWF could not read the host setup config.
 **Likely Cause:** The config file is malformed, has duplicate keys, uses unsupported schema versions, or cannot be interpreted safely.
@@ -281,13 +288,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Verify the `~/.awf` directory exists, is writable by your user, and is not blocked by filesystem permissions, then rerun setup.
 **Related Command:** `awf setup`
 **Docs Link:** [docs/REASON_CATALOG.md#host_setup_config_write_failed](#host_setup_config_write_failed)
-
-### HOST_PORT_CONFLICT
-**Problem:** AWF rejected a workspace create or retry because a host port needed by the new workspace is already in use by another active or unreleased workspace.
-**Likely Cause:** Another workspace's profile services or companions bind the same Docker host port and its compose stack is still running, or the workspace is terminal but has not yet released its runtime resources (no `workspace.terminal_runtime_released` event exists).
-**Operator Fix:** Wait for the conflicting workspace to release its ports (destroy, complete, or have its runtime released), then retry. Use `awf workspace show <conflicting_workspace_id>` to check its status and events.
-**Related Command:** `awf workspace list`
-**Docs Link:** [docs/REASON_CATALOG.md#host_port_conflict](#host_port_conflict)
 
 ### IDEMPOTENCY_REPLAY_UNAVAILABLE
 **Problem:** AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.
