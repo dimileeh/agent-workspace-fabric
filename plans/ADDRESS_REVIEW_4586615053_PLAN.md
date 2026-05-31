@@ -2,55 +2,57 @@
 
 ## Problem Statement and Scope
 
-PR review comment `issue:4586615053` reports remaining Cursor runtime cleanup
-items in the agent-runtime Dockerfile and Cursor adapter tests. The scoped
-work is limited to:
+PR review comment `issue:4586615053` reports two residual Cursor runtime design
+points:
 
-- `docker/agent-runtime.Dockerfile`
-- `src/awf/adapters/cursor.py`
-- focused Cursor/Dockerfile unit tests
+- `infer_provider(model="sonnet-4-thinking", output=None)` can infer
+  `anthropic` because the Cursor default model contains the generic Anthropic
+  marker `sonnet`.
+- Cursor custom non-thinking defaults intentionally bypass effort mapping, but
+  the helper contract does not document that operator-facing tradeoff.
+
+The scoped work is limited to:
+
+- `src/awf/adapters/provider_failures.py`
+- `src/awf/adapters/model_selection.py`
+- focused adapter/provider-failure tests
 - this plan and its validation artifact
-
-The existing branch already has the root `cursor-agent --version || true`
-smoke-check change, but the Node symlink still uses the unresolved
-`command -v node` path and the Cursor adapter still exposes an unused private
-delegating helper.
 
 ## Requirements Checklist
 
-- Preserve the soft root-level Cursor version smoke check:
-  `cursor-agent --version || true`.
-- Preserve the strict non-root Cursor version check after `USER agent`.
-- Canonicalize the Node binary source before symlinking it into
-  `/usr/local/bin/node` so the Dockerfile cannot create a self-referential
-  symlink.
-- Remove the unused private `_cursor_model_for_effort` wrapper from
-  `src/awf/adapters/cursor.py`.
-- Keep Cursor effort-mapping tests pointed at the shared model-selection helper.
+- Add a regression test proving the Cursor default thinking model is inferred
+  as `cursor`, even without Cursor-specific output text.
+- Update provider inference so Cursor-specific model markers win before generic
+  Anthropic markers.
+- Document the `cursor_selected_model` precedence contract: explicit model
+  first, then custom default, then effort mapping when the default is absent or
+  already Cursor's thinking default.
+- Add or preserve test coverage showing custom non-thinking Cursor defaults
+  intentionally bypass effort mapping for high/xhigh efforts.
 - Do not run broad AWF/GitHub-owned validation; use focused local checks only.
 
 ## Implementation Steps
 
-1. Update focused regression assertions in
-   `tests/unit/test_agent_runtime_dockerfile.py` for the canonicalized Node
-   symlink and split Cursor version-check behavior.
-2. Update the Cursor adapter effort-mapping test to import
-   `cursor_model_for_effort` directly from `awf.adapters.model_selection`.
-3. Run the focused Dockerfile test before the Dockerfile edit and confirm the
-   new canonicalized symlink assertion fails.
-4. Update `docker/agent-runtime.Dockerfile` to use `readlink -f` around
-   `command -v node`.
-5. Remove the unused private Cursor helper and stale import from
-   `src/awf/adapters/cursor.py`.
-6. Run the focused Dockerfile and Cursor adapter tests.
-7. Create the validation artifact with requirement-by-requirement evidence.
+1. Add focused failing tests for Cursor provider inference and custom-default
+   effort bypass behavior.
+2. Run the new provider-inference test before implementation and confirm the
+   current Anthropic inference failure.
+3. Add Cursor's default thinking model to the Cursor provider markers checked
+   before Anthropic markers.
+4. Expand the `cursor_selected_model` docstring to state the custom-default
+   precedence tradeoff.
+5. Run focused adapter/provider-failure tests and focused lint for changed
+   files.
+6. Create the validation artifact with requirement-by-requirement evidence.
 
 ## Verification Commands and Pass Criteria
 
-- `uv run --python 3.12 --extra dev pytest tests/unit/test_agent_runtime_dockerfile.py::test_agent_runtime_installs_all_supported_coding_clis -q`
-  - Expected to fail after the test-only edit and before the Dockerfile fix.
-  - Expected to pass after the Dockerfile fix.
-- `uv run --python 3.12 --extra dev pytest tests/unit/adapters/test_adapters.py::TestCursorAdapter::test_effort_mapping_uses_documented_models_not_extra_flags -q`
-  - Expected to pass after the import/helper cleanup.
+- `uv run --python 3.12 --extra dev pytest tests/unit/adapters/test_provider_failures.py::test_cursor_default_thinking_model_infers_cursor_without_output -q`
+  - Expected to fail after the test-only edit and before the inference fix.
+  - Expected to pass after the inference fix.
+- `uv run --python 3.12 --extra dev pytest tests/unit/adapters/test_adapters.py::TestCursorAdapter::test_custom_default_model_bypasses_effort_mapping -q`
+  - Expected to pass after the model-selection contract test/doc update.
+- `uv run --python 3.12 --extra dev ruff check src/awf/adapters/provider_failures.py src/awf/adapters/model_selection.py tests/unit/adapters/test_provider_failures.py tests/unit/adapters/test_adapters.py`
+  - Expected to pass.
 
 Full AWF/GitHub validation is intentionally left to AWF after agent completion.

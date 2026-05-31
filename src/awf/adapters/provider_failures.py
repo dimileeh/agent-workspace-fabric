@@ -91,6 +91,7 @@ _GOOGLE_MARKERS = (
 _OPENAI_MARKERS = ("codex", "openai", "gpt-", "o3", "o4")
 _CURSOR_MARKERS = (
     "cursor-agent",
+    "sonnet-4-thinking",
     "cursor_api_key",
     "cursor api key",
     "cursor auth",

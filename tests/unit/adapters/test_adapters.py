@@ -34,7 +34,7 @@ from awf.adapters.gemini import GeminiAdapter
 from awf.adapters.gemini import _settings_for_effort as gemini_settings_for_effort
 from awf.adapters.gemini import _thinking_level_for_effort as gemini_thinking_level_for_effort
 from awf.adapters.grok import GrokAdapter, _grok_launcher_script, _model_for_effort
-from awf.adapters.model_selection import cursor_model_for_effort
+from awf.adapters.model_selection import cursor_model_for_effort, cursor_selected_model
 from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
@@ -1184,6 +1184,18 @@ class TestCursorAdapter:
         assert cursor_model_for_effort(model=None, effort="high") == "sonnet-4-thinking"
         assert cursor_model_for_effort(model=None, effort="xhigh") == "sonnet-4-thinking"
         assert cursor_model_for_effort(model=None, effort="max") == "sonnet-4-thinking"
+
+    @pytest.mark.unit
+    def test_custom_default_model_bypasses_effort_mapping(self) -> None:
+        """Custom Cursor defaults remain operator-controlled for high efforts."""
+        assert (
+            cursor_selected_model(
+                model=None,
+                default_model="gpt-5",
+                effort="xhigh",
+            )
+            == "gpt-5"
+        )
 
 
 class TestGrokAdapter:

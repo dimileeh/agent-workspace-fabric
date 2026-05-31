@@ -34,7 +34,14 @@ def cursor_selected_model(
     default_model: str | None,
     effort: str | None,
 ) -> str | None:
-    """Return the Cursor model selected for one run."""
+    """Return the Cursor model selected for one run.
+
+    Explicit model overrides win first. A custom default model that is not
+    Cursor's thinking default is treated as operator-controlled and bypasses
+    effort mapping, even for high/xhigh efforts. Effort mapping only selects
+    the thinking model when no default is set or the default already matches
+    AWF's Cursor thinking default.
+    """
 
     if model:
         return model

@@ -191,6 +191,11 @@ def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
     assert infer_provider(model=None, output="xAI Grok rate limit") == "xai"
 
 
+def test_cursor_default_thinking_model_infers_cursor_without_output() -> None:
+    """Cursor's default model must not be mistaken for Anthropic Sonnet."""
+    assert infer_provider(model="sonnet-4-thinking", output=None) == "cursor"
+
+
 def test_cursor_provider_inference_takes_precedence_over_google_markers() -> None:
     assert (
         infer_provider(
