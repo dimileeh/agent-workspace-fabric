@@ -322,10 +322,10 @@ async def test_cleanup_validation_worktree_detects_head_change_after_dirty_clean
 
 
 @pytest.mark.unit
-async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_failure(
+async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_clean_after_cleanup(
     tmp_path: Path,
 ) -> None:
-    """Tracked-file mutations that are restored after validation must fail cleanup."""
+    """Tracked-file mutations restored after validation should be treated as clean."""
     worktree = _init_fake_worktree(tmp_path)
     restore_ref = "a" * 40
     calls: list[tuple[str, ...]] = []
@@ -359,9 +359,10 @@ async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_fai
         restore_ref=restore_ref,
     )
 
-    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
-    assert cleanup.cleaned is False
-    assert "AWF validation modified tracked files" in cleanup.message
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert cleanup.check.paths == ("tracked.py",)
+    assert cleanup.message == ""
     assert cleanup.verify_check is not None
     assert cleanup.verify_check.clean
 
