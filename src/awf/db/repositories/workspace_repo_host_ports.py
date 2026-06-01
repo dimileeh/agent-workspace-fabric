@@ -193,15 +193,17 @@ async def find_host_port_conflicts(
     where ``host_port`` appears in *host_ports*.
 
     Active and destroying workspaces always conflict because their
-    compose stacks are still running.  Terminal workspaces (failed,
-    cancelled, completed, destroyed) conflict only when they
-    actually acquired runtime resources — i.e. their
-    ``compose_project_name`` is not NULL — **and** their runtime
-    has not been released yet (no
-    ``workspace.terminal_runtime_released`` event exists).  A
-    workspace that failed during provisioning before the compose
-    stack was launched never bound a host port, so it does not
-    block port reuse even without a release event.
+    compose stacks are still running (or being torn down).  For these
+    statuses ``compose_project_name`` is deliberately not checked: an
+    active workspace that never reached compose launch still holds an
+    intended port claim that must block concurrent requests at dispatch
+    time.  Terminal workspaces (failed, cancelled, completed,
+    destroyed) conflict only when they actually acquired runtime
+    resources — i.e. their ``compose_project_name`` is not NULL — and
+    their runtime has not been effectively released yet.  A workspace
+    that failed during provisioning before the compose stack was
+    launched never bound a host port, so it does not block port reuse
+    even without a release event.
 
     When *node_id* is provided, only workspaces on that node are
     considered.  For claimed workspaces, ``Workspace.node_id`` is used

@@ -362,9 +362,13 @@ async def retry_workspace_row(
         # auto-retry), the provisioner re-checks companion ports and
         # auto-resolved profile service ports before Docker Compose launch.
         # If the source stack still owns one of those ports, the retry
-        # workspace fails before compose-up rather than surfacing as a Docker
-        # bind error. Reordering these two guards without updating the
-        # provisioner checks could break the invariant.
+        # workspace fails with COMPANION_HOST_PORT_CHECK_FATAL before
+        # compose-up rather than surfacing as a Docker bind error. This is
+        # the expected outcome for port-bearing workspaces on the
+        # planning-scope auto-retry path: the retry is created but fails
+        # early at the provisioner port-check stage until the cleanup worker
+        # releases the source's runtime. Reordering these two guards without
+        # updating the provisioner checks could break the invariant.
 
     retried = await repo.create(
         repo_url=source.repo_url,
