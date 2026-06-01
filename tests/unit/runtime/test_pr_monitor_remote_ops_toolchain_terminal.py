@@ -12,7 +12,7 @@ def test_toolchain_missing_pre_push_validation_failure_is_terminal() -> None:
     result = _GitPushResult(
         pushed=False,
         failed=True,
-        returncode=127,
+        returncode=1,
         reason_code="PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING",
     )
 
