@@ -383,7 +383,9 @@ async def test_method_rejection_without_alternative_notifies_human_without_trans
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert len(gh.comments) == 1
-    assert "merge method" in gh.comments[0]
+    assert "no merge method succeeded" in gh.comments[0]
+    assert "selected merge method is not allowed" not in gh.comments[0]
+    assert "attempted=squash; effective_allowed=squash" in gh.comments[0]
     assert sleep_fn.calls == [60]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
@@ -602,7 +604,9 @@ async def test_mismatched_last_merge_rejection_records_method_blocker(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert len(gh.comments) == 1
-    assert "merge method" in gh.comments[0]
+    assert "no merge method succeeded" in gh.comments[0]
+    assert "selected merge method is not allowed" not in gh.comments[0]
+    assert "attempted=squash; effective_allowed=squash" in gh.comments[0]
     assert sleep_fn.calls == [60]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
@@ -636,7 +640,9 @@ async def test_unclassified_last_method_rejection_records_method_blocker(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert len(gh.comments) == 1
-    assert "merge method" in gh.comments[0]
+    assert "no merge method succeeded" in gh.comments[0]
+    assert "selected merge method is not allowed" not in gh.comments[0]
+    assert "attempted=squash; effective_allowed=squash" in gh.comments[0]
     assert sleep_fn.calls == [60]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids

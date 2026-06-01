@@ -139,8 +139,8 @@ def _merge_method_mismatch_message(
     attempted = attempted_method or "none"
     suffix = f" GitHub reported: {detail}" if detail else ""
     return (
-        "MERGE_METHOD_MISMATCH: AWF could not merge this PR because the selected "
-        f"merge method is not allowed for base branch {base_branch!r}. "
+        "MERGE_METHOD_MISMATCH: AWF could not merge this PR because no merge "
+        f"method succeeded for base branch {base_branch!r}. "
         f"attempted={attempted}; effective_allowed={allowed}.{suffix}"
     )[:2000]
 
