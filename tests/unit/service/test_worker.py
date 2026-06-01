@@ -312,12 +312,14 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
     assert default_monitor is not None
     # gh is built lazily in the factory from the resolved forge (forge="auto"
-    # on a default profile normalizes to github) with the shared runner, and
-    # the resulting ForgeClient flows into the monitor kwargs.
+    # on a default profile normalizes to github via concrete_forge_for_repo —
+    # the github repo_url confirms the host) with the shared runner, and the
+    # resulting ForgeClient flows into the monitor kwargs.
     assert created["forge_client_forge"] == "github"
     assert created["forge_client_runner"] is created["executor_runner"]
     assert created["feature_monitor_kwargs"]["gh"] is forge_client
@@ -348,6 +350,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
 
@@ -384,6 +387,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=False,
             initial_review_grace_period_seconds=12.5,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
 
@@ -418,11 +422,35 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="sync_release_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
     assert release_sync_monitor is not None
     assert "feature_monitor_kwargs" not in created
     assert "release_monitor_kwargs" in created
+
+    # Regression (issue:4596733729): the PR-monitor factory must mirror the
+    # executor forge gate's URL-aware resolution (concrete_forge_for_repo), not
+    # plain concrete_forge. A legacy/missing snapshot normalizes profile.forge to
+    # "auto"; if such a workspace's repo_url is a BitBucket URL the factory must
+    # route to the bitbucket forge so make_forge_client raises
+    # FORGE_NOT_SUPPORTED — never silently constructing a GitHubClient for a
+    # BitBucket repo when the factory runs before the executor gate (e.g. a
+    # monitor rebuild on a pre-Phase-1 snapshot). With plain concrete_forge this
+    # would resolve "github".
+    created.pop("forge_client_forge", None)
+    bitbucket_monitor = created["executor_monitor_factory"](
+        object(),
+        WorkspaceProfile(name="legacy-auto"),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+            repo_url="git@bitbucket.org:ws/repo.git",
+        ),
+    )
+    assert bitbucket_monitor is not None
+    assert created["forge_client_forge"] == "bitbucket"
 
 
 @pytest.mark.unit
@@ -566,6 +594,7 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
     reconciler = created["reconciler"]
@@ -656,6 +685,7 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
 
