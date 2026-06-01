@@ -248,6 +248,7 @@ class ComposeStackLauncher:
         """
 
         async def _build_single(companion: MaterializedCompanionService) -> CompanionService:
+            """Resolve and optionally pre-build one materialized companion service."""
             service = await asyncio.to_thread(companion_service_from_materialized, companion)
             if self._companion_image_builder is not None:
                 tag = await self._companion_image_builder.ensure(

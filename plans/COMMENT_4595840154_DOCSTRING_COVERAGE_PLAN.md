@@ -33,3 +33,17 @@ introduced by this PR that currently lack docstrings.
   `missing_docstrings_on_added_defs=0`.
 - `uv run --python 3.12 --extra dev ruff check <touched python files>` passes.
 - Full AWF/GitHub validation and broad external coverage gates are left to AWF.
+
+## Assumptions/Changes
+
+After later commits landed on the same branch, the original added-definition
+audit remained clean but CodeRabbit's review-level percentage warning still
+mapped to the broader changed-file surface. Iteration 2 therefore extends the
+docstring-only cleanup to:
+
+- focused public docstring lint findings in the changed Python files; and
+- undocumented production helpers in changed Python files.
+
+The pass criteria now also includes a focused AST count over changed Python
+files reporting at least 80% documented definitions, matching the external
+warning threshold without adopting a new repository-wide gate.

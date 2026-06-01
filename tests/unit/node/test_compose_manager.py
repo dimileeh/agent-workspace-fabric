@@ -30,6 +30,7 @@ _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "worksp
 
 @pytest.fixture
 def manager(tmp_path: Path) -> ComposeManager:
+    """Provide a compose manager rooted in the test temp directory."""
     return ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
 
 
@@ -78,6 +79,7 @@ class _HangingProcess:
 
 @pytest.mark.unit
 def test_compose_project_paths_secret_metadata_cannot_be_mutated() -> None:
+    """Compose project path secret metadata is immutable after construction."""
     paths = ComposeProjectPaths(
         project_dir=Path("/tmp/compose/ws_secret"),
         compose_file=Path("/tmp/compose/ws_secret/compose.yml"),
@@ -97,8 +99,11 @@ def test_compose_project_paths_secret_metadata_cannot_be_mutated() -> None:
 
 
 class TestRender:
+    """Tests for rendering workspace compose specifications."""
+
     @pytest.mark.unit
     def test_renders_valid_yaml(self, manager: ComposeManager, tmp_path: Path) -> None:
+        """The rendered compose file is valid YAML with the base services."""
         paths = manager.render(_spec(tmp_path))
         assert paths.compose_file.exists()
 
@@ -110,6 +115,7 @@ class TestRender:
     def test_mounts_worktree_into_agent_at_workspace(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """The agent container mounts the workspace worktree at /workspace."""
         spec = _spec(tmp_path)
         paths = manager.render(spec)
 
@@ -123,6 +129,7 @@ class TestRender:
         manager: ComposeManager,
         tmp_path: Path,
     ) -> None:
+        """Default rendering exposes the host gateway to the agent."""
         rendered = manager.render(_spec(tmp_path)).compose_file.read_text()
         parsed = yaml.safe_load(rendered)
 
@@ -135,6 +142,7 @@ class TestRender:
         manager: ComposeManager,
         tmp_path: Path,
     ) -> None:
+        """Open egress keeps a public network and host gateway mapping."""
         parsed = yaml.safe_load(
             manager.render(
                 _spec(tmp_path, network_internal=False, host_gateway_enabled=True)
@@ -150,6 +158,7 @@ class TestRender:
         manager: ComposeManager,
         tmp_path: Path,
     ) -> None:
+        """Offline egress renders an internal network without host gateway access."""
         parsed = yaml.safe_load(
             manager.render(
                 _spec(tmp_path, network_internal=True, host_gateway_enabled=False)
@@ -165,6 +174,7 @@ class TestRender:
         manager: ComposeManager,
         tmp_path: Path,
     ) -> None:
+        """Offline egress keeps the agent and profile services on the AWF network."""
         parsed = yaml.safe_load(
             manager.render(
                 _spec(
@@ -188,6 +198,7 @@ class TestRender:
     def test_profile_service_password_placeholders_are_resolved(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Profile service password placeholders resolve during rendering."""
         from awf.node.compose_manager import ComposeService
 
         spec = _spec(
@@ -220,6 +231,7 @@ class TestRender:
     def test_password_placeholder_expansion_noops_without_postgres_password(
         self, manager: ComposeManager
     ) -> None:
+        """Password placeholder expansion is a no-op without a password."""
         assert (
             manager._expand_placeholders(
                 "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf",
@@ -232,6 +244,7 @@ class TestRender:
     def test_companion_service_password_placeholders_are_resolved(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Companion service password placeholders resolve during rendering."""
         spec = _spec(
             tmp_path,
             postgres_password="companion-secret",
@@ -262,6 +275,7 @@ class TestRender:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """DinD companion secret placeholders render without exposing raw values."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-secret-value")
         spec = _spec(
             tmp_path,
@@ -391,6 +405,7 @@ class TestRender:
 
     @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
+        """Compose project names and resource names are deterministic."""
         # Container names embed the workspace_id so operators can ``docker ps
         # --filter name=awf-ws_test123`` to find the stack.
         spec = _spec(tmp_path)
@@ -405,6 +420,7 @@ class TestRender:
     def test_profile_service_healthcheck_renders(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Profile service healthchecks render into compose healthcheck blocks."""
         from awf.node.compose_manager import ComposeService
 
         spec = _spec(
@@ -426,6 +442,7 @@ class TestRender:
     def test_agent_depends_on_profile_service_healthcheck(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """The agent waits for profile services that declare healthchecks."""
         from awf.node.compose_manager import ComposeService
 
         parsed = yaml.safe_load(
@@ -449,6 +466,7 @@ class TestRender:
     def test_resource_limits_applied_when_set(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Explicit CPU and memory limits render into deploy resources."""
         spec = _spec(tmp_path, cpu_limit="4", memory_limit="8g")
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
         assert parsed["services"]["agent"]["deploy"]["resources"]["limits"] == {
@@ -460,6 +478,7 @@ class TestRender:
     def test_resource_limits_apply_default_pair_when_only_one_limit_is_set(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Single resource limits are paired with the default matching limit."""
         cpu_only = yaml.safe_load(
             manager.render(_spec(tmp_path, cpu_limit="2")).compose_file.read_text()
         )
@@ -480,6 +499,7 @@ class TestRender:
     def test_resource_limits_absent_when_unset(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Unset resource limits omit deploy resources from the agent service."""
         parsed = yaml.safe_load(manager.render(_spec(tmp_path)).compose_file.read_text())
         assert "deploy" not in parsed["services"]["agent"]
 
@@ -487,6 +507,7 @@ class TestRender:
     def test_auth_mounts_and_git_identity_propagate(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Auth mounts and git identity values propagate into the agent service."""
         from awf.node.compose_manager import AuthMount
 
         spec = _spec(
@@ -514,6 +535,7 @@ class TestRender:
     def test_declared_secret_lease_mounts_render_read_only_without_secret_values(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Secret lease mounts render read-only without exposing secret values."""
         from awf.node.compose_manager import AuthMount
 
         raw_secret = "sk-live-do-not-render"
@@ -543,6 +565,7 @@ class TestRender:
     def test_companion_service_renders_as_build_from_source(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Companion services render as source builds with expected wiring."""
         from awf.node.compose_manager import CompanionService
 
         spec = _spec(
@@ -598,6 +621,7 @@ class TestRender:
     def test_companion_without_healthcheck_is_not_waited_on_by_agent(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Companions without healthchecks do not gate agent startup."""
         from awf.node.compose_manager import CompanionService
 
         spec = _spec(
@@ -619,6 +643,7 @@ class TestRender:
     def test_named_volume_detection_ignores_bind_sources(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Named volume detection ignores bind mounts and relative sources."""
         spec = _spec(
             tmp_path,
             services=(
@@ -643,6 +668,7 @@ class TestRender:
     def test_named_volume_detection_skips_malformed_volume_entries(
         self, manager: ComposeManager
     ) -> None:
+        """Named volume detection skips malformed volume entries."""
         names = manager._named_volumes_for(  # noqa: SLF001 - direct helper contract test
             [
                 {"name": "not-a-list", "volumes": "cache_data:/cache"},
@@ -655,6 +681,7 @@ class TestRender:
 
     @pytest.mark.unit
     def test_dind_profile_adds_docker_daemon(self, manager: ComposeManager, tmp_path: Path) -> None:
+        """DinD mode injects the managed Docker daemon service."""
         profile = docker_compose_profile()
         spec = _spec(
             tmp_path,
@@ -679,6 +706,7 @@ class TestRender:
     def test_dind_daemon_uses_configured_dind_image(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """DinD mode uses the configured daemon image."""
         spec = _spec(
             tmp_path,
             docker_mode="dind",
@@ -691,6 +719,7 @@ class TestRender:
     def test_dind_mode_sets_default_agent_docker_host(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """DinD mode supplies the default agent Docker host."""
         parsed = yaml.safe_load(
             manager.render(_spec(tmp_path, docker_mode="dind")).compose_file.read_text()
         )
@@ -701,6 +730,7 @@ class TestRender:
     def test_explicit_agent_docker_host_is_preserved(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
+        """Explicit agent Docker host values override the DinD default."""
         parsed = yaml.safe_load(
             manager.render(
                 _spec(
@@ -717,6 +747,7 @@ class TestRender:
 
     @pytest.mark.unit
     def test_strict_undefined_catches_missing_vars(self) -> None:
+        """Template rendering fails loudly for missing context variables."""
         # Guard: if the template starts referencing a new variable without the
         # WorkspaceComposeSpec supplying it, rendering must fail loudly rather
         # than silently emitting empty YAML values.
@@ -733,6 +764,8 @@ class TestRender:
         self,
         tmp_path: Path,
     ) -> None:
+        """Downing a missing compose file avoids invoking docker compose."""
+
         class _RecordingComposeManager(ComposeManager):
             def __init__(self) -> None:
                 super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
@@ -763,6 +796,8 @@ class TestRender:
         self,
         tmp_path: Path,
     ) -> None:
+        """Project label cleanup removes containers, networks, and volumes."""
+
         class _RecordingComposeManager(ComposeManager):
             def __init__(self) -> None:
                 super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
@@ -807,6 +842,8 @@ class TestRender:
         self,
         tmp_path: Path,
     ) -> None:
+        """Project label cleanup can leave matching volumes in place."""
+
         class _RecordingComposeManager(ComposeManager):
             def __init__(self) -> None:
                 super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
@@ -847,6 +884,8 @@ class TestRender:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Compose command execution classifies a missing docker binary."""
+
         async def _raise_missing(*_args: object, **_kwargs: object) -> _FakeProcess:
             raise FileNotFoundError("docker")
 
@@ -875,6 +914,7 @@ class TestRender:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Compose commands receive COMPOSE_PROJECT_NAME and COMPOSE_FILE."""
         calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
         async def _spawn(*args: object, **kwargs: object) -> _FakeProcess:
@@ -906,6 +946,7 @@ class TestRender:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Launching without wait omits compose wait flags."""
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
@@ -932,6 +973,7 @@ class TestRender:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Hung compose commands are killed and reported as timeouts."""
         process = _HangingProcess()
 
         async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:
@@ -959,6 +1001,7 @@ class TestRender:
         manager: ComposeManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Docker capture returns stdout for successful commands."""
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
@@ -978,6 +1021,8 @@ class TestRender:
         manager: ComposeManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Docker capture maps daemon connectivity failures to docker unavailable."""
+
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
             return _FakeProcess(
                 returncode=1,
@@ -999,6 +1044,8 @@ class TestRender:
         manager: ComposeManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Docker capture preserves ordinary command failures."""
+
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
             return _FakeProcess(returncode=2, stdout=b"usage\n", stderr=b"bad flag\n")
 
@@ -1018,6 +1065,8 @@ class TestRender:
         manager: ComposeManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Docker capture classifies a missing docker binary."""
+
         async def _raise_missing(*_args: object, **_kwargs: object) -> _FakeProcess:
             raise FileNotFoundError("docker")
 
@@ -1039,6 +1088,8 @@ class TestRender:
         manager: ComposeManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Docker capture translates non-FileNotFound OSErrors."""
+
         # ``PermissionError`` (docker binary present but not executable) is an
         # ``OSError`` subclass that is *not* ``FileNotFoundError``; it must still be
         # translated to a structured ``DOCKER_UNAVAILABLE`` error so best-effort
@@ -1065,6 +1116,7 @@ class TestRender:
         manager: ComposeManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Hung docker capture commands are killed and reported as timeouts."""
         process = _HangingProcess()
 
         async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:

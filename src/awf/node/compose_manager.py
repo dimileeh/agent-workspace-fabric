@@ -690,6 +690,7 @@ class ComposeManager:
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _paths_for(self, spec: WorkspaceComposeSpec) -> ComposeProjectPaths:
+        """Return deterministic compose project paths for a workspace spec."""
         project_dir = self._projects_dir / spec.workspace_id
         return ComposeProjectPaths(
             project_dir=project_dir, compose_file=project_dir / "compose.yml"
@@ -704,6 +705,7 @@ class ComposeManager:
         operation: str,
         capture_timeout_seconds: float = COMPOSE_CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
+        """Run a docker compose command with structured failure classification."""
         cmd = [
             "docker",
             "compose",
@@ -784,10 +786,12 @@ class ComposeManager:
             )
 
     async def _docker_resource_ids(self, args: list[str], *, operation: str) -> list[str]:
+        """Return non-empty docker resource IDs from a capture command."""
         result = await self._docker_capture(args, operation=operation)
         return [line.strip() for line in result.splitlines() if line.strip()]
 
     async def _docker(self, args: list[str], *, operation: str) -> None:
+        """Run a docker command and discard successful stdout."""
         await self._docker_capture(args, operation=operation)
 
     async def _docker_capture(
@@ -798,6 +802,7 @@ class ComposeManager:
         capture_timeout_seconds: float | None = None,
         combine_stderr: bool = False,
     ) -> str:
+        """Run a docker command and return stdout or raise a structured error."""
         # Resolve the default at call time (not at def time) so tests that
         # monkeypatch the module-level DOCKER_CAPTURE_TIMEOUT_SECONDS keep working.
         timeout_seconds = (
@@ -882,6 +887,7 @@ class ComposeManager:
         return stdout
 
     def _services_for(self, spec: WorkspaceComposeSpec) -> list[ComposeService]:
+        """Return profile services with the managed DinD daemon inserted when needed."""
         services = list(spec.services)
         if spec.docker_mode == "dind":
             services.insert(
@@ -900,6 +906,7 @@ class ComposeManager:
     def _render_service(
         self, service: ComposeService, *, postgres_password: str | None
     ) -> dict[str, object]:
+        """Render a compose service into the template context."""
         return {
             "name": service.name,
             "image": service.image,
@@ -923,6 +930,7 @@ class ComposeManager:
         }
 
     def _named_volumes_for(self, services: list[dict[str, object]]) -> list[str]:
+        """Collect named Docker volumes referenced by rendered services."""
         names: set[str] = set()
         for service in services:
             volumes = service.get("volumes")
@@ -937,6 +945,7 @@ class ComposeManager:
         return sorted(names)
 
     def _expand_placeholders(self, value: str, *, postgres_password: str | None) -> str:
+        """Expand compose-time profile placeholders that AWF owns."""
         if postgres_password is None:
             return value
         return value.replace("${AWF_POSTGRES_PASSWORD}", postgres_password)
