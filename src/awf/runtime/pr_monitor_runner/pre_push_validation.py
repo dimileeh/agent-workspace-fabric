@@ -31,7 +31,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
-from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
@@ -344,7 +344,7 @@ async def _pre_push_validation_worktree_check(
 
     async def _run_git(args: list[str]) -> Any:
         """Run git command arguments inside the workspace worktree."""
-        return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
+        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
 
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
@@ -370,7 +370,7 @@ async def _pre_push_validation_cleanup(
 
     async def _run_git(args: list[str]) -> Any:
         """Run git command arguments inside the workspace worktree."""
-        return await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
+        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
 
     from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
 
@@ -629,7 +629,7 @@ async def _rollback_failed_pre_push_validation_fix_pass(
 ) -> bool:
     """Rollback uncommitted validation-fix edits before the monitor loops again."""
     reset = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
+        git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
     )
     if not reset.ok:
         log = _log.warning

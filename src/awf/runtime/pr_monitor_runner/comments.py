@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Literal
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
-from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_prompts import (
@@ -37,16 +36,6 @@ if TYPE_CHECKING:
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
 _log = get_logger(__name__)
-
-
-def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
-    return [
-        "git",
-        *git_safe_directory_config_args(worktree_path),
-        "-C",
-        str(worktree_path),
-        *args,
-    ]
 
 
 async def _address_thread(

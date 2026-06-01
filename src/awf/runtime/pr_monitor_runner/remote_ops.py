@@ -486,7 +486,7 @@ async def _git_push_result(
     refspec: str | None = None,
 ) -> _GitPushResult:
     """Push HEAD and return detailed failure or resync information."""
-    from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     remote = remote_url or "origin"
     refspec = refspec or f"HEAD:refs/heads/{remote_branch}"
@@ -498,7 +498,7 @@ async def _git_push_result(
             returncode=1,
             stderr=policy_block_message,
         )
-    r = await runner._deps.runner.run(_git_worktree_command(worktree_path, "push", remote, refspec))
+    r = await runner._deps.runner.run(git_worktree_command(worktree_path, "push", remote, refspec))
     if r.ok:
         pushed = "up-to-date" not in (r.stderr or "").lower()
         return _GitPushResult(
@@ -561,7 +561,7 @@ async def _git_push_result(
     )
     if remote_url:
         fetch_result = await runner._deps.runner.run(
-            _git_worktree_command(
+            git_worktree_command(
                 worktree_path,
                 "fetch",
                 remote_url,
@@ -571,7 +571,7 @@ async def _git_push_result(
         reset_target = "FETCH_HEAD"
     else:
         fetch_result = await runner._deps.runner.run(
-            _git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
+            git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
         )
         reset_target = f"origin/{remote_branch}"
     if not fetch_result.ok:
@@ -594,7 +594,7 @@ async def _git_push_result(
             stderr=stderr,
         )
     await runner._deps.runner.run(
-        _git_worktree_command(worktree_path, "reset", "--hard", reset_target)
+        git_worktree_command(worktree_path, "reset", "--hard", reset_target)
     )
     return _GitPushResult(
         pushed=False,
@@ -668,13 +668,13 @@ async def _run_sync_base(
 ) -> _GitPushResult:
     """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
-    from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     worktree_path = runner._worktrees_root / workspace_id
 
     async def _git(*args: str) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""
-        r = await runner._deps.runner.run(_git_worktree_command(worktree_path, *args))
+        r = await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
         return r.returncode, r.stdout, r.stderr
 
     await _git("merge", "--abort")
@@ -790,7 +790,7 @@ async def _refresh_staleness_after_sync_base(
         StaleReasonRepository,
         sync_candidate_readiness,
     )
-    from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     try:
         async with runner._deps.session_factory() as session:
@@ -808,7 +808,7 @@ async def _refresh_staleness_after_sync_base(
             ]
             worktree_path = runner._worktrees_root / workspace_id
             rev_parse = await runner._deps.runner.run(
-                _git_worktree_command(worktree_path, "rev-parse", f"origin/{base_branch}")
+                git_worktree_command(worktree_path, "rev-parse", f"origin/{base_branch}")
             )
             if rev_parse.returncode != 0 or not rev_parse.stdout.strip():
                 _log.warning(
