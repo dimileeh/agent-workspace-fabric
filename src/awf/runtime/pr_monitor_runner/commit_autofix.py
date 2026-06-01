@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from awf.common.commands import CommandResult
-from awf.runtime.pr_monitor_runner.comments import (
-    _git_worktree_command,
+from awf.runtime.pr_monitor_runner.git_utils import (
+    git_worktree_command,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_porcelain,
@@ -70,7 +70,7 @@ async def _retry_monitor_precommit_autofix_commit_once(
     if not repair_paths:
         return None
 
-    dirty_status = await runner.run(_git_worktree_command(worktree_path, "status", "--porcelain"))
+    dirty_status = await runner.run(git_worktree_command(worktree_path, "status", "--porcelain"))
     if not dirty_status.ok:
         _log.warning(
             "monitor.dirty_commit_autofix_status_failed",
@@ -127,7 +127,7 @@ async def _retry_monitor_precommit_autofix_commit_once(
         )
         return None
 
-    add = await runner.run(_git_worktree_command(worktree_path, "add", "--", *restage_paths))
+    add = await runner.run(git_worktree_command(worktree_path, "add", "--", *restage_paths))
     if not add.ok:
         _log.warning(
             "monitor.dirty_commit_autofix_add_failed",
@@ -137,5 +137,5 @@ async def _retry_monitor_precommit_autofix_commit_once(
         )
         return None
 
-    retry = await runner.run(_git_worktree_command(worktree_path, "commit", "-m", message))
+    retry = await runner.run(git_worktree_command(worktree_path, "commit", "-m", message))
     return retry, restage_paths

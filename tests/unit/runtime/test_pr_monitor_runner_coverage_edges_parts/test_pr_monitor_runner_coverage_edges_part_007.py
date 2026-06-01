@@ -1138,8 +1138,13 @@ def test_git_push_and_porcelain_helpers_cover_clean_rename_and_invalid_lines() -
     ]
     assert _untracked_paths_from_porcelain(
         '?? old/name.py -> src/name.py\n?? "docs/new note.md"\n?? docs/new.md\n'
+        "!! ignored-output.json\n"
         "?? docs/new.md\n M tracked.py\n"
-    ) == ["old/name.py -> src/name.py", "docs/new note.md", "docs/new.md"]
+    ) == [
+        "old/name.py -> src/name.py",
+        "docs/new note.md",
+        "docs/new.md",
+    ]
     assert _changed_paths_from_porcelain_z(
         "\0".join(
             [
@@ -1158,7 +1163,10 @@ def test_git_push_and_porcelain_helpers_cover_clean_rename_and_invalid_lines() -
         "src/new name.py",
     ]
     assert _untracked_paths_from_porcelain_z(
-        "?? docs/new note.md\0?? plans/orphan dir/file one.md\0 M tracked.py\0"
+        "?? docs/new note.md\0"
+        "!! ignored-output.json\0"
+        "?? plans/orphan dir/file one.md\0"
+        " M tracked.py\0"
     ) == ["docs/new note.md", "plans/orphan dir/file one.md"]
 
 
