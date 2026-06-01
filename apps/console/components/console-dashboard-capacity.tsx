@@ -315,14 +315,14 @@ function localCapacityLimitLabel(saturation: ResourceSaturationSummary): string 
 function localCapacityDetail(source: LocalCapacitySourceValue | null): string {
   switch (source) {
     case "docker":
-      return "Limits are the CPU/memory the Docker runtime reports via docker info: the VM allocation under Docker Desktop (host may be larger), or the host's own resources under a native Docker Engine";
+      return "Limits from docker info (native Docker Engine: host resources; Docker Desktop: VM allocation, host may be larger)";
     case "operator_config":
       return "Limits are the AWF_LOCAL_CAPACITY_* operator overrides used by the scheduler";
     case "mixed":
       return "Limits combine AWF_LOCAL_CAPACITY_* overrides with Docker runtime detection";
     case null:
     default:
-      return "Limits are the runtime capacity AWF reports for scheduling (the host's own resources under a native Docker Engine; the VM allocation under Docker Desktop)";
+      return "Limits from runtime capacity AWF detects (native Docker Engine: host resources; Docker Desktop: VM allocation)";
   }
 }
 
