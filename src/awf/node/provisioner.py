@@ -429,6 +429,14 @@ class Provisioner:
                         and compose_fail_ws.status == WorkspaceStatus.provisioning.value
                         and compose_fail_ws.compose_project_name is None
                     ):
+                        # Defensive backstop: pre_launch_session normally sets
+                        # compose_project_name before launch, so this branch
+                        # is dead in the normal path.  It is retained in case
+                        # a future code change (or an unexpected pre_launch
+                        # commit failure that does *not* return early) leaves
+                        # compose_project_name null at compose-fail time,
+                        # ensuring the cleanup worker can still discover and
+                        # tear down the project.
                         compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
                         if (
                             resolved_profile_dict is not None
