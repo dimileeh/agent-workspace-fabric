@@ -868,6 +868,43 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
     assert retried_reservation.peak_memory_gb == 16.0
 
 
+async def test_retry_legacy_dind_source_without_reservation_preserves_dind_demand(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    payload = _request().model_dump(mode="python")
+    payload["workspace"] = {
+        "profile_ref": None,
+        "profile": {"name": "dind-retry", "docker": {"mode": "dind"}},
+    }
+    first = await service.create(WorkspaceCreateRequest.model_validate(payload))
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        assert source.resolved_profile["docker"]["mode"] == "dind"
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        assert len(source_reservations) == 1
+        await session.delete(source_reservations[0])
+        await session.commit()
+
+    retry = await _retry_with_preflight_override(service, first.id)
+
+    async with factory() as session:
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        retried_reservation = (
+            await ResourceReservationRepository(session).list_for_workspace(retry.new_workspace_id)
+        )[0]
+
+    assert source_reservations == []
+    assert retried_reservation.dind_slots == 1
+
+
 @pytest.mark.unit
 async def test_retry_conformance_unsatisfied_auto_salvages_implementation_diff(
     factory: async_sessionmaker[AsyncSession],

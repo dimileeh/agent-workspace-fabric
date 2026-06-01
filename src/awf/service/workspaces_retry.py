@@ -436,9 +436,10 @@ async def retry_workspace_row(
     # workspace needs a node_id for host-port admission scoping, and the
     # reservation row is the canonical source of that assignment. Without it,
     # the retried workspace would lack a node_id, breaking admission checks
-    # and scheduler scoring. When source_reservation is None, the retry
-    # reservation uses defaulted values (disk_mb=None, dind_slots=0) which
-    # carry zero capacity cost but still anchor the node_id.
+    # and scheduler scoring. When source_reservation is None, disk defaults to
+    # no reservation cost, but DinD demand must still come from the stored
+    # resolved profile because worker capacity checks treat an existing
+    # ResourceReservation as authoritative.
     if source_reservation is not None:
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
@@ -452,6 +453,7 @@ async def retry_workspace_row(
             phase=source_reservation.phase,
         )
     else:
+        dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
@@ -459,8 +461,8 @@ async def retry_workspace_row(
             peak_cpu=resolved_settings.workspace_peak_cpu,
             peak_memory_gb=resolved_settings.workspace_peak_memory_gb,
             disk_mb=None,
-            dind_slots=0,
-            dind_mode="none",
+            dind_slots=1 if dind_mode == "dind" else 0,
+            dind_mode=dind_mode,
             phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
         )
     await ResourceReservationRepository(session).create(
