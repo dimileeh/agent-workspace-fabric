@@ -349,9 +349,10 @@ def _compose_up_reports_missing_image(exc: ComposeOperationError, image: str) ->
     """Return whether Compose reported that a specific local image tag is absent."""
     detail = f"{exc.stderr}\n{exc.stdout}"
     image_ref = _compose_image_ref_regex(image)
+    image_ref_before_colon = _compose_image_ref_before_colon_regex(image)
     patterns = (
         rf"no such image:\s*{image_ref}",
-        rf"{image_ref}\s*:\s*no such image",
+        rf"{image_ref_before_colon}\s*:\s*no such image",
         rf"pull access denied for\s+{image_ref}",
         rf"(?:repository\s+)?{image_ref}\s+does not exist",
     )
@@ -363,6 +364,13 @@ def _compose_image_ref_regex(image: str) -> str:
     image_ref_chars = r"A-Za-z0-9_.:/-"
     escaped_image = re.escape(image)
     return rf"(?<![{image_ref_chars}])['\"]?{escaped_image}['\"]?(?![{image_ref_chars}])"
+
+
+def _compose_image_ref_before_colon_regex(image: str) -> str:
+    """Return an exact image reference fragment followed by a colon separator."""
+    image_ref_chars = r"A-Za-z0-9_.:/-"
+    escaped_image = re.escape(image)
+    return rf"(?<![{image_ref_chars}])['\"]?{escaped_image}['\"]?(?=\s*:)"
 
 
 def _stack_secret_metadata(

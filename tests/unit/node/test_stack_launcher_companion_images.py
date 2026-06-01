@@ -571,6 +571,17 @@ def test_missing_image_detector_accepts_no_such_image_for_companion_tag() -> Non
 
 
 @pytest.mark.unit
+def test_missing_image_detector_accepts_tag_colon_no_such_image() -> None:
+    """Docker's tag-colon no-such-image message confirms the tag is absent."""
+    tag = "awf-companion-backend:abc123def456"
+
+    assert _compose_up_reports_missing_image(
+        _compose_error(f"Error response from daemon: {tag}: no such image"),
+        tag,
+    )
+
+
+@pytest.mark.unit
 def test_missing_image_detector_rejects_other_image_when_companion_tag_is_elsewhere() -> None:
     """Missing-image text must name the companion tag, not just mention it elsewhere."""
     tag = "awf-companion-backend:abc123def456"
