@@ -557,15 +557,11 @@ async def test_execution_validation_fails_cleanup_when_callback_becomes_stale_af
     assert result.stop
     assert result.successful_validation_run_id is None
     assert executor._finish_validation_callback_if_terminal.await_count == expected_callback_checks
-    executor._finish_validation_run.assert_awaited_once_with(
-        validation_run_id,
-        status="failed",
-        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-    )
+    executor._finish_validation_run.assert_not_awaited()
     finish_pending_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
     assert finish_pending_kwargs["workspace_id"] == workspace_id
     assert finish_pending_kwargs["status"] == OperationStatus.failed
-    assert finish_pending_kwargs["validation_run_id"] == validation_run_id
+    assert finish_pending_kwargs["validation_run_id"] is None
     assert finish_pending_kwargs["requested_tier"] == 1
     assert finish_pending_kwargs["reason_code"] == VALIDATION_WORKTREE_CLEANUP_FAILED
     mark_failed_kwargs = executor._mark_failed.await_args.kwargs

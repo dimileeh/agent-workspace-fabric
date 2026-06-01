@@ -331,7 +331,7 @@ async def _handle_validation_cleanup_guard(
     return await _fail_validation_worktree_guard(
         self,
         workspace_id=workspace_id,
-        validation_run_id=validation_run_id,
+        validation_run_id=None if stale_cleanup_callback_ignored else validation_run_id,
         validation_tier=validation_tier,
         reason_code=reason_code,
         message=cleanup_message,
