@@ -13,6 +13,7 @@ friendly formatting is opt-in via ``--format pretty``.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata as importlib_metadata
 import subprocess
 import sys
 from pathlib import Path
@@ -75,6 +76,8 @@ _PROVIDER_HELP_PASSTHROUGH = (
     "with migration guidance; use `awf service bootstrap`."
 )
 
+_DISTRIBUTION_NAME = "agent-workspace-fabric"
+
 
 app = typer.Typer(
     name="awf",
@@ -84,10 +87,18 @@ app = typer.Typer(
 )
 
 
+def _cli_version() -> str:
+    """Return the installed console script version, with a source-tree fallback."""
+    try:
+        return importlib_metadata.version(_DISTRIBUTION_NAME)
+    except importlib_metadata.PackageNotFoundError:
+        return __version__
+
+
 def _version_callback(value: bool) -> None:
     """Print the package version for the eager root ``--version`` option."""
     if value:
-        typer.echo(f"awf {__version__}")
+        typer.echo(f"awf {_cli_version()}")
         raise typer.Exit()
 
 

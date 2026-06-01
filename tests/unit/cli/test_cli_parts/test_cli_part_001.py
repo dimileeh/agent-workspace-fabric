@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from importlib.metadata import PackageNotFoundError
 from unittest.mock import MagicMock, patch
 
 import click
@@ -70,10 +71,24 @@ def test_handle_response_uses_response_request_without_global_context() -> None:
 @pytest.mark.unit
 def test_root_version_option_reports_package_version() -> None:
     """``awf --version`` reports the installed package version."""
-    result = _runner.invoke(app, ["--version"])
+    with patch("awf.cli.main.importlib_metadata.version", return_value="9.8.7"):
+        result = _runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert __version__ in result.stdout
+    assert "awf 9.8.7" in result.stdout
+
+
+@pytest.mark.unit
+def test_root_version_option_falls_back_when_package_metadata_is_missing() -> None:
+    """Source checkout invocations still work without installed metadata."""
+    with patch(
+        "awf.cli.main.importlib_metadata.version",
+        side_effect=PackageNotFoundError,
+    ):
+        result = _runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert f"awf {__version__}" in result.stdout
 
 
 class TestWorkspaceCreate:
