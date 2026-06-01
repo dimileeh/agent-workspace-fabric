@@ -1168,6 +1168,21 @@ class Provisioner:
                         revoke_count=revoke_count,
                         reason_code="REVOKE_CAP_REACHED",
                     )
+                await repo.add_event(
+                    ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                    payload={
+                        "workspace_id": workspace_id,
+                        "orphan_stop_error": orphan_stop_error,
+                        **(
+                            {"revoke_count": revoke_count}
+                            if revoke_count >= _MAX_REVOKE_EVENTS
+                            else {}
+                        ),
+                    },
+                )
+                if revoke_count >= _MAX_REVOKE_EVENTS:
                     await repo.add_event(
                         ws,
                         event_type="workspace.stale_action_skipped",
@@ -1183,16 +1198,6 @@ class Provisioner:
                                 "may be required to stop orphan containers "
                                 "and free host ports."
                             ),
-                        },
-                    )
-                else:
-                    await repo.add_event(
-                        ws,
-                        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-                        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-                        payload={
-                            "workspace_id": workspace_id,
-                            "orphan_stop_error": orphan_stop_error,
                         },
                     )
             await repo.add_event(
