@@ -226,10 +226,16 @@ async def find_host_port_conflicts(
     active and terminal-unreleased workspaces (including their
     ``task_policy`` and ``resolved_profile`` JSON blobs), then parses
     ports in Python.  There is no WHERE clause that prunes by port
-    value.  As workspace count grows, every admission check becomes
-    more expensive.  When this becomes a bottleneck, consider adding
-    a JSONB index on the relevant port fields or a denormalized
-    ``host_ports`` integer-array column with a GIN index.
+    value.  Additionally, for every terminal-unreleased candidate row,
+    ``terminal_runtime_effectively_released_expr`` runs as a correlated
+    subquery against ``WorkspaceEvent``, compounding per-row cost when
+    many terminal workspaces lack a release event.  As workspace count
+    grows, every admission check becomes more expensive.  When this
+    becomes a bottleneck, consider adding a JSONB index on the relevant
+    port fields or a denormalized ``host_ports`` integer-array column
+    with a GIN index, and indexing
+    ``WorkspaceEvent(workspace_id, event_type, reason_code, occurred_at)``
+    to speed up the correlated subquery.
 
     NODE-FILTER FALLBACK: When *node_id* is provided, workspaces whose
     ``node_id`` is NULL *and* have no ``ResourceReservation`` row at
