@@ -502,6 +502,8 @@ class Provisioner:
                 workspace_id=workspace_id,
                 error=str(exc),
             )
+            if await self._launch_lost_to_terminal_cleanup(workspace_id):
+                return
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.infrastructure_failure,
