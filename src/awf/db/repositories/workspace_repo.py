@@ -38,6 +38,10 @@ from awf.db.models import (
     Workspace,
     WorkspaceEvent,
 )
+from awf.db.repositories._scheduler import (
+    _schedulable_workspace_ids_stmt,
+    _scheduler_scoring_time,
+)
 from awf.db.repositories.base import (
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     HostPortConflict,
@@ -47,8 +51,6 @@ from awf.db.repositories.base import (
     _candidate_terminal_close_reason,
     _matches_pr_adoption_identity,
     _releases_resource_reservation,
-    _schedulable_workspace_ids_stmt,
-    _scheduler_scoring_time,
     _workspace_idempotency_advisory_lock_key,
     _workspace_status_value,
     resolve_session_dialect_name,

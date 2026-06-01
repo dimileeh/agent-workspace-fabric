@@ -177,6 +177,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#disk_usage_unavailable](#disk_usage_unavailable)
 
+### DUPLICATE_HOST_PORT
+**Problem:** The same host port is claimed by more than one service or companion within a single workspace create request.
+**Likely Cause:** A companion and a profile service, or two profile services, bind the same Docker host port in the same request. The database conflict check cannot detect this because the new workspace is not persisted yet.
+**Operator Fix:** Change your profile or companion configuration so that each service binds a unique host port, then retry the create request.
+**Related Command:** `awf workspace list`
+**Docs Link:** [docs/REASON_CATALOG.md#duplicate_host_port](#duplicate_host_port)
+
 ### DOCKER_CLI_NOT_FOUND
 **Problem:** Docker CLI is not installed or is not on PATH.
 **Likely Cause:** The docker CLI is missing from the host environment or not accessible to the AWF process.

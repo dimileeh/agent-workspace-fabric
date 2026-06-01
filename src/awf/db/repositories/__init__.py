@@ -9,6 +9,19 @@ from sqlalchemy.orm.attributes import set_committed_value
 from awf.common.ids import (
     new_workspace_id,
 )
+from awf.db.repositories._scheduler import (
+    SCHEDULER_SQL_AGE_BOOST_DIALECTS,
+    SchedulerOrderExpressions,
+    _postgresql_interval_seconds_expr,
+    _postgresql_scheduler_age_boost_expr,
+    _schedulable_workspace_ids_stmt,
+    _scheduler_age_boost_expr,
+    _scheduler_json_int_expr,
+    _scheduler_scoring_time,
+    _scheduler_zero_age_boost_expr,
+    _sqlite_scheduler_age_boost_expr,
+    scheduler_order_expressions,
+)
 from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_CONFLICT_STATUSES,
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
@@ -20,7 +33,6 @@ from awf.db.repositories.base import (
     OWNED_PATH_ANCESTOR_MATCH_REASON,
     OWNED_PATH_EXACT_MATCH_REASON,
     OWNED_PATH_WILDCARD_MATCH_REASON,
-    SCHEDULER_SQL_AGE_BOOST_DIALECTS,
     SECRET_LEASE_AUDIT_EVENT_TYPE,
     SECRET_LEASE_AUDIT_SCHEMA,
     SECRET_LEASE_STATUS_EXPIRED,
@@ -37,7 +49,6 @@ from awf.db.repositories.base import (
     OwnedPathOverlapMatch,
     PolicyFindingCreate,
     QueueDecisionCreate,
-    SchedulerOrderExpressions,
     SecretLeaseIssue,
     StaleReasonCreate,
     WorkspaceEventCreate,
@@ -52,15 +63,8 @@ from awf.db.repositories.base import (
     _matches_pr_adoption_identity,
     _operation_idempotency_advisory_lock_key,
     _owned_path_conflict_advisory_lock_key,
-    _postgresql_interval_seconds_expr,
-    _postgresql_scheduler_age_boost_expr,
     _provider_model_circuit_breaker_insert_if_absent_stmt,
-    _schedulable_workspace_ids_stmt,
-    _scheduler_age_boost_expr,
-    _scheduler_json_int_expr,
-    _scheduler_zero_age_boost_expr,
     _secret_lease_insert_if_absent_stmt,
-    _sqlite_scheduler_age_boost_expr,
     _wildcard_prefixes_overlap,
     _workspace_idempotency_advisory_lock_key,
     empty_resource_reservation_totals,
@@ -68,7 +72,6 @@ from awf.db.repositories.base import (
     owned_paths_overlap,
     pr_feedback_body_hash,
     resolve_session_dialect_name,
-    scheduler_order_expressions,
     validation_command_set_hash,
 )
 from awf.db.repositories.quality_repo import (
@@ -167,6 +170,7 @@ __all__ = [
     "_callback_subscription_event_type_filter",
     "_scheduler_json_int_expr",
     "_scheduler_age_boost_expr",
+    "_scheduler_scoring_time",
     "TaskExternalIdConflictError",
     "TaskRepository",
     "TaskAttemptRepository",
