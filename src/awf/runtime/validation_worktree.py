@@ -68,6 +68,44 @@ def _resolve_head_sha(result: CommandResult, *, ref: str) -> tuple[str | None, s
     return sha, ""
 
 
+def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
+    """Return whether `path` should be treated as part of an ignored root."""
+    normalized_path = _normalize_porcelain_path(path)
+    for ignored_path in ignored_paths:
+        if normalized_path == ignored_path:
+            return True
+        if ignored_path.endswith("/") and normalized_path.startswith(ignored_path):
+            return True
+        if not ignored_path.endswith("/") and normalized_path.startswith(f"{ignored_path}/"):
+            return True
+    return False
+
+
+def _ignored_untracked_snapshot_from_ls_files(
+    stdout: str | None,
+) -> tuple[str, ...]:
+    """Parse a null-delimited `git ls-files` output of ignored untracked paths."""
+    if not stdout:
+        return ()
+    records = tuple(line for line in stdout.split("\0") if line and line != "\x00")
+    return tuple(dict.fromkeys(records))
+
+
+async def _snapshot_ignored_paths(
+    run_git: GitRunner,
+    *,
+    pathspecs: tuple[str, ...] = (),
+) -> tuple[tuple[str, ...], str]:
+    """Snapshot ignored untracked paths with a null-delimited command."""
+    args = ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]
+    if pathspecs:
+        args.extend(["--", *pathspecs])
+    result = await run_git(args)
+    if not result.ok:
+        return (), (result.stderr or "")[:1000]
+    return _ignored_untracked_snapshot_from_ls_files(result.stdout), ""
+
+
 @dataclass(frozen=True)
 class ValidationWorktreeCheck:
     """Result payload describing whether the validation worktree is clean."""
@@ -77,6 +115,7 @@ class ValidationWorktreeCheck:
     paths: tuple[str, ...] = ()
     untracked_paths: tuple[str, ...] = ()
     ignored_paths: tuple[str, ...] = ()
+    ignored_paths_snapshot: tuple[str, ...] = ()
     reason_code: str | None = None
     message: str = ""
     command_stderr: str = ""
@@ -154,6 +193,7 @@ async def check_validation_worktree_clean(
     worktree_path: Path,
     ignore_all_ignored: bool = False,
     ignore_ignored_paths: tuple[str, ...] | None = None,
+    capture_ignored_paths_snapshot: bool = False,
 ) -> ValidationWorktreeCheck:
     """Return dirty paths before or after an AWF validation command.
 
@@ -180,6 +220,25 @@ async def check_validation_worktree_clean(
 
     status_stdout = status.stdout or ""
     ignored_paths = _ignored_paths_from_porcelain(status_stdout)
+    ignored_paths_snapshot: tuple[str, ...] = ()
+    if capture_ignored_paths_snapshot and ignored_paths:
+        if ignore_ignored_paths is None:
+            ignore_ignored_paths = ()
+        snapshot_paths, snapshot_stderr = await _snapshot_ignored_paths(
+            run_git,
+            pathspecs=tuple(ignore_ignored_paths or ()),
+        )
+        if not snapshot_paths and snapshot_stderr:
+            return ValidationWorktreeCheck(
+                clean=False,
+                reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                message=(
+                    "Could not inspect ignored paths for validation pre-check with `git ls-files`."
+                ),
+                command_stderr=snapshot_stderr,
+            )
+        ignored_paths_snapshot = snapshot_paths
+
     if ignore_all_ignored:
         ignored_paths_to_ignore = {_normalize_porcelain_path(path) for path in ignored_paths}
     elif ignore_ignored_paths is None:
@@ -189,20 +248,25 @@ async def check_validation_worktree_clean(
     paths = tuple(
         path
         for path in _changed_paths_from_porcelain(status_stdout)
-        if _normalize_porcelain_path(path) not in ignored_paths_to_ignore
+        if not _is_under_ignored_path(path, ignored_paths_to_ignore)
     )
     untracked_paths = tuple(
         path
         for path in _untracked_paths_from_porcelain(status_stdout)
-        if _normalize_porcelain_path(path) not in ignored_paths_to_ignore
+        if not _is_under_ignored_path(path, ignored_paths_to_ignore)
     )
     if not paths and not untracked_paths:
-        return ValidationWorktreeCheck(clean=True, ignored_paths=ignored_paths)
+        return ValidationWorktreeCheck(
+            clean=True,
+            ignored_paths=ignored_paths,
+            ignored_paths_snapshot=ignored_paths_snapshot,
+        )
     return ValidationWorktreeCheck(
         clean=False,
         paths=paths,
         untracked_paths=untracked_paths,
         ignored_paths=ignored_paths,
+        ignored_paths_snapshot=ignored_paths_snapshot,
         reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
         message=(
             "Validation worktree has pre-existing uncommitted changes; "
@@ -217,6 +281,7 @@ async def cleanup_validation_worktree_side_effects(
     worktree_path: Path,
     restore_ref: str | None = None,
     ignore_ignored_paths: tuple[str, ...] | None = None,
+    ignore_ignored_paths_snapshot: tuple[str, ...] | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
 
@@ -364,11 +429,36 @@ async def cleanup_validation_worktree_side_effects(
             )
 
     ignored_paths = {_normalize_porcelain_path(path) for path in (ignore_ignored_paths or ())}
-    cleanup_untracked_paths = tuple(
+    cleanup_untracked_paths = [
         path
         for path in check.untracked_paths
         if _normalize_porcelain_path(path) not in ignored_paths
-    )
+    ]
+    if ignore_ignored_paths_snapshot is not None and ignored_paths:
+        current_ignored_paths, snapshot_stderr = await _snapshot_ignored_paths(
+            run_git,
+            pathspecs=tuple(ignored_paths),
+        )
+        if snapshot_stderr:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=check,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=(
+                    "Could not inspect ignored paths for validation cleanup with `git ls-files`."
+                ),
+                cleanup_command="git ls-files",
+                cleanup_stderr=snapshot_stderr,
+            )
+        ignored_snapshot_set = set(ignore_ignored_paths_snapshot)
+        cleanup_untracked_paths.extend(
+            path
+            for path in current_ignored_paths
+            if path not in ignored_snapshot_set and _is_under_ignored_path(path, ignored_paths)
+        )
+
+    cleanup_untracked_paths = list(dict.fromkeys(cleanup_untracked_paths))
     if cleanup_untracked_paths:
         clean = await run_git(["clean", "-fdx", "--", *cleanup_untracked_paths])
         if not clean.ok:
