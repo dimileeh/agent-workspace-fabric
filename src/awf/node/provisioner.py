@@ -421,8 +421,12 @@ class Provisioner:
             try:
                 async with self._session_factory() as compose_fail_session:
                     compose_fail_repo = WorkspaceRepository(compose_fail_session)
-                    compose_fail_ws = await compose_fail_repo.get(workspace_id)
-                    if compose_fail_ws is not None and compose_fail_ws.compose_project_name is None:
+                    compose_fail_ws = await compose_fail_repo.get_for_update(workspace_id)
+                    if (
+                        compose_fail_ws is not None
+                        and compose_fail_ws.status == WorkspaceStatus.provisioning.value
+                        and compose_fail_ws.compose_project_name is None
+                    ):
                         compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
                         if (
                             resolved_profile_dict is not None
