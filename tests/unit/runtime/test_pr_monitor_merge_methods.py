@@ -124,16 +124,22 @@ class _MergeMethodClient:
         *,
         repo_methods: tuple[str, ...] = ("merge", "squash", "rebase"),
         branch_methods: tuple[str, ...] | None = None,
+        repo_error: GitHubClientError | None = None,
+        branch_error: GitHubClientError | None = None,
         merge_results: list[str | GitHubClientError] | None = None,
     ) -> None:
         self.repo_methods = repo_methods
         self.branch_methods = branch_methods
+        self.repo_error = repo_error
+        self.branch_error = branch_error
         self.merge_results = merge_results or ["MERGESHA123"]
         self.merge_calls: list[str] = []
         self.comments: list[str] = []
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         assert repo.slug() == "dimileeh/aira-web"
+        if self.repo_error is not None:
+            raise self.repo_error
         return self.repo_methods
 
     async def fetch_branch_pull_request_allowed_merge_methods(
@@ -144,6 +150,8 @@ class _MergeMethodClient:
     ) -> tuple[str, ...] | None:
         assert repo.slug() == "dimileeh/aira-web"
         assert branch in {"main", "development"}
+        if self.branch_error is not None:
+            raise self.branch_error
         return self.branch_methods
 
     async def merge_pr(
@@ -242,6 +250,34 @@ async def test_unconstrained_squash_allowed_base_preserves_squash_default(
 
     assert terminal is True
     assert gh.merge_calls == ["squash"]
+
+
+@pytest.mark.unit
+async def test_transient_merge_method_preflight_error_retries_without_blocker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation="gh api repos/{owner}/{repo}/rules/branches/development",
+            returncode=1,
+            stderr="HTTP 502 Bad Gateway",
+        )
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert gh.merge_calls == []
+    assert gh.comments == []
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
 
 
 @pytest.mark.unit

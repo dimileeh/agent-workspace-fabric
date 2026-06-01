@@ -311,6 +311,7 @@ async def handle_merge_action(
         fresh_status: PRStatus | None = None
         merge_sha: str | None = None
         merge_blocker: GitHubClientError | None = None
+        merge_method_preflight_error: GitHubClientError | None = None
         merge_method_notification_reason: str | None = None
         merge_operation: MonitorOperationHandle | None = None
         recheck_error: GitHubClientError | None = None
@@ -570,20 +571,7 @@ async def handle_merge_action(
                                 base_branch=base_branch,
                             )
                         except GitHubClientError as exc:
-                            merge_method_notification_reason = _merge_method_mismatch_message(
-                                base_branch=base_branch,
-                                attempted_method=None,
-                                effective_methods=(),
-                                detail=str(exc),
-                            )
-                            state.mark_addressed(
-                                _merge_method_blocked_key(
-                                    pr_number=merge_status.number,
-                                    head_sha=merge_status.head_sha,
-                                ),
-                                merge_method_notification_reason,
-                            )
-                            await self._persist_state(workspace_id, state)
+                            merge_method_preflight_error = exc
                         else:
                             if not effective_methods:
                                 merge_method_notification_reason = _merge_method_mismatch_message(
@@ -887,6 +875,24 @@ async def handle_merge_action(
             await self._terminate_failed(
                 workspace_id,
                 message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[:2000],
+            )
+            return True
+
+        if merge_method_preflight_error is not None:
+            if await self._wait_after_transient_github_error(
+                merge_method_preflight_error,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="merge_method_preflight",
+                monitor_log=monitor_log,
+            ):
+                return False
+            await self._terminate_failed(
+                workspace_id,
+                message=(
+                    "monitor: github error during merge-method preflight: "
+                    f"{merge_method_preflight_error}"
+                )[:2000],
             )
             return True
 
