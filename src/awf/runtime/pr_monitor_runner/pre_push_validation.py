@@ -55,6 +55,7 @@ from awf.runtime.validation_types import (
 from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
     VALIDATION_WORKTREE_STATUS_FAILED,
 )
 
@@ -226,6 +227,66 @@ def _pre_push_validation_reason_code(result: ValidationResult) -> str:
     )
 
 
+def _safe_pre_push_validation_artifact_name(value: str) -> str:
+    """Return a filesystem-safe artifact name for pre-push validation evidence."""
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+    return safe or "validation"
+
+
+def _pre_push_side_effect_failure_result(
+    *,
+    result: ValidationResult,
+    cleanup: ValidationWorktreeCleanup,
+    workspace_id: str,
+    validation_run_id: str,
+    artifacts_root: Path,
+) -> tuple[ValidationResult, Mapping[str, object]]:
+    """Add a synthetic failure for passing validation that required cleanup side effects."""
+    side_effect_paths = cleanup.side_effect_paths
+    paths_text = ", ".join(side_effect_paths) if side_effect_paths else "<unknown>"
+    artifacts_dir = artifacts_root / workspace_id / "pre_push_validation_worktree"
+    safe_validation_run_id = _safe_pre_push_validation_artifact_name(validation_run_id)
+    stdout_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stdout"
+    stderr_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stderr"
+    stdout = (
+        "AWF pre-push validation commands passed only before validation worktree "
+        "cleanup restored or deleted side effects. The restored commit state was "
+        f"not validated. Cleaned paths: {paths_text}."
+    )
+    try:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text(stdout, encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+    except OSError as exc:
+        _log.warning(
+            "pre_push_validation.side_effect_artifact_write_failed",
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            error_message=str(exc)[:500],
+        )
+    command = ValidationCommandResult(
+        command="validation worktree side-effect guard",
+        returncode=1,
+        duration_seconds=0.0,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        reason_code=VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+        policy_failed=True,
+        metadata={
+            "cleaned_paths": list(side_effect_paths),
+            "restore_ref": cleanup.restore_ref,
+        },
+        captured_stdout=stdout,
+        captured_stderr="",
+    )
+    details: dict[str, object] = {
+        "side_effect_reason_code": VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+        "cleaned_paths": list(side_effect_paths),
+        "validation_worktree_cleanup": cleanup.details(),
+    }
+    return replace(result, commands=[*result.commands, command]), details
+
+
 @dataclass(frozen=True)
 class _PrePushValidationResult:
     """Pre-push validation outcome for a single workspace push attempt."""
@@ -378,6 +439,8 @@ async def _run_pre_push_validation_with_fix_passes(
         if validation_result.reason_code == PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON:
             return validation_result
         if validation_result.reason_code == PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
+            return validation_result
+        if validation_result.validation_reason_code == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED:
             return validation_result
         if validation_result.first_failure is None:
             return validation_result
@@ -1119,6 +1182,16 @@ async def _run_pre_push_validation(
             cleanup=cleanup_result,
         )
 
+    side_effect_details: Mapping[str, object] | None = None
+    if result.all_passed and (cleanup_result.side_effect_paths or not cleanup_result.check.clean):
+        result, side_effect_details = _pre_push_side_effect_failure_result(
+            result=result,
+            cleanup=cleanup_result,
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            artifacts_root=self._artifacts_root,
+        )
+
     failed_commands = () if result.all_passed else _failed_pre_push_commands(result)
     toolchain_missing_failure = (
         None
@@ -1170,6 +1243,7 @@ async def _run_pre_push_validation(
         validation_reason_code=None if result.all_passed else validation_reason_code,
         result=result,
         coverage=coverage_result or result.coverage,
+        extra_details=side_effect_details,
         ignore_ignored_paths=pre_validation_ignore_paths,
         ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
         ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,

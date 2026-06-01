@@ -29,6 +29,7 @@ from awf.runtime.validation_types import (
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
     ValidationWorktreeCheck,
 )
 from tests.postgres import postgres_test_engine
@@ -1165,11 +1166,11 @@ async def test_pre_push_validation_runs_profile_coverage_before_push(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_tracked_side_effect_after_validation_cleans_before_push(
+async def test_pre_push_validation_tracked_side_effect_after_validation_blocks_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Validation-generated tracked dirt should be cleaned up before push."""
+    """Passing validation with cleaned tracked side effects must block push."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -1186,7 +1187,6 @@ async def test_pre_push_validation_tracked_side_effect_after_validation_cleans_b
     cmd.queue_result(returncode=0, stdout="")  # clean after cleanup
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD@{awf}
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD after cleanup
-    cmd.queue_result(returncode=0, stdout="", stderr="")  # git push
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1204,14 +1204,24 @@ async def test_pre_push_validation_tracked_side_effect_after_validation_cleans_b
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert result.failed is False
-    assert result.pushed is True
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
+    assert result.details["cleaned_paths"] == ["apps/console/next-env.d.ts"]
+    cleanup_details = result.details["validation_worktree_cleanup"]
+    assert isinstance(cleanup_details, dict)
+    assert cleanup_details["paths"] == ["apps/console/next-env.d.ts"]
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(
         f"restore --source {local_head} --staged --worktree -- apps/console/next-env.d.ts" in call
         for call in joined_calls
     )
-    assert any("push" in call for call in joined_calls)
+    assert not any(" push " in f" {call} " for call in joined_calls)
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "failed"
+    assert runs[-1].reason_code == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
 
 
 @pytest.mark.unit
