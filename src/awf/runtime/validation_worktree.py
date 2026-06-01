@@ -178,6 +178,48 @@ def _snapshot_empty_ignored_dirs(
     return tuple(dict.fromkeys(empty_dirs))
 
 
+def _snapshot_empty_untracked_dirs(
+    *,
+    worktree_path: Path,
+    ignored_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Snapshot fileless non-ignored directory trees that git status omits."""
+    empty_dirs: list[str] = []
+    ignored_path_set = {_normalize_porcelain_path(path) for path in ignored_paths}
+
+    def has_file_descendant(directory: Path) -> bool:
+        try:
+            children = tuple(sorted(directory.iterdir(), key=lambda child: child.name))
+        except OSError:
+            return True
+
+        has_file = False
+        for child in children:
+            if child.name == ".git":
+                has_file = True
+                continue
+            if not _is_directory(child):
+                has_file = True
+                continue
+            try:
+                relative_child = child.relative_to(worktree_path).as_posix()
+            except ValueError:
+                has_file = True
+                continue
+            child_path = f"{relative_child}/"
+            if _is_under_ignored_path(child_path, ignored_path_set):
+                has_file = True
+                continue
+            if has_file_descendant(child):
+                has_file = True
+            else:
+                empty_dirs.append(child_path)
+        return has_file
+
+    has_file_descendant(worktree_path)
+    return tuple(dict.fromkeys(empty_dirs))
+
+
 def _cleanup_empty_ignored_dirs(
     *,
     worktree_path: Path,
@@ -516,6 +558,10 @@ async def check_validation_worktree_clean(
         status_stdout,
         include_ignored=True,
     )
+    empty_untracked_dirs = _snapshot_empty_untracked_dirs(
+        worktree_path=worktree_path,
+        ignored_paths=ignored_paths,
+    )
     # Ignored roots only suppress untracked or ignored artifacts; tracked files
     # below those roots must stay visible so cleanup can restore them.
     ignored_untracked_paths = {
@@ -523,9 +569,25 @@ async def check_validation_worktree_clean(
         for path in untracked_paths_from_status
         if _is_under_ignored_path(path, ignored_paths_to_ignore)
     }
-    paths = tuple(path for path in changed_paths if path not in ignored_untracked_paths)
+    paths = tuple(
+        dict.fromkeys(
+            (
+                *(path for path in changed_paths if path not in ignored_untracked_paths),
+                *empty_untracked_dirs,
+            )
+        )
+    )
     untracked_paths = tuple(
-        path for path in untracked_paths_from_status if path not in ignored_untracked_paths
+        dict.fromkeys(
+            (
+                *(
+                    path
+                    for path in untracked_paths_from_status
+                    if path not in ignored_untracked_paths
+                ),
+                *empty_untracked_dirs,
+            )
+        )
     )
     if not paths and not untracked_paths:
         return ValidationWorktreeCheck(

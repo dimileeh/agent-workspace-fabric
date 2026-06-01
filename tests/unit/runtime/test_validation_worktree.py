@@ -93,6 +93,28 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_treats_empty_untracked_dirs_as_dirty(
+    tmp_path: Path,
+) -> None:
+    """Empty untracked directories are dirty even though git status omits them."""
+    worktree = _init_fake_worktree(tmp_path)
+    (worktree / "generated").mkdir()
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command that cannot report empty untracked dirs."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.paths == ("generated/",)
+    assert check.untracked_paths == ("generated/",)
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_treats_ignored_paths_as_dirty(
     tmp_path: Path,
 ) -> None:
@@ -1707,6 +1729,43 @@ async def test_cleanup_validation_worktree_marks_untracked_files_as_clean_after_
     assert cleanup.cleanup_command is None
     assert cleanup.verify_check is not None
     assert cleanup.verify_check.clean
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_removes_empty_untracked_dir_after_validation(
+    tmp_path: Path,
+) -> None:
+    """Cleanup should remove empty untracked directories before reporting success."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    generated_dir = worktree / "generated"
+    generated_dir.mkdir()
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate git status omitting an empty validation-created directory."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        if args == list(_VALIDATION_CLEAN_ARGS + ("generated/",)):
+            generated_dir.rmdir()
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert _VALIDATION_CLEAN_ARGS + ("generated/",) in commands
+    assert not generated_dir.exists()
 
 
 @pytest.mark.unit
