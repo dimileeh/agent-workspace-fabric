@@ -1048,6 +1048,192 @@ class TestMutations:
         sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
         assert sha == ""
 
+    @pytest.mark.unit
+    async def test_fetch_repo_merge_methods_reads_repo_flags(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                '{"allow_merge_commit":true,"allow_squash_merge":false,"allow_rebase_merge":true}'
+            ),
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
+
+        assert methods == ("merge", "rebase")
+        assert fake.calls[0].args == ["gh", "api", "repos/o/r"]
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_empty_unconstrained(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"),
+            branch="feature/dev",
+        )
+
+        assert methods is None
+        assert fake.calls[0].args == ["gh", "api", "repos/o/r/rules/branches/feature%2Fdev"]
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_ignores_non_pr_rules(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout='[{"type":"required_status_checks","parameters":{}}]',
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"),
+            branch="main",
+        )
+
+        assert methods is None
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_omitted_methods_unconstrained(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=('[{"type":"pull_request","parameters":{"required_approving_review_count":1}}]'),
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"),
+            branch="main",
+        )
+
+        # GitHub omits allowed_merge_methods when the pull_request rule does
+        # not constrain merge method choice, so the runner falls back to repo
+        # merge flags instead of treating the rule as an empty method set.
+        assert methods is None
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_normalizes_values(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                '[{"type":"pull_request","parameters":'
+                '{"allowed_merge_methods":["merge","squash","rebase","invalid"]}}]'
+            ),
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"),
+            branch="main",
+        )
+
+        assert methods == ("merge", "squash", "rebase")
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_intersects_multiple_rules(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "["
+                '{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","squash"]}},'
+                '{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","rebase"]}}'
+                "]"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"),
+            branch="main",
+        )
+
+        assert methods == ("merge",)
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_gh_error(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="bad credentials with token secret")
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as exc:
+            await client.fetch_branch_pull_request_allowed_merge_methods(
+                repo=RepoRef(owner="o", name="r"),
+                branch="main",
+            )
+
+        assert "bad credentials" in str(exc.value)
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_redacts_gh_error_secret(
+        self,
+    ) -> None:
+        secret = "ghp_branchRulesSecret123"
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr=f"HTTP 403 token {secret} denied")
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as exc:
+            await client.fetch_branch_pull_request_allowed_merge_methods(
+                repo=RepoRef(owner="o", name="r"),
+                branch="main",
+            )
+
+        assert secret not in exc.value.stderr
+        assert secret not in str(exc.value)
+        assert "[redacted]" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_bad_json(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="{bad json")
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as exc:
+            await client.fetch_branch_pull_request_allowed_merge_methods(
+                repo=RepoRef(owner="o", name="r"),
+                branch="main",
+            )
+
+        assert "json parse" in str(exc.value)
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_redacts_bad_json_secret(
+        self,
+    ) -> None:
+        secret = "ghp_branchRulesSecret123"
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=f"{{bad json {secret}")
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as exc:
+            await client.fetch_branch_pull_request_allowed_merge_methods(
+                repo=RepoRef(owner="o", name="r"),
+                branch="main",
+            )
+
+        assert "json parse" in str(exc.value)
+        assert secret not in exc.value.stderr
+        assert secret not in str(exc.value)
+        assert "[redacted]" in exc.value.stderr
+
 
 class TestPrivateCoverageEdges:
     @pytest.mark.unit

@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.common.github_client import GitHubClient
+from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -131,6 +131,23 @@ class RecordedSleep:
     async def __call__(self, seconds: float) -> None:
         """Record the requested sleep duration without delaying."""
         self.calls.append(seconds)
+
+
+class DefaultMergeMethodGitHubClient(GitHubClient):
+    """GitHub client test double that keeps legacy merge queues stable."""
+
+    async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
+        del repo
+        return ("merge", "squash", "rebase")
+
+    async def fetch_branch_pull_request_allowed_merge_methods(
+        self,
+        *,
+        repo: RepoRef,
+        branch: str,
+    ) -> tuple[str, ...] | None:
+        del repo, branch
+        return None
 
 
 def pr_payload(
@@ -336,13 +353,14 @@ def make_runner(
     merge_coordinator: object | None = None,
     post_merge_target_reconciler: Any | None = None,
     provider_recovery_default_model: str | None = None,
+    gh: Any | None = None,
 ) -> PullRequestMonitorRunner:
     """Construct a PullRequestMonitorRunner wired for integration-style unit tests."""
     kwargs: dict = {
         "session_factory": factory,
         "runner": cmd,
         "adapter": adapter,
-        "gh": GitHubClient(cmd),
+        "gh": gh if gh is not None else DefaultMergeMethodGitHubClient(cmd),
         "monitor_config": MonitorConfig(
             auto_merge=auto_merge,
             poll_interval_seconds=60,

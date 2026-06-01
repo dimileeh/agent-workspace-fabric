@@ -49,6 +49,10 @@ def _initial_review_grace_done_key(pr_number: int) -> str:
     return f"__awf_initial_review_grace_done__:{pr_number}"
 
 
+def _merge_method_blocked_key(*, pr_number: int, head_sha: str) -> str:
+    return f"__awf_merge_method_blocked__:{pr_number}:{head_sha}"
+
+
 def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
     return f"{started_wall_seconds:.6f}"
 
