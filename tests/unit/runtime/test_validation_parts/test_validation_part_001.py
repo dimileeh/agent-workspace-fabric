@@ -389,6 +389,14 @@ def test_setup_dependency_network_classifier_ignores_version_like_fallback_host(
 
 
 @pytest.mark.unit
+def test_setup_dependency_package_extraction_reads_archive_name_version() -> None:
+    assert (  # noqa: SLF001
+        validation_module._extract_setup_dependency_package("Using cached docker-7.1.0.tar.gz")
+        == "docker==7.1.0"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "artifact_name",
     [
@@ -1082,6 +1090,13 @@ def test_setup_dependency_python_and_uv_command_match_defensive_edges() -> None:
     )
     assert (  # noqa: SLF001
         validation_module._python_module_pip_dependency_setup_command_match(
+            ["python"],
+            start=1,
+        )
+        is None
+    )
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
             ["python", "-m"], start=0
         )
         is False
@@ -1096,6 +1111,13 @@ def test_setup_dependency_python_and_uv_command_match_defensive_edges() -> None:
     assert (  # noqa: SLF001
         validation_module._python_module_pip_dependency_setup_command_match(
             ["python", "script.py"],
+            start=0,
+        )
+        is None
+    )
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
+            ["python", "-I", "-B"],
             start=0,
         )
         is None
