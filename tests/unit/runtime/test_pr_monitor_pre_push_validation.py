@@ -1219,12 +1219,27 @@ async def test_run_pre_push_validation_rejects_new_ignored_entries_before_valida
 
     assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert result.validation_run_id == "vr-gained-ignored"
-    assert "Validation worktree gained ignored entries after setup baseline" in result.message
+    assert "Validation worktree ignored entries changed after setup baseline" in result.message
     assert started_runs == ["started"]
     assert len(finish_calls) == 1
     assert finish_calls[0]["status"] == "failed"
     assert finish_calls[0]["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert runner._deps.validation.calls == []
+
+
+@pytest.mark.unit
+def test_pre_push_validation_new_ignored_entries_rejects_removed_snapshot_paths() -> None:
+    """Deleted baseline ignored artifacts should be treated as ignored drift."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    assert pre_push_validation._pre_push_validation_new_ignored_entries(
+        baseline_ignored_roots=(".venv/",),
+        baseline_ignored_snapshot=(".venv/existing-artifact.log",),
+        baseline_ignored_snapshot_signatures=((".venv/existing-artifact.log", "sig-existing"),),
+        current_ignored_roots=(".venv/",),
+        current_ignored_snapshot=(),
+        current_ignored_snapshot_signatures=(),
+    )
 
 
 @pytest.mark.unit

@@ -271,17 +271,22 @@ def _pre_push_validation_new_ignored_entries(
     current_ignored_snapshot: tuple[str, ...],
     current_ignored_snapshot_signatures: tuple[tuple[str, str], ...],
 ) -> bool:
-    """Detect newly introduced or materially changed ignored worktree entries."""
-    if set(current_ignored_roots) - set(baseline_ignored_roots):
+    """Detect added, removed, or materially changed ignored worktree entries."""
+    baseline_roots = set(baseline_ignored_roots)
+    current_roots = set(current_ignored_roots)
+    if baseline_roots != current_roots:
         return True
 
-    if set(current_ignored_snapshot) - set(baseline_ignored_snapshot):
+    baseline_snapshot = set(baseline_ignored_snapshot)
+    current_snapshot = set(current_ignored_snapshot)
+    if baseline_snapshot != current_snapshot:
         return True
 
+    current_signature_map = dict(current_ignored_snapshot_signatures)
+    baseline_signature_map = dict(baseline_ignored_snapshot_signatures)
     if baseline_ignored_snapshot_signatures and current_ignored_snapshot_signatures:
-        baseline_signature_map = dict(baseline_ignored_snapshot_signatures)
-        for path, signature in current_ignored_snapshot_signatures:
-            if baseline_signature_map.get(path) != signature:
+        for path in baseline_snapshot:
+            if baseline_signature_map.get(path) != current_signature_map.get(path):
                 return True
 
     return False
@@ -748,7 +753,7 @@ async def _run_pre_push_validation(
                 workspace_head_sha=workspace_head_sha,
                 reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                 message=(
-                    "Validation worktree gained ignored entries after setup "
+                    "Validation worktree ignored entries changed after setup "
                     "baseline and will not proceed to validation."
                 ),
                 ignore_ignored_paths=pre_validation_check.ignored_paths,
