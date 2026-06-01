@@ -185,6 +185,7 @@ async def _run_pre_push_validation_with_fix_passes(
     )
     last_result: _PrePushValidationResult | None = None
     baseline_ignored_paths: tuple[str, ...] | None = None
+    baseline_ignored_roots: tuple[str, ...] | None = None
     baseline_ignored_paths_snapshot: tuple[str, ...] | None = None
     baseline_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None
     for pass_index in range(max_fix_passes + 1):
@@ -204,10 +205,42 @@ async def _run_pre_push_validation_with_fix_passes(
         )
         if baseline_ignored_paths is None:
             baseline_ignored_paths = validation_result.ignore_ignored_paths
+            baseline_ignored_roots = validation_result.ignore_ignored_paths
             baseline_ignored_paths_snapshot = validation_result.ignore_ignored_paths_snapshot
             baseline_ignored_paths_snapshot_signatures = (
                 validation_result.ignore_ignored_paths_snapshot_signatures
             )
+
+        if baseline_ignored_roots is not None:
+            gained_ignored = _pre_push_validation_new_ignored_entries(
+                baseline_ignored_roots=baseline_ignored_roots,
+                baseline_ignored_snapshot=baseline_ignored_paths_snapshot or (),
+                baseline_ignored_snapshot_signatures=(
+                    baseline_ignored_paths_snapshot_signatures or ()
+                ),
+                current_ignored_roots=validation_result.ignore_ignored_paths,
+                current_ignored_snapshot=validation_result.ignore_ignored_paths_snapshot,
+                current_ignored_snapshot_signatures=(
+                    validation_result.ignore_ignored_paths_snapshot_signatures
+                ),
+            )
+            if gained_ignored:
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=validation_result.validation_run_id,
+                    workspace_head_sha=validation_result.workspace_head_sha,
+                    reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                    message=(
+                        "Validation worktree gained ignored entries after setup "
+                        "baseline and will not proceed to validation."
+                    ),
+                    ignore_ignored_paths=validation_result.ignore_ignored_paths,
+                    ignore_ignored_paths_snapshot=validation_result.ignore_ignored_paths_snapshot,
+                    ignore_ignored_paths_snapshot_signatures=(
+                        validation_result.ignore_ignored_paths_snapshot_signatures
+                    ),
+                )
+
         if validation_result.passed:
             return validation_result
         last_result = validation_result
@@ -254,6 +287,31 @@ async def _run_pre_push_validation_with_fix_passes(
             )
     assert last_result is not None
     return last_result
+
+
+def _pre_push_validation_new_ignored_entries(
+    *,
+    baseline_ignored_roots: tuple[str, ...],
+    baseline_ignored_snapshot: tuple[str, ...],
+    baseline_ignored_snapshot_signatures: tuple[tuple[str, str], ...],
+    current_ignored_roots: tuple[str, ...],
+    current_ignored_snapshot: tuple[str, ...],
+    current_ignored_snapshot_signatures: tuple[tuple[str, str], ...],
+) -> bool:
+    """Detect newly introduced or materially changed ignored worktree entries."""
+    if set(current_ignored_roots) - set(baseline_ignored_roots):
+        return True
+
+    if set(current_ignored_snapshot) - set(baseline_ignored_snapshot):
+        return True
+
+    if baseline_ignored_snapshot_signatures and current_ignored_snapshot_signatures:
+        baseline_signature_map = dict(baseline_ignored_snapshot_signatures)
+        for path, signature in current_ignored_snapshot_signatures:
+            if baseline_signature_map.get(path) != signature:
+                return True
+
+    return False
 
 
 async def _pre_push_validation_commands(
