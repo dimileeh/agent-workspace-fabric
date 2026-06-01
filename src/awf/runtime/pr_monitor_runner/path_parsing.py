@@ -79,20 +79,16 @@ def _changed_paths_from_name_only_z(diff_stdout: str) -> tuple[str, ...]:
 
 
 def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
-    """Extract untracked or ignored paths from ``git status --porcelain`` output."""
+    """Extract untracked paths from ``git status --porcelain`` output."""
     return list(_shared_untracked_paths_from_porcelain(status_stdout))
 
 
 def _untracked_paths_from_porcelain_z(status_stdout: str) -> list[str]:
-    """Extract untracked and ignored paths from ``git status --porcelain -z`` output.
-
-    The parser includes both porcelain ``??`` (untracked) and ``!!`` (ignored)
-    markers and returns a list of matching paths.
-    """
+    """Extract untracked paths from ``git status --porcelain -z`` output."""
     return list(
         dict.fromkeys(
             path
             for status, path, _original_path in _porcelain_z_records(status_stdout)
-            if status in {"??", "!!"}
+            if status == "??"
         )
     )

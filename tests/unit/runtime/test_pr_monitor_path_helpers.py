@@ -114,9 +114,11 @@ def test_non_nul_porcelain_parser_uses_shared_runtime_helpers() -> None:
         "new name.py",
         "ignored root/",
     ]
-    assert path_parsing._untracked_paths_from_porcelain(status_stdout) == [  # noqa: SLF001
-        "ignored root/",
-    ]
+    assert path_parsing._untracked_paths_from_porcelain(status_stdout) == []  # noqa: SLF001
+    assert git_porcelain.untracked_paths_from_porcelain(
+        status_stdout,
+        include_ignored=True,
+    ) == ("ignored root/",)
 
 
 def test_worktree_modified_paths_from_porcelain_skips_malformed_and_staged() -> None:

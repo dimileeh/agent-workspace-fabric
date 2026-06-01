@@ -109,11 +109,18 @@ def changed_paths_from_porcelain(status_stdout: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(paths))
 
 
-def untracked_paths_from_porcelain(status_stdout: str) -> tuple[str, ...]:
-    """Extract untracked or ignored paths from ``git status --porcelain`` output."""
+def untracked_paths_from_porcelain(
+    status_stdout: str,
+    *,
+    include_ignored: bool = False,
+) -> tuple[str, ...]:
+    """Extract untracked paths from ``git status --porcelain`` output."""
     paths: list[str] = []
     for line in status_stdout.splitlines():
-        if not (line.startswith("?? ") or line.startswith("!! ")):
+        if line.startswith("?? "):
+            paths.append(unquote_porcelain_path(line[3:]))
+            continue
+        if not include_ignored or not line.startswith("!! "):
             continue
         paths.append(unquote_porcelain_path(line[3:]))
     return tuple(dict.fromkeys(paths))

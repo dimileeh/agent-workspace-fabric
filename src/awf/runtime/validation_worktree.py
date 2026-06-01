@@ -452,7 +452,10 @@ async def check_validation_worktree_clean(
     else:
         ignored_paths_to_ignore = {_normalize_porcelain_path(path) for path in ignore_ignored_paths}
     changed_paths = _changed_paths_from_porcelain(status_stdout)
-    untracked_paths_from_status = _untracked_paths_from_porcelain(status_stdout)
+    untracked_paths_from_status = _untracked_paths_from_porcelain(
+        status_stdout,
+        include_ignored=True,
+    )
     # Ignored roots only suppress untracked or ignored artifacts; tracked files
     # below those roots must stay visible so cleanup can restore them.
     ignored_untracked_paths = {
