@@ -21,6 +21,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node.companion_services import MaterializedCompanionService, WorkspaceCompanionSpec
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
@@ -1263,3 +1264,75 @@ class TestFailureHandlingEdges:
             assert reloaded.failure_message is not None
             assert "unexpected provisioning failure" in reloaded.failure_message
             assert "workspace.base.yml.j2" in reloaded.failure_message
+
+    @pytest.mark.unit
+    async def test_pre_launch_unexpected_failure_does_not_claim_runtime_ports(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                raise AssertionError("pre-launch failure should not call launch")
+
+        class _PreLaunchFailingProvisioner(Provisioner):
+            async def _materialize_companions(
+                self,
+                *,
+                workspace_id: str,
+                companions: tuple[WorkspaceCompanionSpec, ...],
+                default_base_branch: str,
+            ) -> tuple[MaterializedCompanionService, ...]:
+                del workspace_id, companions, default_base_branch
+                raise RuntimeError("companion worktree materialization exploded")
+
+        launcher = _RecordingStackLauncher()
+        provisioner = _PreLaunchFailingProvisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="companion pre-launch failure",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                task_policy={
+                    "companions": [
+                        {
+                            "name": "web",
+                            "repo_url": str(origin_repo),
+                            "ports": [[80, 18080]],
+                        }
+                    ]
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(RuntimeError, match="companion worktree materialization exploded"):
+            await provisioner.provision(ws_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            reloaded = await repo.get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.compose_project_name is None
+
+            conflicts = await repo.find_host_port_conflicts(
+                host_ports=[18080],
+                excluding_workspace_id=None,
+            )
+            assert conflicts == []

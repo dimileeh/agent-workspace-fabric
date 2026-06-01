@@ -225,6 +225,7 @@ class Provisioner:
         egress_plan: LocalEgressPlan | None = None
         egress_decision: EgressDecision | None = None
         destination_category: str | None = None
+        stack_launch_started = False
         try:
             layout = await self._git.add_worktree(
                 workspace_id=workspace_id,
@@ -436,6 +437,7 @@ class Provisioner:
                         reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
                     )
                     return
+                stack_launch_started = True
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
@@ -596,7 +598,7 @@ class Provisioner:
                 failure_reason=FailureReason.infrastructure_failure,
                 message=f"unexpected provisioning failure: {exc}"[:2000],
                 from_status=WorkspaceStatus.provisioning,
-                compose_launched=True,
+                compose_launched=stack_launch_started,
             )
             raise
 
@@ -867,8 +869,8 @@ class Provisioner:
                 # otherwise find_host_port_conflicts would incorrectly treat the
                 # workspace as a port-blocker despite it never having bound a
                 # host port. The compose_launched flag is True only for
-                # ComposeOperationError and the catch-all unexpected-failure
-                # path (which may fire at any point after launch begins).
+                # ComposeOperationError and for catch-all unexpected failures
+                # after the stack launcher call has started.
                 if (
                     ws.compose_project_name is None
                     and from_status == WorkspaceStatus.provisioning
