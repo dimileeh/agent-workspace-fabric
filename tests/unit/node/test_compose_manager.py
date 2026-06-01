@@ -1115,6 +1115,69 @@ class TestCompanionImageCommands:
         assert await manager.companion_image_exists("missing:tag") is False
 
     @pytest.mark.unit
+    async def test_companion_image_inspect_true_on_zero_exit(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """companion_image_inspect returns True on a zero-exit inspect."""
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0, stdout=b"sha256:abc\n")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        assert await manager.companion_image_inspect("awf-companion-backend:abc") is True
+        assert calls[0] == ("docker", "image", "inspect", "awf-companion-backend:abc")
+
+    @pytest.mark.unit
+    async def test_companion_image_inspect_false_for_missing_image(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """companion_image_inspect returns False for confirmed missing images."""
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(
+                returncode=1,
+                stderr=b"Error response from daemon: No such image: missing:tag",
+            )
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        assert await manager.companion_image_inspect("missing:tag") is False
+
+    @pytest.mark.unit
+    async def test_companion_image_inspect_preserves_non_missing_probe_errors(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """companion_image_inspect raises non-missing inspect failures unchanged."""
+        probe_error = b"Cannot connect to the Docker daemon"
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=1, stderr=probe_error)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as raised:
+            await manager.companion_image_inspect("awf-companion-backend:abc")
+
+        assert raised.value.reason_code == "DOCKER_UNAVAILABLE"
+        assert raised.value.stderr == probe_error.decode()
+
+    @pytest.mark.unit
+    async def test_companion_image_exists_remains_lenient_for_probe_errors(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """companion_image_exists still treats every inspect failure as absent."""
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=1, stderr=b"Cannot connect to the Docker daemon")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        assert await manager.companion_image_exists("awf-companion-backend:abc") is False
+
+    @pytest.mark.unit
     async def test_build_companion_image_passes_tag_dockerfile_and_labels(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:

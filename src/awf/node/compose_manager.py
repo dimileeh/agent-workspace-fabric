@@ -89,6 +89,16 @@ class ComposeOperationError(Exception):
         )
 
 
+def _is_missing_image_inspect_failure(exc: ComposeOperationError) -> bool:
+    """Return whether an ``image inspect`` failure confirms an absent tag."""
+    detail = f"{exc.stderr}\n{exc.stdout}".lower()
+    if "no such image" in detail:
+        return True
+    if exc.reason_code != "COMPOSE_COMMAND_FAILED":
+        return False
+    return "not found" in detail
+
+
 @dataclass(frozen=True)
 class AuthMount:
     """One read-only bind mount carrying a credential directory into the agent."""
@@ -480,6 +490,21 @@ class ComposeManager:
             volumes=len(volume_names),
         )
 
+    async def companion_image_inspect(self, tag: str) -> bool:
+        """Return whether a companion image tag is present locally.
+
+        Confirmed missing-image inspect failures return ``False``. Other Docker
+        probe failures are raised so point-of-use revalidation does not hide
+        daemon errors behind an inline-build fallback.
+        """
+        try:
+            await self._docker_capture(["image", "inspect", tag], operation="image inspect")
+        except ComposeOperationError as exc:
+            if _is_missing_image_inspect_failure(exc):
+                return False
+            raise
+        return True
+
     async def companion_image_exists(self, tag: str) -> bool:
         """Return whether a companion image tag is already present locally.
 
@@ -487,10 +512,9 @@ class ComposeManager:
         present" so the caller falls back to building it.
         """
         try:
-            await self._docker_capture(["image", "inspect", tag], operation="image inspect")
+            return await self.companion_image_inspect(tag)
         except ComposeOperationError:
             return False
-        return True
 
     async def build_companion_image(
         self,

@@ -144,13 +144,8 @@ class CompanionImageBuilder:
         revalidation must not hide daemon errors behind an inline-build fallback.
         """
         try:
-            await self._compose._docker_capture(  # noqa: SLF001
-                ["image", "inspect", tag],
-                operation="image inspect",
-            )
+            return await self._compose.companion_image_inspect(tag)
         except ComposeOperationError as exc:
-            if _is_missing_image_inspect_failure(exc):
-                return False
             _log.warning(
                 "companion_image.revalidate_failed",
                 tag=tag,
@@ -158,7 +153,6 @@ class CompanionImageBuilder:
                 stderr=exc.stderr[:1000],
             )
             raise
-        return True
 
     async def ensure(
         self,
@@ -281,13 +275,3 @@ class CompanionImageBuilder:
             return None
         _log.info("companion_image.built", companion=name, tag=tag)
         return tag
-
-
-def _is_missing_image_inspect_failure(exc: ComposeOperationError) -> bool:
-    """Return whether an ``image inspect`` failure confirms an absent tag."""
-    detail = f"{exc.stderr}\n{exc.stdout}".lower()
-    if "no such image" in detail:
-        return True
-    if exc.reason_code != "COMPOSE_COMMAND_FAILED":
-        return False
-    return "not found" in detail

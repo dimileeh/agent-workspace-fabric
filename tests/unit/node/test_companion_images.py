@@ -19,7 +19,7 @@ from awf.node.compose_manager import (
 
 
 class _FakeCompose:
-    """Minimal ComposeManager stand-in exposing only the builder's docker calls."""
+    """Minimal ComposeManager stand-in exposing only the builder's public calls."""
 
     def __init__(
         self,
@@ -71,21 +71,16 @@ class _FakeCompose:
             raise self.build_error
         self._built_tags.add(tag)  # a successful build makes that exact tag present
 
-    async def _docker_capture(self, args: list[str], *, operation: str) -> str:
-        assert operation == "image inspect"
-        self.inspect_calls.append(args)
+    async def companion_image_inspect(self, tag: str) -> bool:
+        self.inspect_calls.append(["image", "inspect", tag])
         if self.inspect_error is not None:
+            detail = f"{self.inspect_error.stderr}\n{self.inspect_error.stdout}".lower()
+            if "no such image" in detail or (
+                self.inspect_error.reason_code == "COMPOSE_COMMAND_FAILED" and "not found" in detail
+            ):
+                return False
             raise self.inspect_error
-        tag = args[-1]
-        if self.exists_result or tag in self._built_tags:
-            return "[]"
-        raise ComposeOperationError(
-            operation=operation,
-            returncode=1,
-            stdout="",
-            stderr=f"Error response from daemon: No such image: {tag}",
-            reason_code="COMPOSE_COMMAND_FAILED",
-        )
+        return self.exists_result or tag in self._built_tags
 
 
 @pytest.mark.unit
