@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge import ForgeNotSupportedError
 from awf.common.github_client import PullRequestAdoptionMetadata
 from awf.control.executor import (
     ExecutorConfig,
@@ -1166,6 +1167,60 @@ class TestSyncReleasePrHandoff:
             assert ws.failure_reason == "infrastructure_failure"
             assert ws.events[-1].reason_code == "RELEASE_SYNC_GITHUB_ERROR"
             assert "gh pr create" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_pr_adoption_unsupported_forge_fails_cleanly_before_monitor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # Defense-in-depth: the early forge gate in execution_flow normally
+        # stops an unsupported forge from ever reaching the release handoff, but
+        # the ``gh`` client is still constructed via ``make_forge_client`` inside
+        # the PR-adoption try-block. If construction raises
+        # ``ForgeNotSupportedError`` here, the handoff must mark the workspace
+        # failed with FORGE_NOT_SUPPORTED rather than let the error propagate
+        # uncaught and strand the workspace in ``running``.
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
+
+        def _raise_forge_not_supported(*_args: Any, **_kwargs: Any) -> Any:
+            raise ForgeNotSupportedError(
+                message="BitBucket forge support is not yet implemented (test)."
+            )
+
+        monkeypatch.setattr(
+            "awf.control.executor.monitor_handoff.make_forge_client",
+            _raise_forge_not_supported,
+        )
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=_release_sync_policy(),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not run after an unsupported-forge failure")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.execute(ws_id)
+
+        assert all(c.args[:3] != ["gh", "pr", "create"] for c in fake.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.events[-1].reason_code == "FORGE_NOT_SUPPORTED"
+            assert "sync_release_pr failed" in (ws.failure_message or "")
+            assert "BitBucket forge support is not yet implemented" in (ws.failure_message or "")
 
     @pytest.mark.unit
     async def test_no_op_skips_when_status_changes_mid_flight(

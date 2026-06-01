@@ -21,7 +21,7 @@ import yaml
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
-from awf.common.forge import concrete_forge, make_forge_client
+from awf.common.forge import ForgeNotSupportedError, concrete_forge, make_forge_client
 from awf.common.github_client import (
     GitHubClientError,
     PullRequestMetadataError,
@@ -1105,6 +1105,19 @@ async def _handoff_sync_release_pr_monitor(
             message=f"sync_release_pr failed: {exc.message}",
             reason_code=exc.reason_code,
             details=exc.detail,
+        )
+        return
+    except ForgeNotSupportedError as exc:
+        # Defense-in-depth: ``make_forge_client`` is constructed inside this
+        # try-block, so an unsupported forge that slips past the early
+        # execution_flow gate fails cleanly with FORGE_NOT_SUPPORTED instead of
+        # propagating uncaught and stranding the workspace in ``running``.
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
         )
         return
     except GitHubClientError as exc:
