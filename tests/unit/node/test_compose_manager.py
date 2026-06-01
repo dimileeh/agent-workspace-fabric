@@ -1165,6 +1165,24 @@ class TestCompanionImageCommands:
         assert raised.value.stderr == probe_error.decode()
 
     @pytest.mark.unit
+    async def test_companion_image_inspect_preserves_unrelated_not_found_errors(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """companion_image_inspect does not classify unrelated not-found text as missing."""
+        probe_error = b"permission denied: user not found"
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=1, stderr=probe_error)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as raised:
+            await manager.companion_image_inspect("awf-companion-backend:abc")
+
+        assert raised.value.reason_code == "COMPOSE_COMMAND_FAILED"
+        assert raised.value.stderr == probe_error.decode()
+
+    @pytest.mark.unit
     async def test_companion_image_exists_remains_lenient_for_probe_errors(
         self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:

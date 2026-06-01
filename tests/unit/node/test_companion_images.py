@@ -75,9 +75,7 @@ class _FakeCompose:
         self.inspect_calls.append(["image", "inspect", tag])
         if self.inspect_error is not None:
             detail = f"{self.inspect_error.stderr}\n{self.inspect_error.stdout}".lower()
-            if "no such image" in detail or (
-                self.inspect_error.reason_code == "COMPOSE_COMMAND_FAILED" and "not found" in detail
-            ):
+            if "no such image" in detail:
                 return False
             raise self.inspect_error
         return self.exists_result or tag in self._built_tags

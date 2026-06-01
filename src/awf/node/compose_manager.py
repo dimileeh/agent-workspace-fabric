@@ -92,11 +92,7 @@ class ComposeOperationError(Exception):
 def _is_missing_image_inspect_failure(exc: ComposeOperationError) -> bool:
     """Return whether an ``image inspect`` failure confirms an absent tag."""
     detail = f"{exc.stderr}\n{exc.stdout}".lower()
-    if "no such image" in detail:
-        return True
-    if exc.reason_code != "COMPOSE_COMMAND_FAILED":
-        return False
-    return "not found" in detail
+    return "no such image" in detail
 
 
 @dataclass(frozen=True)
