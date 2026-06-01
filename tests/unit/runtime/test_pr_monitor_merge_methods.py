@@ -138,6 +138,16 @@ def test_merge_method_rejection_classifier_is_specific() -> None:
         )
         is False
     )
+    assert (
+        _merge_method_rejection_method(
+            GitHubClientError(
+                operation="gh pr merge squash merges are not allowed",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            )
+        )
+        is None
+    )
 
 
 @pytest.mark.unit
@@ -689,6 +699,43 @@ async def test_mismatched_last_merge_rejection_records_method_blocker(
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_method_rejection_notification_truncates_long_github_detail(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Final method-blocker notifications preserve fields and cap GitHub detail."""
+    long_detail = " ".join(f"detail{i:03d}" for i in range(80))
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr=(
+                    f"GraphQL: Squash merges are not allowed on this repository. {long_detail}"
+                ),
+            )
+        ],
+    )
+
+    terminal, _state, _sleep, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert len(gh.comments) == 1
+    comment = gh.comments[0]
+    assert "attempted=squash; effective_allowed=squash" in comment
+    assert "detail000" in comment
+    assert "detail079" not in comment
+    github_detail = comment.split("GitHub reported: ", 1)[1].split("\n\n", 1)[0]
+    assert len(github_detail.removesuffix(".")) <= 240
 
 
 @pytest.mark.unit

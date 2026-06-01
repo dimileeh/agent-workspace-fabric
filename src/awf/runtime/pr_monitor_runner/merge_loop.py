@@ -120,7 +120,7 @@ async def _resolve_effective_merge_methods(
 
 def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
     """Return the merge method explicitly rejected by GitHub, when known."""
-    text = str(exc).lower()
+    text = exc.stderr.lower()
     if "squash merges are not allowed" in text:
         return "squash"
     if "merge commits are not allowed" in text:
@@ -250,7 +250,8 @@ async def _attempt_merge_method(
                 base_branch=base_branch,
                 attempted_method=merge_method,
                 effective_methods=effective_methods,
-                detail=exc.stderr.strip() or str(exc),
+                detail=" ".join(_redact_and_truncate_github_error(exc.stderr).split())[:240]
+                or None,
             )
             state.mark_addressed(
                 _merge_method_blocked_key(
