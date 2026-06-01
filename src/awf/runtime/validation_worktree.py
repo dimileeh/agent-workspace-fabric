@@ -885,7 +885,9 @@ async def cleanup_validation_worktree_side_effects(
         ignored_snapshot_normalized_set = {
             _normalize_porcelain_path(path) for path in ignored_snapshot_set
         }
-        current_ignored_signature_lookup = dict(current_ignored_signatures)
+        current_ignored_signature_lookup_by_normalized_path = (
+            _ignored_signature_lookup_by_normalized_path(current_ignored_signatures)
+        )
         current_ignored_set = set(current_ignored_paths)
         current_ignored_normalized_set = {
             _normalize_porcelain_path(path) for path in current_ignored_set
@@ -947,7 +949,13 @@ async def cleanup_validation_worktree_side_effects(
                 normalized_path,
                 (path, ""),
             )
-            if current_ignored_signature_lookup.get(path, "") != baseline_signature:
+            _current_path, current_signature = (
+                current_ignored_signature_lookup_by_normalized_path.get(
+                    normalized_path,
+                    (path, ""),
+                )
+            )
+            if current_signature != baseline_signature:
                 modified_snapshot_paths.append(baseline_path)
         if modified_snapshot_paths:
             return await _return_after_head_verification(

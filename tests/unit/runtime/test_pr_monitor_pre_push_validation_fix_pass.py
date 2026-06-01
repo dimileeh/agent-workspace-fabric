@@ -640,11 +640,11 @@ async def test_run_pre_push_validation_rejects_new_ignored_entries_before_valida
 
 
 @pytest.mark.unit
-def test_pre_push_validation_new_ignored_entries_rejects_removed_snapshot_paths() -> None:
+def test_pre_push_validation_ignored_entries_drifted_rejects_removed_snapshot_paths() -> None:
     """Deleted baseline ignored artifacts should be treated as ignored drift."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
-    assert pre_push_validation._pre_push_validation_new_ignored_entries(
+    assert pre_push_validation._pre_push_validation_ignored_entries_drifted(
         baseline_ignored_roots=(".venv/",),
         baseline_ignored_snapshot=(".venv/existing-artifact.log",),
         baseline_ignored_snapshot_signatures=((".venv/existing-artifact.log", "sig-existing"),),
@@ -662,14 +662,14 @@ def test_pre_push_validation_new_ignored_entries_rejects_removed_snapshot_paths(
         ((), ((".venv/existing-artifact.log", "sig-existing"),)),
     ],
 )
-def test_pre_push_validation_new_ignored_entries_rejects_one_sided_signature_drift(
+def test_pre_push_validation_ignored_entries_drifted_rejects_one_sided_signature_drift(
     baseline_signatures: tuple[tuple[str, str], ...],
     current_signatures: tuple[tuple[str, str], ...],
 ) -> None:
     """One-sided ignored artifact signatures should be treated as ignored drift."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
-    assert pre_push_validation._pre_push_validation_new_ignored_entries(
+    assert pre_push_validation._pre_push_validation_ignored_entries_drifted(
         baseline_ignored_roots=(".venv/",),
         baseline_ignored_snapshot=(".venv/existing-artifact.log",),
         baseline_ignored_snapshot_signatures=baseline_signatures,

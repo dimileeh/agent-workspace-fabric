@@ -1133,6 +1133,64 @@ async def test_cleanup_validation_worktree_fails_modified_ignored_file_using_sna
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_normalizes_current_signature_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equivalent ignored signature paths should compare through normalized keys."""
+    import awf.runtime.validation_worktree as validation_worktree
+
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    generated_dir = worktree / ".venv" / "generated"
+    generated_dir.mkdir(parents=True)
+    commands: list[tuple[str, ...]] = []
+
+    def _snapshot_signatures(
+        *,
+        worktree_path: Path,
+        snapshot_paths: tuple[str, ...],
+        **_kwargs: object,
+    ) -> tuple[tuple[str, str], ...]:
+        assert worktree_path == worktree
+        assert snapshot_paths == (".venv/generated/",)
+        return ((".venv/generated", "same-signature"),)
+
+    monkeypatch.setattr(
+        validation_worktree,
+        "_snapshot_ignored_path_signatures",
+        _snapshot_signatures,
+    )
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate equivalent current and baseline paths with different slashes."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
+            return _CommandResultLike(0, ".venv/generated/\0", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/generated/",),
+        ignore_ignored_paths_snapshot_signatures=((".venv/generated/", "same-signature"),),
+    )
+
+    assert cleanup.cleaned is True
+    assert cleanup.reason_code is None
+    assert cleanup.cleanup_command is None
+    assert _VALIDATION_CLEAN_ARGS + (".venv/generated",) not in commands
+
+
+@pytest.mark.unit
 async def test_cleanup_validation_worktree_fails_when_empty_ignored_dir_becomes_file(
     tmp_path: Path,
 ) -> None:

@@ -237,6 +237,30 @@ async def run_validation_and_fix_cycle(
             target_head_sha=None,
             tier=validation_tier,
         )
+        if not pre_validation_check.clean:
+            reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+            message = (
+                pre_validation_check.message
+                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                else validation_worktree_preexisting_dirty_message(pre_validation_check)
+            )
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                validation_tier=validation_tier,
+                reason_code=reason_code,
+                message=message,
+            )
+        if validation_workspace_head_sha is None:
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                validation_tier=validation_tier,
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                message="could not capture workspace HEAD before AWF validation",
+            )
         if setup_ignored_paths_snapshot is None:
             setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
             setup_ignored_paths_snapshot_signatures = (
@@ -277,30 +301,6 @@ async def run_validation_and_fix_cycle(
                     reason_code=reason_code,
                     message=message,
                 )
-        if not pre_validation_check.clean:
-            reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-            message = (
-                pre_validation_check.message
-                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
-                else validation_worktree_preexisting_dirty_message(pre_validation_check)
-            )
-            return await _fail_validation_worktree_guard(
-                self,
-                workspace_id=workspace_id,
-                validation_run_id=validation_run_id,
-                validation_tier=validation_tier,
-                reason_code=reason_code,
-                message=message,
-            )
-        if validation_workspace_head_sha is None:
-            return await _fail_validation_worktree_guard(
-                self,
-                workspace_id=workspace_id,
-                validation_run_id=validation_run_id,
-                validation_tier=validation_tier,
-                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
-                message="could not capture workspace HEAD before AWF validation",
-            )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
         try:

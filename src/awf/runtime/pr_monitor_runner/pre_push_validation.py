@@ -436,7 +436,7 @@ async def _run_pre_push_validation_with_fix_passes(
         pass_index += 1
 
 
-def _pre_push_validation_new_ignored_entries(
+def _pre_push_validation_ignored_entries_drifted(
     *,
     baseline_ignored_roots: tuple[str, ...],
     baseline_ignored_snapshot: tuple[str, ...],
@@ -934,7 +934,7 @@ async def _run_pre_push_validation(
             ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
         )
     if baseline_ignored_roots is not None and baseline_ignored_paths_snapshot is not None:
-        gained_ignored = _pre_push_validation_new_ignored_entries(
+        ignored_entries_drifted = _pre_push_validation_ignored_entries_drifted(
             baseline_ignored_roots=baseline_ignored_roots,
             baseline_ignored_snapshot=baseline_ignored_paths_snapshot,
             baseline_ignored_snapshot_signatures=(baseline_ignored_paths_snapshot_signatures or ()),
@@ -944,7 +944,7 @@ async def _run_pre_push_validation(
                 pre_validation_check.ignored_paths_snapshot_signatures
             ),
         )
-        if gained_ignored:
+        if ignored_entries_drifted:
             await _finish_pre_push_validation_run(
                 self,
                 validation_run_id,
