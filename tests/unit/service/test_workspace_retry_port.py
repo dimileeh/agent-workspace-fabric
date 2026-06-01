@@ -338,15 +338,17 @@ async def test_retry_allows_when_source_compose_project_name_is_none(
 
 
 @pytest.mark.unit
-async def test_retry_rejects_when_no_host_ports_but_source_compose_stack_running(
+async def test_retry_allows_when_no_host_ports_even_if_source_compose_stack_running(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
     """A source workspace with compose_project_name set but no host ports
-    (no companions, no resolved-profile ports) must still raise
-    WorkspaceRetrySourceRuntimeNotReleasedError — the compose stack may
-    still be running, and retrying would create container-name, network,
-    and volume conflicts at docker compose up time."""
+    (no companions, no resolved-profile ports) must NOT raise
+    WorkspaceRetrySourceRuntimeNotReleasedError — the compose project
+    name is workspace-ID-scoped (awf_<id>), so a zero-port workspace
+    cannot cause host-port conflicts with the retry.  The
+    runtime-release guard is only applied inside the if host_ports:
+    branch where it provides actual safety."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
 
@@ -371,15 +373,15 @@ async def test_retry_rejects_when_no_host_ports_but_source_compose_stack_running
         await session.commit()
 
     async with factory() as session:
-        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
-            await retry_workspace_row(
-                session,
-                source.id,
-                settings=settings,
-                provider_readiness_override=True,
-                provider_readiness_override_reason="no-host-ports runtime guard test",
-                provider_environ={},
-            )
+        result = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="no-host-ports runtime guard test",
+            provider_environ={},
+        )
+        assert result.source_workspace_id == source.id
 
 
 @pytest.mark.unit

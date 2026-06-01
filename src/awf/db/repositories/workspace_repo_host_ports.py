@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import builtins
-import logging
 from collections.abc import Mapping
 
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog import get_logger
 
 from awf.common.owned_paths import (
     internal_plan_artifact_owned_paths_from_profile,
@@ -29,6 +29,8 @@ from awf.db.repositories.base import (
     host_ports_from_task_policy_companions,
     terminal_runtime_effectively_released_expr,
 )
+
+_log = get_logger(__name__)
 
 
 async def acquire_owned_path_conflict_lock(
@@ -79,15 +81,14 @@ async def acquire_host_port_admission_lock(
     # dict.fromkeys deduplicates by port value; seen_keys skips ports whose
     # SHA-256-derived advisory-lock key collides with an already-acquired one
     # (birthday collision guard — extremely rare but correct to handle).
-    _log = logging.getLogger(__name__)
     seen_keys: set[int] = set()
     for hp in sorted(dict.fromkeys(host_ports)):
         lock_key = lock_key_fn(hp)
         if lock_key in seen_keys:
             _log.warning(
-                "host_port_admission_lock.birthday_collision: port=%s lock_key=%s — advisory lock key collision detected; serialization is provided by the already-held key, but the two ports share one lock slot",
-                hp,
-                lock_key,
+                "host_port_admission_lock.birthday_collision",
+                port=hp,
+                lock_key=lock_key,
             )
             continue
         seen_keys.add(lock_key)
