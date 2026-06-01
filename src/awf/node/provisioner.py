@@ -443,17 +443,20 @@ class Provisioner:
                             compose_fail_ws.resolved_profile = resolved_profile_dict
                     await compose_fail_session.commit()
             except Exception as commit_exc:
-                _log.warning(
+                _log.error(
                     "provisioner.compose_fail_commit_failed",
                     workspace_id=workspace_id,
-                    reason_code="COMPOSE_FAIL_COMMIT_NON_FATAL",
+                    reason_code="COMPOSE_FAIL_COMMIT_FATAL",
                     error=str(commit_exc),
                 )
-                # If this commit also fails, compose_project_name stays null.
-                # find_host_port_conflicts then ignores the terminal workspace
-                # and the cleanup worker also skips it, so ports from a
-                # partial compose failure may be transiently undetectable
-                # until Docker itself rejects the bind on the next compose-up.
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message="compose-fail backstop commit failed; compose_project_name not persisted",
+                    from_status=WorkspaceStatus.provisioning,
+                    reason_code="COMPOSE_FAIL_COMMIT_FATAL",
+                )
+                return
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
             # Best-effort and must never mask the original ComposeOperationError.
@@ -761,6 +764,14 @@ class Provisioner:
                 # could finalize cleanup against the wrong Docker daemon.
                 if ws.node_id is None:
                     ws.node_id = self._config.node_id
+                # When a compose-fail backstop commit fails, compose_project_name
+                # remains null, making the workspace invisible to both
+                # find_host_port_conflicts and the cleanup worker's compose
+                # project lookup. Persist it here so that the terminal workspace
+                # still blocks port admission and the cleanup sweep can target
+                # the correct Docker Compose project.
+                if ws.compose_project_name is None and from_status == WorkspaceStatus.provisioning:
+                    ws.compose_project_name = f"awf_{workspace_id}"
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 await repo.transition(
