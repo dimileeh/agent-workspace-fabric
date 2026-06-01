@@ -426,6 +426,7 @@ def _profile_for_workspace(
             inline_profile=ws.requested_profile,
             profile_ref=ws.profile_ref or ws.env_profile or "auto",
             validation_commands=list(ws.test_commands),
+            repo_url=ws.repo_url,
         ).profile,
         planning_max_iterations_default,
         raw_profile=ws.requested_profile,

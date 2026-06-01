@@ -9269,6 +9269,23 @@
           "docker": {
             "$ref": "#/components/schemas/ProfileDocker"
           },
+          "forge": {
+            "anyOf": [
+              {
+                "enum": [
+                  "github",
+                  "bitbucket"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "auto",
+                "type": "string"
+              }
+            ],
+            "default": "auto",
+            "title": "Forge"
+          },
           "monitor": {
             "$ref": "#/components/schemas/ProfileMonitor"
           },

@@ -50,6 +50,26 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service logs --service worker",
         "docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed",
     ),
+    "FORGE_NOT_SUPPORTED": _ReasonText(
+        (
+            "AWF detected a code forge it does not yet support. Only GitHub is "
+            "implemented; BitBucket is detected but not yet available."
+        ),
+        (
+            "Use a GitHub-hosted repository for now, or track BitBucket support in "
+            "issue #345 (Phase 1 adds detection only). Recreate the workspace "
+            "against a github.com remote."
+        ),
+        (
+            "The workspace repository URL resolved to a non-GitHub forge (for "
+            "example bitbucket.org), or the workspace profile set `forge: "
+            "bitbucket`. Phase 1 of issue #345 adds forge detection without a "
+            "BitBucket client, so the workspace fails fast instead of mis-routing "
+            "to GitHub."
+        ),
+        "awf workspace create",
+        _reason_catalog_link("FORGE_NOT_SUPPORTED"),
+    ),
     "AWF_SETUP_PLACEHOLDER": _ReasonText(
         "`awf setup` is registered but the first-run setup implementation is not active yet.",
         (

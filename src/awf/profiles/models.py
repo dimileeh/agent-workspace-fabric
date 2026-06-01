@@ -25,6 +25,7 @@ from pydantic import (
     model_validator,
 )
 
+from awf.db.enums import ForgeKind
 from awf.profiles.pricing import PricingMetadata
 
 
@@ -730,6 +731,10 @@ class WorkspaceProfile(BaseModel):
     description: str | None = Field(default=None, max_length=1024)
     source: str = Field(default="inline", max_length=256)
     confidence: Literal["low", "medium", "high"] = "high"
+    forge: ForgeKind | Literal["auto"] = "auto"
+    """Code forge the workspace repo lives on (issue #345). ``"auto"`` defers to
+    URL-host detection at resolve time; the resolver persists the concrete
+    ``github``/``bitbucket`` value (explicit ``forge:`` > URL host > github)."""
     runtime: ProfileRuntime = Field(default_factory=ProfileRuntime)
     docker: ProfileDocker = Field(default_factory=ProfileDocker)
     services: list[ProfileService] = Field(default_factory=list)

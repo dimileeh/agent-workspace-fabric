@@ -25,6 +25,11 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.forge import (
+    ForgeNotSupportedError,
+    concrete_forge,
+    ensure_forge_supported,
+)
 from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
@@ -171,6 +176,27 @@ async def execute(
         workspace_id=workspace_id,
         workspace=ws,
     ):
+        return
+
+    # Forge-support gate — the earliest point the resolved forge is known, and
+    # BEFORE every downstream gh path: the non-feature dispatch (sync_release_pr /
+    # sync_feature_pr build ``gh`` in monitor handoff), the agent run, push, and
+    # ``gh pr create``. A detected-but-unimplemented forge (e.g. bitbucket) must
+    # fail fast here with FORGE_NOT_SUPPORTED rather than strand the workspace on
+    # an uncaught error deeper in a handoff. Read from the persisted
+    # ``resolved_profile`` (reconstructed, never re-resolved); ``concrete_forge``
+    # maps a missing/legacy ``auto`` value to github so pre-existing GitHub
+    # workspaces never trip the gate.
+    try:
+        ensure_forge_supported(concrete_forge((ws.resolved_profile or {}).get("forge")))
+    except ForgeNotSupportedError as exc:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=exc.message,
+            reason_code=exc.reason_code,
+        )
         return
 
     # When the PR monitor's RECOVERY_DISPATCH path delivered this

@@ -21,8 +21,8 @@ import yaml
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
+from awf.common.forge import concrete_forge, make_forge_client
 from awf.common.github_client import (
-    GitHubClient,
     GitHubClientError,
     PullRequestMetadataError,
     RepoRef,
@@ -1089,7 +1089,8 @@ async def _handoff_sync_release_pr_monitor(
     try:
         metadata, created = await find_or_create_release_pr(
             runner=self._runner,
-            gh=GitHubClient(self._runner),
+            # Reconstructed forge (not re-resolved); unsupported forges fail fast.
+            gh=make_forge_client(concrete_forge(profile.forge), self._runner),
             repo=repo,
             source_branch=source_branch,
             target_branch=target_branch,

@@ -1115,6 +1115,7 @@ def workspace_create_profile_snapshots(
             inline_profile=payload.workspace.profile,
             profile_ref=payload.workspace.profile_ref,
             validation_commands=payload.validation.commands,
+            repo_url=payload.repo_url,
         )
         profile = profile_with_requested_tier(
             resolved.profile,
