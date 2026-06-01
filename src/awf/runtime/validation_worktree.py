@@ -629,15 +629,21 @@ async def cleanup_validation_worktree_side_effects(
                     f"{', '.join(deleted_ignored_paths)}"
                 ),
             )
-        modified_snapshot_paths = [
-            path
-            for path in current_ignored_paths
-            if _is_under_ignored_path(path, ignored_paths)
-            and path in ignored_snapshot_set
-            and ignore_ignored_paths_snapshot_signatures is not None
-            and current_ignored_signature_lookup.get(path)
-            != ignore_ignored_paths_snapshot_lookup.get(path, "")
-        ]
+        modified_snapshot_paths = []
+        for path in current_ignored_paths:
+            if not _is_under_ignored_path(path, ignored_paths):
+                continue
+            if path not in ignored_snapshot_set:
+                continue
+            if ignore_ignored_paths_snapshot_signatures is None:
+                continue
+            if current_ignored_signature_lookup.get(
+                path, ""
+            ) != ignore_ignored_paths_snapshot_lookup.get(
+                path,
+                "",
+            ):
+                modified_snapshot_paths.append(path)
         if modified_snapshot_paths:
             return ValidationWorktreeCleanup(
                 cleaned=False,
