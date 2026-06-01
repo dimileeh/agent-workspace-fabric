@@ -263,6 +263,69 @@ async def test_launch_retries_with_inline_build_when_prebuilt_image_pruned_after
 
 
 @pytest.mark.unit
+async def test_launch_revalidates_remaining_prebuilt_companion_images_before_retry(
+    tmp_path: Path,
+) -> None:
+    """Retry-time revalidation clears cache-hit tags not named in the first failure."""
+    backend_tag = "awf-companion-backend:abc123def456"
+    worker_tag = "awf-companion-worker:abc123def456"
+
+    class _RetryRevalidationBuilder:
+        """Builder double that prunes the worker tag after first launch validation."""
+
+        def __init__(self) -> None:
+            self.exists_calls: list[str] = []
+
+        async def ensure(
+            self,
+            *,
+            name: str,
+            commit_sha: str,
+            build_context: str,
+            dockerfile: str,
+            relative_build_context: str,
+            capture_timeout_seconds: float,
+        ) -> str | None:
+            del commit_sha, build_context, dockerfile, relative_build_context
+            del capture_timeout_seconds
+            return {"backend": backend_tag, "worker": worker_tag}[name]
+
+        async def companion_image_exists(self, tag: str) -> bool:
+            previous_calls = self.exists_calls.count(tag)
+            self.exists_calls.append(tag)
+            return tag != worker_tag or previous_calls == 0
+
+    compose = _MissingImageOnceCompose(missing_tag=backend_tag)
+    builder = _RetryRevalidationBuilder()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+    request = _launch_request(tmp_path)
+    request = WorkspaceStackLaunchRequest(
+        workspace_id=request.workspace_id,
+        layout=request.layout,
+        profile=request.profile,
+        companions=(
+            _materialized(tmp_path / "backend", name="backend"),
+            _materialized(tmp_path / "worker", name="worker"),
+        ),
+        companion_graph_prevalidated=True,
+    )
+
+    await launcher.launch(request)
+
+    first_companions = compose.specs[0].companions
+    retry_companions = compose.specs[1].companions
+    assert [companion.image for companion in first_companions] == [backend_tag, worker_tag]
+    assert [companion.image for companion in retry_companions] == [None, None]
+    assert builder.exists_calls.count(backend_tag) == 1
+    assert builder.exists_calls.count(worker_tag) == 2
+    assert compose.waits == [True, True]
+
+
+@pytest.mark.unit
 async def test_launch_retries_daemon_classified_missing_prebuilt_companion_image(
     tmp_path: Path,
 ) -> None:

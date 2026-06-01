@@ -195,7 +195,7 @@ class ComposeStackLauncher:
         except ComposeOperationError as e:
             retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
             if retry_spec is not None:
-                spec = retry_spec
+                spec = await self._revalidate_prebuilt_companion_images(retry_spec)
                 try:
                     paths = await self._compose.up(spec, wait=True)
                 except ComposeOperationError as retry_error:
