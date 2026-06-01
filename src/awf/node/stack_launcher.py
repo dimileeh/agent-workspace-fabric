@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -190,20 +191,32 @@ class ComposeStackLauncher:
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
         try:
-            paths = await self._compose.up(spec, wait=True)
+            spec = await self._revalidate_prebuilt_companion_images(spec)
         except ComposeOperationError as e:
-            if e.reason_code == "DOCKER_UNAVAILABLE":
-                required_services = [s.name for s in spec.services if s.required]
-                if spec.docker_mode == "dind":
-                    required_services.append("docker")
-                msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
-                if required_services:
-                    msg = f"{msg} and required services: {required_services}"
-                detail = e.stderr.strip() or e.stdout.strip()
-                if detail:
-                    msg = f"{msg}: {detail}"
-                raise WorkspaceServiceExecutionError(msg) from e
+            _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
             raise
+        missing_prebuilt_retry_budget = _prebuilt_companion_image_count(spec)
+        while True:
+            try:
+                paths = await self._compose.up(spec, wait=True)
+                break
+            except ComposeOperationError as e:
+                retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
+                if retry_spec is None or missing_prebuilt_retry_budget <= 0:
+                    _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
+                    raise
+                # Replace spec so retry-time revalidation and any retry failure
+                # handling report the compose spec used by the failing attempt.
+                spec = retry_spec
+                missing_prebuilt_retry_budget -= 1
+                try:
+                    spec = await self._revalidate_prebuilt_companion_images(spec)
+                except ComposeOperationError as retry_error:
+                    _raise_workspace_service_error_if_docker_unavailable(
+                        retry_error,
+                        spec=spec,
+                    )
+                    raise
         secret_metadata = _stack_secret_metadata(
             secret_lease_resolution=secret_lease_resolution,
             companion_secret_metadata=companion_secret_metadata,
@@ -245,6 +258,7 @@ class ComposeStackLauncher:
         """
 
         async def _build_single(companion: MaterializedCompanionService) -> CompanionService:
+            """Resolve and optionally pre-build one materialized companion service."""
             service = await asyncio.to_thread(companion_service_from_materialized, companion)
             if self._companion_image_builder is not None:
                 tag = await self._companion_image_builder.ensure(
@@ -261,6 +275,102 @@ class ComposeStackLauncher:
 
         services = await asyncio.gather(*(_build_single(companion) for companion in companions))
         return tuple(services)
+
+    async def _revalidate_prebuilt_companion_images(
+        self,
+        spec: WorkspaceComposeSpec,
+    ) -> WorkspaceComposeSpec:
+        """Clear vanished pre-built companion images so compose builds inline."""
+        if self._companion_image_builder is None:
+            return spec
+        builder = self._companion_image_builder
+
+        async def _revalidate_single(companion: CompanionService) -> CompanionService:
+            """Return a build-backed companion when its pre-built image vanished."""
+            if companion.image is None:
+                return companion
+            if await builder.companion_image_exists(companion.image):
+                return companion
+            return replace(companion, image=None)
+
+        companions = tuple(
+            await asyncio.gather(*(_revalidate_single(companion) for companion in spec.companions))
+        )
+        if companions == spec.companions:
+            return spec
+        return replace(spec, companions=companions)
+
+
+def _prebuilt_companion_image_count(spec: WorkspaceComposeSpec) -> int:
+    """Return the number of companions still pinned to pre-built image tags."""
+    return sum(1 for companion in spec.companions if companion.image is not None)
+
+
+def _raise_workspace_service_error_if_docker_unavailable(
+    exc: ComposeOperationError,
+    *,
+    spec: WorkspaceComposeSpec,
+) -> None:
+    """Map Docker availability failures to the workspace service error shape."""
+    if exc.reason_code != "DOCKER_UNAVAILABLE":
+        return
+    required_services = [s.name for s in spec.services if s.required]
+    if spec.docker_mode == "dind":
+        required_services.append("docker")
+    msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
+    if required_services:
+        msg = f"{msg} and required services: {required_services}"
+    detail = exc.stderr.strip() or exc.stdout.strip()
+    if detail:
+        msg = f"{msg}: {detail}"
+    raise WorkspaceServiceExecutionError(msg) from exc
+
+
+def _missing_prebuilt_companion_image_retry_spec(
+    spec: WorkspaceComposeSpec,
+    exc: ComposeOperationError,
+) -> WorkspaceComposeSpec | None:
+    """Clear missing pre-built companion images after a compose-up race."""
+    missing_images = frozenset(
+        companion.image
+        for companion in spec.companions
+        if companion.image is not None and _compose_up_reports_missing_image(exc, companion.image)
+    )
+    if not missing_images:
+        return None
+    companions = tuple(
+        replace(companion, image=None) if companion.image in missing_images else companion
+        for companion in spec.companions
+    )
+    return replace(spec, companions=companions)
+
+
+def _compose_up_reports_missing_image(exc: ComposeOperationError, image: str) -> bool:
+    """Return whether Compose reported that a specific local image tag is absent."""
+    detail = f"{exc.stderr}\n{exc.stdout}"
+    image_ref = _compose_image_ref_regex(image)
+    image_ref_before_colon = _compose_image_ref_before_colon_regex(image)
+    patterns = (
+        rf"no such image:\s*{image_ref}",
+        rf"{image_ref_before_colon}\s*:\s*no such image",
+        rf"pull access denied for\s+{image_ref}",
+        rf"(?:repository\s+)?{image_ref}\s+does not exist",
+    )
+    return any(re.search(pattern, detail, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _compose_image_ref_regex(image: str) -> str:
+    """Return a regex fragment matching an exact Compose image reference."""
+    image_ref_chars = r"A-Za-z0-9_.:/-"
+    escaped_image = re.escape(image)
+    return rf"(?<![{image_ref_chars}])['\"]?{escaped_image}['\"]?(?![{image_ref_chars}])"
+
+
+def _compose_image_ref_before_colon_regex(image: str) -> str:
+    """Return an exact image reference fragment followed by a colon separator."""
+    image_ref_chars = r"A-Za-z0-9_.:/-"
+    escaped_image = re.escape(image)
+    return rf"(?<![{image_ref_chars}])['\"]?{escaped_image}['\"]?(?=\s*:)"
 
 
 def _stack_secret_metadata(
