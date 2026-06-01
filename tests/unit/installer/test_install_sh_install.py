@@ -127,6 +127,26 @@ def test_default_install_accepts_matching_path_awf_when_bin_dir_empty(
 
 
 @pytest.mark.unit
+def test_default_install_matching_path_awf_that_fails_help_is_not_reachable(
+    harness: InstallerHarness,
+) -> None:
+    """A matching PATH fallback must still pass the later runnability check."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # bin-dir prediction misses where the tool linked awf
+    harness.add_awf(version="0.1.0", help_rc=1)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "AWF_NOT_REACHABLE" in result.stderr
+    assert "awf was found at" in result.stderr
+    assert "the install may be incomplete" in result.stderr
+    assert "Installed agent-workspace-fabric" not in result.stdout
+
+
+@pytest.mark.unit
 def test_default_install_accepts_uppercase_tag_style_path_awf_version(
     harness: InstallerHarness,
 ) -> None:
