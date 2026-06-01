@@ -193,18 +193,20 @@ class ComposeStackLauncher:
             spec = await self._revalidate_prebuilt_companion_images(spec)
             paths = await self._compose.up(spec, wait=True)
         except ComposeOperationError as e:
-            if e.reason_code == "DOCKER_UNAVAILABLE":
-                required_services = [s.name for s in spec.services if s.required]
-                if spec.docker_mode == "dind":
-                    required_services.append("docker")
-                msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
-                if required_services:
-                    msg = f"{msg} and required services: {required_services}"
-                detail = e.stderr.strip() or e.stdout.strip()
-                if detail:
-                    msg = f"{msg}: {detail}"
-                raise WorkspaceServiceExecutionError(msg) from e
-            raise
+            retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
+            if retry_spec is not None:
+                spec = retry_spec
+                try:
+                    paths = await self._compose.up(spec, wait=True)
+                except ComposeOperationError as retry_error:
+                    _raise_workspace_service_error_if_docker_unavailable(
+                        retry_error,
+                        spec=spec,
+                    )
+                    raise
+            else:
+                _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
+                raise
         secret_metadata = _stack_secret_metadata(
             secret_lease_resolution=secret_lease_resolution,
             companion_secret_metadata=companion_secret_metadata,
@@ -286,6 +288,60 @@ class ComposeStackLauncher:
         if companions == spec.companions:
             return spec
         return replace(spec, companions=companions)
+
+
+def _raise_workspace_service_error_if_docker_unavailable(
+    exc: ComposeOperationError,
+    *,
+    spec: WorkspaceComposeSpec,
+) -> None:
+    """Map Docker availability failures to the workspace service error shape."""
+    if exc.reason_code != "DOCKER_UNAVAILABLE":
+        return
+    required_services = [s.name for s in spec.services if s.required]
+    if spec.docker_mode == "dind":
+        required_services.append("docker")
+    msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
+    if required_services:
+        msg = f"{msg} and required services: {required_services}"
+    detail = exc.stderr.strip() or exc.stdout.strip()
+    if detail:
+        msg = f"{msg}: {detail}"
+    raise WorkspaceServiceExecutionError(msg) from exc
+
+
+def _missing_prebuilt_companion_image_retry_spec(
+    spec: WorkspaceComposeSpec,
+    exc: ComposeOperationError,
+) -> WorkspaceComposeSpec | None:
+    """Clear missing pre-built companion images after a compose-up race."""
+    if exc.reason_code == "DOCKER_UNAVAILABLE":
+        return None
+    missing_images = frozenset(
+        companion.image
+        for companion in spec.companions
+        if companion.image is not None and _compose_up_reports_missing_image(exc, companion.image)
+    )
+    if not missing_images:
+        return None
+    companions = tuple(
+        replace(companion, image=None) if companion.image in missing_images else companion
+        for companion in spec.companions
+    )
+    return replace(spec, companions=companions)
+
+
+def _compose_up_reports_missing_image(exc: ComposeOperationError, image: str) -> bool:
+    """Return whether Compose reported that a specific local image tag is absent."""
+    detail = f"{exc.stderr}\n{exc.stdout}".lower()
+    if image.lower() not in detail:
+        return False
+    return (
+        "no such image" in detail
+        or "not found" in detail
+        or "pull access denied" in detail
+        or "repository does not exist" in detail
+    )
 
 
 def _stack_secret_metadata(

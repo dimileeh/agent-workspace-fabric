@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from awf.node.companion_services import MaterializedCompanionService, WorkspaceCompanionSpec
-from awf.node.compose_manager import CompanionService, ComposeProjectPaths, WorkspaceComposeSpec
+from awf.node.compose_manager import (
+    CompanionService,
+    ComposeOperationError,
+    ComposeProjectPaths,
+    WorkspaceComposeSpec,
+)
 from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import WorkspaceProfile
@@ -32,6 +37,33 @@ class _RecordingCompose:
         """Record the rendered spec and return deterministic compose paths."""
         self.specs.append(spec)
         self.waits.append(wait)
+        return ComposeProjectPaths(
+            project_dir=Path("/tmp/awf-compose/ws_launcher"),
+            compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+        )
+
+
+class _MissingImageOnceCompose:
+    """Compose double that loses a pre-built companion tag on the first launch."""
+
+    def __init__(self, *, missing_tag: str) -> None:
+        """Initialize the missing-image failure and recorded launch specs."""
+        self.missing_tag = missing_tag
+        self.specs: list[WorkspaceComposeSpec] = []
+        self.waits: list[bool] = []
+
+    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+        """Fail once with Docker's missing-image text, then succeed."""
+        self.specs.append(spec)
+        self.waits.append(wait)
+        if len(self.specs) == 1:
+            raise ComposeOperationError(
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr=f"Error response from daemon: No such image: {self.missing_tag}",
+                reason_code="COMPOSE_COMMAND_FAILED",
+            )
         return ComposeProjectPaths(
             project_dir=Path("/tmp/awf-compose/ws_launcher"),
             compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
@@ -195,6 +227,51 @@ async def test_launch_revalidates_prebuilt_companion_image_and_falls_back_when_m
     assert companion.build_context == str((tmp_path / "backend").resolve())
     assert companion.dockerfile == "Dockerfile"
     assert builder.exists_calls == ["awf-companion-backend:abc123def456"]
+    assert compose.waits == [True]
+
+
+@pytest.mark.unit
+async def test_launch_retries_with_inline_build_when_prebuilt_image_pruned_after_revalidation(
+    tmp_path: Path,
+) -> None:
+    """A tag pruned after revalidation is cleared and retried as an inline build."""
+    tag = "awf-companion-backend:abc123def456"
+    compose = _MissingImageOnceCompose(missing_tag=tag)
+    builder = _RecordingBuilder(tag=tag, exists=True)
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+
+    await launcher.launch(_launch_request(tmp_path))
+
+    first_companion = compose.specs[0].companions[0]
+    retry_companion = compose.specs[1].companions[0]
+    assert first_companion.image == tag
+    assert retry_companion.image is None
+    assert retry_companion.build_context == str((tmp_path / "backend").resolve())
+    assert retry_companion.dockerfile == "Dockerfile"
+    assert builder.exists_calls == [tag]
+    assert compose.waits == [True, True]
+
+
+@pytest.mark.unit
+async def test_launch_does_not_retry_missing_non_companion_image(tmp_path: Path) -> None:
+    """Missing-image errors must name a pre-built companion tag to trigger retry."""
+    compose = _MissingImageOnceCompose(missing_tag="postgres:16")
+    builder = _RecordingBuilder(tag="awf-companion-backend:abc123def456", exists=True)
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ComposeOperationError):
+        await launcher.launch(_launch_request(tmp_path))
+
+    assert len(compose.specs) == 1
+    assert compose.specs[0].companions[0].image == "awf-companion-backend:abc123def456"
     assert compose.waits == [True]
 
 
