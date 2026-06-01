@@ -663,7 +663,7 @@ TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE: Final = "workspace.terminal_runtime
 """Event type recorded when a terminal-runtime release is revoked because orphan containers could not be stopped."""
 
 TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE: Final = (
-    "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_PORT_BOUND"
+    "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_STOP_FAILED"
 )
 """Reason code accompanying the ``workspace.terminal_runtime_release_revoked`` event."""
 

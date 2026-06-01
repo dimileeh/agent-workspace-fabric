@@ -1017,7 +1017,7 @@ class TestOperatorControlRaces:
                 e
                 for e in reloaded.events
                 if e.event_type == "workspace.terminal_runtime_release_revoked"
-                and e.reason_code == "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_PORT_BOUND"
+                and e.reason_code == "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_STOP_FAILED"
             ]
             assert len(revoked_events) == 1, (
                 "orphan stop failure must record a terminal_runtime_release_revoked event"
