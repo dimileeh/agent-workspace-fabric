@@ -1214,7 +1214,13 @@ class GitHubClient:
         """
         encoded_branch = quote(branch, safe="")
         payload = await self._gh_json(
-            ["gh", "api", f"repos/{repo.slug()}/rules/branches/{encoded_branch}"],
+            [
+                "gh",
+                "api",
+                f"repos/{repo.slug()}/rules/branches/{encoded_branch}",
+                "--paginate",
+                "--slurp",
+            ],
             operation="gh api branch rules",
         )
         if payload is None:
@@ -1226,8 +1232,9 @@ class GitHubClient:
                 stderr="GitHub branch rules response was not a JSON array",
             )
 
+        rules = _flatten_branch_rules_pages(payload)
         constrained: set[str] | None = None
-        for rule in payload:
+        for rule in rules:
             if not isinstance(rule, dict) or rule.get("type") != "pull_request":
                 continue
             parameters = rule.get("parameters")
@@ -1357,6 +1364,13 @@ class GitHubClient:
                 stderr=result.stderr,
             )
         return result
+
+
+def _flatten_branch_rules_pages(payload: list[Any]) -> list[Any]:
+    """Normalize ``gh api --paginate --slurp`` branch-rule pages."""
+    if not all(isinstance(page, list) for page in payload):
+        return payload
+    return [rule for page in payload for rule in page]
 
 
 # ── Tiny helpers kept private to avoid accidental imports ──────────────────

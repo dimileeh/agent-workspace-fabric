@@ -1078,7 +1078,43 @@ class TestMutations:
         )
 
         assert methods is None
-        assert fake.calls[0].args == ["gh", "api", "repos/o/r/rules/branches/feature%2Fdev"]
+        assert fake.calls[0].args == [
+            "gh",
+            "api",
+            "repos/o/r/rules/branches/feature%2Fdev",
+            "--paginate",
+            "--slurp",
+        ]
+
+    @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_reads_later_pages(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    [{"type": "required_status_checks", "parameters": {}}],
+                    [
+                        {
+                            "type": "pull_request",
+                            "parameters": {"allowed_merge_methods": ["rebase"]},
+                        }
+                    ],
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"),
+            branch="main",
+        )
+
+        assert methods == ("rebase",)
+        assert "--paginate" in fake.calls[0].args
+        assert "--slurp" in fake.calls[0].args
 
     @pytest.mark.unit
     async def test_fetch_branch_pull_request_allowed_merge_methods_ignores_non_pr_rules(
