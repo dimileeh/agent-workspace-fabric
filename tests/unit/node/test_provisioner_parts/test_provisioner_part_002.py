@@ -614,23 +614,6 @@ class TestOperatorControlRaces:
                 )
 
         class _CancellingAfterLaunchGuardProvisioner(Provisioner):
-            _recheck_call_count: int = 0
-
-            async def _recheck_status(
-                self,
-                workspace_id: str,
-                *,
-                expected: WorkspaceStatus,
-                action: str,
-                reason_code: str,
-            ) -> bool:
-                return await super()._recheck_status(
-                    workspace_id,
-                    expected=expected,
-                    action=action,
-                    reason_code=reason_code,
-                )
-
             async def _recheck_before_launch(self, workspace_id: str) -> bool:
                 result = await super()._recheck_before_launch(workspace_id)
                 if result:
