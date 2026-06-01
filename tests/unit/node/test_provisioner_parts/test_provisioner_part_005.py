@@ -15,7 +15,7 @@ the workspace's own companion ports before the cross-workspace DB query.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -129,7 +129,7 @@ class TestAutoResolvedProfileIntraWorkspaceDuplicate:
     async def test_no_duplicate_when_profile_ports_differ_from_companions(
         self,
     ) -> None:
-        session_factory = AsyncMock()
+        session_factory = Mock()
         provisioner = Provisioner(
             session_factory=session_factory,
             git=AsyncMock(),
@@ -138,7 +138,34 @@ class TestAutoResolvedProfileIntraWorkspaceDuplicate:
         )
         profile = _profile_with_service_port(5432)
         task_policy = _companion_task_policy(8080, 9090)
-        with pytest.raises(TypeError):
+        mock_session = AsyncMock()
+        mock_session.info = {}
+        mock_session.bind = None
+
+        class _SessionCtx:
+            async def __aenter__(self) -> AsyncMock:
+                return mock_session
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return None
+
+        session_factory.return_value = _SessionCtx()
+        with (
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.find_host_port_conflicts",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.acquire_host_port_admission_lock",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.get_for_update",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
             await provisioner._check_auto_resolved_profile_host_ports(
                 workspace_id="ws-1",
                 profile=profile,
