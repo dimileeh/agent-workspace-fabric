@@ -50,6 +50,7 @@ def _initial_review_grace_done_key(pr_number: int) -> str:
 
 
 def _merge_method_blocked_key(*, pr_number: int, head_sha: str) -> str:
+    """Build state key for a PR-head merge-method blocker."""
     return f"__awf_merge_method_blocked__:{pr_number}:{head_sha}"
 
 

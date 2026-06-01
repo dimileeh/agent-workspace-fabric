@@ -47,6 +47,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 def _mergeable_status() -> PRStatus:
+    """Build a clean PR status suitable for merge-loop regression tests."""
     return PRStatus(
         number=_TEST_PR_NUMBER,
         head_sha="abc1234567890def",
@@ -127,6 +128,8 @@ def test_merge_method_rejection_classifier_is_specific() -> None:
 
 
 class _MergeMethodClient:
+    """GitHub client test double for merge-method policy scenarios."""
+
     def __init__(
         self,
         *,
@@ -136,6 +139,7 @@ class _MergeMethodClient:
         branch_error: GitHubClientError | None = None,
         merge_results: list[str | GitHubClientError] | None = None,
     ) -> None:
+        """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
         self.branch_methods = branch_methods
         self.repo_error = repo_error
@@ -154,11 +158,13 @@ class _MergeMethodClient:
         pr_number: int,
         base_branch: str,
     ) -> None:
+        """Set expected repository, PR, and base branch for assertions."""
         self.expected_repo = repo
         self.expected_pr_number = pr_number
         self.expected_base_branch = base_branch
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
+        """Return configured repository merge methods or raise the configured error."""
         assert repo == self.expected_repo
         if self.repo_error is not None:
             raise self.repo_error
@@ -170,6 +176,7 @@ class _MergeMethodClient:
         repo: RepoRef,
         branch: str,
     ) -> tuple[str, ...] | None:
+        """Return configured branch merge methods or raise the configured error."""
         assert repo == self.expected_repo
         assert branch == self.expected_base_branch
         if self.branch_error is not None:
@@ -184,6 +191,7 @@ class _MergeMethodClient:
         method: str = "squash",
         delete_branch: bool = True,
     ) -> str:
+        """Record the attempted method and return or raise the queued outcome."""
         assert repo == self.expected_repo
         assert pr_number == self.expected_pr_number
         assert delete_branch is True
@@ -194,6 +202,7 @@ class _MergeMethodClient:
         return result
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
+        """Record human notification comments emitted by the merge loop."""
         assert repo == self.expected_repo
         assert pr_number == self.expected_pr_number
         self.comments.append(body)
@@ -206,6 +215,7 @@ async def _execute_merge(
     gh: _MergeMethodClient,
     base_branch: str = _TEST_DEFAULT_BASE_BRANCH,
 ) -> tuple[bool | None, MonitorState, RecordedSleep, str]:
+    """Seed a monitored workspace and execute one merge action."""
     workspace_id = await seed_monitoring_workspace(factory)
     sleep_fn = RecordedSleep()
     gh.expect_context(

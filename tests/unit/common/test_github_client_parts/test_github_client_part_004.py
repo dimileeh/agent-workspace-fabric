@@ -908,6 +908,8 @@ class TestFetchFailingCheckLogs:
 
 
 class TestMutations:
+    """Mutation and merge-method GitHub client command tests."""
+
     @pytest.mark.unit
     async def test_resolve_thread_posts_expected_mutation(self) -> None:
         fake = FakeCommandRunner()
@@ -1050,6 +1052,7 @@ class TestMutations:
 
     @pytest.mark.unit
     async def test_fetch_repo_merge_methods_reads_repo_flags(self) -> None:
+        """Repository merge method discovery follows the GitHub repo flags."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1068,6 +1071,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_empty_unconstrained(
         self,
     ) -> None:
+        """An empty branch-rules response leaves merge method choice unconstrained."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")
         client = GitHubClient(fake)
@@ -1090,6 +1094,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_reads_later_pages(
         self,
     ) -> None:
+        """Paginated branch rules include later-page merge-method constraints."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1120,6 +1125,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_ignores_non_pr_rules(
         self,
     ) -> None:
+        """Non-pull-request branch rules do not constrain merge methods."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1138,6 +1144,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_omitted_methods_unconstrained(
         self,
     ) -> None:
+        """Pull-request rules without allowed methods remain unconstrained."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1159,6 +1166,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_unknown_only_unconstrained(
         self,
     ) -> None:
+        """Unknown-only merge method values do not constrain AWF methods."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1180,6 +1188,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_normalizes_values(
         self,
     ) -> None:
+        """Known merge method values are normalized and unknown values ignored."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1201,6 +1210,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_intersects_multiple_rules(
         self,
     ) -> None:
+        """Multiple pull-request rules intersect their recognized method sets."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1224,6 +1234,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_gh_error(
         self,
     ) -> None:
+        """Branch rules API failures are surfaced as GitHub client errors."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="bad credentials with token secret")
         client = GitHubClient(fake)
@@ -1240,6 +1251,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_redacts_gh_error_secret(
         self,
     ) -> None:
+        """Branch rules API failures redact token-like stderr before surfacing."""
         secret = "ghp_branchRulesSecret123"
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr=f"HTTP 403 token {secret} denied")
@@ -1259,6 +1271,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_bad_json(
         self,
     ) -> None:
+        """Malformed branch rules JSON is wrapped as a GitHub client error."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="{bad json")
         client = GitHubClient(fake)
@@ -1275,6 +1288,7 @@ class TestMutations:
     async def test_fetch_branch_pull_request_allowed_merge_methods_redacts_bad_json_secret(
         self,
     ) -> None:
+        """Malformed branch rules JSON redacts token-like output in errors."""
         secret = "ghp_branchRulesSecret123"
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=f"{{bad json {secret}")
@@ -1293,8 +1307,11 @@ class TestMutations:
 
 
 class TestPrivateCoverageEdges:
+    """Coverage edge tests for private GitHub client helper paths."""
+
     @pytest.mark.unit
     async def test_gh_json_and_run_gh_raise_on_strict_failures(self) -> None:
+        """Strict helper failures raise while non-strict command failures return."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="boom")
         fake.queue_result(returncode=1, stderr="strict boom")
@@ -1321,6 +1338,7 @@ class TestPrivateCoverageEdges:
 
     @pytest.mark.unit
     def test_private_nested_payload_and_review_helpers_cover_fallbacks(self) -> None:
+        """Nested payload helpers preserve fallback behavior for review parsing."""
         assert github_client_module._dig([{"name": "first"}], 1, "name") is None  # noqa: SLF001
         assert github_client_module._dig("not-dict", "name") is None  # noqa: SLF001
         assert (

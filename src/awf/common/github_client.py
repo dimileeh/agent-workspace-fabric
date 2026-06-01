@@ -49,6 +49,7 @@ class GitHubClientError(Exception):
     """Raised when ``gh`` or GraphQL returns a non-zero exit / error payload."""
 
     def __init__(self, *, operation: str, returncode: int, stderr: str) -> None:
+        """Store redacted command failure context for monitor diagnostics."""
         self.operation = operation
         self.returncode = returncode
         self.stderr = redact_audit_text(stderr)

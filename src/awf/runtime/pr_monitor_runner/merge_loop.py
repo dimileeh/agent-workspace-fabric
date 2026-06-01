@@ -55,6 +55,8 @@ _KNOWN_MERGE_METHODS = frozenset(_MERGE_METHOD_PREFERENCE)
 
 
 class _MergeAttemptOutcome(StrEnum):
+    """Terminal categories for one merge-method attempt."""
+
     SUCCESS = "success"
     RETRY_NEXT_METHOD = "retry_next_method"
     METHOD_BLOCKER = "method_blocker"
@@ -63,6 +65,8 @@ class _MergeAttemptOutcome(StrEnum):
 
 @dataclass(frozen=True)
 class _MergeAttemptResult:
+    """Structured result from trying one explicit merge method."""
+
     outcome: _MergeAttemptOutcome
     merge_sha: str | None = None
     blocker: GitHubClientError | None = None
@@ -74,6 +78,7 @@ def _effective_merge_methods(
     repo_methods: tuple[str, ...],
     branch_methods: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
+    """Intersect repo and branch merge policies in AWF preference order."""
     repo_allowed = {method for method in repo_methods if method in _KNOWN_MERGE_METHODS}
     branch_allowed = (
         None
@@ -90,6 +95,7 @@ async def _resolve_effective_merge_methods(
     repo: RepoRef,
     base_branch: str,
 ) -> tuple[str, ...]:
+    """Fetch repository and base-branch policy before selecting merge methods."""
     repo_methods = await self._deps.gh.fetch_repo_merge_methods(repo=repo)
     branch_methods = await self._deps.gh.fetch_branch_pull_request_allowed_merge_methods(
         repo=repo,
@@ -99,6 +105,7 @@ async def _resolve_effective_merge_methods(
 
 
 def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
+    """Return the merge method explicitly rejected by GitHub, when known."""
     text = str(exc).lower()
     if "squash merges are not allowed" in text:
         return "squash"
@@ -110,6 +117,7 @@ def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
 
 
 def _merge_error_supports_method_alternative(exc: GitHubClientError) -> bool:
+    """Detect GitHub merge failures that can be retried with another method."""
     text = str(exc).lower()
     return (
         _merge_method_rejection_method(exc) is not None
@@ -124,6 +132,7 @@ def _merge_method_mismatch_message(
     effective_methods: tuple[str, ...],
     detail: str | None = None,
 ) -> str:
+    """Build the human-facing merge-method mismatch notification."""
     allowed = ", ".join(effective_methods) if effective_methods else "none"
     attempted = attempted_method or "none"
     suffix = f" GitHub reported: {detail}" if detail else ""
@@ -149,6 +158,7 @@ async def _attempt_merge_method(
     effective_methods: tuple[str, ...],
     attempt_index: int,
 ) -> _MergeAttemptResult:
+    """Try one explicit merge method and classify the result for the merge loop."""
     merge_operation = await self._begin_monitor_state_operation(
         workspace_id=workspace_id,
         action="merge",
