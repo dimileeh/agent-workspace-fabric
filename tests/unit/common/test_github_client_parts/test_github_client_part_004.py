@@ -1159,6 +1159,7 @@ class TestMutations:
         assert "--paginate" in fake.calls[0].args
         assert "--slurp" in fake.calls[0].args
         assert "branch rules" in exc.value.operation
+        assert "try again" in exc.value.stderr
 
     @pytest.mark.unit
     async def test_fetch_branch_pull_request_allowed_merge_methods_reads_later_pages(

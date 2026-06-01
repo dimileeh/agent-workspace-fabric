@@ -1241,7 +1241,10 @@ class GitHubClient:
             raise GitHubClientError(
                 operation="gh api branch rules",
                 returncode=0,
-                stderr="GitHub branch rules empty response despite --paginate --slurp",
+                stderr=(
+                    "GitHub branch rules empty response despite --paginate --slurp; "
+                    "API response may be temporarily unavailable, try again"
+                ),
             )
         if not isinstance(payload, list):
             raise GitHubClientError(

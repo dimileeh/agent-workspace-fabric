@@ -418,6 +418,38 @@ async def test_transient_merge_method_preflight_error_retries_without_blocker(
 
 
 @pytest.mark.unit
+async def test_empty_branch_rules_slurp_preflight_error_retries_without_blocker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Empty slurped branch-rule output is a retryable preflight anomaly."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation="gh api branch rules",
+            returncode=0,
+            stderr=(
+                "GitHub branch rules empty response despite --paginate --slurp; "
+                "API response may be temporarily unavailable, try again"
+            ),
+        )
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert gh.merge_calls == []
+    assert gh.comments == []
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 async def test_non_transient_merge_method_preflight_error_notifies_human(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
