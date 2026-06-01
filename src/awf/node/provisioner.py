@@ -529,6 +529,7 @@ class Provisioner:
                 failure_reason=FailureReason.infrastructure_failure,
                 message=f"unexpected provisioning failure: {exc}"[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                compose_launched=True,
             )
             raise
 
@@ -1012,6 +1013,19 @@ class Provisioner:
                 raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
+            # Port-admission invariant: the advisory lock acquired here is
+            # released when this session commits (it is a
+            # pg_advisory_xact_lock). After this commit, the workspace's
+            # resolved_profile is visible to concurrent provisioners via
+            # find_host_port_conflicts because its status is still
+            # ``provisioning`` ∈ HOST_PORT_CONFLICT_STATUSES, so the port
+            # claim is detectable even without the lock held. The subsequent
+            # pre_launch_session runs in a separate transaction without the
+            # advisory lock; this is safe because the conflict is caught by
+            # the HOST_PORT_CONFLICT_STATUSES filter, not by the lock. If a
+            # future refactor changes the query scope to exclude
+            # ``provisioning`` from the host-port visibility filter, this
+            # two-commit gap would silently reopen a TOCTOU window.
             await repo.acquire_host_port_admission_lock(host_ports=auto_profile_host_ports)
             conflicts = await repo.find_host_port_conflicts(
                 host_ports=auto_profile_host_ports,

@@ -314,6 +314,16 @@ async def retry_workspace_row(
     # sibling nodes whose ports are not actually held by the source.  When
     # Phase 2 introduces multi-node, this branch should require a resolved
     # node_id or be replaced by a per-node runtime-release query.
+    # Stale-read window: _source_runtime_not_yet_released reads the DB
+    # *before* acquire_host_port_admission_lock below. If the cleanup worker
+    # emits terminal_runtime_released for the source in the gap between this
+    # check and the lock acquisition, the caller receives a 409
+    # SOURCE_RUNTIME_NOT_RELEASED even though the ports were actually freed
+    # and the retry could have proceeded. This is harmless — the caller
+    # retries and the next attempt sees the released event — but it is an
+    # extra round-trip. Do not "fix" this by moving the check inside the
+    # lock; the advisory lock must be acquired before find_host_port_conflicts
+    # to prevent a TOCTOU window on port admission.
     if (
         not ignore_source_runtime_check
         and await _source_runtime_not_yet_released(session, source)
@@ -334,6 +344,16 @@ async def retry_workspace_row(
                 host_port=conflicts[0].host_port,
                 conflicting_workspace_id=conflicts[0].workspace_id,
             )
+        # Safety note: source.id is unconditionally excluded from
+        # find_host_port_conflicts above (excluding_workspace_id=source.id).
+        # This is valid because the runtime-release gate
+        # (_source_runtime_not_yet_released) has already confirmed the
+        # source's containers are down when ignore_source_runtime_check is
+        # False, and when ignore_source_runtime_check is True (planning-scope
+        # auto-retry), the provisioner's
+        # _check_auto_resolved_profile_host_ports will catch any remaining
+        # conflict at provision time. Reordering these two guards without
+        # updating this exclusion could break the invariant.
 
     retried = await repo.create(
         repo_url=source.repo_url,
