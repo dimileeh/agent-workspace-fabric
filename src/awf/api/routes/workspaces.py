@@ -341,6 +341,7 @@ async def create_workspace(
             resolved_profile=_resolved_profile,
         )
     except ProfileResolutionError as exc:
+        await session.rollback()
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content=ErrorResponse(
@@ -384,6 +385,7 @@ async def create_workspace(
             ).model_dump(),
         )
     except WorkspaceProviderReadinessBlockedError as exc:
+        await session.rollback()
         return _provider_readiness_blocked_response(exc)
 
     if idempotency_key is not None:
