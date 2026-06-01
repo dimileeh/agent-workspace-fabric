@@ -696,6 +696,11 @@ class TestCollectSmokeReportExceptionPaths:
         )
 
         captured: dict[str, object] = {}
+
+        def _capture_forge(_project, resolution):
+            captured["forge"] = resolution.profile.forge
+            return SimpleNamespace(draft=SimpleNamespace(template="generic", yaml=""))
+
         with (
             patch(
                 "awf.common.git_remote.detect_repo_url_from_checkout",
@@ -703,14 +708,13 @@ class TestCollectSmokeReportExceptionPaths:
             ),
             patch(
                 "awf.profiles.onboarding.preview_workspace_profile",
-                side_effect=lambda _project, resolution: captured.update(
-                    forge=resolution.profile.forge
-                ),
+                side_effect=_capture_forge,
             ),
         ):
-            _default_disk_profile_preview(tmp_path)
+            preview = _default_disk_profile_preview(tmp_path)
 
         assert captured["forge"] == "bitbucket"
+        assert preview.draft.template == "generic"
 
     async def test_workspace_request_fails_when_smoke_returns_non_dict(
         self, tmp_path: Path
