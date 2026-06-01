@@ -95,7 +95,22 @@ def _pure_toolchain_missing_failure(
     Mixed results are treated as genuine validation failures so a real lint/test
     failure is not hidden behind an earlier missing-tool diagnostic.
     """
-    return _pure_toolchain_missing_failure_from_failures(_failed_pre_push_commands(result))
+    failures = _failed_pre_push_commands(result)
+    return _pure_toolchain_missing_failure_for_result(result, failures)
+
+
+def _pure_toolchain_missing_failure_for_result(
+    result: ValidationResult,
+    failures: tuple[ValidationCommandResult, ...],
+) -> ValidationCommandResult | None:
+    """Return a pure 127 failure, including command-less provider failures."""
+    toolchain_failure = _pure_toolchain_missing_failure_from_failures(failures)
+    if toolchain_failure is not None or failures:
+        return toolchain_failure
+    first_failure = result.first_failure
+    if first_failure is not None and first_failure.returncode == 127:
+        return first_failure
+    return None
 
 
 def _pure_toolchain_missing_failure_from_failures(
@@ -554,7 +569,7 @@ async def _run_pre_push_validation(
     toolchain_missing_failure = (
         None
         if result.all_passed
-        else _pure_toolchain_missing_failure_from_failures(failed_commands)
+        else _pure_toolchain_missing_failure_for_result(result, failed_commands)
     )
     preferred_failure = (
         None

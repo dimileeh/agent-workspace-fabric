@@ -119,6 +119,24 @@ def _validation_result(
     )
 
 
+class _CommandlessFailureValidationResult(ValidationResult):
+    """Validation result that exposes a first failure outside command records."""
+
+    _first_failure: ValidationCommandResult
+
+    def __init__(self, first_failure: ValidationCommandResult) -> None:
+        super().__init__(commands=[])
+        object.__setattr__(self, "_first_failure", first_failure)
+
+    @property
+    def all_passed(self) -> bool:
+        return False
+
+    @property
+    def first_failure(self) -> ValidationCommandResult | None:
+        return self._first_failure
+
+
 def _coverage_result(tmp_path: Path) -> ValidationCoverageResult:
     """Build a successful explicit coverage result for pre-push coverage tests."""
     return ValidationCoverageResult(
@@ -476,6 +494,69 @@ async def test_pre_push_validation_toolchain_missing_bypasses_fix_pass(
     assert result.details["reason_code"] == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
     assert result.details["validation_reason_code"] == "COMMAND_FAILED"
     assert result.details["failing_command"] == "ruff check ."
+    assert result.details["failing_returncode"] == 127
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_commandless_toolchain_missing_bypasses_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command-less 127 first failure should still be terminal toolchain-missing."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'4' * 40}\n")
+    first_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage provider",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="commandless_provider_missing",
+    )
+    validation = _FakeValidation(_CommandlessFailureValidationResult(first_failure))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _unexpected_validation_commands(_self: Any, **_kwargs: object) -> tuple[str, ...]:
+        """Fail loudly if command-less toolchain-missing loads fix-prompt context."""
+        pytest.fail("command-less toolchain-missing validation must not run a fix pass")
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_commands",
+        _unexpected_validation_commands,
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert len(validation.calls) == 1
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == "COMMAND_FAILED"
+    assert result.details["failing_command"] == "coverage provider"
     assert result.details["failing_returncode"] == 127
     runs = await _validation_runs(factory, workspace_id)
     assert runs[-1].reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
