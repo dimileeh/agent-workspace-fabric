@@ -313,6 +313,48 @@ def first_run_failure_payload(
     )
 
 
+def first_run_report_payload(
+    *,
+    command: str,
+    summary: str,
+    issues: Collection[FirstRunIssue],
+    details: Mapping[str, Any] | None = None,
+    next_steps: tuple[str, ...] = (),
+) -> FirstRunPayload:
+    """Build a multi-issue first-run payload, deriving status from severities.
+
+    Unlike the single-issue ``first_run_*_payload`` helpers, this assembles a
+    report from many reason-coded issues. Top-level ``status`` is ``blocked``
+    when any issue is blocked/failed, ``warning`` when any issue is a warning,
+    else ``success``; ``reason_code`` is the first blocking issue's code (or the
+    first warning's code when warnings-only).
+    """
+    issue_tuple = tuple(issues)
+    status, reason_code = _derive_first_run_report_status(issue_tuple)
+    return FirstRunPayload(
+        status=status,
+        command=command,
+        summary=summary,
+        reason_code=reason_code,
+        issues=issue_tuple,
+        details=dict(details or {}),
+        next_steps=next_steps,
+    )
+
+
+def _derive_first_run_report_status(
+    issues: tuple[FirstRunIssue, ...],
+) -> tuple[FirstRunStatus, str | None]:
+    """Return the top-level status/reason derived from issue severities."""
+    blocking = [issue for issue in issues if issue.severity in ("blocked", "failed")]
+    if blocking:
+        return "blocked", blocking[0].reason_code
+    warnings = [issue for issue in issues if issue.severity == "warning"]
+    if warnings:
+        return "warning", warnings[0].reason_code
+    return "success", None
+
+
 def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
     """Return a JSON-safe, redacted first-run payload dictionary."""
     raw_payload = _clean_first_run_dump(payload.model_dump(mode="python", exclude_none=True))
@@ -645,6 +687,7 @@ __all__ = [
     "first_run_failure_payload",
     "first_run_issue_from_reason_code",
     "first_run_remediation_from_reason_code",
+    "first_run_report_payload",
     "first_run_success_payload",
     "first_run_warning_payload",
     "redact_first_run_value",
