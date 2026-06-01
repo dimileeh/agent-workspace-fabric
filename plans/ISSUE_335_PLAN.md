@@ -20,7 +20,7 @@ Close the companion-image pre-build vs. GC-prune race in `StackLauncher` without
 Run targeted checks for the changed code and regression coverage only:
 
 ```bash
-uv run --python 3.12 --extra dev pytest tests/unit/node/test_companion_images.py tests/unit/node/test_stack_launcher_companion_images.py tests/unit/node/test_compose_manager.py::TestComposeManager::test_companion_prebuilt_image_pins_pull_policy_never -q
+uv run --python 3.12 --extra dev pytest tests/unit/node/test_companion_images.py tests/unit/node/test_stack_launcher_companion_images.py tests/unit/node/test_compose_manager.py::TestRender::test_companion_prebuilt_image_pins_pull_policy_never -q
 uv run --python 3.12 --extra dev ruff check src/awf/node/companion_images.py src/awf/node/stack_launcher.py tests/unit/node/test_companion_images.py tests/unit/node/test_stack_launcher_companion_images.py
 uv run --python 3.12 --extra dev mypy src/awf/node/companion_images.py src/awf/node/stack_launcher.py
 ```
