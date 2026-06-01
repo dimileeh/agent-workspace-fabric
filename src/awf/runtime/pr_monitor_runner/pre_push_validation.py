@@ -202,6 +202,9 @@ async def _run_pre_push_validation_with_fix_passes(
             capture_ignored_paths_snapshot=(
                 baseline_ignored_paths is None or bool(baseline_ignored_paths)
             ),
+            baseline_ignored_roots=baseline_ignored_roots,
+            baseline_ignored_paths_snapshot=baseline_ignored_paths_snapshot,
+            baseline_ignored_paths_snapshot_signatures=baseline_ignored_paths_snapshot_signatures,
         )
         if baseline_ignored_paths is None:
             baseline_ignored_paths = validation_result.ignore_ignored_paths
@@ -210,36 +213,6 @@ async def _run_pre_push_validation_with_fix_passes(
             baseline_ignored_paths_snapshot_signatures = (
                 validation_result.ignore_ignored_paths_snapshot_signatures
             )
-
-        if baseline_ignored_roots is not None:
-            gained_ignored = _pre_push_validation_new_ignored_entries(
-                baseline_ignored_roots=baseline_ignored_roots,
-                baseline_ignored_snapshot=baseline_ignored_paths_snapshot or (),
-                baseline_ignored_snapshot_signatures=(
-                    baseline_ignored_paths_snapshot_signatures or ()
-                ),
-                current_ignored_roots=validation_result.ignore_ignored_paths,
-                current_ignored_snapshot=validation_result.ignore_ignored_paths_snapshot,
-                current_ignored_snapshot_signatures=(
-                    validation_result.ignore_ignored_paths_snapshot_signatures
-                ),
-            )
-            if gained_ignored:
-                return _PrePushValidationResult(
-                    passed=False,
-                    validation_run_id=validation_result.validation_run_id,
-                    workspace_head_sha=validation_result.workspace_head_sha,
-                    reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
-                    message=(
-                        "Validation worktree gained ignored entries after setup "
-                        "baseline and will not proceed to validation."
-                    ),
-                    ignore_ignored_paths=validation_result.ignore_ignored_paths,
-                    ignore_ignored_paths_snapshot=validation_result.ignore_ignored_paths_snapshot,
-                    ignore_ignored_paths_snapshot_signatures=(
-                        validation_result.ignore_ignored_paths_snapshot_signatures
-                    ),
-                )
 
         if validation_result.passed:
             return validation_result
@@ -682,6 +655,9 @@ async def _run_pre_push_validation(
     ignore_ignored_paths: tuple[str, ...] | None = None,
     ignore_all_ignored: bool = True,
     capture_ignored_paths_snapshot: bool = True,
+    baseline_ignored_roots: tuple[str, ...] | None = None,
+    baseline_ignored_paths_snapshot: tuple[str, ...] | None = None,
+    baseline_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None,
 ) -> _PrePushValidationResult:
     """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
@@ -713,7 +689,9 @@ async def _run_pre_push_validation(
         worktree_path=worktree_path,
         ignore_all_ignored=ignore_all_ignored,
         ignore_ignored_paths=ignore_ignored_paths,
-        capture_ignored_paths_snapshot=capture_ignored_paths_snapshot,
+        capture_ignored_paths_snapshot=(
+            capture_ignored_paths_snapshot or bool(baseline_ignored_roots)
+        ),
     )
     if not pre_validation_check.clean:
         return _pre_push_dirty_result(
@@ -746,6 +724,39 @@ async def _run_pre_push_validation(
             ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
             ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
         )
+    if baseline_ignored_roots is not None and baseline_ignored_paths_snapshot is not None:
+        gained_ignored = _pre_push_validation_new_ignored_entries(
+            baseline_ignored_roots=baseline_ignored_roots,
+            baseline_ignored_snapshot=baseline_ignored_paths_snapshot,
+            baseline_ignored_snapshot_signatures=(baseline_ignored_paths_snapshot_signatures or ()),
+            current_ignored_roots=pre_validation_check.ignored_paths,
+            current_ignored_snapshot=pre_validation_check.ignored_paths_snapshot,
+            current_ignored_snapshot_signatures=(
+                pre_validation_check.ignored_paths_snapshot_signatures
+            ),
+        )
+        if gained_ignored:
+            await _finish_pre_push_validation_run(
+                self,
+                validation_run_id,
+                status="failed",
+                reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+            )
+            return _PrePushValidationResult(
+                passed=False,
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                message=(
+                    "Validation worktree gained ignored entries after setup "
+                    "baseline and will not proceed to validation."
+                ),
+                ignore_ignored_paths=pre_validation_check.ignored_paths,
+                ignore_ignored_paths_snapshot=pre_validation_check.ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot_signatures=(
+                    pre_validation_check.ignored_paths_snapshot_signatures
+                ),
+            )
     coverage_result: ValidationCoverageResult | None = None
     try:
         assert self._deps.validation is not None

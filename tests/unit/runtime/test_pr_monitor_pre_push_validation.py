@@ -35,6 +35,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    ValidationWorktreeCheck,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -1107,6 +1108,123 @@ async def test_pre_push_validation_fix_pass_rejects_new_ignored_paths_on_retry(
     assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert len(validation_calls) == 2
     assert len(fix_pass_calls) == 1
+
+
+@pytest.mark.unit
+async def test_run_pre_push_validation_rejects_new_ignored_entries_before_validation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gained ignored snapshot should fail before any validation command executes."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "a" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
+
+    async def _run_pre_push_validation_worktree_check(
+        _self: object,
+        **_kwargs: object,
+    ) -> ValidationWorktreeCheck:
+        return ValidationWorktreeCheck(
+            clean=True,
+            ignored_paths=(".venv/",),
+            ignored_paths_snapshot=(
+                ".venv/existing-artifact.log",
+                ".venv/new-artifact.log",
+            ),
+            ignored_paths_snapshot_signatures=(
+                (".venv/existing-artifact.log", "sig-existing"),
+                (".venv/new-artifact.log", "sig-new"),
+            ),
+        )
+
+    started_runs: list[str] = []
+
+    async def _start_pre_push_validation_run(
+        _self: object,
+        **_kwargs: object,
+    ) -> str:
+        started_runs.append("started")
+        return "vr-gained-ignored"
+
+    finish_calls: list[dict[str, object]] = []
+
+    async def _finish_pre_push_validation_run(
+        _self: object,
+        validation_run_id: str,
+        *,
+        status: str,
+        reason_code: str | None,
+        retry_count: int = 0,
+        coverage: dict[str, object] | None = None,
+        command_retries: list[int] | None = None,
+    ) -> None:
+        finish_calls.append(
+            {
+                "validation_run_id": validation_run_id,
+                "status": status,
+                "reason_code": reason_code,
+                "retry_count": retry_count,
+                "coverage": coverage,
+                "command_retries": command_retries,
+            }
+        )
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_worktree_check",
+        _run_pre_push_validation_worktree_check,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_start_pre_push_validation_run",
+        _start_pre_push_validation_run,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_finish_pre_push_validation_run",
+        _finish_pre_push_validation_run,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+        ignore_ignored_paths=(".venv/",),
+        ignore_all_ignored=True,
+        capture_ignored_paths_snapshot=False,
+        baseline_ignored_roots=(".venv/",),
+        baseline_ignored_paths_snapshot=(".venv/existing-artifact.log",),
+        baseline_ignored_paths_snapshot_signatures=(
+            (".venv/existing-artifact.log", "sig-existing"),
+        ),
+    )
+
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id == "vr-gained-ignored"
+    assert "Validation worktree gained ignored entries after setup baseline" in result.message
+    assert started_runs == ["started"]
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["status"] == "failed"
+    assert finish_calls[0]["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert runner._deps.validation.calls == []
 
 
 @pytest.mark.unit
