@@ -30,6 +30,7 @@ from awf.runtime.ownership import (
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
 )
 from awf.runtime.validation import (
+    PROFILE_VALIDATION_TOOL_UNAVAILABLE,
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     SETUP_DEPENDENCY_NETWORK_RETRY,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
@@ -174,6 +175,40 @@ class _CancellingHandoffSetupValidation:
             )
             await session.commit()
         return ValidationResult()
+
+
+class _ProfilePreflightFailureValidation(_RecordingValidation):
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__()
+        self._tmp_path = tmp_path
+        self.preflight_calls: list[str] = []
+
+    async def run_profile_tool_preflight(
+        self,
+        *,
+        workspace_id: str,
+        profile: object,
+    ) -> ValidationResult:
+        del profile
+        self.preflight_calls.append(workspace_id)
+        stdout_path = self._tmp_path / "profile_preflight.stdout"
+        stderr_path = self._tmp_path / "profile_preflight.stderr"
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("uv run pytest tests/unit -q lacks --extra dev\n", encoding="utf-8")
+        return ValidationResult(
+            commands=[
+                ValidationCommandResult(
+                    command="profile validation tool preflight",
+                    returncode=1,
+                    duration_seconds=0.1,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    phase="profile_preflight",
+                    reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+                    policy_failed=True,
+                )
+            ]
+        )
 
 
 class TestExecutorMonitorHandoffSetup:
@@ -484,6 +519,61 @@ class TestExecutorMonitorHandoffSetup:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_profile_preflight_failure_blocks_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        validation = _ProfilePreflightFailureValidation(tmp_path)
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert validation.preflight_calls == [ws_id]
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.profile_resolution_failure.value
+            assert ws.failure_message == (
+                "profile preflight failed: profile validation tool preflight"
+            )
+            assert ws.events[-1].reason_code == PROFILE_VALIDATION_TOOL_UNAVAILABLE
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_setup_status_recheck_blocks_monitor_factory(
