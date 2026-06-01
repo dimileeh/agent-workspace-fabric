@@ -1917,6 +1917,31 @@ def test_pre_push_validation_new_ignored_entries_rejects_removed_snapshot_paths(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("baseline_signatures", "current_signatures"),
+    [
+        (((".venv/existing-artifact.log", "sig-existing"),), ()),
+        ((), ((".venv/existing-artifact.log", "sig-existing"),)),
+    ],
+)
+def test_pre_push_validation_new_ignored_entries_rejects_one_sided_signature_drift(
+    baseline_signatures: tuple[tuple[str, str], ...],
+    current_signatures: tuple[tuple[str, str], ...],
+) -> None:
+    """One-sided ignored artifact signatures should be treated as ignored drift."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    assert pre_push_validation._pre_push_validation_new_ignored_entries(
+        baseline_ignored_roots=(".venv/",),
+        baseline_ignored_snapshot=(".venv/existing-artifact.log",),
+        baseline_ignored_snapshot_signatures=baseline_signatures,
+        current_ignored_roots=(".venv/",),
+        current_ignored_snapshot=(".venv/existing-artifact.log",),
+        current_ignored_snapshot_signatures=current_signatures,
+    )
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

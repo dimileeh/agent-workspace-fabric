@@ -449,7 +449,7 @@ def _pre_push_validation_new_ignored_entries(
 
     current_signature_map = dict(current_ignored_snapshot_signatures)
     baseline_signature_map = dict(baseline_ignored_snapshot_signatures)
-    if baseline_ignored_snapshot_signatures and current_ignored_snapshot_signatures:
+    if baseline_ignored_snapshot_signatures or current_ignored_snapshot_signatures:
         for path in baseline_snapshot:
             if baseline_signature_map.get(path) != current_signature_map.get(path):
                 return True
