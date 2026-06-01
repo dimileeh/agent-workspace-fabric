@@ -93,6 +93,14 @@ def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
     return None
 
 
+def _merge_error_supports_method_alternative(exc: GitHubClientError) -> bool:
+    text = f"{exc.stderr}\n{exc}".lower()
+    return (
+        _merge_method_rejection_method(exc) is not None
+        or "could not be merged with this method" in text
+    )
+
+
 def _merge_method_mismatch_message(
     *,
     base_branch: str,
@@ -661,7 +669,11 @@ async def handle_merge_action(
                                             "error_message": str(exc),
                                         },
                                     )
-                                    if attempt_index == 0 and len(effective_methods[:2]) > 1:
+                                    if (
+                                        attempt_index == 0
+                                        and len(effective_methods[:2]) > 1
+                                        and _merge_error_supports_method_alternative(exc)
+                                    ):
                                         continue
                                     if rejected_method == merge_method:
                                         merge_method_notification_reason = (

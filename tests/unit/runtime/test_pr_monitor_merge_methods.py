@@ -394,6 +394,40 @@ async def test_method_rejection_retries_once_with_allowed_alternative(
 
 
 @pytest.mark.unit
+async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient merge failure backs off instead of changing merge method."""
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="HTTP 502 Bad Gateway",
+            ),
+            "MERGESHA789",
+        ],
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert sleep_fn.calls == [60]
+    assert gh.comments == []
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 async def test_unclassified_first_merge_failure_retries_allowed_alternative(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
