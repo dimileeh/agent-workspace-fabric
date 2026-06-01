@@ -9,9 +9,9 @@
  */
 
 @theme inline {
-  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
-  --font-mono: var(--font-plex-mono), "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", Menlo,
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", Menlo,
     ui-monospace, monospace;
 
   --color-canvas: var(--canvas);

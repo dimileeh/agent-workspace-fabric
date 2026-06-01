@@ -331,9 +331,22 @@ export function Panel({
   );
 }
 
-export function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+export function Fact({
+  label,
+  value,
+  mono = false,
+  stale = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  stale?: boolean;
+}) {
   return (
-    <div className="min-w-0 rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2">
+    <div
+      data-awf-stale={stale ? "true" : undefined}
+      className="min-w-0 rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2"
+    >
       <div className="label-caps">{label}</div>
       <div className={`${mono ? "mono" : "tnum"} truncate text-sm text-fg`}>{value}</div>
     </div>

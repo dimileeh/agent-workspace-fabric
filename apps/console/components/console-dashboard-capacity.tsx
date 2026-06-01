@@ -87,12 +87,16 @@ export function ResourceCapacityPanel({
   saturation,
   error,
   stale = false,
+  summaryStale = false,
   workspaceSummary,
   workspaceSummaryError,
 }: {
   saturation: ResourceSaturationSummary | null;
   error: string | null;
   stale?: boolean;
+  // Reliability-summary fields (Stuck, Reason coverage) come from a separate
+  // feed and dim independently of the saturation-driven panel staleness.
+  summaryStale?: boolean;
   workspaceSummary: WorkspaceReliabilitySummary | null;
   workspaceSummaryError: string | null;
 }) {
@@ -147,10 +151,12 @@ export function ResourceCapacityPanel({
             <Fact
               label="Stuck"
               value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
+              stale={summaryStale}
             />
             <Fact
               label="Reason Coverage"
               value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
+              stale={summaryStale}
             />
             <Fact
               label="Reserved runtime CPU"

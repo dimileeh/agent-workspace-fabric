@@ -963,6 +963,7 @@ const searchParams = useSearchParams();
                 saturation={resourceSaturation}
                 error={resourceError}
                 stale={capacityStale}
+                summaryStale={summaryStale}
                 workspaceSummary={workspaceSummary}
                 workspaceSummaryError={workspaceSummaryError}
               />
