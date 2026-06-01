@@ -466,6 +466,7 @@ class Provisioner:
                     message="compose-fail backstop commit failed; compose_project_name not persisted",
                     from_status=WorkspaceStatus.provisioning,
                     reason_code="COMPOSE_FAIL_COMMIT_FATAL",
+                    compose_launched=True,
                 )
                 return
             # Capture companion logs/healthcheck state BEFORE marking failed and
@@ -508,6 +509,7 @@ class Provisioner:
                     message=str(exc)[:2000],
                     from_status=WorkspaceStatus.provisioning,
                     event_payload=diagnostics,
+                    compose_launched=True,
                 )
             raise
         except Exception as exc:
@@ -736,12 +738,23 @@ class Provisioner:
         from_status: WorkspaceStatus,
         reason_code: str | None = None,
         event_payload: dict[str, Any] | None = None,
+        compose_launched: bool = False,
     ) -> None:
         """Best-effort transition to ``failed``.
 
         We swallow secondary failures here: if the DB itself is unavailable the
         caller's exception will already bubble up with the primary cause, and
         logging twice is better than masking the root error.
+
+        When *compose_launched* is True, the Docker Compose project was
+        (or may have been) started before the failure, so
+        ``compose_project_name`` is persisted so that the cleanup worker can
+        find the project and ``find_host_port_conflicts`` correctly treats the
+        workspace as a port-blocker.  Pre-launch failures (port conflicts,
+        git errors, profile errors) pass ``compose_launched=False`` to keep
+        ``compose_project_name`` NULL — these workspaces never bound a host
+        port and must not block port admission (see ``find_host_port_conflicts``
+        docstring).
         """
         try:
             async with self._session_factory() as session:
@@ -775,13 +788,20 @@ class Provisioner:
                 # could finalize cleanup against the wrong Docker daemon.
                 if ws.node_id is None:
                     ws.node_id = self._config.node_id
-                # When a compose-fail backstop commit fails, compose_project_name
-                # remains null, making the workspace invisible to both
-                # find_host_port_conflicts and the cleanup worker's compose
-                # project lookup. Persist it here so that the terminal workspace
-                # still blocks port admission and the cleanup sweep can target
-                # the correct Docker Compose project.
-                if ws.compose_project_name is None and from_status == WorkspaceStatus.provisioning:
+                # Only persist compose_project_name for failures that occurred
+                # after Docker Compose was (or may have been) started. Pre-launch
+                # failures (port conflicts, git errors, profile errors) never
+                # created containers, so compose_project_name must stay NULL —
+                # otherwise find_host_port_conflicts would incorrectly treat the
+                # workspace as a port-blocker despite it never having bound a
+                # host port. The compose_launched flag is True only for
+                # ComposeOperationError and the catch-all unexpected-failure
+                # path (which may fire at any point after launch begins).
+                if (
+                    ws.compose_project_name is None
+                    and from_status == WorkspaceStatus.provisioning
+                    and compose_launched
+                ):
                     ws.compose_project_name = f"awf_{workspace_id}"
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message

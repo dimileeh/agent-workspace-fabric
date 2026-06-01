@@ -185,6 +185,93 @@ class TestProvisionerSkipUnknown:
             # Status preserved, not overridden.
             assert ws.status == "requested"
 
+    @pytest.mark.unit
+    async def test_mark_failed_pre_launch_leaves_compose_project_name_null(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Pre-launch failures (compose_launched=False) must not set
+        compose_project_name.  A workspace that failed before Docker
+        Compose was launched never bound a host port, so it must not
+        block port admission in find_host_port_conflicts."""
+
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="r",
+                branch_base="b",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requires_database=False,
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await s.commit()
+            ws_id = ws.id
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=object(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        await prov._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="port conflict before compose launch",
+            from_status=WorkspaceStatus.provisioning,
+            compose_launched=False,
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.compose_project_name is None
+
+    @pytest.mark.unit
+    async def test_mark_failed_post_compose_sets_compose_project_name(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Post-compose failures (compose_launched=True) must set
+        compose_project_name so the cleanup worker and port-conflict
+        check can find the Docker project."""
+
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="r",
+                branch_base="b",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requires_database=False,
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await s.commit()
+            ws_id = ws.id
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=object(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        await prov._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.service_startup_failure,
+            message="compose stack failed to start",
+            from_status=WorkspaceStatus.provisioning,
+            compose_launched=True,
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.compose_project_name == f"awf_{ws_id}"
+
 
 # ── git_manager ────────────────────────────────────────────────────────────
 
