@@ -1452,6 +1452,8 @@ async def test_pre_push_validation_cleanup_failure_blocks_push(
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
     cmd.queue_result(returncode=1, stderr="restore failed")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -2104,12 +2106,14 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
 
 @pytest.mark.unit
 async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
+    factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     """Rollback should keep ignored artifacts like .venv while removing generated files."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
     runner = make_runner(
+        factory=factory,
         cmd=FakeCommandRunner(),
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
@@ -2122,21 +2126,24 @@ async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
 
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {restore_ref[:8]}\n")
     cmd.queue_result(returncode=0, stdout="?? generated.tmp\n!! .venv/\n")
-    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
-    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
 
-    rolled_back = await pre_push_validation._rollback_failed_pre_push_validation_fix_pass(
-        runner,
-        workspace_id="workspace",
-        worktree_path=worktree,
-        restore_ref=restore_ref,
-        ignore_ignored_paths=(".venv",),
-        pass_number=1,
-        reason="test",
+    rollback_failure_reason = (
+        await pre_push_validation._rollback_failed_pre_push_validation_fix_pass(
+            runner,
+            workspace_id="workspace",
+            worktree_path=worktree,
+            restore_ref=restore_ref,
+            ignore_ignored_paths=(".venv",),
+            pass_number=1,
+            reason="test",
+        )
     )
 
-    assert rolled_back is True
+    assert rollback_failure_reason is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {restore_ref}" in call for call in joined_calls)
     assert any("clean -fdx -- generated.tmp" in call for call in joined_calls)
@@ -2175,9 +2182,9 @@ async def test_pre_push_validation_fix_pass_rollback_failure_is_bubbled_as_pre_p
         _validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
     )
 
-    async def _rollback_failed(*_args: object, **_kwargs: object) -> bool:
+    async def _rollback_failed(*_args: object, **_kwargs: object) -> str:
         """Simulate a rollback failure in fix-pass cleanup."""
-        return False
+        return "PRE_PUSH_VALIDATION_ROLLBACK_FAILED"
 
     async def _commit_failed(**_kwargs: object) -> bool:
         """Simulate a repair commit failure exception path."""
@@ -2203,13 +2210,73 @@ async def test_pre_push_validation_fix_pass_rollback_failure_is_bubbled_as_pre_p
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_post_reset_cleanup_failure_surfaces_cleanup_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful reset plus failed cleanup should not be labeled rollback failed."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    restore_ref = "6" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {restore_ref[:8]}\n")
+    cmd.queue_result(returncode=0, stdout="?? validation-artifact.log\n")
+    cmd.queue_result(returncode=1, stderr="clean failed")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(  # type: ignore[assignment]
+        _validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+    )
+
+    async def _commit_failed(**_kwargs: object) -> bool:
+        """Simulate a repair commit failure after the agent attempted a fix."""
+        return False
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_failed)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert "rollback failed" not in result.stderr
+    assert "cleanup failed" in result.stderr
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_rollback_does_not_clean_when_reset_fails(
+    factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     """A failed rollback reset should preserve untracked files for manual recovery."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
     runner = make_runner(
+        factory=factory,
         cmd=FakeCommandRunner(),
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
@@ -2221,18 +2288,20 @@ async def test_pre_push_validation_fix_pass_rollback_does_not_clean_when_reset_f
     restore_ref = "b" * 40
     cmd.queue_result(returncode=1, stdout="")
 
-    rolled_back = await pre_push_validation._rollback_failed_pre_push_validation_fix_pass(
-        runner,
-        workspace_id="workspace",
-        worktree_path=worktree,
-        restore_ref=restore_ref,
-        pass_number=1,
-        reason="reset_failed",
+    rollback_failure_reason = (
+        await pre_push_validation._rollback_failed_pre_push_validation_fix_pass(
+            runner,
+            workspace_id="workspace",
+            worktree_path=worktree,
+            restore_ref=restore_ref,
+            pass_number=1,
+            reason="reset_failed",
+        )
     )
 
-    assert rolled_back is False
+    assert rollback_failure_reason == "PRE_PUSH_VALIDATION_ROLLBACK_FAILED"
     joined_calls = [" ".join(call.args) for call in cmd.calls]
-    assert f"reset --hard {restore_ref}" in joined_calls
+    assert any(f"reset --hard {restore_ref}" in call for call in joined_calls)
     assert not any("clean -fdx" in call for call in joined_calls)
 
 
