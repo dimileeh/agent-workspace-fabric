@@ -1007,6 +1007,83 @@ class TestOperatorControlRaces:
                 "orphan stop failure must record a terminal_runtime_release_revoked event"
             )
 
+    @pytest.mark.unit
+    async def test_orphan_stop_failure_over_cap_records_revoke_cap_escalation(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        )
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            ws.status = WorkspaceStatus.destroyed.value
+            for _ in range(4):
+                await repo.add_event(
+                    ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                )
+            await repo.add_event(
+                ws,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        async def _mock_stop_project_containers_fail(
+            compose_project_name: str,
+        ) -> None:
+            del compose_project_name
+            raise RuntimeError("docker stop failed")
+
+        with patch(
+            "awf.node.provisioner.stop_project_containers",
+            new=_mock_stop_project_containers_fail,
+        ):
+            assert await provisioner._launch_lost_to_terminal_cleanup(ws_id) is True  # noqa: SLF001
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            revoked_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE
+                and e.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE
+            ]
+            assert len(revoked_events) == 5, (
+                "the current orphan stop failure must still record a revoke event"
+            )
+            cap_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.stale_action_skipped"
+                and e.reason_code == "REVOKE_CAP_REACHED"
+            ]
+            assert len(cap_events) == 1, (
+                "over-cap revoke counts must still surface the operator escalation"
+            )
+            assert cap_events[0].payload["revoke_count"] == 5
+            assert "docker stop failed" in cap_events[0].payload["orphan_stop_error"]
+
 
 class TestSecretLeaseIssueEdges:
     @pytest.mark.unit
