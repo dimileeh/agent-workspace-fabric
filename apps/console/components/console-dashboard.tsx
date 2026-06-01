@@ -872,13 +872,16 @@ const searchParams = useSearchParams();
   // there is no cached snapshot, so the panel shows its loading/error state
   // instead of a misleading "last snapshot" badge.
   const apiDown = apiState === "error";
-  const resourceErrored = apiDown || resourceError != null || workspaceSummaryError != null;
+  // Saturation drives the capacity panel and most fleet KPIs. A reliability
+  // summary error is a separate, secondary source (surfaced via its own banner),
+  // so it must not dim saturation-backed data that is still fresh.
+  const resourceErrored = apiDown || resourceError != null;
   const mergeErrored = apiDown || mergeQueueError != null || mergeQueueStatus === "error";
   const failureErrored = apiDown || failureSummaryStatus === "error";
   const capacityStale = resourceErrored && resourceSaturation != null;
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
-  const fleetStale = resourceErrored && (resourceSaturation != null || workspaceSummary != null);
+  const fleetStale = resourceErrored && resourceSaturation != null;
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
