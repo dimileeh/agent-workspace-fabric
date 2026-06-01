@@ -46,6 +46,7 @@ _REQUESTED_ADMISSION_SLOT_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.pushing,
     WorkspaceStatus.monitoring_pr,
 )
+"""Workspace statuses where the workspace holds an admission slot (e.g. a host-port lock)."""
 
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 
