@@ -1044,54 +1044,54 @@ class Provisioner:
         """
         compose_project = f"awf_{workspace_id}"
         async with self._session_factory() as session:
-            released = await has_terminal_runtime_released_event(session, workspace_id)
-        if not released:
-            return False
-        _log.warning(
-            "provisioner.launch_lost_to_terminal_cleanup",
-            workspace_id=workspace_id,
-            reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
-        )
-        orphan_stopped = True
-        orphan_stop_error = None
-        try:
-            await stop_project_containers(compose_project)
-        except Exception as exc:
-            orphan_stopped = False
-            orphan_stop_error = str(exc)
-            _log.exception(
-                "provisioner.orphan_container_stop_failed",
-                workspace_id=workspace_id,
-                reason_code="ORPHAN_STOP_FAILED",
-            )
-        async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get_for_update(workspace_id)
-            if ws is not None:
-                payload: dict[str, object] = {
-                    "action": "provision",
-                    "expected_status": WorkspaceStatus.provisioning.value,
-                    "actual_status": ws.status,
-                    "orphan_containers_stopped": orphan_stopped,
-                }
-                if orphan_stop_error is not None:
-                    payload["orphan_stop_error"] = orphan_stop_error
-                    await repo.add_event(
-                        ws,
-                        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-                        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-                        payload={
-                            "workspace_id": workspace_id,
-                            "orphan_stop_error": orphan_stop_error,
-                        },
-                    )
+            if ws is None:
+                return False
+            released = await has_terminal_runtime_released_event(session, workspace_id)
+            if not released:
+                return False
+            _log.warning(
+                "provisioner.launch_lost_to_terminal_cleanup",
+                workspace_id=workspace_id,
+                reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
+            )
+            orphan_stopped = True
+            orphan_stop_error = None
+            try:
+                await stop_project_containers(compose_project)
+            except Exception as exc:
+                orphan_stopped = False
+                orphan_stop_error = str(exc)
+                _log.exception(
+                    "provisioner.orphan_container_stop_failed",
+                    workspace_id=workspace_id,
+                    reason_code="ORPHAN_STOP_FAILED",
+                )
+            payload: dict[str, object] = {
+                "action": "provision",
+                "expected_status": WorkspaceStatus.provisioning.value,
+                "actual_status": ws.status,
+                "orphan_containers_stopped": orphan_stopped,
+            }
+            if orphan_stop_error is not None:
+                payload["orphan_stop_error"] = orphan_stop_error
                 await repo.add_event(
                     ws,
-                    event_type="workspace.stale_action_skipped",
-                    reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
-                    payload=payload,
+                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                    payload={
+                        "workspace_id": workspace_id,
+                        "orphan_stop_error": orphan_stop_error,
+                    },
                 )
-                await session.commit()
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_action_skipped",
+                reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
+                payload=payload,
+            )
+            await session.commit()
         return True
 
     async def _record_stale_action_skip(

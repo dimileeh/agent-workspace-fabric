@@ -83,11 +83,9 @@ async def acquire_host_port_admission_lock(
     for hp in dict.fromkeys(host_ports):
         lock_key = lock_key_fn(hp)
         if lock_key in seen_keys:
-            raise ValueError(
-                f"Advisory lock key collision for host port {hp}: "
-                f"lock key {lock_key} already acquired by a different port. "
-                f"Cannot safely skip the lock without risking a TOCTOU race."
-            )
+            from awf.service.workspaces import WorkspaceCreateDuplicateHostPortError
+
+            raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
         seen_keys.add(lock_key)
         distinct_keys.append(lock_key)
     distinct_keys.sort()
