@@ -686,6 +686,32 @@ class TestCollectSmokeReportExceptionPaths:
         assert "awf:" in result.draft.yaml
         assert result.inspection.detected_template == "generic"
 
+    def test_default_disk_profile_preview_resolves_forge_from_remote(self, tmp_path: Path) -> None:
+        """The checkout's bitbucket origin drives ``forge: auto`` resolution to bitbucket."""
+        workspace_dir = tmp_path / ".awf"
+        workspace_dir.mkdir()
+        (workspace_dir / "workspace.yml").write_text(
+            "awf:\n  name: generic\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        captured: dict[str, object] = {}
+        with (
+            patch(
+                "awf.common.git_remote.detect_repo_url_from_checkout",
+                return_value="https://bitbucket.org/o/r.git",
+            ),
+            patch(
+                "awf.profiles.onboarding.preview_workspace_profile",
+                side_effect=lambda _project, resolution: captured.update(
+                    forge=resolution.profile.forge
+                ),
+            ),
+        ):
+            _default_disk_profile_preview(tmp_path)
+
+        assert captured["forge"] == "bitbucket"
+
     async def test_workspace_request_fails_when_smoke_returns_non_dict(
         self, tmp_path: Path
     ) -> None:
