@@ -605,6 +605,7 @@ async def _rollback_failed_pre_push_validation_fix_pass(
         restore_ref=restore_ref,
         reset_returncode=reset.returncode,
         clean_returncode=0 if ok else None,
+        clean_reason_code=None if ok else cleanup.reason_code,
         reset_stderr=(reset.stderr or "")[:400],
         clean_stderr=(cleanup.cleanup_stderr or "")[:400],
     )
