@@ -234,19 +234,18 @@ async def find_host_port_conflicts(
     a JSONB index on the relevant port fields or a denormalized
     ``host_ports`` integer-array column with a GIN index.
 
-    NODE-FILTER GAP: When *node_id* is provided, workspaces whose
+    NODE-FILTER FALLBACK: When *node_id* is provided, workspaces whose
     ``node_id`` is NULL *and* have no ``ResourceReservation`` row at
-    all are silently excluded because
-    ``COALESCE(Workspace.node_id, active_reservation_node,
-    latest_reservation_node)`` returns NULL and ``NULL == node_id`` is
-    never true.  In practice, ``Provisioner._mark_failed`` stamps
-    ``node_id`` on the failure path, so new terminal rows always
-    carry the launching node.  Legacy rows persisted before that fix
-    and rows that failed at the DB layer before reservation creation
-    are the remaining gap.  For the current single-node topology this
-    is low-risk because all such workspaces share the same Docker
-    daemon; for multi-node deployments, a node-ownership claim or
-    fallback inclusion strategy will be needed.
+    all (legacy rows created before the provisioner started stamping
+    ``node_id`` and before the reservation system existed) are
+    included via a fallback clause that treats such null-node rows as
+    potential conflicts on every node.  This prevents an upgraded
+    local install from missing a legacy Docker stack that still owns
+    a host port.  In a true multi-node deployment this may produce
+    false positives for legacy rows whose actual node cannot be
+    determined; a node-ownership claim field (e.g.  a
+    ``claimed_node_id`` column on the workspace) would allow
+    precise attribution.
     """
     if not host_ports:
         return []
@@ -310,7 +309,16 @@ async def find_host_port_conflicts(
         effective_node = func.coalesce(
             Workspace.node_id, active_reservation_node, latest_reservation_node
         )
-        stmt = stmt.where(effective_node == node_id)
+        stmt = stmt.where(
+            or_(
+                effective_node == node_id,
+                and_(
+                    Workspace.node_id.is_(None),
+                    active_reservation_node.is_(None),
+                    latest_reservation_node.is_(None),
+                ),
+            )
+        )
 
     if excluding_workspace_id is not None:
         stmt = stmt.where(Workspace.id != excluding_workspace_id)

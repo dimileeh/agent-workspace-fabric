@@ -1267,3 +1267,53 @@ class TestCrossNodeAndEdgeCases:
             node_id="node-b",
         )
         assert conflicts_b == []
+
+    @pytest.mark.asyncio
+    async def test_legacy_terminal_no_reservation_included_via_null_node_fallback(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A legacy terminal workspace with no node_id and no reservation is included on all nodes.
+
+        Legacy rows created before the provisioner started stamping
+        ``Workspace.node_id`` and before the reservation system existed
+        can have ``compose_project_name IS NOT NULL`` but
+        ``Workspace.node_id IS NULL`` and zero ``ResourceReservation``
+        rows.  The null-node fallback clause must include such rows
+        when *node_id* is provided so that their unreleased Docker
+        stack is not missed by admission on an upgraded install.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            compose_project_name="awf_legacy_no_reservation",
+        )
+        ws.node_id = None
+        await session.commit()
+
+        conflicts_a = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+            node_id="local",
+        )
+        assert len(conflicts_a) == 1
+        assert conflicts_a[0].host_port == 8080
+        assert conflicts_a[0].workspace_id == ws.id
+
+        conflicts_b = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+            node_id="other-node",
+        )
+        assert len(conflicts_b) == 1
