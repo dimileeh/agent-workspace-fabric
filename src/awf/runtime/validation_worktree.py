@@ -546,6 +546,14 @@ async def cleanup_validation_worktree_side_effects(
             message=check.message,
         )
 
+    async def _return_after_head_verification(
+        failure: ValidationWorktreeCleanup,
+    ) -> ValidationWorktreeCleanup:
+        head_check = await _verify_head_unchanged(restore_ref=restore_ref)
+        if head_check is not None:
+            return head_check
+        return failure
+
     tracked_paths = check.tracked_paths
     if restore_ref is None and tracked_paths:
         message = (
@@ -593,16 +601,19 @@ async def cleanup_validation_worktree_side_effects(
             pathspecs=tuple(ignored_pathspecs),
         )
         if snapshot_stderr:
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=(
-                    "Could not inspect ignored paths for validation cleanup with `git ls-files`."
-                ),
-                cleanup_command=None,
-                cleanup_stderr=snapshot_stderr,
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "Could not inspect ignored paths for validation cleanup with "
+                        "`git ls-files`."
+                    ),
+                    cleanup_command=None,
+                    cleanup_stderr=snapshot_stderr,
+                )
             )
         current_ignored_signatures = (
             _snapshot_ignored_path_signatures(
@@ -619,14 +630,16 @@ async def cleanup_validation_worktree_side_effects(
             path for path in ignore_ignored_paths_snapshot if path not in current_ignored_set
         ]
         if deleted_ignored_paths:
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=(
-                    "AWF validation removed pre-existing ignored files: "
-                    f"{', '.join(deleted_ignored_paths)}"
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation removed pre-existing ignored files: "
+                        f"{', '.join(deleted_ignored_paths)}"
+                    ),
                 ),
             )
         modified_snapshot_paths = []
@@ -645,14 +658,16 @@ async def cleanup_validation_worktree_side_effects(
             ):
                 modified_snapshot_paths.append(path)
         if modified_snapshot_paths:
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=(
-                    "AWF validation modified pre-existing ignored files and they "
-                    f"cannot be safely restored: {', '.join(modified_snapshot_paths)}"
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation modified pre-existing ignored files and they "
+                        f"cannot be safely restored: {', '.join(modified_snapshot_paths)}"
+                    ),
                 ),
             )
         cleanup_untracked_paths.extend(

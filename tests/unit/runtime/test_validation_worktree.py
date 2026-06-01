@@ -557,6 +557,47 @@ async def test_cleanup_validation_worktree_fails_when_ignored_snapshot_path_disa
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_rolls_back_head_when_deleted_ignored_snapshot_fails(
+    tmp_path: Path,
+) -> None:
+    """Deleted setup-owned ignored files should not strand validation-authored HEAD."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    current_head = "b" * 40
+    pre_validation_snapshot = (".venv/existing-artifact.log",)
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate validation deleting an ignored file after moving HEAD."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{current_head}\n", None)
+        if args == ["reset", "--hard", restore_ref]:
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=pre_validation_snapshot,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleanup_command == "git reset --hard"
+    assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
+    assert ("reset", "--hard", restore_ref) in commands
+    assert ("clean", "-fdx", "--", ".venv/existing-artifact.log") not in commands
+
+
+@pytest.mark.unit
 async def test_cleanup_validation_worktree_verify_check_does_not_report_status_as_cleanup_command(
     tmp_path: Path,
 ) -> None:
