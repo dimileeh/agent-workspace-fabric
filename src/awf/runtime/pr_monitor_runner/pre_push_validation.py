@@ -183,6 +183,8 @@ async def _run_pre_push_validation_with_fix_passes(
         worktree_path=worktree_path,
     )
     last_result: _PrePushValidationResult | None = None
+    baseline_ignored_paths: tuple[str, ...] | None = None
+    baseline_ignored_paths_snapshot: tuple[str, ...] | None = None
     for pass_index in range(max_fix_passes + 1):
         validation_result = await _run_pre_push_validation(
             self,
@@ -191,7 +193,15 @@ async def _run_pre_push_validation_with_fix_passes(
             compose_project=compose_project,
             compose_file=compose_file,
             remote_branch=remote_branch,
+            ignore_ignored_paths=baseline_ignored_paths,
+            ignore_all_ignored=baseline_ignored_paths is None,
+            capture_ignored_paths_snapshot=(
+                baseline_ignored_paths is None or bool(baseline_ignored_paths)
+            ),
         )
+        if baseline_ignored_paths is None:
+            baseline_ignored_paths = validation_result.ignore_ignored_paths
+            baseline_ignored_paths_snapshot = validation_result.ignore_ignored_paths_snapshot
         if validation_result.passed:
             return validation_result
         last_result = validation_result
@@ -210,8 +220,8 @@ async def _run_pre_push_validation_with_fix_passes(
             remote_url=remote_url,
             state=state,
             validation_result=validation_result,
-            ignore_ignored_paths=validation_result.ignore_ignored_paths,
-            ignore_ignored_paths_snapshot=validation_result.ignore_ignored_paths_snapshot,
+            ignore_ignored_paths=baseline_ignored_paths or (),
+            ignore_ignored_paths_snapshot=baseline_ignored_paths_snapshot,
             pass_number=pass_index + 1,
             total_passes=max_fix_passes,
             validation_commands=validation_commands,
@@ -261,6 +271,9 @@ async def _pre_push_validation_worktree_check(
     self: Any,
     *,
     worktree_path: Path,
+    ignore_all_ignored: bool = True,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
+    capture_ignored_paths_snapshot: bool = True,
 ) -> ValidationWorktreeCheck:
     """Check pre-push validation preconditions for clean validation worktree state."""
 
@@ -273,8 +286,9 @@ async def _pre_push_validation_worktree_check(
     return await check_validation_worktree_clean(
         run_git=_run_git,
         worktree_path=worktree_path,
-        ignore_all_ignored=True,
-        capture_ignored_paths_snapshot=True,
+        ignore_all_ignored=ignore_all_ignored,
+        ignore_ignored_paths=ignore_ignored_paths,
+        capture_ignored_paths_snapshot=capture_ignored_paths_snapshot,
     )
 
 
@@ -589,6 +603,9 @@ async def _run_pre_push_validation(
     compose_project: str,
     compose_file: Path,
     remote_branch: str,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
+    ignore_all_ignored: bool = True,
+    capture_ignored_paths_snapshot: bool = True,
 ) -> _PrePushValidationResult:
     """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
@@ -618,6 +635,9 @@ async def _run_pre_push_validation(
     pre_validation_check = await _pre_push_validation_worktree_check(
         self,
         worktree_path=worktree_path,
+        ignore_all_ignored=ignore_all_ignored,
+        ignore_ignored_paths=ignore_ignored_paths,
+        capture_ignored_paths_snapshot=capture_ignored_paths_snapshot,
     )
     if not pre_validation_check.clean:
         return _pre_push_dirty_result(

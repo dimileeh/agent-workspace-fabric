@@ -918,6 +918,104 @@ async def test_pre_push_validation_untracked_cleanup_allows_fix_pass(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_uses_initial_ignored_snapshot_across_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry attempts should reuse the first ignored snapshot instead of recapturing all ignored files."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = "workspace_fix_retry"
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True, exist_ok=True)
+    fix_pass_calls: list[dict[str, object]] = []
+    validation_calls: list[dict[str, object]] = []
+    validation_results = [
+        pre_push_validation._PrePushValidationResult(
+            passed=False,
+            validation_run_id="vr1",
+            workspace_head_sha="a" * 40,
+            reason_code="PRE_PUSH_VALIDATION_FAILED",
+            message="attempt 1 failed",
+            validation_reason_code="PYTEST_TEST_FAILURE",
+            result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+            ignore_ignored_paths=(),
+            ignore_ignored_paths_snapshot=(),
+        ),
+        pre_push_validation._PrePushValidationResult(
+            passed=False,
+            validation_run_id="vr2",
+            workspace_head_sha="a" * 40,
+            reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+            message="attempt 2 failed",
+            result=None,
+        ),
+    ]
+
+    async def _run_pre_push_validation(
+        _self: Any,
+        *,
+        ignore_ignored_paths: tuple[str, ...] | None,
+        ignore_all_ignored: bool,
+        capture_ignored_paths_snapshot: bool,
+        **_kwargs: object,
+    ) -> pre_push_validation._PrePushValidationResult:
+        validation_calls.append(
+            {
+                "ignore_ignored_paths": ignore_ignored_paths,
+                "ignore_all_ignored": ignore_all_ignored,
+                "capture_ignored_paths_snapshot": capture_ignored_paths_snapshot,
+            }
+        )
+        return validation_results.pop(0)
+
+    async def _run_fix_pass(**_kwargs: object) -> tuple[bool, str | None]:
+        fix_pass_calls.append(cast(dict[str, object], _kwargs))
+        return True, None
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation",
+        _run_pre_push_validation,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation_fix_pass",
+        _run_fix_pass,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation_with_fix_passes(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+        remote_url=None,
+        state=None,
+    )
+
+    assert len(validation_calls) == 2
+    assert validation_calls[0]["ignore_all_ignored"] is True
+    assert validation_calls[0]["ignore_ignored_paths"] is None
+    assert validation_calls[0]["capture_ignored_paths_snapshot"] is True
+    assert validation_calls[1]["ignore_all_ignored"] is False
+    assert validation_calls[1]["ignore_ignored_paths"] == ()
+    assert validation_calls[1]["capture_ignored_paths_snapshot"] is False
+    assert len(fix_pass_calls) == 1
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
