@@ -199,6 +199,67 @@ async def test_retry_rejects_host_port_conflict(
 
 
 @pytest.mark.unit
+async def test_retry_rejects_host_port_conflict_with_normalized_target_node(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retry admission must normalize the configured worker node before
+    scanning host-port conflicts, matching create admission reservations."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        worker_node_id=" node-a ",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        blocker = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        blocker_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(blocker.id)
+        assert len(blocker_reservations) == 1
+        assert blocker_reservations[0].node_id == "node-a"
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="normalized target node conflict test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
 async def test_retry_allows_same_port_when_source_is_only_holder(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

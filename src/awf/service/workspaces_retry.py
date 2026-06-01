@@ -46,6 +46,7 @@ from awf.service.coordination import (
     owned_path_overlap_coordination_warnings,
     task_policy_with_coordination_warnings,
 )
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_readiness import (
     HttpGet,
     SubprocessRun,
@@ -300,8 +301,13 @@ async def retry_workspace_row(
     source_effective_node_id = source.node_id or (
         source_reservation.node_id if source_reservation else None
     )
+    configured_target_node_id = (
+        effective_worker_node_id(resolved_settings)
+        if resolved_settings.worker_node_id is not None
+        else None
+    )
     target_node_id = (
-        resolved_settings.worker_node_id
+        configured_target_node_id
         or source.node_id
         or (source_reservation.node_id if source_reservation else None)
         or "local"
