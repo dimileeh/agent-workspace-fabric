@@ -19,7 +19,7 @@ lint/type commands recorded as evidence.
 
 ## Commands run (focused)
 
-```
+```bash
 pytest tests/unit/common/test_forge.py tests/unit/common/test_repo_ref_forge.py \
        tests/unit/profiles/test_forge_resolution.py \
        tests/unit/control/test_executor_forge_gate.py     # 58 passed
