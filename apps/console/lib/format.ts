@@ -271,6 +271,13 @@ export function capacityUtilizationPct(saturation: ResourceSaturationSummary): n
     known = true;
     pct = Math.max(pct, 100);
   }
+  // Admission flagged saturated (not yet blocking) is a warning the capacity
+  // panel already surfaces; reflect it as at-least-warn pressure (>=75%) so the
+  // headline can't read healthy while admission is visibly saturated.
+  if (saturation.admission?.status === "saturated") {
+    known = true;
+    pct = Math.max(pct, 75);
+  }
   if (!known) {
     return null;
   }

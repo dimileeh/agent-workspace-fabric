@@ -271,6 +271,13 @@ test("capacityUtilizationPct treats blocked disk/admission as exhausted", () => 
   assert.equal(capacityUtilizationPct(saturationFixture({ admission: { ok: false } })), 100);
 });
 
+test("capacityUtilizationPct reflects admission saturated as at-least-warn", () => {
+  assert.equal(
+    capacityUtilizationPct(saturationFixture({ admission: { ok: true, status: "saturated" } })),
+    75,
+  );
+});
+
 test("capacityUtilizationPct returns null when no limit is comparable", () => {
   const saturation = saturationFixture({
     allocated_capacity: {
