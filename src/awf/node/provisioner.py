@@ -1039,22 +1039,24 @@ class Provisioner:
         containers and return ``True`` so the caller aborts without
         transitioning to ``ready``.
 
-        The initial check uses ``get`` (no row lock) so that slow
-        Docker I/O during ``stop_project_containers`` does not hold
-        the ``SELECT FOR UPDATE`` lock.  The row lock is re-acquired
-        only for the brief ``add_event`` / ``commit`` step after
-        Docker I/O completes.
+        The DB session is released before Docker I/O and reacquired
+        afterwards so that a slow or unresponsive Docker daemon does not
+        hold a pool connection.  The row lock (``get_for_update``) is
+        acquired only for the brief ``add_event`` / ``commit`` step
+        after Docker I/O completes.
+
+        Mitigations for pool exhaustion: (1) the DB session is released
+        before Docker I/O; (2) ``stop_project_containers`` should be
+        wrapped with a per-operation timeout by its caller if the
+        pool has a tight size bound; (3) the pool ``max_size`` should
+        account for at most one concurrent orphan-stop per node.
 
         Returns ``True`` when terminal cleanup won and containers were
         stopped; ``False`` when the workspace is still clear to proceed.
         """
         compose_project = f"awf_{workspace_id}"
+        prior_status: str | None = None
         async with self._session_factory() as session:
-            # NOTE: the session (and its DB connection) is held open across the
-            # stop_project_containers call below.  This is intentional: we avoid
-            # a SELECT FOR UPDATE lock during slow Docker I/O, at the cost of
-            # tying up one pool connection.  Acceptable for single-node topology;
-            # revisit if connection-pool exhaustion becomes a concern.
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
             if ws is None:
@@ -1063,23 +1065,26 @@ class Provisioner:
             if not released:
                 return False
             prior_status = ws.status
-            _log.warning(
-                "provisioner.launch_lost_to_terminal_cleanup",
+
+        _log.warning(
+            "provisioner.launch_lost_to_terminal_cleanup",
+            workspace_id=workspace_id,
+            reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
+        )
+        orphan_stopped = True
+        orphan_stop_error = None
+        try:
+            await stop_project_containers(compose_project)
+        except Exception as exc:
+            orphan_stopped = False
+            orphan_stop_error = str(exc)
+            _log.exception(
+                "provisioner.orphan_container_stop_failed",
                 workspace_id=workspace_id,
-                reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
+                reason_code="ORPHAN_STOP_FAILED",
             )
-            orphan_stopped = True
-            orphan_stop_error = None
-            try:
-                await stop_project_containers(compose_project)
-            except Exception as exc:
-                orphan_stopped = False
-                orphan_stop_error = str(exc)
-                _log.exception(
-                    "provisioner.orphan_container_stop_failed",
-                    workspace_id=workspace_id,
-                    reason_code="ORPHAN_STOP_FAILED",
-                )
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
             ws = await repo.get_for_update(workspace_id)
             if ws is None:
                 return True
