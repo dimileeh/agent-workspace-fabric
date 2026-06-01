@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -27,8 +28,8 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner.remote_ops import (
-    _GitPushResult,
     _git_push_failure_outcome,
+    _GitPushResult,
 )
 from awf.runtime.validation_types import (
     ValidationCommandResult,
@@ -85,6 +86,41 @@ class _FakeValidation:
         """Stub profile coverage step; included for interface compatibility."""
         self.coverage_calls.append(dict(kwargs))
         return self.coverage_result
+
+
+@pytest.mark.unit
+def test_pre_push_validation_structural_helpers_are_single_source() -> None:
+    """Keep pre-push validation helper definitions and retry flow single-sourced."""
+    source_path = Path(pre_push_validation_module.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    helper_names = {
+        "_failed_pre_push_commands",
+        "_first_real_pre_push_failure",
+        "_first_failure_outside_collected_failures",
+        "_first_real_pre_push_failure_for_result",
+        "_first_real_pre_push_failure_from_failures",
+        "_pure_toolchain_missing_failure",
+        "_pure_toolchain_missing_failure_for_result",
+        "_pure_toolchain_missing_failure_from_failures",
+        "_preferred_pre_push_failure",
+        "_preferred_pre_push_failure_from_failures",
+        "_pre_push_validation_reason_code_for_preferred_failure",
+        "_pre_push_validation_reason_code",
+    }
+    top_level_functions = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+
+    for helper_name in helper_names:
+        assert top_level_functions.count(helper_name) == 1
+
+    retry_function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_run_pre_push_validation_with_fix_passes"
+    )
+    assert isinstance(retry_function.body[-1], ast.While)
+    assert isinstance(retry_function.body[-1].test, ast.Constant)
+    assert retry_function.body[-1].test.value is True
 
 
 def _command_result(

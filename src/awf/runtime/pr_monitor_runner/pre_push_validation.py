@@ -425,14 +425,6 @@ async def _run_pre_push_validation_with_fix_passes(
                 ),
             )
         pass_index += 1
-    return replace(
-        validation_result,
-        reason_code=PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
-        message=(
-            "PR monitor pre-push validation fix pass failed after "
-            f"all attempts: {validation_result.message}"
-        ),
-    )
 
 
 def _pre_push_validation_new_ignored_entries(
