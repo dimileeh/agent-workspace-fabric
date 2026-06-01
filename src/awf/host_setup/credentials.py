@@ -514,21 +514,28 @@ class PlainFileCredentialBackend:
         provider = _require_safe_identifier(request.provider, field="provider")
         account = _require_safe_identifier(request.account, field="account")
         # Resolve the secrets dir only now — after the platform/consent gates and the
-        # identifier validation above. Resolution expands ``~`` against the host home
-        # directory, which raises ``RuntimeError`` when none can be determined (a
-        # minimal container user with no ``HOME``/passwd entry). Translate that into
-        # the reason-coded ``CredentialError`` every other backend failure uses so a
-        # missing home never escapes as a raw ``pathlib`` exception, and so the more
-        # fundamental platform/consent/input diagnostics above still take precedence
-        # (PRRT_kwDOSJAM6s6F-tfO).
+        # identifier validation above. Resolution can fail two ways, neither of which
+        # may escape as a raw stdlib exception (the backend contract is "raises only
+        # ``CredentialError``"):
+        #   * ``~`` expansion against the host home directory raises ``RuntimeError``
+        #     when none can be determined (a minimal container user with no
+        #     ``HOME``/passwd entry); and
+        #   * a *relative* custom ``secrets_dir`` is absolutised via ``Path.absolute``,
+        #     which calls ``os.getcwd`` and raises ``FileNotFoundError`` (an
+        #     ``OSError``) when the process working directory has been deleted.
+        # Translate either into the reason-coded ``CredentialError`` every other
+        # backend failure uses so a missing home or working directory never escapes as
+        # a raw ``pathlib``/``os`` exception, and so the more fundamental
+        # platform/consent/input diagnostics above still take precedence
+        # (PRRT_kwDOSJAM6s6F-tfO). The recorded ``error_type`` distinguishes the two.
         try:
             secrets_dir = self._secrets_dir
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             raise CredentialError(
                 reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
                 message=(
                     "Unable to resolve the plain-file secrets directory: the host "
-                    "home directory could not be determined."
+                    "home or current working directory could not be determined."
                 ),
                 details={"backend": self.kind, "error_type": type(exc).__name__},
             ) from exc

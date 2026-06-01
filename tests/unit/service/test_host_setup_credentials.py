@@ -1060,6 +1060,42 @@ def test_plain_file_unresolvable_home_is_reason_coded(
 
 
 @pytest.mark.unit
+def test_plain_file_unresolvable_cwd_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify an ``OSError`` from cwd resolution maps to a reason-coded error.
+
+    A *relative* custom ``secrets_dir`` is absolutised via ``Path.absolute``,
+    which calls ``os.getcwd``. That raises ``FileNotFoundError`` (an ``OSError``,
+    not the ``RuntimeError`` home expansion raises) when the process working
+    directory has been deleted out from under it. Like the home-resolution
+    failure it must not escape the backend as a raw ``os`` error: it maps to the
+    same ``CREDENTIAL_BACKEND_UNAVAILABLE`` reason every other plain-file backend
+    failure uses, recording only the exception *type* — never a path or secret.
+    """
+
+    def _no_cwd() -> str:
+        raise FileNotFoundError("[Errno 2] No such file or directory")
+
+    # ``Path.absolute`` calls ``os.getcwd`` on the shared ``os`` module object,
+    # so patching it through ``credentials.os`` reaches ``pathlib``'s call too.
+    monkeypatch.setattr(credentials.os, "getcwd", _no_cwd)
+
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir="relative/secrets",
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "plain_file", "error_type": "FileNotFoundError"}
+
+
+@pytest.mark.unit
 def test_plain_file_platform_gate_precedes_home_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
