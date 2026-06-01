@@ -1039,18 +1039,25 @@ class Provisioner:
         containers and return ``True`` so the caller aborts without
         transitioning to ``ready``.
 
+        The initial check uses ``get`` (no row lock) so that slow
+        Docker I/O during ``stop_project_containers`` does not hold
+        the ``SELECT FOR UPDATE`` lock.  The row lock is re-acquired
+        only for the brief ``add_event`` / ``commit`` step after
+        Docker I/O completes.
+
         Returns ``True`` when terminal cleanup won and containers were
         stopped; ``False`` when the workspace is still clear to proceed.
         """
         compose_project = f"awf_{workspace_id}"
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.get_for_update(workspace_id)
+            ws = await repo.get(workspace_id)
             if ws is None:
                 return False
             released = await has_terminal_runtime_released_event(session, workspace_id)
             if not released:
                 return False
+            prior_status = ws.status
             _log.warning(
                 "provisioner.launch_lost_to_terminal_cleanup",
                 workspace_id=workspace_id,
@@ -1068,10 +1075,13 @@ class Provisioner:
                     workspace_id=workspace_id,
                     reason_code="ORPHAN_STOP_FAILED",
                 )
+            ws = await repo.get_for_update(workspace_id)
+            if ws is None:
+                return True
             payload: dict[str, object] = {
                 "action": "provision",
                 "expected_status": WorkspaceStatus.provisioning.value,
-                "actual_status": ws.status,
+                "actual_status": prior_status,
                 "orphan_containers_stopped": orphan_stopped,
             }
             if orphan_stop_error is not None:
