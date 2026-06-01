@@ -302,8 +302,8 @@ async def retry_workspace_row(
     )
     target_node_id = (
         resolved_settings.worker_node_id
-        or (source_reservation.node_id if source_reservation else None)
         or source.node_id
+        or (source_reservation.node_id if source_reservation else None)
         or "local"
     )
     # Phase 1 single-node assumption: when source_effective_node_id is None
