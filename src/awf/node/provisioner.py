@@ -1217,21 +1217,21 @@ class Provisioner:
                         "orphan_stop_error": orphan_stop_error,
                     },
                 )
-                if revoke_count + 1 >= _MAX_REVOKE_EVENTS:
+                if revoke_count + 1 == _MAX_REVOKE_EVENTS:
                     await repo.add_event(
                         ws,
                         event_type="workspace.stale_action_skipped",
                         reason_code="REVOKE_CAP_REACHED",
                         payload={
                             "workspace_id": workspace_id,
-                            "revoke_count": revoke_count,
+                            "revoke_count": revoke_count + 1,
                             "orphan_stop_error": orphan_stop_error,
                             "message": (
-                                f"{revoke_count} consecutive revoke events; "
-                                "suppressing further revokes to break "
-                                "release-revoke loop. Operator intervention "
-                                "may be required to stop orphan containers "
-                                "and free host ports."
+                                f"{revoke_count + 1} consecutive revoke events; "
+                                "operator intervention may be required to stop "
+                                "orphan containers and free host ports. "
+                                "Revoke events will continue to be recorded "
+                                "until the runtime is released."
                             ),
                         },
                     )
