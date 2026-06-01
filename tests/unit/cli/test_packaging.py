@@ -1,6 +1,11 @@
 import tomllib
 from pathlib import Path
 
+import pytest
+
+import awf
+from tests.packaging_build import pyproject_project_version
+
 REPO_ROOT = Path(__file__).parents[3]
 
 
@@ -72,6 +77,18 @@ def test_wheel_includes_bootstrap_assets_without_secret_env_files() -> None:
     assert "/docker/compose/.env" in set(sdist.get("exclude", []))
 
 
+def test_sdist_includes_installer_release_metadata() -> None:
+    """The sdist ships the checked-in installer/release metadata (T11/T12 lanes)."""
+    pyproject_path = REPO_ROOT / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        data = tomllib.load(f)
+
+    sdist_includes = set(data["tool"]["hatch"]["build"]["targets"]["sdist"].get("include", []))
+    assert "/packaging/install.sh" in sdist_includes
+    assert "/scripts/generate_install_manifest.py" in sdist_includes
+    assert "/RELEASING.md" in sdist_includes
+
+
 def test_control_plane_dockerfile_copies_forced_bootstrap_assets_before_uv_sync() -> None:
     """The service image build must include Hatch forced-includes before uv sync."""
     pyproject_path = REPO_ROOT / "pyproject.toml"
@@ -90,3 +107,29 @@ def test_control_plane_dockerfile_copies_forced_bootstrap_assets_before_uv_sync(
 
     for source_path in force_include:
         assert source_path in dockerfile_prefix
+
+
+# --------------------------------------------------------------------------- #
+# Version-drift guard
+# --------------------------------------------------------------------------- #
+#
+# These are sub-millisecond static checks (no build artifact), so they live here
+# in the fast static-packaging suite rather than the ``slow``-marked build-backed
+# module — drift between ``pyproject.toml`` and ``src/awf/__init__.py`` must be
+# caught by fast CI lanes, not only a scheduled slow run.
+
+
+def test_runtime_version_matches_pyproject() -> None:
+    """``awf.__version__`` tracks ``pyproject[project].version`` (installer post-check)."""
+    assert awf.__version__ == pyproject_project_version()
+
+
+def test_installed_distribution_version_matches_pyproject() -> None:
+    """When resolvable, the installed distribution metadata version matches pyproject."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        installed = version("agent-workspace-fabric")
+    except PackageNotFoundError:  # pragma: no cover - depends on install layout
+        pytest.skip("agent-workspace-fabric distribution metadata is not resolvable")
+    assert installed == pyproject_project_version()
