@@ -20,8 +20,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Final, Protocol, cast
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_value
@@ -30,7 +31,7 @@ from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import release_sync_source_branch
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     EgressAuditRepository,
     ResourceReservationRepository,
@@ -78,6 +79,16 @@ from awf.service.workspaces import (
     WorkspaceCreateDuplicateHostPortError,
     WorkspaceCreateHostPortConflictError,
 )
+
+_MAX_REVOKE_EVENTS: Final = 3
+"""Maximum revoke events before escalation.
+
+When ``_launch_lost_to_terminal_cleanup`` records this many consecutive
+``terminal_runtime_release_revoked`` events (orphan container stop failures),
+further revokes are suppressed to break the indefinite release-revoke loop
+and let the workspace appear as effectively released.  An operator-surfaced
+stale-reason event is recorded instead so a human can intervene.
+"""
 
 _log = get_logger(__name__)
 
@@ -1122,15 +1133,48 @@ class Provisioner:
             }
             if orphan_stop_error is not None:
                 payload["orphan_stop_error"] = orphan_stop_error
-                await repo.add_event(
-                    ws,
-                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-                    payload={
-                        "workspace_id": workspace_id,
-                        "orphan_stop_error": orphan_stop_error,
-                    },
+                revoke_count_result = await session.execute(
+                    select(func.count()).where(
+                        WorkspaceEvent.workspace_id == workspace_id,
+                        WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                        WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                    )
                 )
+                revoke_count = revoke_count_result.scalar() or 0
+                if revoke_count >= _MAX_REVOKE_EVENTS:
+                    _log.warning(
+                        "provisioner.revoke_cap_reached",
+                        workspace_id=workspace_id,
+                        revoke_count=revoke_count,
+                        reason_code="REVOKE_CAP_REACHED",
+                    )
+                    await repo.add_event(
+                        ws,
+                        event_type="workspace.stale_action_skipped",
+                        reason_code="REVOKE_CAP_REACHED",
+                        payload={
+                            "workspace_id": workspace_id,
+                            "revoke_count": revoke_count,
+                            "orphan_stop_error": orphan_stop_error,
+                            "message": (
+                                f"{revoke_count} consecutive revoke events; "
+                                "suppressing further revokes to break "
+                                "release-revoke loop. Operator intervention "
+                                "may be required to stop orphan containers "
+                                "and free host ports."
+                            ),
+                        },
+                    )
+                else:
+                    await repo.add_event(
+                        ws,
+                        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                        payload={
+                            "workspace_id": workspace_id,
+                            "orphan_stop_error": orphan_stop_error,
+                        },
+                    )
             await repo.add_event(
                 ws,
                 event_type="workspace.stale_action_skipped",
