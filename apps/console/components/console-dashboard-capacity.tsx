@@ -321,7 +321,6 @@ function localCapacityDetail(source: LocalCapacitySourceValue | null): string {
     case "mixed":
       return "Limits combine AWF_LOCAL_CAPACITY_* overrides with Docker runtime detection";
     case null:
-      return "Limits are the runtime capacity AWF reports for scheduling (the host's own resources under a native Docker Engine; the VM allocation under Docker Desktop)";
     default:
       return "Limits are the runtime capacity AWF reports for scheduling (the host's own resources under a native Docker Engine; the VM allocation under Docker Desktop)";
   }
