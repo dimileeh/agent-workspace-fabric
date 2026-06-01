@@ -148,6 +148,33 @@ class _EventRecordingValidation(_RecordingValidation):
         return await super().run_profile_phases(phase_names=phase_names, **kwargs)
 
 
+class _CancellingHandoffSetupValidation:
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> ValidationResult:
+        self.calls.append(phase_names)
+        assert phase_names == ("setup", "pre_agent")
+        async with self._factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.cancelled,
+                reason_code="TEST_CANCELLED",
+            )
+            await session.commit()
+        return ValidationResult()
+
+
 class TestExecutorMonitorHandoffSetup:
     @pytest.mark.unit
     async def test_handoff_monitor_rejects_prepared_profile_with_setup_enabled(
@@ -408,6 +435,61 @@ class TestExecutorMonitorHandoffSetup:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_setup_status_recheck_blocks_monitor_factory(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        factory_calls: list[str] = []
+        validation = _CancellingHandoffSetupValidation(factory)
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+                raise AssertionError("cancelled handoff must not run the PR monitor")
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> _Monitor:
+            factory_calls.append("called")
+            return _Monitor()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert factory_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "sync_feature_pr_handoff"
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_setup_failure_blocks_monitor(

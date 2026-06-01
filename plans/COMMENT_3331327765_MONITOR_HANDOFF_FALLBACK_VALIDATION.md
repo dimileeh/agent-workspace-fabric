@@ -1,7 +1,7 @@
 # Monitor Handoff Fallback Persistence Validation
 
 Plan reference:
-`COMMENT_3331327765_MONITOR_HANDOFF_FALLBACK_PLAN.md`
+`plans/COMMENT_3331327765_MONITOR_HANDOFF_FALLBACK_PLAN.md`
 
 ## Requirement Status
 

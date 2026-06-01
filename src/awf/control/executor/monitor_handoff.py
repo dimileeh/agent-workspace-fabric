@@ -772,6 +772,7 @@ async def _build_handoff_pr_monitor(
     build_failed_message_prefix: str,
     profile: Any | None = None,
     run_profile_setup: bool = True,
+    stale_action: str = "monitor_handoff_build_pr_monitor",
 ) -> _MonitorRunnerProto | None:
     """Build the PR monitor for a handoff, marking the workspace failed on error.
 
@@ -814,6 +815,12 @@ async def _build_handoff_pr_monitor(
             compose_project=compose_project,
             compose_file=compose_file,
             worktree_path=worktree_path,
+        ):
+            return None
+        if run_profile_setup and not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action=stale_action,
         ):
             return None
         if monitor is None and self._pr_monitor_factory is not None:
@@ -1229,6 +1236,7 @@ async def _handoff_sync_feature_pr_monitor(
         compose_file=compose_file,
         build_failed_log_event="executor.sync_feature_pr_monitor_build_failed",
         build_failed_message_prefix="adopted PR monitor handoff failed: ",
+        stale_action="sync_feature_pr_handoff",
     )
     if monitor is None:
         return

@@ -1,7 +1,7 @@
 # Monitor Handoff Ownership Repair Validation
 
 Plan reference:
-`COMMENT_3330714584_MONITOR_HANDOFF_OWNERSHIP_PLAN.md`
+`plans/COMMENT_3330714584_MONITOR_HANDOFF_OWNERSHIP_PLAN.md`
 
 ## Requirement Status
 
