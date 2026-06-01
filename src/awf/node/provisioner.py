@@ -100,15 +100,18 @@ _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head
 _MAX_REVOKE_EVENTS: Final = 3
 """Maximum revoke events before escalation.
 
-When ``_launch_lost_to_terminal_cleanup`` records this many consecutive
+When ``_launch_lost_to_terminal_cleanup`` records this many lifetime-total
 ``terminal_runtime_release_revoked`` events (orphan container stop failures),
 an additional escalation event is recorded to surface the problem to an
-operator.  The revoke event itself is always recorded regardless of the cap
-so that the workspace remains effectively unreleased (ports stay blocked) in
-the ``terminal_runtime_effectively_released_expr`` check.  Without the
-revoke event, the latest event would remain ``terminal_runtime_released``,
-falsely marking the workspace as released even though orphan containers
-still hold host ports.
+operator.  The counter is intentionally lifetime-total rather than
+consecutive: a workspace that has needed repeated orphan-stop intervention is
+worth surfacing even if cleanup eventually succeeded between failures.  The
+revoke event itself is always recorded regardless of the cap so that the
+workspace remains effectively unreleased (ports stay blocked) in the
+``terminal_runtime_effectively_released_expr`` check.  Without the revoke
+event, the latest event would remain ``terminal_runtime_released``, falsely
+marking the workspace as released even though orphan containers still hold
+host ports.
 """
 
 _log = get_logger(__name__)
@@ -1383,7 +1386,7 @@ class Provisioner:
                             "revoke_count": revoke_count + 1,
                             "orphan_stop_error": orphan_stop_error,
                             "message": (
-                                f"{revoke_count + 1} consecutive revoke events; "
+                                f"{revoke_count + 1} lifetime-total revoke events; "
                                 "operator intervention may be required to stop "
                                 "orphan containers and free host ports. "
                                 "Revoke events will continue to be recorded "

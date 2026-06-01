@@ -1082,6 +1082,8 @@ class TestOperatorControlRaces:
                 "over-cap revoke counts must still surface the operator escalation"
             )
             assert cap_events[0].payload["revoke_count"] == 5
+            assert "lifetime-total revoke events" in cap_events[0].payload["message"]
+            assert "consecutive revoke events" not in cap_events[0].payload["message"]
             assert "docker stop failed" in cap_events[0].payload["orphan_stop_error"]
 
 
