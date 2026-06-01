@@ -1050,6 +1050,11 @@ class Provisioner:
         """
         compose_project = f"awf_{workspace_id}"
         async with self._session_factory() as session:
+            # NOTE: the session (and its DB connection) is held open across the
+            # stop_project_containers call below.  This is intentional: we avoid
+            # a SELECT FOR UPDATE lock during slow Docker I/O, at the cost of
+            # tying up one pool connection.  Acceptable for single-node topology;
+            # revisit if connection-pool exhaustion becomes a concern.
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
             if ws is None:

@@ -314,9 +314,7 @@ async def retry_workspace_row(
         or "local"
     )
     if await _source_runtime_not_yet_released(session, source) and (
-        source_effective_node_id is None
-        or target_node_id is None
-        or source_effective_node_id == target_node_id
+        source_effective_node_id is None or source_effective_node_id == target_node_id
     ):
         raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
             source_workspace_id=source.id,
