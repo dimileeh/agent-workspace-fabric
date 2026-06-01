@@ -188,6 +188,9 @@ def test_redaction_preserves_merge_method_policy_phrases() -> None:
         "Squash merges are not allowed",
         "Merge commits are not allowed",
         "Rebase merges are not allowed",
+        "Merge method squash merging is not allowed",
+        "Merge method merge commit is not allowed",
+        "Merge method rebase is not allowed",
     )
 
     for phrase in phrases:
@@ -806,11 +809,11 @@ async def test_unclassified_first_merge_failure_notifies_without_method_mismatch
 
 
 @pytest.mark.unit
-async def test_mismatched_first_merge_rejection_retries_allowed_alternative(
+async def test_mismatched_first_merge_rejection_notifies_without_method_rotation(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A mismatched method-specific rejection retries the next allowed method."""
+    """A rejection naming a different method is not enough to rotate methods."""
     gh = _MergeMethodClient(
         repo_methods=("merge", "squash"),
         branch_methods=("merge", "squash"),
@@ -830,20 +833,22 @@ async def test_mismatched_first_merge_rejection_retries_allowed_alternative(
         gh=gh,
     )
 
-    assert terminal is True
-    assert gh.merge_calls == ["squash", "merge"]
-    assert gh.comments == []
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert len(gh.comments) == 1
+    assert "GitHub rejected the merge attempt" in gh.comments[0]
+    assert "MERGE_METHOD_MISMATCH" not in gh.comments[0]
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
 
 
 @pytest.mark.unit
-async def test_mismatched_last_merge_rejection_records_method_blocker(
+async def test_mismatched_last_merge_rejection_notifies_without_method_blocker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A mismatched method-specific rejection blocks after alternatives are exhausted."""
+    """A rejection naming a different method does not persist a method blocker."""
     gh = _MergeMethodClient(
         repo_methods=("squash",),
         branch_methods=("squash",),
@@ -865,11 +870,10 @@ async def test_mismatched_last_merge_rejection_records_method_blocker(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert len(gh.comments) == 1
-    assert "no merge method succeeded" in gh.comments[0]
-    assert "selected merge method is not allowed" not in gh.comments[0]
-    assert "attempted=squash; effective_allowed=squash" in gh.comments[0]
+    assert "GitHub rejected the merge attempt" in gh.comments[0]
+    assert "MERGE_METHOD_MISMATCH" not in gh.comments[0]
     assert sleep_fn.calls == [60]
-    assert any(
+    assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
 

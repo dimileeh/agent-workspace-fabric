@@ -1264,6 +1264,9 @@ class GitHubClient:
             allowed = parameters.get("allowed_merge_methods")
             if not isinstance(allowed, list):
                 continue
+            if not allowed:
+                constrained = set()
+                break
             normalized = {method for method in allowed if method in {"merge", "squash", "rebase"}}
             if not normalized:
                 continue

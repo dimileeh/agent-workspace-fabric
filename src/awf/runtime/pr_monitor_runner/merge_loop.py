@@ -289,7 +289,8 @@ async def _attempt_merge_method(
             method=merge_method,
         )
     except GitHubClientError as exc:
-        is_method_rejection = _merge_error_supports_method_alternative(exc)
+        rejected_method = _merge_method_rejection_method(exc)
+        is_confirmed_method_rejection = rejected_method == merge_method
         await self._finish_monitor_operation(
             merge_operation,
             status=OperationStatus.failed,
@@ -321,9 +322,9 @@ async def _attempt_merge_method(
             },
         )
         has_remaining_alternative = attempt_index < len(effective_methods) - 1
-        if has_remaining_alternative and is_method_rejection:
+        if has_remaining_alternative and is_confirmed_method_rejection:
             return _MergeAttemptResult(_MergeAttemptOutcome.RETRY_NEXT_METHOD)
-        if is_method_rejection:
+        if is_confirmed_method_rejection:
             notification_reason = _merge_method_mismatch_message(
                 base_branch=base_branch,
                 attempted_method=merge_method,
