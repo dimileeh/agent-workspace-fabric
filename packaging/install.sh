@@ -849,12 +849,15 @@ awf_version_matches_install() {
     reported="$("$candidate" --version 2>/dev/null || true)"
     [ -n "$reported" ] || return 1
 
-    for token in $reported; do
+    while IFS= read -r token; do
+        [ -n "$token" ] || continue
         normalized="$(normalize_version_token "$token")"
         if [ "$normalized" = "$expected" ]; then
             return 0
         fi
-    done
+    done <<EOF
+$(printf '%s' "$reported" | tr '[:space:]' '\n')
+EOF
     return 1
 }
 

@@ -88,6 +88,25 @@ def test_default_install_rejects_stale_path_awf_when_bin_dir_empty(
 
 
 @pytest.mark.unit
+def test_default_install_rejects_glob_expansion_in_path_awf_version(
+    harness: InstallerHarness,
+) -> None:
+    """Glob characters in ``awf --version`` cannot fake a version match."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # install "succeeds" but produces no awf in uv's bin dir
+    harness.add_awf(version="*")  # stale PATH binary with glob-like version output
+    (harness.root / "0.1.0").write_text("cwd glob match\n", encoding="utf-8")
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "AWF_NOT_REACHABLE" in result.stderr
+    assert "Installed agent-workspace-fabric" not in result.stdout
+
+
+@pytest.mark.unit
 def test_default_install_accepts_matching_path_awf_when_bin_dir_empty(
     harness: InstallerHarness,
 ) -> None:
