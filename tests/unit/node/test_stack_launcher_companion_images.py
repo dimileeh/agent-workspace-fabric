@@ -81,6 +81,34 @@ class _MissingImageOnceCompose:
         )
 
 
+class _MissingImagesInOrderCompose:
+    """Compose double that loses pre-built companion tags across launch attempts."""
+
+    def __init__(self, missing_tags: tuple[str, ...]) -> None:
+        """Initialize the missing-image sequence and recorded launch specs."""
+        self.missing_tags = missing_tags
+        self.specs: list[WorkspaceComposeSpec] = []
+        self.waits: list[bool] = []
+
+    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+        """Fail once per configured tag, then succeed."""
+        self.specs.append(spec)
+        self.waits.append(wait)
+        attempt_index = len(self.specs) - 1
+        if attempt_index < len(self.missing_tags):
+            raise ComposeOperationError(
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr=f"Error response from daemon: No such image: {self.missing_tags[attempt_index]}",
+                reason_code="COMPOSE_COMMAND_FAILED",
+            )
+        return ComposeProjectPaths(
+            project_dir=Path("/tmp/awf-compose/ws_launcher"),
+            compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+        )
+
+
 class _RecordingBuilder:
     def __init__(self, *, tag: str | None, exists: bool = True) -> None:
         """Initialize the fake pre-build result and existence state."""
@@ -339,6 +367,68 @@ async def test_launch_revalidates_remaining_prebuilt_companion_images_before_ret
     assert builder.exists_calls.count(backend_tag) == 1
     assert builder.exists_calls.count(worker_tag) == 2
     assert compose.waits == [True, True]
+
+
+@pytest.mark.unit
+async def test_launch_retries_repeated_missing_prebuilt_companion_images(
+    tmp_path: Path,
+) -> None:
+    """Each stale pre-built companion tag gets a bounded point-of-use retry."""
+    backend_tag = "awf-companion-backend:abc123def456"
+    worker_tag = "awf-companion-worker:abc123def456"
+
+    class _MultiTagBuilder:
+        """Builder double that reports both tags present during revalidation."""
+
+        def __init__(self) -> None:
+            self.exists_calls: list[str] = []
+
+        async def ensure(
+            self,
+            *,
+            name: str,
+            commit_sha: str,
+            build_context: str,
+            dockerfile: str,
+            relative_build_context: str,
+            capture_timeout_seconds: float,
+        ) -> str | None:
+            del commit_sha, build_context, dockerfile, relative_build_context
+            del capture_timeout_seconds
+            return {"backend": backend_tag, "worker": worker_tag}[name]
+
+        async def companion_image_exists(self, tag: str) -> bool:
+            self.exists_calls.append(tag)
+            return True
+
+    compose = _MissingImagesInOrderCompose((backend_tag, worker_tag))
+    builder = _MultiTagBuilder()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+    request = _launch_request(tmp_path)
+    request = WorkspaceStackLaunchRequest(
+        workspace_id=request.workspace_id,
+        layout=request.layout,
+        profile=request.profile,
+        companions=(
+            _materialized(tmp_path / "backend", name="backend"),
+            _materialized(tmp_path / "worker", name="worker"),
+        ),
+        companion_graph_prevalidated=True,
+    )
+
+    await launcher.launch(request)
+
+    assert [[companion.image for companion in spec.companions] for spec in compose.specs] == [
+        [backend_tag, worker_tag],
+        [None, worker_tag],
+        [None, None],
+    ]
+    assert builder.exists_calls == [backend_tag, worker_tag, worker_tag]
+    assert compose.waits == [True, True, True]
 
 
 @pytest.mark.unit

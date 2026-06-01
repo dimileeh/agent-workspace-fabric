@@ -192,25 +192,31 @@ class ComposeStackLauncher:
         )
         try:
             spec = await self._revalidate_prebuilt_companion_images(spec)
-            paths = await self._compose.up(spec, wait=True)
         except ComposeOperationError as e:
-            retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
-            if retry_spec is not None:
+            _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
+            raise
+        missing_prebuilt_retry_budget = _prebuilt_companion_image_count(spec)
+        while True:
+            try:
+                paths = await self._compose.up(spec, wait=True)
+                break
+            except ComposeOperationError as e:
+                retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
+                if retry_spec is None or missing_prebuilt_retry_budget <= 0:
+                    _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
+                    raise
                 # Replace spec so retry-time revalidation and any retry failure
                 # handling report the compose spec used by the failing attempt.
                 spec = retry_spec
+                missing_prebuilt_retry_budget -= 1
                 try:
                     spec = await self._revalidate_prebuilt_companion_images(spec)
-                    paths = await self._compose.up(spec, wait=True)
                 except ComposeOperationError as retry_error:
                     _raise_workspace_service_error_if_docker_unavailable(
                         retry_error,
                         spec=spec,
                     )
                     raise
-            else:
-                _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
-                raise
         secret_metadata = _stack_secret_metadata(
             secret_lease_resolution=secret_lease_resolution,
             companion_secret_metadata=companion_secret_metadata,
@@ -293,6 +299,11 @@ class ComposeStackLauncher:
         if companions == spec.companions:
             return spec
         return replace(spec, companions=companions)
+
+
+def _prebuilt_companion_image_count(spec: WorkspaceComposeSpec) -> int:
+    """Return the number of companions still pinned to pre-built image tags."""
+    return sum(1 for companion in spec.companions if companion.image is not None)
 
 
 def _raise_workspace_service_error_if_docker_unavailable(
