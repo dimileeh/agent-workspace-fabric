@@ -188,6 +188,7 @@ async def _run_pre_push_validation_with_fix_passes(
     baseline_ignored_paths_snapshot: tuple[str, ...] | None = None
     baseline_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None
     for pass_index in range(max_fix_passes + 1):
+        ignore_all_ignored = baseline_ignored_paths is None or not baseline_ignored_paths
         validation_result = await _run_pre_push_validation(
             self,
             workspace_id=workspace_id,
@@ -196,7 +197,7 @@ async def _run_pre_push_validation_with_fix_passes(
             compose_file=compose_file,
             remote_branch=remote_branch,
             ignore_ignored_paths=baseline_ignored_paths,
-            ignore_all_ignored=baseline_ignored_paths is None,
+            ignore_all_ignored=ignore_all_ignored,
             capture_ignored_paths_snapshot=(
                 baseline_ignored_paths is None or bool(baseline_ignored_paths)
             ),

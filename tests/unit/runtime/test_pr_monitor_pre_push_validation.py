@@ -1008,7 +1008,7 @@ async def test_pre_push_validation_fix_pass_uses_initial_ignored_snapshot_across
     assert validation_calls[0]["ignore_all_ignored"] is True
     assert validation_calls[0]["ignore_ignored_paths"] is None
     assert validation_calls[0]["capture_ignored_paths_snapshot"] is True
-    assert validation_calls[1]["ignore_all_ignored"] is False
+    assert validation_calls[1]["ignore_all_ignored"] is True
     assert validation_calls[1]["ignore_ignored_paths"] == ()
     assert validation_calls[1]["capture_ignored_paths_snapshot"] is False
     assert len(fix_pass_calls) == 1
