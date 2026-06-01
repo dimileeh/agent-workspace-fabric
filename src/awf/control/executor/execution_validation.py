@@ -74,12 +74,19 @@ from awf.control.validation_fix_cycle import (
 )
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.runtime.validation import ValidationCoverageResult, profile_phase_command_plan
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationCoverageResult,
+    ValidationResult,
+    profile_phase_command_plan,
+)
 from awf.runtime.validation_worktree import (
     VALIDATION_INFRASTRUCTURE_ERROR,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
     VALIDATION_WORKTREE_STATUS_FAILED,
     ValidationWorktreeCheck,
+    ValidationWorktreeCleanup,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     validation_worktree_preexisting_dirty_message,
@@ -118,6 +125,58 @@ def _setup_ignored_snapshot_drift(
         + signature_drift
     )
     return tuple(dict.fromkeys(drift))
+
+
+def _safe_validation_artifact_name(value: str) -> str:
+    """Return a filesystem-safe artifact name for validation evidence."""
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+    return safe or "validation"
+
+
+def _cleaned_side_effect_paths(cleanup_result: ValidationWorktreeCleanup) -> tuple[str, ...]:
+    """Return stable path evidence for cleaned validation side effects."""
+    return cleanup_result.side_effect_paths
+
+
+def _side_effect_failure_result(
+    *,
+    val_result: ValidationResult,
+    cleanup_result: ValidationWorktreeCleanup,
+    workspace_id: str,
+    validation_run_id: str,
+    artifacts_root: Path,
+) -> ValidationResult:
+    """Add a synthetic validation failure for cleaned successful side effects."""
+    side_effect_paths = _cleaned_side_effect_paths(cleanup_result)
+    paths_text = ", ".join(side_effect_paths) if side_effect_paths else "<unknown>"
+    artifacts_dir = artifacts_root / workspace_id / "validation_worktree"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    safe_validation_run_id = _safe_validation_artifact_name(validation_run_id)
+    stdout_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stdout"
+    stderr_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stderr"
+    stdout_path.write_text(
+        (
+            "AWF validation commands passed only before validation worktree cleanup "
+            "restored or deleted side effects. The restored commit state was not "
+            f"validated. Cleaned paths: {paths_text}."
+        ),
+        encoding="utf-8",
+    )
+    stderr_path.write_text("", encoding="utf-8")
+    command = ValidationCommandResult(
+        command="validation worktree side-effect guard",
+        returncode=1,
+        duration_seconds=0.0,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        reason_code=VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+        policy_failed=True,
+        metadata={
+            "cleaned_paths": list(side_effect_paths),
+            "restore_ref": cleanup_result.restore_ref,
+        },
+    )
+    return replace(val_result, commands=[*val_result.commands, command])
 
 
 async def run_validation_and_fix_cycle(
@@ -498,6 +557,19 @@ async def run_validation_and_fix_cycle(
             val_result,
             baseline_coverage=baseline_coverage,
         )
+        cleaned_side_effects = bool(cleanup_result.side_effect_paths)
+        if (
+            val_result.all_passed
+            and cleanup_result.ok
+            and (cleaned_side_effects or not cleanup_result.check.clean)
+        ):
+            val_result = _side_effect_failure_result(
+                val_result=val_result,
+                cleanup_result=cleanup_result,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                artifacts_root=self._config.compose_projects_root,
+            )
         validation_coverage = _validation_run_coverage_metadata(
             val_result,
             baseline_coverage=baseline_coverage,

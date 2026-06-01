@@ -41,12 +41,148 @@ from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationW
 from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
 )
 from tests.unit.control.test_executor_coverage_edges_parts.test_executor_coverage_edges_part_003 import (
     _command_result,
     _executor_with_runner,
     _PlanningAdapter,
 )
+
+
+@pytest.mark.unit
+async def test_execution_validation_rejects_success_after_cleaned_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Passing validation must fail if it only passed before AWF cleaned side effects."""
+    profile = WorkspaceProfile.model_validate({"name": "validation-cleaned-side-effects"})
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "validation-cleaned-side-effects"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Task with validation side effects",
+        agent="codex",
+        owned_paths=(),
+        id="ws_side_effects",
+    )
+
+    pre_validation_check = ValidationWorktreeCheck(clean=True)
+    side_effect_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/generated.py",),
+        untracked_paths=("src/generated.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+        message="validation wrote an untracked module",
+    )
+    cleanup_result = ValidationWorktreeCleanup(
+        cleaned=True,
+        check=side_effect_check,
+        restore_ref="c" * 40,
+        verify_check=ValidationWorktreeCheck(clean=True),
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_command_result(tmp_path, returncode=0)])
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-side-effects"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+    )
+    adapter = SimpleNamespace(run=AsyncMock())
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=pre_validation_check),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(return_value=cleanup_result),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_side_effects",
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_side_effects",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_side_effects",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=AsyncMock(return_value=CommandResult(0, "", "")),
+    )
+
+    assert result.stop
+    assert result.successful_validation_run_id is None
+    assert result.successful_validation_workspace_head_sha is None
+    finish_run_kwargs = executor._finish_validation_run.await_args.kwargs
+    assert finish_run_kwargs["status"] == "failed"
+    assert finish_run_kwargs["reason_code"] == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
+    finish_pending_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_pending_kwargs["status"] == OperationStatus.failed
+    assert finish_pending_kwargs["reason_code"] == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
+    mark_failed_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_failed_kwargs["reason_code"] == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
+    adapter.run.assert_not_awaited()
+
+    stdout_path = (
+        tmp_path
+        / "artifacts"
+        / "ws_side_effects"
+        / "validation_worktree"
+        / "vr-side-effects.side_effects.stdout"
+    )
+    assert "src/generated.py" in stdout_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit

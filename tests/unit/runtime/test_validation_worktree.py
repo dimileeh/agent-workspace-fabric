@@ -938,6 +938,7 @@ async def test_cleanup_validation_worktree_cleans_ignored_files_with_none_stderr
 
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
+    assert cleanup.side_effect_paths == ("tracked.py", "ignored-output/fixture.json")
     assert (
         *_VALIDATION_RESTORE_PREFIX,
         "--source",
@@ -1191,6 +1192,7 @@ async def test_cleanup_validation_worktree_cleans_new_ignored_files_using_snapsh
 
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
+    assert cleanup.side_effect_paths == (".venv/new-artifact.log",)
     assert _VALIDATION_CLEAN_ARGS + (".venv/new-artifact.log",) in commands
 
 

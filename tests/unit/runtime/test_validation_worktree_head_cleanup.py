@@ -187,6 +187,7 @@ async def test_cleanup_validation_worktree_treats_clean_state_as_noop_when_resto
 
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
+    assert cleanup.side_effect_paths == ()
     assert cleanup.message == ""
     assert calls == [tuple(_VALIDATION_STATUS_ARGS)]
 
@@ -270,6 +271,7 @@ async def test_cleanup_validation_worktree_marks_restored_tracked_changes_as_cle
 
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
+    assert cleanup.side_effect_paths == ("tracked.py",)
     assert cleanup.check.paths == ("tracked.py",)
     assert cleanup.message == ""
     assert cleanup.verify_check is not None
@@ -309,6 +311,7 @@ async def test_cleanup_validation_worktree_marks_untracked_files_as_clean_after_
 
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
+    assert cleanup.side_effect_paths == ("untracked.py",)
     assert cleanup.message == ""
     assert cleanup.cleanup_command is None
     assert cleanup.verify_check is not None

@@ -28,11 +28,15 @@ from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY as _VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
 )
 from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED as _VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+)
+from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_STATUS_FAILED as _VALIDATION_WORKTREE_STATUS_FAILED,
 )
 
 VALIDATION_WORKTREE_CLEANUP_FAILED: str = _VALIDATION_WORKTREE_CLEANUP_FAILED
 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY: str = _VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED: str = _VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
 VALIDATION_WORKTREE_STATUS_FAILED: str = _VALIDATION_WORKTREE_STATUS_FAILED
 VALIDATION_INFRASTRUCTURE_ERROR: str = _VALIDATION_INFRASTRUCTURE_ERROR
 
@@ -537,16 +541,28 @@ class ValidationWorktreeCleanup:
     cleanup_command: str | None = None
     cleanup_stderr: str = ""
     verify_check: ValidationWorktreeCheck | None = None
+    cleaned_paths: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
         """Return whether cleanup completed successfully."""
         return self.reason_code is None
 
+    @property
+    def side_effect_paths(self) -> tuple[str, ...]:
+        """Return paths that prove validation left worktree side effects."""
+        if self.cleaned_paths:
+            return self.cleaned_paths
+        if self.check.clean:
+            return ()
+        return tuple(dict.fromkeys((*self.check.paths, *self.check.untracked_paths)))
+
     def details(self) -> dict[str, object]:
         """Serialize cleanup metadata for failure reporting and evidence."""
         details = self.check.details()
         details["restore_ref"] = self.restore_ref
+        if self.cleaned_paths:
+            details["cleaned_paths"] = list(self.cleaned_paths)
         if self.reason_code is not None:
             details["reason_code"] = self.reason_code
         if self.cleanup_command is not None:
@@ -1016,6 +1032,7 @@ async def cleanup_validation_worktree_side_effects(
         )
 
     cleanup_untracked_paths = _collapse_descendant_cleanup_paths(cleanup_untracked_paths)
+    cleaned_paths = tuple(dict.fromkeys((*tracked_paths, *cleanup_untracked_paths)))
     if restore_ref is None and cleanup_untracked_paths:
         return ValidationWorktreeCleanup(
             cleaned=False,
@@ -1090,7 +1107,12 @@ async def cleanup_validation_worktree_side_effects(
         head_check = await _verify_head_unchanged(restore_ref=restore_ref)
         if head_check is not None:
             return head_check
-        return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=check,
+            restore_ref=restore_ref,
+            cleaned_paths=cleaned_paths,
+        )
 
     verify = await check_validation_worktree_clean(
         run_git=run_git,
@@ -1133,6 +1155,7 @@ async def cleanup_validation_worktree_side_effects(
         check=check,
         restore_ref=restore_ref,
         verify_check=verify,
+        cleaned_paths=cleaned_paths,
     )
 
 
