@@ -301,9 +301,14 @@ class ValidationWorktreeCleanup:
             details["cleanup_command"] = self.cleanup_command
         if self.cleanup_stderr:
             details["cleanup_stderr"] = self.cleanup_stderr
-        if self.verify_check is not None and self.verify_check.paths:
-            details["remaining_paths"] = list(self.verify_check.paths)
-            details["remaining_untracked_paths"] = list(self.verify_check.untracked_paths)
+        if self.verify_check is not None:
+            if self.verify_check.reason_code is not None:
+                details["verify_reason_code"] = self.verify_check.reason_code
+            if self.verify_check.command_stderr:
+                details["verify_command_stderr"] = self.verify_check.command_stderr
+            if self.verify_check.paths:
+                details["remaining_paths"] = list(self.verify_check.paths)
+                details["remaining_untracked_paths"] = list(self.verify_check.untracked_paths)
         return details
 
 
@@ -534,15 +539,16 @@ async def cleanup_validation_worktree_side_effects(
 
     tracked_paths = check.tracked_paths
     if restore_ref is None and tracked_paths:
+        message = (
+            "Could not restore validation worktree because "
+            "`restore_ref` was not captured before validation."
+        )
         return ValidationWorktreeCleanup(
             cleaned=False,
             check=check,
             restore_ref=restore_ref,
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-            message=(
-                "Could not verify validation worktree HEAD after cleanup because "
-                "`restore_ref` was not captured before validation."
-            ),
+            message=message,
         )
 
     if tracked_paths:
@@ -614,6 +620,17 @@ async def cleanup_validation_worktree_side_effects(
         )
 
     cleanup_untracked_paths = list(dict.fromkeys(cleanup_untracked_paths))
+    if restore_ref is None and cleanup_untracked_paths:
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=check,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=(
+                "Could not restore validation worktree because "
+                "`restore_ref` was not captured before validation."
+            ),
+        )
     if cleanup_untracked_paths:
         clean = await run_git(["clean", "-fdx", "--", *cleanup_untracked_paths])
         if not clean.ok:

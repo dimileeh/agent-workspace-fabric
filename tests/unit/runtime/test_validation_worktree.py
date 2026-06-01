@@ -601,6 +601,41 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
     assert cleanup.verify_check is not None
     assert cleanup.verify_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
     assert cleanup.verify_check.command_stderr == "status command failed"
+    details = cleanup.details()
+    assert details["verify_reason_code"] == VALIDATION_WORKTREE_STATUS_FAILED
+    assert details["verify_command_stderr"] == "status command failed"
+    assert "remaining_paths" not in details
+    assert "remaining_untracked_paths" not in details
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_fails_for_untracked_dirty_state_when_restore_ref_missing(
+    tmp_path: Path,
+) -> None:
+    """Fail cleanup without deleting untracked files when the restore baseline is unknown."""
+    worktree = _init_fake_worktree(tmp_path)
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a validation cleanup attempt with an unknown restore ref."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? untracked.py\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert (
+        cleanup.message
+        == "Could not restore validation worktree because `restore_ref` was not captured before validation."
+    )
+    assert cleanup.cleanup_command is None
+    assert cleanup.verify_check is None
+    assert ("clean", "-fdx", "--", "untracked.py") not in commands
 
 
 @pytest.mark.unit

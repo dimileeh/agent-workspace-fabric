@@ -180,7 +180,11 @@ def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
 
 
 def _untracked_paths_from_porcelain_z(status_stdout: str) -> list[str]:
-    """Extract untracked paths from ``git status --porcelain -z`` output."""
+    """Extract untracked and ignored paths from ``git status --porcelain -z`` output.
+
+    The parser includes both porcelain ``??`` (untracked) and ``!!`` (ignored)
+    markers and returns a list of matching paths.
+    """
     return list(
         dict.fromkeys(
             path
