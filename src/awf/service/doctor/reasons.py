@@ -643,6 +643,20 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "gh pr view",
         "docs/REASON_CATALOG.md#pr_not_found",
     ),
+    "MERGE_METHOD_MISMATCH": _ReasonText(
+        "AWF could not merge a PR because no effective merge method succeeded.",
+        (
+            "Inspect the repository and base-branch merge policy, enable a "
+            "compatible merge method, or update the branch ruleset before "
+            "remonitoring the workspace."
+        ),
+        (
+            "Repository merge settings and base-branch rules left AWF with no "
+            "allowed method, or GitHub rejected every allowed merge method."
+        ),
+        "awf workspace remonitor <workspace_id>",
+        "docs/REASON_CATALOG.md#merge_method_mismatch",
+    ),
     "GIT_FETCH_BASE_FAILED": _ReasonText(
         "The PR monitor could not refresh the target branch ref for a workspace.",
         (

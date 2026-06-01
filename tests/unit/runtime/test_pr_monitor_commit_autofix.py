@@ -60,6 +60,23 @@ def test_monitor_precommit_autofix_keeps_deterministic_hook_repair_paths() -> No
 
 
 @pytest.mark.unit
+def test_monitor_precommit_autofix_skips_deterministic_hook_without_marker() -> None:
+    output = (
+        "trim trailing whitespace...........................................Failed\n"
+        "- hook id: trailing-whitespace\n"
+        "- exit code: 1\n\n"
+        "ruff check........................................................Failed\n"
+        "- hook id: awf-ruff-check\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        "Found 1 error.\n"
+    )
+    commit_result = CommandResult(returncode=1, stdout=output, stderr="")
+
+    assert _monitor_precommit_autofix_repair_paths(commit_result) == ()
+
+
+@pytest.mark.unit
 def test_monitor_precommit_autofix_skips_formatter_check_repair_paths() -> None:
     output = (
         "ruff format........................................................Failed\n"
