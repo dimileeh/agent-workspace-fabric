@@ -32,7 +32,16 @@ base_branch)``), wired separately into ``ControlWorker``, and a BitBucket
 workspace fails fast at the executor forge gate before any open-PR-resolver path
 matters. A forge-neutral open-PR resolver is deferred to Phase 2.
 
-Import direction (no cycles): ``db.enums`` (leaf) ← ``github_client`` ← ``forge``.
+Import direction (no cycles at module load)::
+
+    db.enums (leaf)             ← github_client      ← forge
+    monitor_state_keys (leaf)   ← runtime.pr_monitor ← forge   (CheckFailure, PRStatus)
+
+``forge`` depends on ``runtime.pr_monitor`` only for the neutral ``CheckFailure``
+and ``PRStatus`` types. That edge does *not* close a cycle: ``runtime.pr_monitor``
+imports only ``runtime.monitor_state_keys`` (a leaf) — it does **not** import
+``runtime.pr_monitor_runner``, which is the package that imports ``forge`` back.
+So the ``pr_monitor_runner → forge`` back-edge never loops through ``pr_monitor``.
 """
 
 from __future__ import annotations
