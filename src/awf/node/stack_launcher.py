@@ -197,8 +197,9 @@ class ComposeStackLauncher:
             if retry_spec is not None:
                 # Replace spec so retry-time revalidation and any retry failure
                 # handling report the compose spec used by the failing attempt.
-                spec = await self._revalidate_prebuilt_companion_images(retry_spec)
+                spec = retry_spec
                 try:
+                    spec = await self._revalidate_prebuilt_companion_images(spec)
                     paths = await self._compose.up(spec, wait=True)
                 except ComposeOperationError as retry_error:
                     _raise_workspace_service_error_if_docker_unavailable(
