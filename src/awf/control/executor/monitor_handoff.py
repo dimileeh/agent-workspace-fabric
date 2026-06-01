@@ -817,7 +817,7 @@ async def _build_handoff_pr_monitor(
             worktree_path=worktree_path,
         ):
             return None
-        if run_profile_setup and not await self._recheck_status(
+        if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.running,
             action=stale_action,
@@ -1058,6 +1058,7 @@ async def _handoff_sync_release_pr_monitor(
         build_failed_message_prefix="release PR monitor handoff failed: ",
         profile=profile,
         run_profile_setup=False,
+        stale_action="sync_release_pr_handoff",
     )
     if monitor is None:
         return

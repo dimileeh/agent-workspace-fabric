@@ -894,6 +894,95 @@ class TestSyncReleasePrHandoff:
             assert candidate.pr_url == "https://github.com/x/y/pull/321"
 
     @pytest.mark.unit
+    async def test_release_pr_ready_recheck_blocks_monitor_factory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        factory_calls: list[str] = []
+        monitor_calls: list[str] = []
+        recheck_actions: list[str] = []
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="3\n")  # rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="3\n")  # post-setup rev-list --count
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/321\n")  # gh pr create
+        fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=321))  # gh pr view
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            create_task_attempt=True,
+            task_policy=_release_sync_policy(),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> _Monitor:
+            factory_calls.append("called")
+            return _Monitor()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+        original_recheck_status = executor._recheck_status
+        release_handoff_rechecks = 0
+
+        async def _recheck_status(
+            workspace_id: str,
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+            reason_code: str = "EXECUTOR_STALE_STATUS",
+        ) -> bool:
+            nonlocal release_handoff_rechecks
+
+            recheck_actions.append(action)
+            if action == "sync_release_pr_handoff":
+                release_handoff_rechecks += 1
+                if release_handoff_rechecks == 2:
+                    async with factory() as s:
+                        ws = await WorkspaceRepository(s).get(workspace_id)
+                        assert ws is not None
+                        ws.status = WorkspaceStatus.cancelled.value
+                        await s.commit()
+            return await original_recheck_status(
+                workspace_id,
+                expected=expected,
+                action=action,
+                reason_code=reason_code,
+            )
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.execute(ws_id)
+
+        assert factory_calls == []
+        assert monitor_calls == []
+        assert recheck_actions.count("sync_release_pr_handoff") == 2
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.pr_url is None
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "sync_release_pr_handoff"
+
+    @pytest.mark.unit
     async def test_ahead_reuses_existing_open_release_pr(
         self,
         fake: FakeCommandRunner,
