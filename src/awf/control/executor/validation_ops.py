@@ -61,6 +61,11 @@ async def _start_validation_run(
     coverage_evidence_status: str | None = None,
     coverage_evidence_reason_code: str | None = None,
 ) -> str:
+    """Start a new validation run and persist its initial metadata.
+
+    Creates a validation-run record with baseline command metadata, profile
+    fingerprinting, and timing, then persists the run in the active session.
+    """
     command_records = _validation_run_command_records(
         profile=profile,
         phase_names=("post_agent", "validate"),
@@ -99,6 +104,7 @@ async def _capture_workspace_head_sha(
     workspace_id: str,
     worktree_path: Path,
 ) -> str | None:
+    """Capture the current workspace HEAD SHA from the worktree, if available."""
     result = await self._runner.run(
         ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
     )
@@ -125,6 +131,7 @@ async def _finish_pending_validate_operations(
     error_message: str | None = None,
     coverage: dict[str, object] | None = None,
 ) -> None:
+    """Finish pending/running validate operations for a workspace in one session."""
     async with self._session_factory() as session:
         await self._finish_pending_validate_operations_in_session(
             session,
@@ -151,6 +158,7 @@ async def _finish_pending_validate_operations_in_session(
     error_message: str | None = None,
     coverage: dict[str, object] | None = None,
 ) -> None:
+    """Persist terminal validation-operation state and optional finish payload."""
     _ = self
     repo = OperationRepository(session)
     pending = await repo.list_for_workspace(
@@ -206,6 +214,7 @@ async def _finish_validation_run(
     coverage_evidence_reason_code: str | None = None,
     coverage_evidence_source_run_id: str | None = None,
 ) -> None:
+    """Finish a validation run record with supplied terminal status and metadata."""
     async with self._session_factory() as session:
         await ValidationRunRepository(session).finish(
             validation_run_id,
@@ -229,6 +238,11 @@ async def _finish_validation_callback_if_terminal(
     validation_run_id: str,
     requested_tier: int,
 ) -> bool:
+    """Handle stale callback callbacks by failing the matching validation run.
+
+    Returns `True` when the callback is terminal/stale and has been handled,
+    otherwise `False` when execution may continue.
+    """
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)
@@ -272,6 +286,7 @@ async def _set_validation_run_target_head_sha(
     target_head_sha: str,
     workspace_head_sha: str | None = None,
 ) -> None:
+    """Persist a validation run's target and observed workspace HEAD SHAs."""
     async with self._session_factory() as session:
         await ValidationRunRepository(session).update_target_head_sha(
             validation_run_id,

@@ -117,6 +117,7 @@ def _unquote_porcelain_path(path: str) -> str:
 
 
 def _porcelain_z_records(status_stdout: str) -> list[tuple[str, str, str | None]]:
+    """Split `git status --porcelain -z` output into status/path record tuples."""
     records = status_stdout.split("\0")
     if records and records[-1] == "":
         records = records[:-1]
