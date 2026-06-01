@@ -193,6 +193,23 @@ async def test_companion_image_exists_returns_false_when_tag_missing() -> None:
 
 
 @pytest.mark.unit
+async def test_companion_image_exists_treats_docker_unavailable_no_such_image_as_missing() -> None:
+    """Docker inspect may classify missing-image stderr as daemon unavailable."""
+    probe_error = ComposeOperationError(
+        operation="image inspect",
+        returncode=1,
+        stdout="",
+        stderr="Error response from daemon: No such image: awf-companion-backend:abc",
+        reason_code="DOCKER_UNAVAILABLE",
+    )
+    compose = _FakeCompose(exists=False, inspect_error=probe_error)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    assert await builder.companion_image_exists("awf-companion-backend:abc") is False
+    assert compose.inspect_calls == [["image", "inspect", "awf-companion-backend:abc"]]
+
+
+@pytest.mark.unit
 async def test_companion_image_exists_preserves_probe_error_reason_code() -> None:
     """The launch-time existence helper does not convert Docker errors to missing."""
     probe_error = ComposeOperationError(
