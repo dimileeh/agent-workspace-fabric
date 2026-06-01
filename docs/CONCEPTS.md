@@ -179,16 +179,20 @@ AWF’s local service compose stack keeps container ports stable (`postgres:5432
 
 - `AWF_POSTGRES_HOST_PORT` controls the host-facing Postgres port (default `5433`).
 - `AWF_API_HOST_PORT` controls the host-facing API port (default `8000`).
+- `AWF_BASE_URL` optionally overrides the host/operator API root used by `awf`
+  workspace commands and manual HTTP checks.
+- `AWF_API_BASE_URL` is the service-side API self-reference URL. In local
+  Compose containers it is `http://api:8000`, not the host CLI target.
 
 Postgres stays loopback-bound (`127.0.0.1`) by default. The API preserves Docker's
 legacy default host bind behavior for `8000:8000`, so existing local clients that
 reach the host IP continue to work. If `AWF_API_HOST_PORT` changes, client calls
-that target the local API host must use the matching host URL. `awf service
-status` and `awf service doctor` derive `http://localhost:<port>` automatically
-when `AWF_API_HOST_PORT` is set in the same shell. Set `AWF_API_BASE_URL` only
-when those CLI checks run from a shell that does not carry `AWF_API_HOST_PORT`,
-when targeting a non-derived API base URL, or for manual HTTP requests such as
-`/readyz` checks.
+that target the local API host must use the matching host URL. The host CLI
+derives `http://localhost:<port>` automatically when `AWF_API_HOST_PORT` is set
+in the same shell. Set `AWF_BASE_URL` only when the CLI or manual HTTP checks
+run from a shell that does not carry `AWF_API_HOST_PORT`, when targeting a
+reverse proxy, or when using another non-derived API base URL. `AWF_CLI_BASE_URL`
+still works for compatibility, but is deprecated.
 
 ## Workspace Lifecycle
 
@@ -441,14 +445,15 @@ curl 'http://localhost:8000/release-readiness'
 uv run --python 3.12 --extra dev awf service logs --follow --service worker
 ```
 
-If `AWF_API_HOST_PORT` is customized, set `AWF_API_BASE_URL` for manual HTTP
-diagnostics or when CLI checks run from a shell that does not carry the host-port
-override:
+If `AWF_API_HOST_PORT` is customized, host CLI calls derive the matching
+localhost URL automatically when the variable is present in the same shell. Set
+`AWF_BASE_URL` for manual HTTP diagnostics or when CLI checks run from a shell
+that does not carry the host-port override:
 
 ```bash
-export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
-curl "${AWF_API_BASE_URL}/readyz?provider=github"
-curl "${AWF_API_BASE_URL}/release-readiness"
+export AWF_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+curl "${AWF_BASE_URL}/readyz?provider=github"
+curl "${AWF_BASE_URL}/release-readiness"
 ```
 
 `awf service status` and `/readyz` include an `agent_readiness` section for
