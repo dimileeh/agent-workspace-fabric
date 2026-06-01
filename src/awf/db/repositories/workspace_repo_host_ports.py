@@ -13,15 +13,11 @@ from awf.common.owned_paths import (
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
 )
-from awf.db.models import ResourceReservation, Workspace, WorkspaceEvent
+from awf.db.models import ResourceReservation, Workspace
 from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     HOST_PORT_CONFLICT_STATUSES,
     HOST_PORT_TERMINAL_RELEASE_STATUSES,
-    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-    TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-    TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
@@ -31,6 +27,7 @@ from awf.db.repositories.base import (
     _owned_paths_overlap,
     host_ports_from_resolved_profile,
     host_ports_from_task_policy_companions,
+    terminal_runtime_effectively_released_expr,
 )
 
 
@@ -250,53 +247,8 @@ async def find_host_port_conflicts(
     if not host_ports:
         return []
 
-    terminal_runtime_latest_released_at = (
-        select(func.max(WorkspaceEvent.occurred_at))
-        .where(WorkspaceEvent.workspace_id == Workspace.id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-        .correlate(Workspace)
-        .scalar_subquery()
-    )
-
-    terminal_runtime_latest_revoked_at = (
-        select(func.max(WorkspaceEvent.occurred_at))
-        .where(WorkspaceEvent.workspace_id == Workspace.id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
-        .correlate(Workspace)
-        .scalar_subquery()
-    )
-
-    terminal_runtime_released_order = (
-        select(func.max(WorkspaceEvent.event_order))
-        .where(WorkspaceEvent.workspace_id == Workspace.id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-        .correlate(Workspace)
-        .scalar_subquery()
-    )
-
-    terminal_runtime_revoked_order = (
-        select(func.max(WorkspaceEvent.event_order))
-        .where(WorkspaceEvent.workspace_id == Workspace.id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
-        .correlate(Workspace)
-        .scalar_subquery()
-    )
-
-    terminal_runtime_effectively_released = and_(
-        terminal_runtime_latest_released_at.isnot(None),
-        or_(
-            terminal_runtime_latest_revoked_at.is_(None),
-            terminal_runtime_latest_released_at > terminal_runtime_latest_revoked_at,
-            and_(
-                terminal_runtime_latest_released_at == terminal_runtime_latest_revoked_at,
-                func.coalesce(terminal_runtime_released_order, 0)
-                > func.coalesce(terminal_runtime_revoked_order, 0),
-            ),
-        ),
+    terminal_runtime_effectively_released = terminal_runtime_effectively_released_expr(
+        correlated_to=Workspace,
     )
 
     host_ports_set = set(host_ports)

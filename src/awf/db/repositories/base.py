@@ -637,6 +637,79 @@ TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE: Final = (
 """Reason code accompanying the ``workspace.terminal_runtime_release_revoked`` event."""
 
 
+def terminal_runtime_effectively_released_expr(
+    correlated_to: type[Workspace] | None = None,
+    workspace_id: str | None = None,
+) -> ColumnElement[bool]:
+    """Build a boolean SQL expression for "terminal runtime was effectively released".
+
+    A release is "effective" when the latest ``terminal_runtime_released``
+    event has not been superseded by a later ``terminal_runtime_release_revoked``
+    event.  When both share the same ``occurred_at``, ``event_order`` serves
+    as the deterministic tie-breaker.
+
+    The expression is built as four correlated scalar subqueries (released_at,
+    revoked_at, released_order, revoked_order) composed into a single boolean.
+
+    Must pass exactly one of *correlated_to* or *workspace_id*:
+
+    - *correlated_to* (typically the ``Workspace`` ORM class): builds
+      subqueries that correlate to the outer ``Workspace`` row — for use
+      inside larger ``SELECT`` statements that iterate over ``Workspace``.
+    - *workspace_id*: builds subqueries that filter to a single workspace
+      — for use when checking one workspace at a time.
+    """
+    if (correlated_to is None) == (workspace_id is None):
+        raise ValueError("Pass exactly one of correlated_to or workspace_id")
+
+    def _build_sub(event_type: str, reason_code: str, column: Any) -> Any:
+        stmt = (
+            select(func.max(column))
+            .where(WorkspaceEvent.event_type == event_type)
+            .where(WorkspaceEvent.reason_code == reason_code)
+        )
+        if correlated_to is not None:
+            stmt = stmt.where(WorkspaceEvent.workspace_id == correlated_to.id).correlate(
+                correlated_to
+            )
+        else:
+            stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+        return stmt.scalar_subquery()
+
+    released_at = _build_sub(
+        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        WorkspaceEvent.occurred_at,
+    )
+    revoked_at = _build_sub(
+        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        WorkspaceEvent.occurred_at,
+    )
+    released_order = _build_sub(
+        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        WorkspaceEvent.event_order,
+    )
+    revoked_order = _build_sub(
+        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        WorkspaceEvent.event_order,
+    )
+
+    return and_(
+        released_at.isnot(None),
+        or_(
+            revoked_at.is_(None),
+            released_at > revoked_at,
+            and_(
+                released_at == revoked_at,
+                func.coalesce(released_order, 0) > func.coalesce(revoked_order, 0),
+            ),
+        ),
+    )
+
+
 async def has_terminal_runtime_released_event(
     session: AsyncSession,
     workspace_id: str,
@@ -648,49 +721,10 @@ async def has_terminal_runtime_released_event(
     as a deterministic tie-breaker — the event with the higher
     ``event_order`` is considered later.
     """
-    released_at_sub = (
-        select(func.max(WorkspaceEvent.occurred_at))
-        .where(WorkspaceEvent.workspace_id == workspace_id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-        .scalar_subquery()
-    )
-    released_order_sub = (
-        select(func.max(WorkspaceEvent.event_order))
-        .where(WorkspaceEvent.workspace_id == workspace_id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-        .scalar_subquery()
-    )
-    revoked_at_sub = (
-        select(func.max(WorkspaceEvent.occurred_at))
-        .where(WorkspaceEvent.workspace_id == workspace_id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
-        .scalar_subquery()
-    )
-    revoked_order_sub = (
-        select(func.max(WorkspaceEvent.event_order))
-        .where(WorkspaceEvent.workspace_id == workspace_id)
-        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
-        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
-        .scalar_subquery()
-    )
-    row = (
-        await session.execute(
-            select(released_at_sub, released_order_sub, revoked_at_sub, revoked_order_sub)
-        )
-    ).one()
-    released_at, released_order, revoked_at, revoked_order = row
-    if released_at is None:
-        return False
-    if revoked_at is None:
-        return True
-    if released_at > revoked_at:
-        return True
-    if released_at < revoked_at:
-        return False
-    return (released_order or 0) > (revoked_order or 0)
+    expr = terminal_runtime_effectively_released_expr(workspace_id=workspace_id)
+    stmt = select(expr)
+    row = (await session.execute(stmt)).one()
+    return bool(row[0])
 
 
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
