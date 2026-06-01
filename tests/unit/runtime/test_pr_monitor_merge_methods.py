@@ -41,6 +41,7 @@ _TEST_MERGE_ONLY_BASE_BRANCH = "release/merge-only"
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Provide an isolated async session factory for merge-method monitor tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -62,6 +63,7 @@ def _mergeable_status() -> PRStatus:
 
 @pytest.mark.unit
 def test_effective_merge_methods_intersect_repo_and_branch_constraints() -> None:
+    """Effective merge methods prefer squash after intersecting repo and branch policy."""
     assert _effective_merge_methods(
         repo_methods=("merge", "squash", "rebase"),
         branch_methods=("merge",),
@@ -81,6 +83,7 @@ def test_effective_merge_methods_intersect_repo_and_branch_constraints() -> None
 
 @pytest.mark.unit
 def test_merge_method_rejection_classifier_is_specific() -> None:
+    """Merge-method rejection classification only handles method-specific failures."""
     assert (
         _merge_method_rejection_method(
             GitHubClientError(
@@ -242,6 +245,7 @@ async def test_ruleset_merge_only_base_uses_merge_method(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A merge-only branch ruleset uses merge commits instead of the squash default."""
     gh = _MergeMethodClient(branch_methods=("merge",))
 
     terminal, _state, _sleep, _workspace_id = await _execute_merge(
@@ -261,6 +265,7 @@ async def test_unconstrained_squash_allowed_base_preserves_squash_default(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """An unconstrained branch keeps the monitor's historical squash default."""
     gh = _MergeMethodClient(
         repo_methods=("merge", "squash", "rebase"),
         branch_methods=None,
@@ -281,6 +286,7 @@ async def test_transient_merge_method_preflight_error_retries_without_blocker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Transient preflight failures retry without recording a merge-method blocker."""
     gh = _MergeMethodClient(
         branch_error=GitHubClientError(
             operation=(
@@ -311,6 +317,7 @@ async def test_method_rejection_without_alternative_notifies_human_without_trans
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A permanent method rejection without alternatives notifies a human once."""
     gh = _MergeMethodClient(
         repo_methods=("squash",),
         branch_methods=("squash",),
@@ -358,6 +365,7 @@ async def test_method_rejection_retries_once_with_allowed_alternative(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A method-specific rejection retries once with the next allowed method."""
     gh = _MergeMethodClient(
         repo_methods=("merge", "squash"),
         branch_methods=("merge", "squash"),
@@ -390,6 +398,7 @@ async def test_unclassified_first_merge_failure_retries_allowed_alternative(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """An unclassified first merge failure still retries the next allowed method."""
     gh = _MergeMethodClient(
         repo_methods=("merge", "squash"),
         branch_methods=("merge", "squash"),
@@ -422,6 +431,7 @@ async def test_mismatched_first_merge_rejection_retries_allowed_alternative(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A mismatched method-specific rejection retries the next allowed method."""
     gh = _MergeMethodClient(
         repo_methods=("merge", "squash"),
         branch_methods=("merge", "squash"),

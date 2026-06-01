@@ -127,6 +127,7 @@ async def handle_merge_action(
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool | None:
+    """Execute a merge action and report whether monitor processing reached a terminal state."""
     if isinstance(action, Merge):
         merge_gate = await self._merge_gate_with_legacy_head_support(
             workspace_id,
