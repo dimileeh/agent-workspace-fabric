@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import validation_cleanup_guards as executor_validation_cleanup_guards
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
@@ -78,12 +78,12 @@ async def test_stale_validation_cleanup_without_primary_keeps_failed_row_fields(
         return None
 
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_validation_cleanup_guards,
         "WorkspaceRepository",
         _FakeWorkspaceRepository,
     )
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_validation_cleanup_guards,
         "load_failure_causality_snapshot",
         _load_no_primary_failure_snapshot,
     )
@@ -105,7 +105,7 @@ async def test_stale_validation_cleanup_without_primary_keeps_failed_row_fields(
     )
     executor = SimpleNamespace(_session_factory=lambda: session)
 
-    await executor_execution_validation._record_stale_validation_cleanup_failure(
+    await executor_validation_cleanup_guards._record_stale_validation_cleanup_failure(
         executor,
         workspace_id=workspace.id,
         validation_run_id="vr-stale-cleanup",

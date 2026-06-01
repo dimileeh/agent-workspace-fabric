@@ -14,6 +14,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor import planning_ops as executor_planning_ops
+from awf.control.executor import validation_cleanup_guards as executor_validation_cleanup_guards
 from awf.control.executor.helpers import (
     _failure_salvage_payload,
     _profile_with_planning_iteration_default,
@@ -529,10 +530,9 @@ async def test_execution_validation_fails_cleanup_when_callback_becomes_stale_af
     )
     record_stale_cleanup_failure = AsyncMock()
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_validation_cleanup_guards,
         "_record_stale_validation_cleanup_failure",
         record_stale_cleanup_failure,
-        raising=False,
     )
 
     result = await executor_execution_validation.run_validation_and_fix_cycle(
@@ -640,12 +640,12 @@ async def test_stale_validation_cleanup_failure_records_secondary_failure_eviden
         )
 
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_validation_cleanup_guards,
         "WorkspaceRepository",
         _FakeWorkspaceRepository,
     )
     monkeypatch.setattr(
-        executor_execution_validation,
+        executor_validation_cleanup_guards,
         "load_failure_causality_snapshot",
         _load_failure_causality_snapshot,
     )
@@ -667,7 +667,7 @@ async def test_stale_validation_cleanup_failure_records_secondary_failure_eviden
     )
     executor = SimpleNamespace(_session_factory=lambda: session)
 
-    await executor_execution_validation._record_stale_validation_cleanup_failure(
+    await executor_validation_cleanup_guards._record_stale_validation_cleanup_failure(
         executor,
         workspace_id=workspace.id,
         validation_run_id="vr-stale-cleanup",
