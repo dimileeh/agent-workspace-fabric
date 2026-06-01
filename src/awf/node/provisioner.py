@@ -303,6 +303,25 @@ class Provisioner:
                             task_policy=ws.task_policy,
                             resolved_profile_dict=resolved_profile_dict,
                         )
+                    except (
+                        WorkspaceCreateHostPortConflictError,
+                        WorkspaceCreateDuplicateHostPortError,
+                    ) as exc:
+                        _log.error(
+                            "provisioner.auto_profile_host_port_conflict",
+                            workspace_id=workspace_id,
+                            host_port=exc.host_port,
+                            conflicting_workspace_id=getattr(exc, "conflicting_workspace_id", None),
+                            reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=str(exc)[:2000],
+                            from_status=WorkspaceStatus.provisioning,
+                            reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        )
+                        return
                     except Exception:
                         _log.warning(
                             "provisioner.auto_profile_host_port_check_failed",
@@ -404,33 +423,6 @@ class Provisioner:
                 from_status=WorkspaceStatus.provisioning,
             )
             raise
-        except WorkspaceCreateHostPortConflictError as exc:
-            _log.error(
-                "provisioner.auto_profile_host_port_conflict",
-                workspace_id=workspace_id,
-                host_port=exc.host_port,
-                conflicting_workspace_id=exc.conflicting_workspace_id,
-            )
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                failure_reason=FailureReason.infrastructure_failure,
-                message=str(exc)[:2000],
-                from_status=WorkspaceStatus.provisioning,
-            )
-            return
-        except WorkspaceCreateDuplicateHostPortError as exc:
-            _log.error(
-                "provisioner.duplicate_host_port",
-                workspace_id=workspace_id,
-                host_port=exc.host_port,
-            )
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                failure_reason=FailureReason.infrastructure_failure,
-                message=str(exc)[:2000],
-                from_status=WorkspaceStatus.provisioning,
-            )
-            return
         except ProfileResolutionError as exc:
             _log.error(
                 "provisioner.profile_resolution_failed",
