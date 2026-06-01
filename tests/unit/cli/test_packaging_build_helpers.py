@@ -11,6 +11,12 @@ These pin the behavior two PR #344 review threads asked for:
   dependencies cannot be fetched offline is environmental and skips, but a
   failure with the local wheel artifact itself (invalid metadata, incompatible
   Requires-Python, malformed archive) is a real regression that fails loudly.
+* ``PRRT_kwDOSJAM6s6F_EeW`` — a *pure* pip resolver miss ("could not find a
+  version that satisfies the requirement" / "no matching distribution found")
+  with no transport marker means the index was reachable but the wheel declares
+  an impossible/misspelled runtime dependency, so it is a wheel-metadata
+  regression that fails loudly; genuine offline still skips because pip emits a
+  transport marker while retrying the unreachable index.
 
 They stub ``subprocess.run``/``shutil.which`` so no actual build (or network) is
 exercised.
@@ -84,16 +90,25 @@ def test_real_regressions_are_not_classified_unavailable(output: str) -> None:
 @pytest.mark.parametrize(
     "output",
     [
-        # Offline dependency resolution: pip cannot reach an index to fetch the
-        # wheel's runtime dependencies, so it reports no candidate found.
-        "Could not find a version that satisfies the requirement structlog (from versions: none)",
-        "ERROR: No matching distribution found for fastapi",
+        # Genuine offline: pip cannot reach an index, so it surfaces a transport /
+        # DNS / connection failure while retrying. These transport markers — not
+        # the terminal resolver-miss text — are what identifies an offline lane.
         "WARNING: Retrying ... after connection broken by 'NewConnectionError(...)'",
         "Temporary failure in name resolution",
         "Failed to establish a new connection: [Errno -3]",
         "Could not connect to pypi.org",
         "Read timed out.",
         "Max retries exceeded with url: /simple/anyio/",
+        # A realistic offline install emits BOTH a transport marker (the network
+        # attempt that failed) AND a terminal resolver miss; the transport marker
+        # keeps it classified as environmental even though the resolver-miss text
+        # is no longer a signature on its own (PRRT_kwDOSJAM6s6F_EeW).
+        (
+            "WARNING: Retrying ... after connection broken by 'NewConnectionError(...)'\n"
+            "ERROR: Could not find a version that satisfies the requirement structlog "
+            "(from versions: none)\n"
+            "ERROR: No matching distribution found for structlog"
+        ),
     ],
 )
 def test_install_offline_failures_are_classified_environmental(output: str) -> None:
@@ -111,6 +126,13 @@ def test_install_offline_failures_are_classified_environmental(output: str) -> N
         "ERROR: Invalid wheel filename (wrong number of parts): awf-bad.whl",
         "error: invalid metadata: Metadata-Version is not declared",
         "zipfile.BadZipFile: File is not a zip file",
+        # A pure resolver miss with NO transport marker: pip reached the index and
+        # reported the wheel's declared dependency as unsatisfiable. On a networked
+        # lane this is an impossible / misspelled runtime dependency — a real
+        # wheel-metadata regression that must fail loudly, not skip as "offline"
+        # (PRRT_kwDOSJAM6s6F_EeW).
+        "ERROR: Could not find a version that satisfies the requirement requets (from versions: none)",
+        "ERROR: No matching distribution found for nonexistent-typo-dependency",
     ],
 )
 def test_install_real_regressions_are_not_classified_environmental(output: str) -> None:

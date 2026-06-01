@@ -92,18 +92,24 @@ def _build_failure_is_environmental(output: str) -> bool:
 
 
 # Substrings in a nonzero ``pip install <wheel>`` output that mark the failure as
-# a dependency-fetch / offline problem (pip cannot reach an index to resolve the
+# an offline dependency-fetch problem (pip cannot reach an index to resolve the
 # wheel's runtime dependencies) rather than a real regression in the local wheel
 # artifact itself. ``pip`` installs the explicitly-passed local archive directly,
 # so a bad wheel (invalid metadata, incompatible Requires-Python, malformed
-# archive) fails with artifact-specific text that contains none of these. Kept
-# network/resolution-focused on purpose so a real artifact regression is never
-# masked as "offline" and skipped instead of failing the package guard
-# (PRRT_kwDOSJAM6s6F-8ys).
+# archive) fails with artifact-specific text that contains none of these.
+#
+# Kept strictly transport/DNS/connection-focused on purpose. pip's terminal
+# resolver-miss messages ("could not find a version that satisfies the
+# requirement" / "no matching distribution found") are deliberately *excluded*:
+# they also appear when the wheel declares an impossible or misspelled runtime
+# dependency, which on a networked lane is a real wheel-metadata regression, not
+# an offline setup problem. A genuine offline run still skips because pip emits
+# one of the transport markers below while retrying the unreachable index before
+# it gives up with a resolver miss — so dropping the resolver-miss substrings
+# never masks an offline lane, but it does let a *pure* resolver miss (index
+# reachable, declared dependency unsatisfiable) fail the package guard loudly
+# instead of skipping (PRRT_kwDOSJAM6s6F-8ys, PRRT_kwDOSJAM6s6F_EeW).
 _INSTALL_ENV_UNAVAILABLE_SIGNATURES = (
-    # pip's terminal messages when no candidate for a dependency can be fetched.
-    "could not find a version that satisfies the requirement",
-    "no matching distribution found",
     # Transport / DNS / connection failures surfaced by pip's vendored urllib3.
     "temporary failure in name resolution",
     "name or service not known",
