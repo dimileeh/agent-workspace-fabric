@@ -427,18 +427,3 @@ export function statusGlyph(status: string): string {
       return "•";
   }
 }
-
-export function toneGlyph(tone: StatusTone): string {
-  switch (tone) {
-    case "good":
-      return "✓";
-    case "warn":
-      return "⚠";
-    case "bad":
-      return "✕";
-    case "info":
-      return "●";
-    default:
-      return "•";
-  }
-}

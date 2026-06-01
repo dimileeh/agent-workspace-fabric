@@ -367,15 +367,20 @@ export function KpiStat({
   tone,
   suffix,
   hint,
+  stale = false,
 }: {
   label: string;
   value: string | number;
   tone?: StatusTone;
   suffix?: string;
   hint?: string;
+  stale?: boolean;
 }) {
   return (
-    <div className="min-w-0 rounded-[var(--radius-panel)] border border-line bg-surface px-3 py-2">
+    <div
+      data-awf-stale={stale ? "true" : undefined}
+      className="min-w-0 rounded-[var(--radius-panel)] border border-line bg-surface px-3 py-2"
+    >
       <div className="label-caps truncate">{label}</div>
       <div className={`kpi-value mt-0.5 truncate ${tone ? toneTextClass(tone) : "text-fg"}`}>
         {value}

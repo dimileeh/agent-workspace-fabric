@@ -28,7 +28,7 @@ A serious, trustworthy control room. Calm, dense, information-first, never flash
 - **Three layers:** Status (is the fleet ok? <5s glance, 5–7 KPIs, top-left priority) → Diagnosis
   (why?) → Action (what do I do?). Progressive disclosure: detail lives in the inspector drawer.
 - **Semantic color carries meaning, never decoration**; never color-alone — pair every status with
-  a glyph + label (`statusGlyph`/`toneGlyph` in `lib/format.ts`).
+  a glyph + label (`statusGlyph` in `lib/format.ts`).
 - **Dim/flag stale data** so operators never act on outdated readings (`data-awf-stale`).
 - WCAG 2.2 AA baseline; keep high-contrast + large-font + reduced-motion modes.
 

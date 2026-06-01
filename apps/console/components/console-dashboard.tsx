@@ -794,6 +794,13 @@ const searchParams = useSearchParams();
     [overview, taskDetailsWorkspaceId],
   );
 
+  // Per-source stale flags: saturation-backed KPIs and reliability-summary KPIs
+  // dim independently so a failure in one feed never fades fresh values from the
+  // other.
+  const apiDown = apiState === "error";
+  const saturationStale = (apiDown || resourceError != null) && resourceSaturation != null;
+  const summaryStale = (apiDown || workspaceSummaryError != null) && workspaceSummary != null;
+
   const fleetKpis = useMemo<FleetKpi[]>(() => {
     const counts = resourceSaturation?.workspace_counts ?? null;
     const capacity = resourceSaturation ? capacityUtilizationPct(resourceSaturation) : null;
@@ -808,18 +815,20 @@ const searchParams = useSearchParams();
     const failed = workspaceSummary?.failed_count;
     const dash = "—";
     return [
-      { id: "active", label: "Active", value: counts ? counts.active_total : dash },
+      { id: "active", label: "Active", value: counts ? counts.active_total : dash, stale: saturationStale },
       {
         id: "running",
         label: "Running",
         value: counts ? counts.running : dash,
         tone: counts?.running ? "info" : undefined,
+        stale: saturationStale,
       },
       {
         id: "monitoring_pr",
         label: "Monitoring PR",
         value: counts ? counts.monitoring_pr : dash,
         tone: counts?.monitoring_pr ? "info" : undefined,
+        stale: saturationStale,
       },
       {
         id: "queued",
@@ -832,6 +841,7 @@ const searchParams = useSearchParams();
               ? `oldest ${compactDuration(oldestWait)}`
               : "awaiting capacity"
             : undefined,
+        stale: saturationStale,
       },
       {
         id: "completed",
@@ -839,6 +849,7 @@ const searchParams = useSearchParams();
         value: completed ?? dash,
         tone: completed ? "good" : undefined,
         hint: completed != null ? windowHint : undefined,
+        stale: summaryStale,
       },
       {
         id: "cancelled",
@@ -846,6 +857,7 @@ const searchParams = useSearchParams();
         value: cancelled ?? dash,
         tone: cancelled ? "warn" : undefined,
         hint: cancelled != null ? windowHint : undefined,
+        stale: summaryStale,
       },
       {
         id: "failed",
@@ -853,6 +865,7 @@ const searchParams = useSearchParams();
         value: failed ?? dash,
         tone: failed ? "bad" : undefined,
         hint: failed != null ? windowHint : undefined,
+        stale: summaryStale,
       },
       {
         id: "capacity",
@@ -862,26 +875,20 @@ const searchParams = useSearchParams();
         // Only flag pressure (warn/bad). Low/idle utilization stays neutral so a
         // value below the warn threshold is not styled like an active signal.
         tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : undefined) : undefined,
+        stale: saturationStale,
       },
     ];
-  }, [resourceSaturation, workspaceSummary]);
+  }, [resourceSaturation, workspaceSummary, saturationStale, summaryStale]);
 
-  // Stale dimming per concern: a panel is stale only when it is actually showing
-  // a previously-loaded snapshot AND its data is no longer fresh (API health
-  // check failed, or that panel's own refresh errored). On first-load failures
+  // Panel-level stale dimming: a panel dims only when it is actually showing a
+  // previously-loaded snapshot AND its feed errored. On first-load failures
   // there is no cached snapshot, so the panel shows its loading/error state
   // instead of a misleading "last snapshot" badge.
-  const apiDown = apiState === "error";
-  // Saturation drives the capacity panel and most fleet KPIs. A reliability
-  // summary error is a separate, secondary source (surfaced via its own banner),
-  // so it must not dim saturation-backed data that is still fresh.
-  const resourceErrored = apiDown || resourceError != null;
   const mergeErrored = apiDown || mergeQueueError != null || mergeQueueStatus === "error";
   const failureErrored = apiDown || failureSummaryStatus === "error";
-  const capacityStale = resourceErrored && resourceSaturation != null;
+  const capacityStale = saturationStale;
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
-  const fleetStale = resourceErrored && resourceSaturation != null;
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -903,7 +910,7 @@ const searchParams = useSearchParams();
         isPending={isPending}
       />
 
-      <FleetHealthStrip kpis={fleetKpis} stale={fleetStale} />
+      <FleetHealthStrip kpis={fleetKpis} />
       <SectionNav />
 
       <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">

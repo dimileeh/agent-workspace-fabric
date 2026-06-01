@@ -255,25 +255,24 @@ export type FleetKpi = {
   tone?: StatusTone;
   suffix?: string;
   hint?: string;
+  stale?: boolean;
 };
 
 // Status layer (ISA-101 three-layer model): a single-glance fleet HUD answering
 // "is the fleet ok?" — the 5-7 KPIs an operator scans first, most critical first.
-// When the feed is stale the KPI values are dimmed, but the warning above them
-// stays at full opacity so the cue is never lost.
-export function FleetHealthStrip({ kpis, stale = false }: { kpis: FleetKpi[]; stale?: boolean }) {
+// KPIs dim per source (saturation vs reliability summary) so only the actually
+// stale values fade, while the warning above stays at full opacity.
+export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
+  const anyStale = kpis.some((kpi) => kpi.stale);
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
-      {stale ? (
+      {anyStale ? (
         <div className="mb-2 inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text">
           <span aria-hidden>⚠</span>
-          showing last snapshot — live data may be stale
+          some values show the last snapshot — live data may be stale
         </div>
       ) : null}
-      <div
-        data-awf-stale={stale ? "true" : undefined}
-        className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8"
-      >
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
         {kpis.map((kpi) => (
           <KpiStat
             key={kpi.id}
@@ -282,6 +281,7 @@ export function FleetHealthStrip({ kpis, stale = false }: { kpis: FleetKpi[]; st
             tone={kpi.tone}
             suffix={kpi.suffix}
             hint={kpi.hint}
+            stale={kpi.stale}
           />
         ))}
       </div>
