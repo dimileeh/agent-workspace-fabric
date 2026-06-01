@@ -77,10 +77,14 @@ an explicit `900`, even when the resolved profile default is also 900 seconds.
 If `awf workspace adopt-pr` returns `Not Found` before any workspace appears:
 
 - Verify the CLI is targeting the same API root as your REST calls.
-- For plain API roots, `AWF_CLI_BASE_URL` can be `http://host:8000`, `http://host:8000/`,
+- For plain API roots, `AWF_BASE_URL` can be `http://host:8000`, `http://host:8000/`,
   `http://host:8000/v1`, or `http://host:8000/v1/`.
-- For reverse-proxy setups, set `AWF_CLI_BASE_URL` to the proxy mount
+- For reverse-proxy setups, set `AWF_BASE_URL` to the proxy mount
   (for example, `http://host:8000/awf` or `http://host:8000/awf/v1`).
+- `AWF_CLI_BASE_URL` is still honored for compatibility, but is deprecated; use
+  `AWF_BASE_URL` for new scripts.
+- When neither variable is set, the host CLI derives
+  `http://localhost:${AWF_API_HOST_PORT:-8000}`.
 - If your base URL already ends in `/v1`, the CLI no longer doubles the prefix.
   In other words, `.../v1` + `POST /v1/workspaces/adopt-pr` now resolves to
   `.../v1/workspaces/adopt-pr`, not `.../v1/v1/workspaces/adopt-pr`.

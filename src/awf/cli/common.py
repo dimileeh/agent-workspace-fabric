@@ -11,7 +11,7 @@ import traceback
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from uuid import uuid4
 
 import httpx
@@ -23,12 +23,14 @@ from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
+_DEPRECATED_CLI_BASE_URL_NOTICE = "AWF_CLI_BASE_URL is deprecated; use AWF_BASE_URL"
 _CONTROL_IDEMPOTENCY_KEY_HELP = (
     "Idempotency key for this mutating control. When omitted, generated and "
     "printed to stderr before the request; pass the same value again to safely "
     "retry after a timeout or dropped response."
 )
 _MIN_RICH_HELP_WIDTH = 80
+_cli_base_url_deprecation_notice_emitted = False
 
 
 class OutputFormat(StrEnum):
@@ -64,8 +66,51 @@ def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
 
 
 def _base_url(override: str | None) -> str:
-    """Get base url."""
-    return override or os.environ.get("AWF_CLI_BASE_URL", _DEFAULT_BASE_URL)
+    """Get the host-reachable AWF API base URL for CLI HTTP calls."""
+    if override:
+        return override
+    base_url = os.environ.get("AWF_BASE_URL")
+    if base_url:
+        return base_url
+    deprecated_base_url = os.environ.get("AWF_CLI_BASE_URL")
+    if deprecated_base_url:
+        _emit_deprecated_cli_base_url_notice()
+        return deprecated_base_url
+    host_port = os.environ.get("AWF_API_HOST_PORT")
+    if host_port:
+        return f"http://localhost:{_parse_api_host_port(host_port)}"
+    return _DEFAULT_BASE_URL
+
+
+def _parse_api_host_port(host_port: str) -> int:
+    """Parse the CLI's host API port override."""
+
+    stripped_port = host_port.strip()
+    if not stripped_port.isdecimal():
+        _exit_invalid_api_host_port(host_port)
+    parsed_port = int(stripped_port)
+    if not 1 <= parsed_port <= 65535:
+        _exit_invalid_api_host_port(host_port)
+    return parsed_port
+
+
+def _exit_invalid_api_host_port(host_port: str) -> NoReturn:
+    """Exit with a CLI usage error for invalid host API port overrides."""
+    typer.echo(
+        f"error: AWF_API_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
+def _emit_deprecated_cli_base_url_notice() -> None:
+    """Warn once per process when the legacy CLI base URL variable is used."""
+    global _cli_base_url_deprecation_notice_emitted
+
+    if _cli_base_url_deprecation_notice_emitted:
+        return
+    typer.echo(_DEPRECATED_CLI_BASE_URL_NOTICE, err=True)
+    _cli_base_url_deprecation_notice_emitted = True
 
 
 def _api_token_headers(override: str | None) -> dict[str, str]:

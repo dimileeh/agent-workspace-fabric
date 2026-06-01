@@ -17,6 +17,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+import awf.cli.common as cli_common
 from awf.cli import main as cli_main
 from awf.cli.main import app
 
@@ -160,6 +161,13 @@ class TestWorkspaceAdoptPr:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.delenv("AWF_BASE_URL", raising=False)
+        monkeypatch.setattr(
+            cli_common,
+            "_cli_base_url_deprecation_notice_emitted",
+            False,
+            raising=False,
+        )
         for base_url in ("http://host:8000/v1", "http://host:8000/v1/"):
             monkeypatch.setenv("AWF_CLI_BASE_URL", base_url)
             response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
@@ -888,23 +896,138 @@ class TestOperationCommands:
 
 
 class TestBaseUrlResolution:
+    _DEPRECATION_NOTICE = "AWF_CLI_BASE_URL is deprecated; use AWF_BASE_URL"
+
+    @staticmethod
+    def _clear_base_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reset CLI base URL environment state for a single test."""
+        monkeypatch.delenv("AWF_BASE_URL", raising=False)
+        monkeypatch.delenv("AWF_CLI_BASE_URL", raising=False)
+        monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+        monkeypatch.setattr(
+            cli_common,
+            "_cli_base_url_deprecation_notice_emitted",
+            False,
+            raising=False,
+        )
+
     @pytest.mark.unit
-    def test_cli_flag_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_cli_flag_overrides_env_without_deprecation_notice(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Prefer an explicit CLI base URL over all environment defaults."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setenv("AWF_BASE_URL", "http://from-base-env:7777")
         monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
+        monkeypatch.setenv("AWF_API_HOST_PORT", "8800")
         response = _mock_response(status_code=200, payload=[])
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
-            _runner.invoke(app, ["workspace", "list", "--base-url", "http://explicit:1234"])
+            result = _runner.invoke(
+                app,
+                ["workspace", "list", "--base-url", "http://explicit:1234"],
+            )
 
+        assert result.exit_code == 0, result.output
         assert mock.call_args[0][1].startswith("http://explicit:1234")
+        assert self._DEPRECATION_NOTICE not in result.stderr
 
     @pytest.mark.unit
-    def test_env_used_when_no_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_awf_base_url_env_wins_over_deprecated_cli_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Prefer AWF_BASE_URL over the deprecated CLI-only environment URL."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setenv("AWF_BASE_URL", "http://from-base-env:7777")
         monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
         response = _mock_response(status_code=200, payload=[])
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
-            _runner.invoke(app, ["workspace", "list"])
+            result = _runner.invoke(app, ["workspace", "list"])
 
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0][1].startswith("http://from-base-env:7777")
+        assert self._DEPRECATION_NOTICE not in result.stderr
+
+    @pytest.mark.unit
+    def test_deprecated_cli_env_used_when_no_base_url_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Use the deprecated CLI-only URL when no primary base URL is set."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "list"])
+
+        assert result.exit_code == 0, result.output
         assert mock.call_args[0][1].startswith("http://from-env:9999")
+        assert self._DEPRECATION_NOTICE in result.stderr
+
+    @pytest.mark.unit
+    def test_deprecated_cli_env_notice_is_one_time_per_process(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Warn once per process when the deprecated CLI URL variable is used."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
+
+        assert cli_common._base_url(None) == "http://from-env:9999"  # noqa: SLF001
+        assert cli_common._base_url(None) == "http://from-env:9999"  # noqa: SLF001
+
+        assert capsys.readouterr().err.count(self._DEPRECATION_NOTICE) == 1
+
+    @pytest.mark.unit
+    def test_api_host_port_derives_default_host_cli_url(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Derive the default operator URL from the service host port override."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setenv("AWF_API_HOST_PORT", "8800")
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0][1].startswith("http://localhost:8800")
+        assert self._DEPRECATION_NOTICE not in result.stderr
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("host_port", ["not-a-port", "0", "65536"])
+    def test_invalid_api_host_port_exits_before_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        host_port: str,
+    ) -> None:
+        """Reject invalid host port overrides before opening an HTTP request."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setenv("AWF_API_HOST_PORT", host_port)
+        with patch("awf.cli.main.httpx.request") as mock:
+            result = _runner.invoke(app, ["workspace", "list"])
+
+        assert result.exit_code == 2
+        assert mock.call_count == 0
+        assert "AWF_API_HOST_PORT must be an integer between 1 and 65535" in result.stderr
+        assert repr(host_port) in result.stderr
+
+    @pytest.mark.unit
+    def test_no_base_url_env_uses_localhost_8000_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Use the localhost default when no CLI URL environment is configured."""
+        self._clear_base_url_env(monkeypatch)
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0][1].startswith("http://localhost:8000")
+        assert self._DEPRECATION_NOTICE not in result.stderr
 
 
 class TestConnectionErrors:
