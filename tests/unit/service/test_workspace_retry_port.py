@@ -587,9 +587,9 @@ async def test_retry_no_reservation_when_target_node_unknown(
     tmp_path,
 ) -> None:
     """When the source has no reservation and no worker_node_id is configured,
-    target_node_id is None and no reservation should be created for the
-    retried workspace.  The conflict checker scans all nodes so a port held
-    by an active workspace on any node is still detected."""
+    target_node_id falls back to "local" (matching create-admission behaviour)
+    and a reservation is created on the local node so the COALESCE-based
+    conflict checker can detect port collisions on that node."""
     settings = Settings(
         _env_file=None,
         host_home=str(tmp_path / "home"),
@@ -642,7 +642,8 @@ async def test_retry_no_reservation_when_target_node_unknown(
         retried_reservations = await ResourceReservationRepository(
             session,
         ).list_for_workspace(retry.new_workspace.id)
-        assert len(retried_reservations) == 0
+        assert len(retried_reservations) == 1
+        assert retried_reservations[0].node_id == "local"
 
 
 @pytest.mark.unit
@@ -650,9 +651,9 @@ async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
-    """When target_node_id is None the conflict scan must still run against
-    all nodes so that a retry cannot silently admit a workspace whose host
-    port collides with an active workspace on any node."""
+    """When target_node_id falls back to "local", the conflict scan on that
+    node must detect an active workspace holding the same host port so the
+    retry is rejected with a 409-class error."""
     settings = Settings(
         _env_file=None,
         host_home=str(tmp_path / "home"),
@@ -718,7 +719,7 @@ async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
             task_kind="feature_branch_pr",
             remote_push_branch=None,
         )
-        blocker.node_id = "node-1"
+        blocker.node_id = "local"
         await repo.transition(blocker, to=WorkspaceStatus.provisioning, reason_code="TEST")
         await repo.transition(blocker, to=WorkspaceStatus.ready, reason_code="TEST")
         await repo.transition(blocker, to=WorkspaceStatus.running, reason_code="TEST")

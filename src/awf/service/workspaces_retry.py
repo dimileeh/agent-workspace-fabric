@@ -311,6 +311,7 @@ async def retry_workspace_row(
         resolved_settings.worker_node_id
         or (source_reservation.node_id if source_reservation else None)
         or source.node_id
+        or "local"
     )
     if await _source_runtime_not_yet_released(session, source) and (
         source_effective_node_id is None
@@ -391,12 +392,7 @@ async def retry_workspace_row(
             dind_mode="dind" if source_reservation.dind_slots else "none",
             phase=source_reservation.phase,
         )
-    elif target_node_id is not None:
-        # No source reservation: fall back to settings defaults.
-        # dind_mode is conservatively "none" because we cannot infer
-        # the original DinD configuration without a reservation row.
-        # This is a narrow edge case (reservation INSERT failed before
-        # provisioning) and accepted capacity-tracking drift.
+    else:
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
@@ -408,22 +404,19 @@ async def retry_workspace_row(
             dind_mode="none",
             phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
         )
-    else:
-        retry_reservation = None
-    if retry_reservation is not None:
-        await ResourceReservationRepository(session).create(
-            workspace_id=retried.id,
-            attempt_id=attempt.id,
-            node_id=retry_reservation.node_id,
-            steady_cpu=retry_reservation.steady_cpu,
-            steady_memory_gb=retry_reservation.steady_memory_gb,
-            peak_cpu=retry_reservation.peak_cpu,
-            peak_memory_gb=retry_reservation.peak_memory_gb,
-            disk_mb=retry_reservation.disk_mb,
-            dind_slots=retry_reservation.dind_slots,
-            phase=retry_reservation.phase,
-        )
-        retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
+    await ResourceReservationRepository(session).create(
+        workspace_id=retried.id,
+        attempt_id=attempt.id,
+        node_id=retry_reservation.node_id,
+        steady_cpu=retry_reservation.steady_cpu,
+        steady_memory_gb=retry_reservation.steady_memory_gb,
+        peak_cpu=retry_reservation.peak_cpu,
+        peak_memory_gb=retry_reservation.peak_memory_gb,
+        disk_mb=retry_reservation.disk_mb,
+        dind_slots=retry_reservation.dind_slots,
+        phase=retry_reservation.phase,
+    )
+    retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     retry_score = scheduler_score_from_workspace(retried, now=retried.created_at)
     await QueueDecisionRepository(session).create(
         workspace_id=retried.id,
