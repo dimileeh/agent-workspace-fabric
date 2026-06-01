@@ -297,6 +297,16 @@ def _snapshot_ignored_path_signatures(
     return tuple((path, _hash_file_contents(worktree_path / path)) for path in snapshot_paths)
 
 
+def _ignored_signature_lookup_by_normalized_path(
+    signatures: tuple[_IgnoredPathSignature, ...],
+) -> dict[str, _IgnoredPathSignature]:
+    """Map ignored signatures by slash-tolerant path while preserving display paths."""
+    lookup: dict[str, _IgnoredPathSignature] = {}
+    for path, signature in signatures:
+        lookup.setdefault(_normalize_porcelain_path(path), (path, signature))
+    return lookup
+
+
 @dataclass(frozen=True)
 class ValidationWorktreeCheck:
     """Result payload describing whether the validation worktree is clean."""
@@ -653,7 +663,9 @@ async def cleanup_validation_worktree_side_effects(
 
     ignored_paths = {_normalize_porcelain_path(path) for path in (ignore_ignored_paths or ())}
     ignored_pathspecs = tuple(ignore_ignored_paths or ())
-    ignore_ignored_paths_snapshot_lookup = dict(ignore_ignored_paths_snapshot_signatures or ())
+    ignored_signature_lookup_by_normalized_path = _ignored_signature_lookup_by_normalized_path(
+        ignore_ignored_paths_snapshot_signatures or ()
+    )
     ignored_snapshot_set: set[str] = set()
     cleanup_untracked_paths = [
         path
@@ -752,17 +764,17 @@ async def cleanup_validation_worktree_side_effects(
         for path in current_ignored_paths:
             if not _is_under_ignored_path(path, ignored_paths):
                 continue
-            if path not in ignored_snapshot_set:
+            normalized_path = _normalize_porcelain_path(path)
+            if normalized_path not in ignored_snapshot_normalized_set:
                 continue
             if ignore_ignored_paths_snapshot_signatures is None:
                 continue
-            if current_ignored_signature_lookup.get(
-                path, ""
-            ) != ignore_ignored_paths_snapshot_lookup.get(
-                path,
-                "",
-            ):
-                modified_snapshot_paths.append(path)
+            baseline_path, baseline_signature = ignored_signature_lookup_by_normalized_path.get(
+                normalized_path,
+                (path, ""),
+            )
+            if current_ignored_signature_lookup.get(path, "") != baseline_signature:
+                modified_snapshot_paths.append(baseline_path)
         if modified_snapshot_paths:
             return await _return_after_head_verification(
                 ValidationWorktreeCleanup(

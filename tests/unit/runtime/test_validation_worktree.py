@@ -1004,6 +1004,94 @@ async def test_cleanup_validation_worktree_fails_modified_ignored_file_using_sna
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_fails_when_empty_ignored_dir_becomes_file(
+    tmp_path: Path,
+) -> None:
+    """Baseline empty ignored directories must not be replaced by files."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    ignored_root = worktree / ".venv"
+    ignored_root.mkdir(parents=True)
+    replacement_file = ignored_root / "generated"
+    replacement_file.write_text("replacement file\n")
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a baseline empty directory replaced by an ignored file."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
+            return _CommandResultLike(0, ".venv/generated\0", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/generated/",),
+        ignore_ignored_paths_snapshot_signatures=((".venv/generated/", "directory"),),
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.message == (
+        "AWF validation modified pre-existing ignored files and they "
+        "cannot be safely restored: .venv/generated/"
+    )
+    assert cleanup.cleanup_command is None
+    assert ("clean", "-fdx", "--", ".venv/generated") not in commands
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_fails_when_ignored_file_becomes_empty_dir(
+    tmp_path: Path,
+) -> None:
+    """Baseline ignored files must not be replaced by empty directories."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    generated_dir = worktree / ".venv" / "generated"
+    generated_dir.mkdir(parents=True)
+    baseline_content = b"baseline file\n"
+    baseline_signature = hashlib.sha256(baseline_content).hexdigest()
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a baseline ignored file replaced by an empty directory."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/generated",),
+        ignore_ignored_paths_snapshot_signatures=((".venv/generated", baseline_signature),),
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.message == (
+        "AWF validation modified pre-existing ignored files and they "
+        "cannot be safely restored: .venv/generated"
+    )
+    assert cleanup.cleanup_command is None
+    assert ("clean", "-fdx", "--", ".venv/generated") not in commands
+
+
+@pytest.mark.unit
 async def test_cleanup_validation_worktree_fails_when_ignored_snapshot_path_disappears(
     tmp_path: Path,
 ) -> None:
