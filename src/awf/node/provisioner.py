@@ -1210,7 +1210,7 @@ class Provisioner:
                         "orphan_stop_error": orphan_stop_error,
                     },
                 )
-                if revoke_count >= _MAX_REVOKE_EVENTS:
+                if revoke_count + 1 >= _MAX_REVOKE_EVENTS:
                     await repo.add_event(
                         ws,
                         event_type="workspace.stale_action_skipped",
