@@ -52,6 +52,7 @@ from awf.service.merge_queue import MergeQueueBlocker
 
 _MERGE_METHOD_PREFERENCE = ("squash", "merge", "rebase")
 _KNOWN_MERGE_METHODS = frozenset(_MERGE_METHOD_PREFERENCE)
+_MERGE_METHOD_MISMATCH_REASON = "MERGE_METHOD_MISMATCH"
 
 
 class _MergeAttemptOutcome(StrEnum):
@@ -120,6 +121,8 @@ async def _resolve_effective_merge_methods(
 
 def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
     """Return the merge method explicitly rejected by GitHub, when known."""
+    # GitHubClientError stores redacted stderr. These policy phrases contain no
+    # secret-like material, so redaction should preserve the classifier signal.
     text = exc.stderr.lower()
     if "squash merges are not allowed" in text:
         return "squash"
@@ -159,6 +162,63 @@ def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
     if detail:
         return f"GitHub rejected merge-method preflight: {detail}"
     return "GitHub rejected merge-method preflight"
+
+
+async def _record_empty_effective_merge_methods_blocker(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    merge_status: PRStatus,
+    base_branch: str,
+    remote_branch: str,
+    monitor_log: WorkspaceLogSink | None,
+    notification_reason: str,
+) -> None:
+    """Record operator evidence when policy intersection leaves no merge method."""
+    merge_operation = await self._begin_monitor_state_operation(
+        workspace_id=workspace_id,
+        action="merge",
+        requested_action="merge",
+        reason=notification_reason,
+        reason_code=_MERGE_METHOD_MISMATCH_REASON,
+        pr_number=pr_number,
+        status=merge_status,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+    )
+    operation_id = merge_operation.operation_id if merge_operation is not None else None
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
+        action="merge",
+        outcome="blocked",
+        reason_code=_MERGE_METHOD_MISMATCH_REASON,
+        pr_number=pr_number,
+        status=merge_status,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=OperationType.monitor_state.value,
+        monitor_log=monitor_log,
+        evidence={
+            "operation": "resolve_effective_merge_methods",
+            "effective_methods": [],
+        },
+    )
+    await self._finish_monitor_operation(
+        merge_operation,
+        status=OperationStatus.failed,
+        result={
+            "status": "failed",
+            "outcome": "merge_method_mismatch",
+            "reason_code": _MERGE_METHOD_MISMATCH_REASON,
+            "effective_methods": [],
+        },
+        error_code=_MERGE_METHOD_MISMATCH_REASON,
+        error_message=notification_reason,
+    )
 
 
 async def _attempt_merge_method(
@@ -764,6 +824,16 @@ async def handle_merge_action(
                                     base_branch=base_branch,
                                     attempted_method=None,
                                     effective_methods=effective_methods,
+                                )
+                                await _record_empty_effective_merge_methods_blocker(
+                                    self,
+                                    workspace_id=workspace_id,
+                                    pr_number=pr_number,
+                                    merge_status=merge_status,
+                                    base_branch=base_branch,
+                                    remote_branch=remote_branch,
+                                    monitor_log=monitor_log,
+                                    notification_reason=merge_method_notification_reason,
                                 )
                                 state.mark_addressed(
                                     _merge_method_blocked_key(

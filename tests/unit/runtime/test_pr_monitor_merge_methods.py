@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import OperationStatus
-from awf.db.repositories import OperationRepository
+from awf.db.repositories import OperationRepository, WorkspaceEventRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -490,6 +490,71 @@ async def test_method_rejection_without_alternative_notifies_human_without_trans
     )
     assert merge_operation.status == OperationStatus.failed.value
     assert merge_operation.error_code == "GITHUB_MERGE_FAILED"
+
+
+@pytest.mark.unit
+async def test_empty_effective_merge_methods_records_operation_and_audit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An empty repo/branch policy intersection leaves operator-visible evidence."""
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("merge",),
+    )
+
+    terminal, state, sleep_fn, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == []
+    assert len(gh.comments) == 1
+    assert "attempted=none; effective_allowed=none" in gh.comments[0]
+    assert sleep_fn.calls == [60]
+    assert any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(
+            workspace_id=workspace_id,
+            limit=20,
+        )
+        audit_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.merge_attempt",
+            limit=20,
+        )
+
+    merge_operation = next(
+        operation
+        for operation in operations
+        if operation.type == "monitor_state"
+        and isinstance(operation.payload, dict)
+        and operation.payload.get("action") == "merge"
+    )
+    assert merge_operation.status == OperationStatus.failed.value
+    assert merge_operation.error_code == "MERGE_METHOD_MISMATCH"
+    assert merge_operation.result == {
+        "status": "failed",
+        "outcome": "merge_method_mismatch",
+        "reason_code": "MERGE_METHOD_MISMATCH",
+        "effective_methods": [],
+    }
+
+    assert len(audit_events) == 1
+    audit_payload = audit_events[0].payload
+    assert isinstance(audit_payload, dict)
+    assert audit_events[0].reason_code == "MERGE_METHOD_MISMATCH"
+    assert audit_payload["action"] == "merge"
+    assert audit_payload["outcome"] == "blocked"
+    assert audit_payload["evidence"] == {
+        "operation": "resolve_effective_merge_methods",
+        "effective_methods": [],
+    }
 
 
 @pytest.mark.unit

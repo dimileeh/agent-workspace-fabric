@@ -1192,13 +1192,22 @@ class GitHubClient:
                 returncode=0,
                 stderr="GitHub repository response was not a JSON object",
             )
+        merge_flags = (
+            ("allow_merge_commit", "merge"),
+            ("allow_squash_merge", "squash"),
+            ("allow_rebase_merge", "rebase"),
+        )
+        if not any(flag in payload for flag, _method in merge_flags):
+            missing = ", ".join(flag for flag, _method in merge_flags)
+            raise GitHubClientError(
+                operation="gh api repo",
+                returncode=0,
+                stderr=f"GitHub repository response omitted merge method flags: {missing}",
+            )
         methods: list[str] = []
-        if payload.get("allow_merge_commit") is True:
-            methods.append("merge")
-        if payload.get("allow_squash_merge") is True:
-            methods.append("squash")
-        if payload.get("allow_rebase_merge") is True:
-            methods.append("rebase")
+        for flag, method in merge_flags:
+            if payload.get(flag) is True:
+                methods.append(method)
         return tuple(methods)
 
     async def fetch_branch_pull_request_allowed_merge_methods(

@@ -1068,6 +1068,36 @@ class TestMutations:
         assert fake.calls[0].args == ["gh", "api", "repos/o/r"]
 
     @pytest.mark.unit
+    async def test_fetch_repo_merge_methods_rejects_missing_repo_flags(self) -> None:
+        """Missing repo merge flags are an API anomaly, not a genuine empty policy."""
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout='{"name":"r"}')
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError, match="omitted merge method flags") as exc:
+            await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
+
+        assert "allow_merge_commit" in exc.value.stderr
+        assert "allow_squash_merge" in exc.value.stderr
+        assert "allow_rebase_merge" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_fetch_repo_merge_methods_all_false_is_empty_policy(self) -> None:
+        """Explicit false repo merge flags still represent a real empty repository policy."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                '{"allow_merge_commit":false,"allow_squash_merge":false,"allow_rebase_merge":false}'
+            ),
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
+
+        assert methods == ()
+
+    @pytest.mark.unit
     async def test_fetch_branch_pull_request_allowed_merge_methods_empty_unconstrained(
         self,
     ) -> None:
