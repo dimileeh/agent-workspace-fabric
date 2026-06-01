@@ -245,9 +245,6 @@ async def _record_stale_validation_cleanup_failure(
                     secondary_failure,
                 ],
             }
-            if ws.status == WorkspaceStatus.failed.value:
-                ws.failure_reason = FailureReason.infrastructure_failure.value
-                ws.failure_message = secondary_failure["message"][:2048]
 
         await repo.add_event(
             ws,
