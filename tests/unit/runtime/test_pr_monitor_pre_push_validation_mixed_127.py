@@ -32,6 +32,21 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
+async def _mixed_failure_setup(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> tuple[str, Path, FakeCommandRunner, FakeAdapter]:
+    """Create the common monitor fixtures for mixed failure scenarios."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted mixed failure fix\n")
+    return workspace_id, worktree, cmd, adapter
+
+
 @pytest.mark.unit
 async def test_mixed_127_fix_commit_failure_reports_real_pre_push_details(
     factory: async_sessionmaker[AsyncSession],
@@ -39,14 +54,8 @@ async def test_mixed_127_fix_commit_failure_reports_real_pre_push_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mixed toolchain and real failures should report the real terminal failure."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _set_resolved_profile(factory, workspace_id)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
+    workspace_id, worktree, cmd, adapter = await _mixed_failure_setup(factory, tmp_path)
     cmd.queue_result(returncode=0, stdout=f"{'4' * 40}\n")
-    adapter = FakeAdapter()
-    adapter.queue(stdout="attempted mixed failure fix\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -109,15 +118,9 @@ async def test_mixed_127_fix_pass_exhaustion_reports_real_pre_push_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exhausted mixed-failure retries should keep real failure diagnostics."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _set_resolved_profile(factory, workspace_id)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
+    workspace_id, worktree, cmd, adapter = await _mixed_failure_setup(factory, tmp_path)
     cmd.queue_result(returncode=0, stdout=f"{'5' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'6' * 40}\n")
-    adapter = FakeAdapter()
-    adapter.queue(stdout="attempted mixed failure fix\n")
     first_mixed = ValidationResult(
         commands=[
             _command_result(
