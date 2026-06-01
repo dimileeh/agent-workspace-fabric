@@ -339,6 +339,9 @@ async def run_validation_and_fix_cycle(
             capture_ignored_paths_snapshot=True,
         )
         pre_validation_ignored_paths_snapshot = pre_validation_check.ignored_paths_snapshot
+        pre_validation_ignored_paths_snapshot_signatures = (
+            pre_validation_check.ignored_paths_snapshot_signatures
+        )
         pre_validation_ignored_roots_snapshot = pre_validation_check.ignored_paths
         if setup_ignored_paths_snapshot is None:
             setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
@@ -443,6 +446,7 @@ async def run_validation_and_fix_cycle(
                 restore_ref=validation_workspace_head_sha,
                 ignore_ignored_paths=pre_validation_check.ignored_paths,
                 ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -503,6 +507,7 @@ async def run_validation_and_fix_cycle(
                 restore_ref=validation_workspace_head_sha,
                 ignore_ignored_paths=pre_validation_check.ignored_paths,
                 ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -551,6 +556,7 @@ async def run_validation_and_fix_cycle(
             restore_ref=validation_workspace_head_sha,
             ignore_ignored_paths=pre_validation_check.ignored_paths,
             ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
         )
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(

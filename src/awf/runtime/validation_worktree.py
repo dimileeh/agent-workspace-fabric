@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ VALIDATION_INFRASTRUCTURE_ERROR: str = _VALIDATION_INFRASTRUCTURE_ERROR
 GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+
+_IgnoredPathSignature = tuple[str, str]
 
 _PORCELAIN_C_ESCAPES = {
     "a": 0x07,
@@ -213,6 +216,28 @@ async def _snapshot_ignored_paths(
     return _ignored_untracked_snapshot_from_ls_files(result.stdout), ""
 
 
+def _hash_file_contents(path: Path) -> str:
+    """Compute a stable content signature for an ignored file snapshot entry."""
+    try:
+        hasher = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except OSError:
+        return ""
+
+
+def _snapshot_ignored_path_signatures(
+    worktree_path: Path,
+    snapshot_paths: tuple[str, ...],
+) -> tuple[_IgnoredPathSignature, ...]:
+    """Build per-path digests for ignored file snapshot entries."""
+    if not snapshot_paths:
+        return ()
+    return tuple((path, _hash_file_contents(worktree_path / path)) for path in snapshot_paths)
+
+
 @dataclass(frozen=True)
 class ValidationWorktreeCheck:
     """Result payload describing whether the validation worktree is clean."""
@@ -223,6 +248,7 @@ class ValidationWorktreeCheck:
     untracked_paths: tuple[str, ...] = ()
     ignored_paths: tuple[str, ...] = ()
     ignored_paths_snapshot: tuple[str, ...] = ()
+    ignored_paths_snapshot_signatures: tuple[_IgnoredPathSignature, ...] = ()
     reason_code: str | None = None
     message: str = ""
     command_stderr: str = ""
@@ -328,6 +354,7 @@ async def check_validation_worktree_clean(
     status_stdout = status.stdout or ""
     ignored_paths = _ignored_paths_from_porcelain(status_stdout)
     ignored_paths_snapshot: tuple[str, ...] = ()
+    ignored_paths_snapshot_signatures: tuple[_IgnoredPathSignature, ...] = ()
     if capture_ignored_paths_snapshot and ignored_paths:
         if ignore_ignored_paths is None:
             ignore_ignored_paths = ()
@@ -345,6 +372,10 @@ async def check_validation_worktree_clean(
                 command_stderr=snapshot_stderr,
             )
         ignored_paths_snapshot = snapshot_paths
+        ignored_paths_snapshot_signatures = _snapshot_ignored_path_signatures(
+            worktree_path=worktree_path,
+            snapshot_paths=ignored_paths_snapshot,
+        )
 
     if ignore_all_ignored:
         ignored_paths_to_ignore = {_normalize_porcelain_path(path) for path in ignored_paths}
@@ -367,6 +398,7 @@ async def check_validation_worktree_clean(
             clean=True,
             ignored_paths=ignored_paths,
             ignored_paths_snapshot=ignored_paths_snapshot,
+            ignored_paths_snapshot_signatures=ignored_paths_snapshot_signatures,
         )
     return ValidationWorktreeCheck(
         clean=False,
@@ -374,6 +406,7 @@ async def check_validation_worktree_clean(
         untracked_paths=untracked_paths,
         ignored_paths=ignored_paths,
         ignored_paths_snapshot=ignored_paths_snapshot,
+        ignored_paths_snapshot_signatures=ignored_paths_snapshot_signatures,
         reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
         message=(
             "Validation worktree has pre-existing uncommitted changes; "
@@ -389,6 +422,7 @@ async def cleanup_validation_worktree_side_effects(
     restore_ref: str | None = None,
     ignore_ignored_paths: tuple[str, ...] | None = None,
     ignore_ignored_paths_snapshot: tuple[str, ...] | None = None,
+    ignore_ignored_paths_snapshot_signatures: tuple[_IgnoredPathSignature, ...] | None = None,
 ) -> ValidationWorktreeCleanup:
     """Restore dirty files created by AWF-owned validation commands."""
 
@@ -532,6 +566,7 @@ async def cleanup_validation_worktree_side_effects(
 
     ignored_paths = {_normalize_porcelain_path(path) for path in (ignore_ignored_paths or ())}
     ignored_pathspecs = tuple(ignore_ignored_paths or ())
+    ignore_ignored_paths_snapshot_lookup = dict(ignore_ignored_paths_snapshot_signatures or ())
     cleanup_untracked_paths = [
         path
         for path in check.untracked_paths
@@ -551,14 +586,31 @@ async def cleanup_validation_worktree_side_effects(
                 message=(
                     "Could not inspect ignored paths for validation cleanup with `git ls-files`."
                 ),
-                cleanup_command="git ls-files",
+                cleanup_command=None,
                 cleanup_stderr=snapshot_stderr,
             )
+        current_ignored_signatures = (
+            _snapshot_ignored_path_signatures(
+                worktree_path=worktree_path,
+                snapshot_paths=current_ignored_paths,
+            )
+            if ignore_ignored_paths_snapshot_signatures is not None
+            else ()
+        )
         ignored_snapshot_set = set(ignore_ignored_paths_snapshot)
+        current_ignored_signature_lookup = dict(current_ignored_signatures)
         cleanup_untracked_paths.extend(
             path
             for path in current_ignored_paths
-            if path not in ignored_snapshot_set and _is_under_ignored_path(path, ignored_paths)
+            if _is_under_ignored_path(path, ignored_paths)
+            and (
+                path not in ignored_snapshot_set
+                or (
+                    ignore_ignored_paths_snapshot_signatures is not None
+                    and current_ignored_signature_lookup.get(path)
+                    != ignore_ignored_paths_snapshot_lookup.get(path, "")
+                )
+            )
         )
 
     cleanup_untracked_paths = list(dict.fromkeys(cleanup_untracked_paths))
