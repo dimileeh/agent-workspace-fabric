@@ -817,7 +817,16 @@ async def cleanup_validation_worktree_side_effects(
     if tracked_paths:
         assert restore_ref is not None
         restore = await run_git(
-            ["restore", "--source", restore_ref, "--staged", "--worktree", "--", *tracked_paths]
+            [
+                "--literal-pathspecs",
+                "restore",
+                "--source",
+                restore_ref,
+                "--staged",
+                "--worktree",
+                "--",
+                *tracked_paths,
+            ]
         )
         if not restore.ok:
             return await _return_after_head_verification(

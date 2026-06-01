@@ -31,6 +31,7 @@ _VALIDATION_IGNORED_LS_FILES_ARGS = (
     "-z",
 )
 _VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-fdx", "--")
+_VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
 
 
 @dataclass
@@ -352,7 +353,7 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
         """Simulate restore failure after a dirty tracked file is reported."""
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M tracked.py\n", "")
-        if args[:1] == ["restore"]:
+        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(1, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
@@ -387,7 +388,7 @@ async def test_cleanup_validation_worktree_rolls_back_head_when_restore_fails(
         if args == list(_VALIDATION_STATUS_ARGS):
             return _CommandResultLike(0, " M tracked.py\n", "")
         if args == [
-            "restore",
+            *_VALIDATION_RESTORE_PREFIX,
             "--source",
             restore_ref,
             "--staged",
@@ -501,7 +502,7 @@ async def test_cleanup_validation_worktree_cleans_ignored_files_with_none_stderr
                 return _CommandResultLike(0, " M tracked.py\n!! ignored-output/fixture.json\n", "")
             return _CommandResultLike(0, "", None)
         if args == [
-            "restore",
+            *_VALIDATION_RESTORE_PREFIX,
             "--source",
             restore_ref,
             "--staged",
@@ -527,7 +528,7 @@ async def test_cleanup_validation_worktree_cleans_ignored_files_with_none_stderr
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
     assert (
-        "restore",
+        *_VALIDATION_RESTORE_PREFIX,
         "--source",
         restore_ref,
         "--staged",
@@ -601,7 +602,7 @@ async def test_cleanup_validation_worktree_restores_tracked_path_under_ignored_r
         if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
             return _CommandResultLike(0, "", None)
         if args == [
-            "restore",
+            *_VALIDATION_RESTORE_PREFIX,
             "--source",
             restore_ref,
             "--staged",
@@ -629,13 +630,73 @@ async def test_cleanup_validation_worktree_restores_tracked_path_under_ignored_r
     assert cleanup.check.tracked_paths == (".venv/tracked.py",)
     assert cleanup.verify_check is not None and cleanup.verify_check.clean
     assert (
-        "restore",
+        *_VALIDATION_RESTORE_PREFIX,
         "--source",
         restore_ref,
         "--staged",
         "--worktree",
         "--",
         ".venv/tracked.py",
+    ) in commands
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_restores_tracked_pathspec_magic_path_literally(
+    tmp_path: Path,
+) -> None:
+    """Tracked paths with pathspec magic syntax must be restored literally."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    tracked_path = worktree / ":(glob)foo"
+    tracked_path.write_text("baseline\n", encoding="utf-8")
+    _run_real_git(worktree, "--literal-pathspecs", "add", "--", ":(glob)foo")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "init",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+    tracked_path.write_text("validation dirt\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        commands.append(tuple(args))
+        result = subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return _CommandResultLike(result.returncode, result.stdout, result.stderr)
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert tracked_path.read_text(encoding="utf-8") == "baseline\n"
+    assert (
+        *_VALIDATION_RESTORE_PREFIX,
+        "--source",
+        restore_ref,
+        "--staged",
+        "--worktree",
+        "--",
+        ":(glob)foo",
     ) in commands
 
 
@@ -1338,7 +1399,7 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
             if len(calls) == 1:
                 return _CommandResultLike(0, " M tracked.py\n", "")
             return _CommandResultLike(0, " M tracked.py\n", "")
-        if args[:1] == ["restore"]:
+        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(0, "", None)
         if args == ["rev-parse", restore_ref]:
             return _CommandResultLike(0, f"{restore_ref}\n", None)
@@ -1375,7 +1436,7 @@ async def test_cleanup_validation_worktree_rollback_to_restore_ref_when_restored
                 return _CommandResultLike(0, " M tracked.py\n", "")
             return _CommandResultLike(0, " M tracked.py\n", "")
         if args == [
-            "restore",
+            *_VALIDATION_RESTORE_PREFIX,
             "--source",
             restore_ref,
             "--staged",
@@ -1420,7 +1481,7 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
             if len(calls) == 1:
                 return _CommandResultLike(0, " M tracked.py\n", "")
             return _CommandResultLike(1, "", "status command failed")
-        if args[:1] == ["restore"]:
+        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
             return _CommandResultLike(0, "", None)
         if args[:2] == ["--literal-pathspecs", "clean"]:
             return _CommandResultLike(0, "", None)
