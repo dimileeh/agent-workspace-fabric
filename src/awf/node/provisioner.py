@@ -910,7 +910,13 @@ class Provisioner:
         pre-launch commit, this method publishes the workspace's
         ``resolved_profile`` inside the same transaction (and therefore
         under the same advisory lock) so that concurrent provisioners can
-        see the port claim before the lock is released.
+        see the port claim before the lock is released.  When
+        ``profile_resolution`` is ``None`` (profile was already resolved in
+        a previous provisioner run and stored in ``ws.resolved_profile``),
+        the previously-published profile is already visible to
+        ``find_host_port_conflicts`` via the ``HOST_PORT_CONFLICT_STATUSES``
+        query (the workspace is still ``provisioning``), so the TOCTOU
+        invariant holds without a re-publish.
 
         ``compose_project_name`` is intentionally **not** set here.  Setting
         it before ``_recheck_before_launch`` records its
