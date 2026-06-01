@@ -586,7 +586,7 @@ class WorkspaceService:
 
             resolved_settings = self._settings or get_settings()
             req_profile, resolved_profile = workspace_create_profile_snapshots(req)
-            node_id = resolved_settings.worker_node_id
+            node_id = resolved_settings.worker_node_id or "local"
             await check_host_port_conflicts(
                 repo,
                 req.companions,
