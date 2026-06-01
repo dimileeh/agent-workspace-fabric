@@ -78,16 +78,9 @@ async def acquire_host_port_admission_lock(
         return
 
     lock_key_fn = _host_port_admission_advisory_lock_key
-    seen_keys: set[int] = set()
     distinct_keys: list[int] = []
     for hp in dict.fromkeys(host_ports):
-        lock_key = lock_key_fn(hp)
-        if lock_key in seen_keys:
-            from awf.service.workspaces import WorkspaceCreateDuplicateHostPortError
-
-            raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
-        seen_keys.add(lock_key)
-        distinct_keys.append(lock_key)
+        distinct_keys.append(lock_key_fn(hp))
     distinct_keys.sort()
     for lock_key in distinct_keys:
         await session.execute(
