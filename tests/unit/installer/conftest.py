@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -175,10 +176,11 @@ class InstallerHarness:
         """
         version_exit = rc if version_rc is None else version_rc
         help_exit = rc if help_rc is None else help_rc
+        version_output = shlex.quote(f"awf {version}")
         behavior = (
             'case "$1" in\n'
             "  --version)\n"
-            f"    printf '%s\\n' 'awf {version}'\n"
+            f"    printf '%s\\n' {version_output}\n"
             f"    exit {version_exit} ;;\n"
             f"  *) exit {help_exit} ;;\n"
             "esac"
