@@ -25,6 +25,7 @@ exercised.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 
 import pytest
 
@@ -49,7 +50,7 @@ def _completed(
 
 
 @pytest.fixture(autouse=True)
-def _clear_build_cache() -> None:
+def _clear_build_cache() -> Iterator[None]:
     """``build_distributions`` is ``lru_cache``d — reset it around each case."""
     build_distributions.cache_clear()
     yield

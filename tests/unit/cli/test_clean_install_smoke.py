@@ -166,6 +166,17 @@ def test_clean_venv_install_help(built: BuiltDistributions, tmp_path: Path) -> N
         # skipped (PRRT_kwDOSJAM6s6F-8ys).
         pytest.fail(f"wheel install failed for a non-environmental reason:\n{combined[-1000:]}")
 
+    if not venv_awf.exists():  # pragma: no cover - wheel entry-point regression
+        # pip install succeeded but the ``awf`` console script is absent (e.g. a
+        # malformed ``entry_points.txt`` in the wheel). Fail with a diagnostic
+        # message rather than letting the subprocess call below raise a bare
+        # FileNotFoundError — a missing entry point on this POSIX layout is a
+        # real wheel-artifact regression the package guard must surface.
+        pytest.fail(
+            f"pip install succeeded but the 'awf' console script is missing at {venv_awf}; "
+            "the wheel's entry-point metadata is malformed."
+        )
+
     outside = tmp_path / "outside"
     outside.mkdir()
     for args in _HELP_COMMANDS:
