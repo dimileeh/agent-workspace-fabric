@@ -11,29 +11,26 @@ import json as json
 import os as os
 import re as re
 import shlex as shlex
-import tempfile as tempfile
 import time as time
 import traceback as traceback
-from collections.abc import Callable, Mapping
-from contextlib import suppress
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
-from yaml.constructor import ConstructorError
-from yaml.nodes import MappingNode, ScalarNode
 
 from awf.adapters.base import get_adapter
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     PullRequestMetadataError,
     RepoRef,
 )
+from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
+from awf.control.executor import monitor_handoff_companion_env as _companion_env
 from awf.control.executor.constants import (
     _DEPRECATED_TASK_KIND_REASON_CODE,
-    _EXECUTOR_AUDIT_ACTOR,
     _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
     _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
     _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
@@ -44,8 +41,6 @@ from awf.control.executor.constants import (
     _RELEASE_SYNC_REPO_INVALID_REASON_CODE,
     _SUPPORTED_TASK_KINDS,
     _UNSUPPORTED_TASK_KIND_REASON_CODE,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
 )
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
@@ -62,11 +57,8 @@ from awf.control.executor.helpers import (
     _sync_feature_pr_missing_metadata_message,
     _with_release_sync_pr_metadata,
 )
-from awf.control.executor.logging_ops import (
-    _setup_dependency_network_details,
-    _setup_dependency_network_event_payload,
-)
 from awf.control.executor.metadata import _metadata_int
+from awf.control.executor.monitor_handoff_setup import _MonitorHandoffSetupFailureError
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _log,
@@ -94,81 +86,28 @@ from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
-    ReleasePrSyncNoOp,
-    prepare_release_pr_sync,
+    count_commits_ahead,
+    find_or_create_release_pr,
     release_pr_body,
     release_pr_title,
 )
-from awf.runtime.validation import (
-    SETUP_DEPENDENCY_NETWORK_RETRY,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
-    ValidationResult,
+
+_add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
+_record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_audit_event
+_record_setup_dependency_network_events = (
+    _monitor_handoff_audit._record_setup_dependency_network_events
 )
-
-
-class _ComposeInterpolationPreservingDumper(yaml.SafeDumper):
-    """Safe YAML dumper that keeps Compose interpolation scalars active."""
-
-
-class _ComposeStringKeySafeLoader(yaml.SafeLoader):
-    """Safe YAML loader that keeps Compose scalar mapping keys as strings."""
-
-
-def _construct_compose_string_key_mapping(
-    loader: _ComposeStringKeySafeLoader,
-    node: MappingNode,
-    deep: bool = False,
-) -> dict[Any, Any]:
-    if not isinstance(node, MappingNode):
-        raise ConstructorError(
-            None,
-            None,
-            f"expected a mapping node, but found {node.id}",
-            node.start_mark,
-        )
-    loader.flatten_mapping(node)
-    construct_object = cast(Callable[..., Any], loader.construct_object)
-    mapping: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key: Any
-        if isinstance(key_node, ScalarNode):
-            key = key_node.value
-        else:
-            key = construct_object(key_node, deep=deep)
-        try:
-            hash(key)
-        except TypeError as exc:
-            raise ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                "found unhashable key",
-                key_node.start_mark,
-            ) from exc
-        mapping[key] = construct_object(
-            value_node,
-            deep=deep,
-        )
-    return mapping
-
-
-_ComposeStringKeySafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_compose_string_key_mapping,
-)
-
-
-def _represent_compose_interpolation_string(
-    dumper: _ComposeInterpolationPreservingDumper,
-    value: str,
-) -> Any:
-    style = '"' if "${" in value else None
-    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
-
-
-_ComposeInterpolationPreservingDumper.add_representer(
-    str,
-    _represent_compose_interpolation_string,
-)
+_ComposeInterpolationPreservingDumper = _companion_env._ComposeInterpolationPreservingDumper
+_ComposeStringKeySafeLoader = _companion_env._ComposeStringKeySafeLoader
+_atomic_write_text = _companion_env._atomic_write_text
+_compose_environment_list_item_targets = _companion_env._compose_environment_list_item_targets
+_construct_compose_string_key_mapping = _companion_env._construct_compose_string_key_mapping
+_remove_compose_environment_targets = _companion_env._remove_compose_environment_targets
+_represent_compose_interpolation_string = _companion_env._represent_compose_interpolation_string
+_restore_compose_environment_list_refs = _companion_env._restore_compose_environment_list_refs
+_restore_compose_environment_refs = _companion_env._restore_compose_environment_refs
+_safe_dump_compose_payload_for_resume = _companion_env._safe_dump_compose_payload_for_resume
+_safe_load_compose_payload_for_resume = _companion_env._safe_load_compose_payload_for_resume
 
 
 class CompanionEnvSecretPrecheckError(ComposeOperationError):
@@ -534,42 +473,6 @@ def _refresh_optional_companion_env_secrets_for_resume(
         )
 
 
-def _safe_dump_compose_payload_for_resume(payload: object) -> str:
-    return yaml.dump(
-        payload,
-        Dumper=_ComposeInterpolationPreservingDumper,
-        sort_keys=False,
-    )
-
-
-def _safe_load_compose_payload_for_resume(text: str) -> object:
-    return yaml.load(text, Loader=_ComposeStringKeySafeLoader)
-
-
-def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding=encoding,
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp_file:
-            tmp_path = Path(tmp_file.name)
-            tmp_file.write(text)
-            tmp_file.flush()
-            os.fsync(tmp_file.fileno())
-        assert tmp_path is not None
-        tmp_path.replace(path)
-    except OSError:
-        if tmp_path is not None:
-            with suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
-        raise
-
-
 def _missing_optional_companion_env_secret_targets(
     *,
     companion_specs: tuple[WorkspaceCompanionSpec, ...],
@@ -602,259 +505,6 @@ def _present_optional_companion_env_secret_refs(
                 optional_env_secret_compose_placeholder(secret.value_from)
             )
     return present_refs
-
-
-def _remove_compose_environment_targets(
-    payload: object,
-    targets_by_service: Mapping[str, set[str]],
-) -> int:
-    if not isinstance(payload, dict):
-        return 0
-    services = payload.get("services")
-    if not isinstance(services, dict):
-        return 0
-
-    removed_count = 0
-    for service_name, targets in targets_by_service.items():
-        service = services.get(service_name)
-        if not isinstance(service, dict):
-            continue
-        environment = service.get("environment")
-        if isinstance(environment, dict):
-            for target in targets:
-                if target in environment:
-                    del environment[target]
-                    removed_count += 1
-            if not environment:
-                del service["environment"]
-            continue
-        if isinstance(environment, list):
-            retained_environment: list[object] = []
-            for item in environment:
-                if _compose_environment_list_item_targets(item, targets):
-                    removed_count += 1
-                    continue
-                retained_environment.append(item)
-            if len(retained_environment) != len(environment):
-                if retained_environment:
-                    service["environment"] = retained_environment
-                else:
-                    # Preserve list style so same-pass restores do not switch
-                    # the section to Compose mapping form.
-                    service["environment"] = []
-    return removed_count
-
-
-def _restore_compose_environment_refs(
-    payload: object,
-    refs_by_service: Mapping[str, Mapping[str, str]],
-) -> int:
-    if not isinstance(payload, dict):
-        return 0
-    services = payload.get("services")
-    if not isinstance(services, dict):
-        return 0
-
-    restored_count = 0
-    for service_name, refs in refs_by_service.items():
-        if not refs:
-            continue
-        service = services.get(service_name)
-        if not isinstance(service, dict):
-            continue
-        environment = service.get("environment")
-        if isinstance(environment, dict):
-            for target, ref in refs.items():
-                if environment.get(target) != ref:
-                    environment[target] = ref
-                    restored_count += 1
-            continue
-        if isinstance(environment, list):
-            restored_count += _restore_compose_environment_list_refs(environment, refs)
-            continue
-        if environment is None:
-            service["environment"] = dict(refs)
-            restored_count += len(refs)
-    return restored_count
-
-
-def _restore_compose_environment_list_refs(
-    environment: list[object],
-    refs: Mapping[str, str],
-) -> int:
-    restored_count = 0
-    seen_targets: set[str] = set()
-    restored_targets: set[str] = set()
-    for index, item in enumerate(environment):
-        if not isinstance(item, str):
-            continue
-        key = item.split("=", 1)[0]
-        ref = refs.get(key)
-        if ref is None:
-            continue
-        seen_targets.add(key)
-        replacement = f"{key}={ref}"
-        if item != replacement:
-            environment[index] = replacement
-            if key not in restored_targets:
-                restored_targets.add(key)
-                restored_count += 1
-
-    for target, ref in refs.items():
-        if target in seen_targets:
-            continue
-        environment.append(f"{target}={ref}")
-        restored_count += 1
-    return restored_count
-
-
-def _compose_environment_list_item_targets(item: object, targets: set[str]) -> bool:
-    if not isinstance(item, str):
-        return False
-    key = item.split("=", 1)[0]
-    return key in targets
-
-
-async def _record_executor_pr_audit_event(
-    self: Any,
-    workspace_id: str,
-    *,
-    event_type: str,
-    action: str,
-    outcome: str,
-    reason_code: str,
-    branch_name: str | None = None,
-    remote_branch: str | None = None,
-    pr_number: int | None = None,
-    pr_url: str | None = None,
-    source_head_sha: str | None = None,
-    source_base_sha: str | None = None,
-    operation_id: str | None = None,
-    operation_type: str | None = None,
-    evidence: Mapping[str, Any] | None = None,
-) -> None:
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:  # pragma: no cover - destroyed mid-flight
-            return
-        await self._add_executor_pr_audit_event(
-            repo,
-            workspace,
-            event_type=event_type,
-            action=action,
-            outcome=outcome,
-            reason_code=reason_code,
-            branch_name=branch_name,
-            remote_branch=remote_branch,
-            pr_number=pr_number,
-            pr_url=pr_url,
-            source_head_sha=source_head_sha,
-            source_base_sha=source_base_sha,
-            operation_id=operation_id,
-            operation_type=operation_type,
-            evidence=evidence,
-        )
-        await session.commit()
-
-
-async def _add_executor_pr_audit_event(
-    self: Any,
-    repo: WorkspaceRepository,
-    workspace: Workspace,
-    *,
-    event_type: str,
-    action: str,
-    outcome: str,
-    reason_code: str,
-    branch_name: str | None = None,
-    remote_branch: str | None = None,
-    pr_number: int | None = None,
-    pr_url: str | None = None,
-    source_head_sha: str | None = None,
-    source_base_sha: str | None = None,
-    operation_id: str | None = None,
-    operation_type: str | None = None,
-    evidence: Mapping[str, Any] | None = None,
-) -> None:
-    _ = self
-    resolved_branch_name = branch_name or workspace.branch_name
-    resolved_remote_branch = remote_branch or workspace.remote_push_branch or workspace.branch_name
-    await repo.add_audit_event(
-        workspace,
-        event_type=event_type,
-        actor=_EXECUTOR_AUDIT_ACTOR,
-        action=action,
-        outcome=outcome,
-        reason_code=reason_code,
-        operation_id=operation_id,
-        operation_type=operation_type,
-        pr_number=pr_number if pr_number is not None else workspace.pr_number,
-        pr_url=pr_url or workspace.pr_url,
-        source_head_sha=source_head_sha,
-        source_base_sha=source_base_sha or workspace.base_commit,
-        target_branch=workspace.branch_base,
-        remote_branch=resolved_remote_branch,
-        branch_name=resolved_branch_name,
-        evidence=evidence,
-    )
-
-
-async def _record_setup_dependency_network_events(
-    self: Any,
-    *,
-    workspace_id: str,
-    result: ValidationResult,
-) -> None:
-    event_specs: list[tuple[str, str, dict[str, Any]]] = []
-    commands = getattr(result, "commands", None)
-    if not commands:
-        return
-    for command in commands:
-        details = _setup_dependency_network_details(command)
-        if details is None:
-            continue
-        retry_count = _metadata_int(details, "retry_count") or 0
-        if retry_count > 0:
-            # Exhausted attempts intentionally emit both the retry event and
-            # the exhausted event from the same redacted retry metadata.
-            event_specs.append(
-                (
-                    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
-                    SETUP_DEPENDENCY_NETWORK_RETRY,
-                    _setup_dependency_network_event_payload(
-                        details,
-                        reason_code=SETUP_DEPENDENCY_NETWORK_RETRY,
-                    ),
-                )
-            )
-        if details.get("retry_exhausted") is True:
-            event_specs.append(
-                (
-                    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
-                    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
-                    _setup_dependency_network_event_payload(
-                        details,
-                        reason_code=SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
-                    ),
-                )
-            )
-    if not event_specs:
-        return
-
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:  # pragma: no cover - destroyed mid-flight
-            return
-        for event_type, reason_code, payload in event_specs:
-            await repo.add_event(
-                workspace,
-                event_type=event_type,
-                reason_code=reason_code,
-                payload=payload,
-            )
-        await session.commit()
 
 
 async def _reject_unsupported_task_kind(
@@ -969,22 +619,292 @@ async def _dispatch_non_feature_task_kind(
     return False
 
 
+async def _prepare_handoff_pr_monitor_profile(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Workspace,
+    worktree_path: Path,
+    compose_project: str,
+    compose_file: Path,
+    build_failed_log_event: str,
+    build_failed_message_prefix: str,
+) -> Any | None:
+    """Resolve and run setup for a PR monitor handoff profile."""
+    try:
+        profile = _profile_for_workspace(
+            workspace,
+            worktree_path=worktree_path,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        profile = await _sync_resolved_profile(
+            self,
+            ws=workspace,
+            workspace_id=workspace_id,
+            profile=profile,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        if not await self._run_monitor_handoff_profile_setup(
+            workspace_id=workspace_id,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+        ):
+            return None
+        return profile
+    except _MonitorHandoffSetupFailureError as exc:
+        _log.error(
+            build_failed_log_event,
+            workspace_id=workspace_id,
+            redacted_traceback=_redacted_exception_traceback(exc),
+        )
+        await _mark_failed_from_monitor_handoff_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            setup_failure=exc,
+        )
+        return None
+    except Exception as exc:
+        _log.error(
+            build_failed_log_event,
+            workspace_id=workspace_id,
+            redacted_traceback=_redacted_exception_traceback(exc),
+        )
+        safe_exception = redact_audit_text(repr(exc), limit=1900)
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"{build_failed_message_prefix}{safe_exception}"[:2000],
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+        return None
+
+
+async def _mark_failed_from_monitor_handoff_setup_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    setup_failure: _MonitorHandoffSetupFailureError,
+) -> None:
+    mark_failed_kwargs: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "from_status": WorkspaceStatus.running,
+        "failure_reason": setup_failure.failure_reason,
+        "message": setup_failure.message,
+        "reason_code": setup_failure.reason_code,
+    }
+    if setup_failure.details is not None:
+        mark_failed_kwargs["details"] = setup_failure.details
+    try:
+        await self._mark_failed(**mark_failed_kwargs)
+        return
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_setup_failure_mark_failed_failed",
+            workspace_id=workspace_id,
+            setup_failure_reason_code=setup_failure.reason_code,
+        )
+    if getattr(self, "_session_factory", None) is None:
+        return
+    await _persist_monitor_handoff_setup_failure_directly(
+        self,
+        workspace_id=workspace_id,
+        setup_failure=setup_failure,
+    )
+
+
+async def _persist_monitor_handoff_setup_failure_directly(
+    self: Any,
+    *,
+    workspace_id: str,
+    setup_failure: _MonitorHandoffSetupFailureError,
+) -> None:
+    """Last-resort terminal transition when the executor failure wrapper raises."""
+    session_factory = getattr(self, "_session_factory", None)
+    if session_factory is None:
+        return
+    final_reason_code = setup_failure.reason_code or setup_failure.failure_reason.value.upper()
+    safe_message = redact_audit_text(setup_failure.message, limit=2000)
+    payload: dict[str, Any] = {
+        "failure_reason": setup_failure.failure_reason.value,
+        "reason_code": final_reason_code,
+        "message": safe_message,
+    }
+    if setup_failure.details is not None:
+        payload["details"] = cast(
+            dict[str, Any],
+            redact_audit_value(dict(setup_failure.details)),
+        )
+    try:
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.running,
+                to=WorkspaceStatus.failed,
+                reason_code=final_reason_code,
+                payload=payload,
+            )
+            if ws is None:
+                await session.commit()
+                return
+            ws.failure_reason = setup_failure.failure_reason.value
+            ws.failure_message = safe_message
+            await session.commit()
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_setup_failure_terminal_fallback_failed",
+            workspace_id=workspace_id,
+            setup_failure_reason_code=setup_failure.reason_code,
+        )
+        raise
+
+
+async def _persist_monitor_handoff_failure_directly(
+    self: Any,
+    *,
+    workspace_id: str,
+    from_status: WorkspaceStatus,
+    failure_reason: FailureReason,
+    message: str,
+    reason_code: str,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    """Last-resort terminal transition for handoff failures outside setup."""
+    session_factory = getattr(self, "_session_factory", None)
+    if session_factory is None:
+        return
+    safe_message = redact_audit_text(message, limit=2000)
+    payload: dict[str, Any] = {
+        "failure_reason": failure_reason.value,
+        "reason_code": reason_code,
+        "message": safe_message,
+    }
+    if details is not None:
+        payload["details"] = cast(
+            dict[str, Any],
+            redact_audit_value(dict(details)),
+        )
+    try:
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                workspace_id,
+                from_status=from_status,
+                to=WorkspaceStatus.failed,
+                reason_code=reason_code,
+                payload=payload,
+            )
+            if ws is None:
+                await session.commit()
+                return
+            ws.failure_reason = failure_reason.value
+            ws.failure_message = safe_message
+            await session.commit()
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_failure_terminal_fallback_failed",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+        )
+        raise
+
+
+async def _mark_monitor_unavailable_failed(
+    self: Any,
+    *,
+    workspace_id: str,
+    message: str,
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
+) -> None:
+    """Mark a no-monitor handoff failure, falling back if the wrapper raises."""
+    try:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=from_status,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=message,
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_monitor_unavailable_mark_failed_failed",
+            workspace_id=workspace_id,
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+        await _persist_monitor_handoff_failure_directly(
+            self,
+            workspace_id=workspace_id,
+            from_status=from_status,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=message,
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+
+
 async def _build_handoff_pr_monitor(
     self: Any,
     *,
     workspace_id: str,
     workspace: Workspace,
     worktree_path: Path,
+    compose_project: str,
+    compose_file: Path,
     build_failed_log_event: str,
     build_failed_message_prefix: str,
+    profile: Any | None = None,
+    run_profile_setup: bool = True,
+    stale_action: str = "monitor_handoff_build_pr_monitor",
 ) -> _MonitorRunnerProto | None:
     """Build the PR monitor for a handoff, marking the workspace failed on error.
 
     Shared by the ``sync_feature_pr`` and ``sync_release_pr`` handoffs. Returns
     ``None`` (after transitioning to ``failed``) when no monitor can be built.
+    A caller that supplies ``profile`` is handing in an already prepared handoff
+    profile and must also set ``run_profile_setup=False`` so setup is not run
+    a second time.
     """
     monitor: _MonitorRunnerProto | None = self._pr_monitor
+    if profile is not None and run_profile_setup:
+        raise ValueError("pre-resolved handoff profiles must pass run_profile_setup=False")
+    if monitor is None and self._pr_monitor_factory is None:
+        await _mark_monitor_unavailable_failed(
+            self,
+            workspace_id=workspace_id,
+            message=f"{build_failed_message_prefix}no PR monitor configured",
+        )
+        return None
+
     try:
+        if profile is None:
+            profile = _profile_for_workspace(
+                workspace,
+                worktree_path=worktree_path,
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
+            profile = await _sync_resolved_profile(
+                self,
+                ws=workspace,
+                workspace_id=workspace_id,
+                profile=profile,
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
+        if run_profile_setup and not await self._run_monitor_handoff_profile_setup(
+            workspace_id=workspace_id,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+        ):
+            return None
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action=stale_action,
+        ):
+            return None
         if monitor is None and self._pr_monitor_factory is not None:
             agent = AgentRuntime(workspace.agent)
             defaults = self._defaults_for(agent)
@@ -998,18 +918,6 @@ async def _build_handoff_pr_monitor(
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
             )
-            profile = _profile_for_workspace(
-                workspace,
-                worktree_path=worktree_path,
-                planning_max_iterations_default=(self._config.planning_max_iterations_default),
-            )
-            profile = await _sync_resolved_profile(
-                self,
-                ws=workspace,
-                workspace_id=workspace_id,
-                profile=profile,
-                planning_max_iterations_default=(self._config.planning_max_iterations_default),
-            )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
                 adapter=adapter,
@@ -1022,6 +930,18 @@ async def _build_handoff_pr_monitor(
                     )
                 ),
             )
+    except _MonitorHandoffSetupFailureError as exc:
+        _log.error(
+            build_failed_log_event,
+            workspace_id=workspace_id,
+            redacted_traceback=_redacted_exception_traceback(exc),
+        )
+        await _mark_failed_from_monitor_handoff_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            setup_failure=exc,
+        )
+        return None
     except Exception as exc:
         _log.error(
             build_failed_log_event,
@@ -1039,12 +959,10 @@ async def _build_handoff_pr_monitor(
         return None
 
     if monitor is None:
-        await self._mark_failed(
+        await _mark_monitor_unavailable_failed(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
-            failure_reason=FailureReason.infrastructure_failure,
             message=f"{build_failed_message_prefix}no PR monitor configured",
-            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
         )
         return None
     return monitor
@@ -1086,12 +1004,93 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
+    # Profile setup installs/repairs the monitor toolchain; source/target
+    # divergence can still change while it runs, so re-count before PR adoption.
     try:
-        outcome = await prepare_release_pr_sync(
+        commits_ahead = await count_commits_ahead(
+            runner=self._runner,
+            cwd=str(worktree_path),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+    except ReleasePrSyncError as exc:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
+            details=exc.detail,
+        )
+        return
+
+    if commits_ahead <= 0:
+        await self._complete_release_pr_sync_no_op(
+            workspace_id=workspace_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+        return
+
+    if self._pr_monitor is None and self._pr_monitor_factory is None:
+        await _mark_monitor_unavailable_failed(
+            self,
+            workspace_id=workspace_id,
+            message="release PR monitor handoff failed: no PR monitor configured",
+        )
+        return
+
+    profile = await _prepare_handoff_pr_monitor_profile(
+        self,
+        workspace_id=workspace_id,
+        workspace=workspace,
+        worktree_path=worktree_path,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        build_failed_log_event="executor.sync_release_pr_monitor_build_failed",
+        build_failed_message_prefix="release PR monitor handoff failed: ",
+    )
+    if profile is None:
+        return
+
+    if not await self._recheck_status(
+        workspace_id,
+        expected=WorkspaceStatus.running,
+        action="sync_release_pr_handoff",
+    ):
+        return
+
+    try:
+        commits_ahead = await count_commits_ahead(
+            runner=self._runner,
+            cwd=str(worktree_path),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+    except ReleasePrSyncError as exc:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
+            details=exc.detail,
+        )
+        return
+
+    if commits_ahead <= 0:
+        await self._complete_release_pr_sync_no_op(
+            workspace_id=workspace_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+        return
+
+    try:
+        metadata, created = await find_or_create_release_pr(
             runner=self._runner,
             gh=GitHubClient(self._runner),
             repo=repo,
-            cwd=str(worktree_path),
             source_branch=source_branch,
             target_branch=target_branch,
             title=release_pr_title(source_branch=source_branch, target_branch=target_branch),
@@ -1117,25 +1116,31 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
-    if isinstance(outcome, ReleasePrSyncNoOp):
-        await self._complete_release_pr_sync_no_op(
-            workspace_id=workspace_id,
-            source_branch=source_branch,
-            target_branch=target_branch,
-        )
-        return
+    _log.info(
+        "release_pr_sync.pr_ready",
+        repo=repo.slug(),
+        source_branch=source_branch,
+        target_branch=target_branch,
+        pr_number=metadata.number,
+        created=created,
+        commits_ahead=commits_ahead,
+    )
 
     monitor = await self._build_handoff_pr_monitor(
         workspace_id=workspace_id,
         workspace=workspace,
         worktree_path=worktree_path,
+        compose_project=compose_project,
+        compose_file=compose_file,
         build_failed_log_event="executor.sync_release_pr_monitor_build_failed",
         build_failed_message_prefix="release PR monitor handoff failed: ",
+        profile=profile,
+        run_profile_setup=False,
+        stale_action="sync_release_pr_monitor_build",
     )
     if monitor is None:
         return
 
-    metadata = outcome.metadata
     async with self._session_factory() as session:
         repo_db = WorkspaceRepository(session)
         persisted = await repo_db.get(workspace_id)
@@ -1160,7 +1165,7 @@ async def _handoff_sync_release_pr_monitor(
         persisted.task_policy = _with_release_sync_pr_metadata(
             persisted.task_policy,
             metadata=metadata,
-            created=outcome.created,
+            created=created,
         )
         await repo_db.add_event(
             persisted,
@@ -1175,7 +1180,7 @@ async def _handoff_sync_release_pr_monitor(
                 "base_sha": metadata.base_sha,
                 "source_branch": source_branch,
                 "target_branch": target_branch,
-                "created": outcome.created,
+                "created": created,
                 "source": "release_pr_sync",
             },
         )
@@ -1203,7 +1208,7 @@ async def _handoff_sync_release_pr_monitor(
         "executor.sync_release_pr_handoff_to_monitor",
         workspace_id=workspace_id,
         pr_url=metadata.url,
-        created=outcome.created,
+        created=created,
     )
     if not await self._recheck_status(
         workspace_id,
@@ -1306,8 +1311,11 @@ async def _handoff_sync_feature_pr_monitor(
         workspace_id=workspace_id,
         workspace=workspace,
         worktree_path=worktree_path,
+        compose_project=compose_project,
+        compose_file=compose_file,
         build_failed_log_event="executor.sync_feature_pr_monitor_build_failed",
         build_failed_message_prefix="adopted PR monitor handoff failed: ",
+        stale_action="sync_feature_pr_handoff",
     )
     if monitor is None:
         return

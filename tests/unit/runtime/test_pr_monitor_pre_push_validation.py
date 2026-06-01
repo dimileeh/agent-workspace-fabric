@@ -11,21 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
-from awf.common.github_client import RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.pr_monitor import (
-    CheckFailure,
-    CheckState,
-    MergeableState,
-    MergeStateStatus,
-    MonitorState,
-    PRStatus,
-    ReviewThread,
-)
-from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome, _GitPushResult
+from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
+from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome
 from awf.runtime.validation_types import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -78,18 +69,25 @@ class _FakeValidation:
 
 
 def _command_result(
-    tmp_path: Path, *, ok: bool, reason_code: str | None = None
+    tmp_path: Path,
+    *,
+    ok: bool,
+    reason_code: str | None = None,
+    command: str = "pytest -q",
+    returncode: int | None = None,
+    artifact_name: str | None = None,
 ) -> ValidationCommandResult:
     """Build a deterministic validation command result with local artifact paths."""
     if reason_code is None:
         reason_code = "VALIDATION_OK" if ok else "PYTEST_TEST_FAILURE"
-    stdout_path = tmp_path / ("ok.stdout" if ok else "failed.stdout")
-    stderr_path = tmp_path / ("ok.stderr" if ok else "failed.stderr")
+    label = artifact_name or ("ok" if ok else command.replace("/", "_").replace(" ", "_"))
+    stdout_path = tmp_path / f"{label}.stdout"
+    stderr_path = tmp_path / f"{label}.stderr"
     stdout_path.write_text("passed\n" if ok else "failed\n", encoding="utf-8")
     stderr_path.write_text("", encoding="utf-8")
     return ValidationCommandResult(
-        command="pytest -q",
-        returncode=0 if ok else 1,
+        command=command,
+        returncode=0 if ok else (returncode if returncode is not None else 1),
         duration_seconds=0.1,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
@@ -98,10 +96,68 @@ def _command_result(
 
 
 def _validation_result(
-    tmp_path: Path, *, ok: bool, reason_code: str | None = None
+    tmp_path: Path,
+    *,
+    ok: bool,
+    reason_code: str | None = None,
+    command: str = "pytest -q",
+    returncode: int | None = None,
+    artifact_name: str | None = None,
 ) -> ValidationResult:
     """Wrap one command result into a single-command validation result."""
-    return ValidationResult(commands=[_command_result(tmp_path, ok=ok, reason_code=reason_code)])
+    return ValidationResult(
+        commands=[
+            _command_result(
+                tmp_path,
+                ok=ok,
+                reason_code=reason_code,
+                command=command,
+                returncode=returncode,
+                artifact_name=artifact_name,
+            )
+        ]
+    )
+
+
+class _CommandlessFailureValidationResult(ValidationResult):
+    """Validation result that exposes a first failure outside command records."""
+
+    _first_failure: ValidationCommandResult
+
+    def __init__(self, first_failure: ValidationCommandResult) -> None:
+        super().__init__(commands=[])
+        object.__setattr__(self, "_first_failure", first_failure)
+
+    @property
+    def all_passed(self) -> bool:
+        return False
+
+    @property
+    def first_failure(self) -> ValidationCommandResult | None:
+        return self._first_failure
+
+
+class _OverriddenFirstFailureValidationResult(ValidationResult):
+    """Validation result whose provider-level first failure differs from commands."""
+
+    _first_failure: ValidationCommandResult
+
+    def __init__(
+        self,
+        *,
+        commands: list[ValidationCommandResult],
+        first_failure: ValidationCommandResult,
+    ) -> None:
+        super().__init__(commands=commands)
+        object.__setattr__(self, "_first_failure", first_failure)
+
+    @property
+    def all_passed(self) -> bool:
+        return False
+
+    @property
+    def first_failure(self) -> ValidationCommandResult | None:
+        return self._first_failure
 
 
 def _coverage_result(tmp_path: Path) -> ValidationCoverageResult:
@@ -115,6 +171,39 @@ def _coverage_result(tmp_path: Path) -> ValidationCoverageResult:
         reason_code="COVERAGE_OK",
         command_result=_command_result(tmp_path, ok=True, reason_code="COVERAGE_OK"),
         gaps=[{"path": "src/awf/runtime/pr_monitor_runner/pre_push_validation.py"}],
+    )
+
+
+def _failing_coverage_result(tmp_path: Path) -> ValidationCoverageResult:
+    """Build a failed coverage result whose command exited successfully."""
+    return ValidationCoverageResult(
+        provider="python",
+        percent=98.5,
+        minimum_percent=99.0,
+        enforce=True,
+        status="failed",
+        reason_code="COVERAGE_BELOW_THRESHOLD",
+        command_result=_command_result(
+            tmp_path,
+            ok=True,
+            reason_code="VALIDATION_OK",
+            command="coverage run -m pytest && coverage report",
+            artifact_name="coverage_below_threshold",
+        ),
+        gaps=[{"path": "src/awf/runtime/pr_monitor_runner/pre_push_validation.py"}],
+    )
+
+
+def _provider_coverage_failure_without_command() -> ValidationCoverageResult:
+    """Build a failed provider result without an associated command record."""
+    return ValidationCoverageResult(
+        provider="python",
+        percent=None,
+        minimum_percent=99.0,
+        enforce=True,
+        status="failed",
+        reason_code="COVERAGE_PROVIDER_FAILED",
+        provider_failure_evidence=["coverage provider did not produce totals"],
     )
 
 
@@ -235,6 +324,7 @@ async def test_pre_push_validation_records_target_head_before_push(
 async def test_pre_push_validation_failure_does_not_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A validation failure should block raw push and expose a validation reason."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -253,6 +343,16 @@ async def test_pre_push_validation_failure_does_not_push(
     )
     runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
 
+    async def _unexpected_validation_commands(_self: Any, **_kwargs: object) -> tuple[str, ...]:
+        """Fail loudly if disabled fix passes still load fix-prompt command context."""
+        pytest.fail("validation commands must not load when fix passes are disabled")
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_commands",
+        _unexpected_validation_commands,
+    )
+
     result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
         worktree_path=worktree,
@@ -266,6 +366,392 @@ async def test_pre_push_validation_failure_does_not_push(
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
     assert result.details is not None
     assert result.details["validation_reason_code"] == "PYTEST_TEST_FAILURE"
+    assert result.details["failing_command"] == "pytest -q"
+    assert result.details["failing_returncode"] == 1
+
+
+@pytest.mark.unit
+def test_pre_push_failure_helpers_prefer_real_migration_and_coverage_commands(
+    tmp_path: Path,
+) -> None:
+    """Direct helper coverage for migration and coverage command failures."""
+    migration_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="alembic upgrade head",
+        returncode=1,
+        reason_code="MIGRATION_FAILED",
+        artifact_name="migration_failed",
+    )
+    coverage_command_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage report",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="coverage_missing",
+    )
+    coverage_failure = ValidationCoverageResult(
+        provider="python",
+        percent=None,
+        minimum_percent=99.0,
+        enforce=True,
+        status="failed",
+        reason_code="COVERAGE_COMMAND_FAILED",
+        command_result=coverage_command_failure,
+    )
+    result = ValidationResult(
+        migration=migration_failure,
+        commands=[],
+        coverage=coverage_failure,
+    )
+
+    failures = pre_push_validation_module._failed_pre_push_commands(result)
+
+    assert failures == (migration_failure, coverage_command_failure)
+    assert pre_push_validation_module._first_real_pre_push_failure(result) is (migration_failure)
+    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is None
+    assert pre_push_validation_module._pre_push_validation_reason_code(result) == "MIGRATION_FAILED"
+
+
+@pytest.mark.unit
+def test_pre_push_failure_helpers_identify_pure_coverage_toolchain_failure(
+    tmp_path: Path,
+) -> None:
+    """A coverage command returning 127 is still a pure toolchain-missing failure."""
+    coverage_command_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage report",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="coverage_toolchain_missing",
+    )
+    result = ValidationResult(
+        coverage=ValidationCoverageResult(
+            provider="python",
+            percent=None,
+            minimum_percent=99.0,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_COMMAND_FAILED",
+            command_result=coverage_command_failure,
+        )
+    )
+
+    assert pre_push_validation_module._first_real_pre_push_failure(result) is None
+    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is (
+        coverage_command_failure
+    )
+    assert (
+        pre_push_validation_module._pre_push_validation_reason_code(result)
+        == "COVERAGE_COMMAND_FAILED"
+    )
+
+
+@pytest.mark.unit
+def test_pre_push_failure_helpers_prefer_non_127_first_failure_over_command_127(
+    tmp_path: Path,
+) -> None:
+    """Provider failures must not be hidden by all-127 command records."""
+    command_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="ruff check .",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="ruff_missing_with_provider_failure",
+    )
+    provider_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage provider",
+        returncode=2,
+        reason_code="COVERAGE_PROVIDER_FAILED",
+        artifact_name="coverage_provider_failed",
+    )
+    result = _OverriddenFirstFailureValidationResult(
+        commands=[command_failure],
+        first_failure=provider_failure,
+    )
+
+    assert pre_push_validation_module._first_real_pre_push_failure(result) is provider_failure
+    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is None
+    assert pre_push_validation_module._preferred_pre_push_failure(result) is provider_failure
+    assert (
+        pre_push_validation_module._pre_push_validation_reason_code(result)
+        == "COVERAGE_PROVIDER_FAILED"
+    )
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_toolchain_missing_bypasses_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pure command-not-found validation failure should not spend fix-pass budget."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "1" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    adapter = FakeAdapter()
+    validation = _FakeValidation(
+        _validation_result(
+            tmp_path,
+            ok=False,
+            command="ruff check .",
+            returncode=127,
+            reason_code="COMMAND_FAILED",
+            artifact_name="ruff_missing",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _unexpected_commit(**_kwargs: object) -> bool:
+        """Fail loudly if a toolchain-missing failure reaches the fix-pass commit step."""
+        pytest.fail("toolchain-missing validation must not run a fix pass")
+
+    async def _unexpected_validation_commands(_self: Any, **_kwargs: object) -> tuple[str, ...]:
+        """Fail loudly if terminal validation still loads fix-prompt command context."""
+        pytest.fail("toolchain-missing validation must not load fix-pass commands")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit)
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_commands",
+        _unexpected_validation_commands,
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert len(validation.calls) == 1
+    assert adapter.calls == []
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    assert result.details is not None
+    assert result.details["reason_code"] == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert result.details["validation_reason_code"] == "COMMAND_FAILED"
+    assert result.details["failing_command"] == "ruff check ."
+    assert result.details["failing_returncode"] == 127
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_commandless_toolchain_missing_bypasses_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command-less 127 first failure should still be terminal toolchain-missing."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'4' * 40}\n")
+    first_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage provider",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="commandless_provider_missing",
+    )
+    validation = _FakeValidation(_CommandlessFailureValidationResult(first_failure))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _unexpected_validation_commands(_self: Any, **_kwargs: object) -> tuple[str, ...]:
+        """Fail loudly if command-less toolchain-missing loads fix-prompt context."""
+        pytest.fail("command-less toolchain-missing validation must not run a fix pass")
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_commands",
+        _unexpected_validation_commands,
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert len(validation.calls) == 1
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == "COMMAND_FAILED"
+    assert result.details["failing_command"] == "coverage provider"
+    assert result.details["failing_returncode"] == 127
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_collects_failed_commands_once_for_reason_codes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reason-code decisions should share one failed-command traversal."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'7' * 40}\n")
+    validation = _FakeValidation(
+        _validation_result(
+            tmp_path,
+            ok=False,
+            command="ruff check .",
+            returncode=127,
+            reason_code="COMMAND_FAILED",
+            artifact_name="single_scan_ruff_missing",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=0,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    original_failed_commands = pre_push_validation_module._failed_pre_push_commands
+    failed_command_calls = 0
+
+    def _count_failed_commands(
+        result: ValidationResult,
+    ) -> tuple[ValidationCommandResult, ...]:
+        nonlocal failed_command_calls
+        failed_command_calls += 1
+        return original_failed_commands(result)
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_failed_pre_push_commands",
+        _count_failed_commands,
+    )
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"
+    assert result.validation_reason_code == "COMMAND_FAILED"
+    assert failed_command_calls == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_mixed_127_prefers_real_failure_for_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed 127 and non-127 failures should surface the genuine validation failure."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'2' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'3' * 40}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed mixed validation\n")
+    mixed = ValidationResult(
+        commands=[
+            _command_result(
+                tmp_path,
+                ok=False,
+                command="ruff check .",
+                returncode=127,
+                reason_code="COMMAND_FAILED",
+                artifact_name="mixed_ruff_missing",
+            ),
+            _command_result(
+                tmp_path,
+                ok=False,
+                command="pytest -q",
+                returncode=1,
+                reason_code="PYTEST_TEST_FAILURE",
+                artifact_name="mixed_pytest_failure",
+            ),
+        ]
+    )
+    validation = _FakeValidation(mixed, _validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        """Report a successful synthetic fix commit."""
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert len(validation.calls) == 2
+    assert len(adapter.calls) == 1
+    assert "Failing command: pytest -q" in adapter.calls[0]
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-2].reason_code == "PYTEST_TEST_FAILURE"
 
 
 @pytest.mark.unit
@@ -523,6 +1009,175 @@ async def test_pre_push_validation_runs_profile_coverage_before_push(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_coverage_failure_persists_coverage_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Coverage policy failures should not be reported as successful commands."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id, include_coverage=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "6" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    coverage = _failing_coverage_result(tmp_path)
+    validation = _FakeValidation(
+        _validation_result(tmp_path, ok=True),
+        coverage_result=coverage,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=0,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+    assert result.stderr.endswith("COVERAGE_BELOW_THRESHOLD")
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+    assert "failing_command" not in result.details
+    assert "failing_returncode" not in result.details
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "failed"
+    assert runs[-1].reason_code == "COVERAGE_BELOW_THRESHOLD"
+    assert runs[-1].coverage is not None
+    assert runs[-1].coverage["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_coverage_provider_failure_without_command_skips_fix_pass(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Coverage provider failures without command records cannot run a fix pass."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'8' * 40}\n")
+    validation = _FakeValidation(
+        ValidationResult(coverage=_provider_coverage_failure_without_command())
+    )
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == "COVERAGE_PROVIDER_FAILED"
+    assert "failing_command" not in result.details
+    assert "failing_returncode" not in result.details
+    assert len(validation.calls) == 1
+    assert adapter.calls == []
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_coverage_provider_skip_still_pushes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A configured coverage provider may decline to emit a result."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id, include_coverage=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'9' * 40}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    validation = _FakeValidation(
+        _validation_result(tmp_path, ok=True),
+        coverage_result=None,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert len(validation.coverage_calls) == 1
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "succeeded"
+    assert runs[-1].coverage is None
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_without_failure_returns_false() -> None:
+    """A validation result with no command failure should not invoke a fix agent."""
+    validation_result = pre_push_validation_module._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_provider",
+        workspace_head_sha="a" * 40,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="coverage provider failed",
+        validation_reason_code="COVERAGE_PROVIDER_FAILED",
+        result=ValidationResult(coverage=_provider_coverage_failure_without_command()),
+    )
+
+    committed = await pre_push_validation_module._run_pre_push_validation_fix_pass(
+        object(),
+        workspace_id="ws_provider",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        remote_branch="awf/ws_provider",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=(),
+    )
+
+    assert committed is False
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_revalidates_before_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -776,300 +1431,6 @@ async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reaso
     assert result.reason_code == "PRE_PUSH_VALIDATION_FIX_FAILED"
     assert result.details is not None
     assert result.details["validation_reason_code"] == "PYTEST_TEST_FAILURE"
+    assert result.details["failing_command"] == "pytest -q"
+    assert result.details["failing_returncode"] == 1
     assert "fix pass failed" in result.stderr
-
-
-@pytest.mark.unit
-async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failure(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review-thread repair must route through validated push when a fix fails."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    thread = ReviewThread(
-        thread_id="T_validation",
-        path="src/foo.py",
-        line=1,
-        body_excerpt="please fix",
-        author="reviewer",
-    )
-    calls: list[str] = []
-    state = MonitorState()
-
-    async def _no_dirty(**_kwargs: object) -> None:
-        """Indicate there is no pre-existing dirty worktree state."""
-
-    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
-
-    async def _start_head(**_kwargs: object) -> tuple[str, None]:
-        """Return a fixed starting head for the repair operation."""
-        return ("start", None)
-
-    async def _address(**_kwargs: object) -> str:
-        """Return a synthetic fixed commit id after thread addressing."""
-        return "fix_committed"
-
-    async def _clean_status(**_kwargs: object) -> object:
-        """Return a clean PR status used to continue the repair loop."""
-        return PRStatus(
-            number=42,
-            head_sha="start",
-            mergeable=MergeableState.MERGEABLE,
-            check_state=CheckState.SUCCESS,
-            unresolved_inline_threads=(),
-            unresolved_review_comments=(),
-            base_behind_count=0,
-            merge_state_status=MergeStateStatus.CLEAN,
-        )
-
-    async def _no_block(**_kwargs: object) -> None:
-        """Allow repair flow to bypass protected-scope checks."""
-
-    async def _validated(**_kwargs: object) -> _GitPushResult:
-        """Simulate a validated-push failure and record the invocation."""
-        calls.append("validated")
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr="validation failed",
-            reason_code="PRE_PUSH_VALIDATION_FAILED",
-        )
-
-    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
-        """Fail loudly if raw push is called in this repair path."""
-        pytest.fail("comment repair must not call raw push")
-
-    async def _unexpected_resolve(**_kwargs: object) -> None:
-        """Fail loudly if threads are resolved before validation succeeds."""
-        pytest.fail("threads must not be resolved when validation blocks push")
-
-    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
-    monkeypatch.setattr(runner, "_address_thread", _address)
-    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _clean_status)
-    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
-    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
-    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
-    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _unexpected_resolve)
-
-    result = await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="start",
-        initial_threads=(thread,),
-        initial_reviews=(),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
-    assert calls == ["validated"]
-    assert "T_validation" not in state.threads_addressed_ids
-
-
-@pytest.mark.unit
-async def test_ci_repair_uses_validated_push(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CI-repair flow should use validated push and avoid raw push."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    adapter.queue(stdout="fixed\n")
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    calls: list[str] = []
-
-    async def _no_dirty(**_kwargs: object) -> None:
-        """Indicate there is no pre-existing dirty worktree state."""
-
-    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
-
-    async def _provider_allows_cli(*_args: object) -> bool:
-        """Return a fixed provider policy for CLI suppression in repairs."""
-        return False
-
-    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _provider_allows_cli)
-
-    async def _start_head(**_kwargs: object) -> tuple[str, None]:
-        """Return a fixed starting head for CI repair simulation."""
-        return ("start", None)
-
-    async def _commit(**_kwargs: object) -> bool:
-        """Return a successful synthetic commit result."""
-        return True
-
-    async def _no_block(**_kwargs: object) -> None:
-        """Allow the CI repair flow to skip protected-scope checks."""
-
-    async def _validated(**_kwargs: object) -> _GitPushResult:
-        """Simulate a validated push success and track invocation."""
-        calls.append("validated")
-        return _GitPushResult(pushed=True, failed=False, returncode=0)
-
-    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
-        """Fail loudly if raw push is called in this repair path."""
-        pytest.fail("CI repair must not call raw push")
-
-    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
-    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit)
-    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
-    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
-    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
-
-    result = await runner._run_ci_fix(
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        failures=(
-            CheckFailure(
-                name="ci",
-                conclusion="FAILURE",
-                log_excerpt="failed",
-            ),
-        ),
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        workspace_id=workspace_id,
-        remote_branch=f"awf/{workspace_id}",
-        state=MonitorState(),
-    )
-
-    assert result.failed is False
-    assert calls == ["validated"]
-
-
-@pytest.mark.unit
-async def test_ci_repair_owned_path_lookup_failure_stops_before_agent(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CI repair should not build prompts with fallback-empty owned paths."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    async def _no_dirty(**_kwargs: object) -> None:
-        """Indicate there is no pre-existing dirty worktree state."""
-
-    async def _provider_allows_cli(*_args: object) -> bool:
-        """Return a fixed provider policy for CLI suppression in repairs."""
-        return False
-
-    async def _start_head(**_kwargs: object) -> tuple[str, None]:
-        """Return a fixed starting head for CI repair simulation."""
-        return ("start", None)
-
-    def _broken_session_factory() -> object:
-        raise TypeError("session factory unavailable")
-
-    async def _unexpected_commit(**_kwargs: object) -> bool:
-        """Fail loudly if repair reaches commit after owned-path lookup fails."""
-        pytest.fail("CI repair must not commit after owned-path lookup failure")
-
-    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
-    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _provider_allows_cli)
-    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
-    monkeypatch.setattr(runner._deps, "session_factory", _broken_session_factory)
-    monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit)
-
-    with pytest.raises(TypeError, match="session factory unavailable"):
-        await runner._run_ci_fix(
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            failures=(
-                CheckFailure(
-                    name="ci",
-                    conclusion="FAILURE",
-                    log_excerpt="failed",
-                ),
-            ),
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            workspace_id=workspace_id,
-            remote_branch=f"awf/{workspace_id}",
-            state=MonitorState(),
-        )
-
-    assert adapter.calls == []
-
-
-@pytest.mark.unit
-async def test_sync_base_uses_validated_push(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Sync-base recovery should also rely on validated push."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)  # merge --abort
-    cmd.queue_result(returncode=0)  # merge --no-edit origin/development
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    state = MonitorState()
-    calls: list[str] = []
-
-    async def _fetch_base(**_kwargs: object) -> None:
-        """Mock base sync fetching for sync-base repair."""
-
-    async def _no_block(**_kwargs: object) -> None:
-        """Allow the sync-base flow to skip protected-scope checks."""
-
-    async def _validated(**_kwargs: object) -> _GitPushResult:
-        """Simulate validated push success and record that it was used."""
-        assert "state" in _kwargs
-        assert _kwargs["state"] is state
-        calls.append("validated")
-        return _GitPushResult(pushed=True, failed=False, returncode=0)
-
-    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
-        """Fail loudly if raw push is called in sync-base repair."""
-        pytest.fail("sync-base repair must not call raw push")
-
-    monkeypatch.setattr(runner, "_fetch_base", _fetch_base)
-    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
-    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
-    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
-
-    result = await runner._run_sync_base(
-        workspace_id=workspace_id,
-        state=state,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is False
-    assert calls == ["validated"]

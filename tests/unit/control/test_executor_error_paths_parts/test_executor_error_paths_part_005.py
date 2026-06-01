@@ -966,7 +966,7 @@ class TestExecutorCoverageEdgesPart001:
         await executor.execute(ws_id)
 
         assert monitor_calls == [ws_id]
-        assert validation.calls == []
+        assert validation.calls == [("setup", "pre_agent")]
         assert fake.calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)

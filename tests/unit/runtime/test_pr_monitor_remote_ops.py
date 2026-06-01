@@ -36,6 +36,14 @@ def test_git_push_failure_outcome_maps_pre_push_validation_reasons(reason_code: 
 
 
 @pytest.mark.unit
+def test_git_push_failure_outcome_maps_toolchain_missing_separately() -> None:
+    assert (
+        _git_push_failure_outcome(_make_push_result("PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"))
+        == "pre_push_validation_toolchain_missing"
+    )
+
+
+@pytest.mark.unit
 def test_git_push_failure_outcome_defaults_to_git_push_failed() -> None:
     assert _git_push_failure_outcome(_make_push_result("UNKNOWN_FAILURE")) == "git_push_failed"
 
