@@ -15,7 +15,11 @@ from awf.node.compose_manager import (
     WorkspaceComposeSpec,
 )
 from awf.node.git_manager import WorktreeLayout
-from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
+from awf.node.stack_launcher import (
+    ComposeStackLauncher,
+    WorkspaceStackLaunchRequest,
+    _compose_up_reports_missing_image,
+)
 from awf.profiles.models import WorkspaceProfile
 
 
@@ -110,6 +114,17 @@ class _RecordingBuilder:
         """Record launch-time image probes and return the configured result."""
         self.exists_calls.append(tag)
         return self.exists
+
+
+def _compose_error(stderr: str) -> ComposeOperationError:
+    """Build a compose-up error for missing-image classifier tests."""
+    return ComposeOperationError(
+        operation="up",
+        returncode=1,
+        stdout="",
+        stderr=stderr,
+        reason_code="COMPOSE_COMMAND_FAILED",
+    )
 
 
 def _materialized(
@@ -368,6 +383,32 @@ async def test_launch_does_not_retry_missing_non_companion_image(tmp_path: Path)
     assert len(compose.specs) == 1
     assert compose.specs[0].companions[0].image == "awf-companion-backend:abc123def456"
     assert compose.waits == [True]
+
+
+@pytest.mark.unit
+def test_missing_image_detector_accepts_not_found_near_companion_tag() -> None:
+    """A plain not-found daemon message near the tag still reports a missing image."""
+    tag = "awf-companion-backend:abc123def456"
+
+    assert _compose_up_reports_missing_image(
+        _compose_error(f"pulling {tag}: image not found"),
+        tag,
+    )
+
+
+@pytest.mark.unit
+def test_missing_image_detector_rejects_unrelated_not_found_when_tag_is_elsewhere() -> None:
+    """Unrelated not-found text must not retry just because the tag is mentioned."""
+    tag = "awf-companion-backend:abc123def456"
+
+    assert not _compose_up_reports_missing_image(
+        _compose_error(
+            f"preparing service for {tag}; "
+            "configuration lookup failed because /tmp/workspace/docker-compose.override.yml "
+            "was not found"
+        ),
+        tag,
+    )
 
 
 @pytest.mark.unit

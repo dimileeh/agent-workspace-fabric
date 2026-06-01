@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -195,6 +196,8 @@ class ComposeStackLauncher:
         except ComposeOperationError as e:
             retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
             if retry_spec is not None:
+                # Replace spec so retry-time revalidation and any retry failure
+                # handling report the compose spec used by the failing attempt.
                 spec = await self._revalidate_prebuilt_companion_images(retry_spec)
                 try:
                     paths = await self._compose.up(spec, wait=True)
@@ -333,11 +336,18 @@ def _missing_prebuilt_companion_image_retry_spec(
 def _compose_up_reports_missing_image(exc: ComposeOperationError, image: str) -> bool:
     """Return whether Compose reported that a specific local image tag is absent."""
     detail = f"{exc.stderr}\n{exc.stdout}".lower()
-    if image.lower() not in detail:
+    image_lower = image.lower()
+    if image_lower not in detail:
         return False
+    image_pattern = re.escape(image_lower)
+    image_near_not_found = re.search(
+        rf"(?:{image_pattern}.{{0,50}}not found|not found.{{0,50}}{image_pattern})",
+        detail,
+        flags=re.DOTALL,
+    )
     return (
         "no such image" in detail
-        or "not found" in detail
+        or image_near_not_found is not None
         or "pull access denied" in detail
         or "repository does not exist" in detail
     )
