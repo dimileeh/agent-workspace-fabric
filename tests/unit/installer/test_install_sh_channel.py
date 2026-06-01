@@ -42,7 +42,7 @@ def test_matching_prerelease_channel_installs(harness: InstallerHarness) -> None
     """A prerelease manifest installs when ``--channel prerelease`` is requested."""
     harness.add_uname("Linux", "x86_64")
     harness.add_uv()
-    harness.add_awf()
+    harness.add_awf(version="0.2.0rc1")
     wheel, digest = harness.write_wheel(version="0.2.0rc1")
     manifest = harness.write_manifest(
         wheel=wheel,
@@ -103,7 +103,7 @@ def test_pinned_version_skips_channel_enforcement(harness: InstallerHarness) -> 
     """A pinned ``--version`` selects the manifest directly; channel is not enforced."""
     harness.add_uname("Linux", "x86_64")
     harness.add_uv()
-    harness.add_awf()
+    harness.add_awf(version="0.2.0rc1")
     wheel, digest = harness.write_wheel(version="0.2.0rc1")
     manifest = harness.write_manifest(
         wheel=wheel,

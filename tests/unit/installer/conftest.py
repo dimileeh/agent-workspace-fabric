@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -156,9 +157,35 @@ class InstallerHarness:
         )
         self._write_stub("pipx", behavior)
 
-    def add_awf(self, *, directory: Path | None = None, rc: int = 0) -> Path:
-        """Place an ``awf`` stub on ``PATH`` or in ``directory`` (exits ``rc``)."""
-        return self._write_stub("awf", f"exit {rc}", directory=directory)
+    def add_awf(
+        self,
+        *,
+        directory: Path | None = None,
+        rc: int = 0,
+        version_rc: int | None = None,
+        help_rc: int | None = None,
+        version: str = "0.1.0",
+    ) -> Path:
+        """Place an ``awf`` stub on ``PATH`` or in ``directory``.
+
+        The stub models the two commands installer verification cares about:
+        ``awf --version`` reports a release identity and ``awf --help`` follows a
+        separate exit status so tests can model a matching-version binary that is
+        still non-runnable. ``rc`` remains the default for both commands to keep
+        existing stale/broken executable tests concise.
+        """
+        version_exit = rc if version_rc is None else version_rc
+        help_exit = rc if help_rc is None else help_rc
+        version_output = shlex.quote(f"awf {version}")
+        behavior = (
+            'case "$1" in\n'
+            "  --version)\n"
+            f"    printf '%s\\n' {version_output}\n"
+            f"    exit {version_exit} ;;\n"
+            f"  *) exit {help_exit} ;;\n"
+            "esac"
+        )
+        return self._write_stub("awf", behavior, directory=directory)
 
     def add_curl(self, *, rc: int = 0) -> None:
         """Stub ``curl`` to record its argv (download flags) then exit ``rc``.
