@@ -84,19 +84,32 @@ def _setup_ignored_snapshot_drift(
     *,
     setup_ignored_paths: tuple[str, ...],
     setup_ignored_roots: tuple[str, ...] | None,
+    setup_ignored_path_signatures: tuple[tuple[str, str], ...] | None = None,
     current_ignored_paths: tuple[str, ...],
     current_ignored_roots: tuple[str, ...] | None,
+    current_ignored_path_signatures: tuple[tuple[str, str], ...] | None = None,
 ) -> tuple[str, ...]:
     """Return ignored snapshot entries that differ from setup baseline."""
     setup_path_set = set(setup_ignored_paths)
     setup_root_set = set(setup_ignored_roots or ())
     current_path_set = set(current_ignored_paths)
     current_root_set = set(current_ignored_roots or ())
+    signature_drift: tuple[str, ...] = ()
+    if setup_ignored_path_signatures or current_ignored_path_signatures:
+        setup_signature_map = dict(setup_ignored_path_signatures or ())
+        current_signature_map = dict(current_ignored_path_signatures or ())
+        signature_drift = tuple(
+            path
+            for path in setup_ignored_paths
+            if path in current_path_set
+            and setup_signature_map.get(path) != current_signature_map.get(path)
+        )
     drift = (
         tuple(path for path in current_ignored_roots or () if path not in setup_root_set)
         + tuple(path for path in current_ignored_paths if path not in setup_path_set)
         + tuple(path for path in (setup_ignored_roots or ()) if path not in current_root_set)
         + tuple(path for path in setup_ignored_paths if path not in current_path_set)
+        + signature_drift
     )
     return tuple(dict.fromkeys(drift))
 
@@ -305,6 +318,7 @@ async def run_validation_and_fix_cycle(
         else 0
     )
     setup_ignored_paths_snapshot: tuple[str, ...] | None = None
+    setup_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None
     setup_ignored_roots_snapshot: tuple[str, ...] | None = None
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
     for pass_number in range(max_validation_attempts):
@@ -366,13 +380,18 @@ async def run_validation_and_fix_cycle(
         pre_validation_ignored_roots_snapshot = pre_validation_check.ignored_paths
         if setup_ignored_paths_snapshot is None:
             setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
+            setup_ignored_paths_snapshot_signatures = (
+                pre_validation_ignored_paths_snapshot_signatures
+            )
             setup_ignored_roots_snapshot = pre_validation_ignored_roots_snapshot
         else:
             setup_ignored_drift = _setup_ignored_snapshot_drift(
                 setup_ignored_paths=setup_ignored_paths_snapshot,
                 setup_ignored_roots=setup_ignored_roots_snapshot,
+                setup_ignored_path_signatures=setup_ignored_paths_snapshot_signatures,
                 current_ignored_paths=pre_validation_ignored_paths_snapshot,
                 current_ignored_roots=pre_validation_ignored_roots_snapshot,
+                current_ignored_path_signatures=(pre_validation_ignored_paths_snapshot_signatures),
             )
             if setup_ignored_drift:
                 dirty_check = ValidationWorktreeCheck(
@@ -381,7 +400,7 @@ async def run_validation_and_fix_cycle(
                     untracked_paths=setup_ignored_drift,
                     reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                     message=(
-                        "Validation worktree gained ignored entries after setup "
+                        "Validation worktree ignored entries changed after setup "
                         "baseline and will not proceed to validation."
                     ),
                 )
