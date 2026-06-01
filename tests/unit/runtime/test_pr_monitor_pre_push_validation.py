@@ -6,6 +6,7 @@ import ast
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,6 +30,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    ValidationWorktreeCheck,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -1300,8 +1302,59 @@ async def test_pre_push_validation_pre_existing_dirty_blocks_before_validation(
     assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert validation.calls == []
     assert result.details is not None
+    assert result.details["workspace_head_sha"] == local_head
     assert result.details["paths"] == ["apps/console/next-env.d.ts"]
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Pre-existing dirt should not be hidden by a later HEAD capture failure."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+        message="dirty file prevents validation",
+    )
+    check_worktree_clean = AsyncMock(return_value=dirty_check)
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    rev_parse_head = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner, "_rev_parse_head", rev_parse_head)
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.workspace_head_sha is None
+    assert result.validation_run_id is None
+    check_worktree_clean.assert_awaited_once()
+    rev_parse_head.assert_awaited_once_with(worktree)
 
 
 @pytest.mark.unit

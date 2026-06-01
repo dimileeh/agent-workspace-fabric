@@ -885,15 +885,6 @@ async def _run_pre_push_validation(
         base_commit = ws.base_commit
 
     workspace_head_sha = await self._rev_parse_head(worktree_path)
-    if workspace_head_sha is None:
-        return _PrePushValidationResult(
-            passed=False,
-            validation_run_id=None,
-            workspace_head_sha=None,
-            reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
-            message="could not capture local HEAD before PR monitor pre-push validation",
-        )
-
     pre_validation_check = await _pre_push_validation_worktree_check(
         self,
         worktree_path=worktree_path,
@@ -907,6 +898,14 @@ async def _run_pre_push_validation(
         return _pre_push_dirty_result(
             workspace_head_sha=workspace_head_sha,
             check=pre_validation_check,
+        )
+    if workspace_head_sha is None:
+        return _PrePushValidationResult(
+            passed=False,
+            validation_run_id=None,
+            workspace_head_sha=None,
+            reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+            message="could not capture local HEAD before PR monitor pre-push validation",
         )
     pre_validation_ignore_paths = pre_validation_check.ignored_paths
     pre_validation_ignored_paths_snapshot = pre_validation_check.ignored_paths_snapshot
