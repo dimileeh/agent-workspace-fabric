@@ -45,7 +45,10 @@ from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationCommandResult, ValidationResult, ValidationRunner
-from awf.runtime.validation_worktree import VALIDATION_WORKTREE_STATUS_FAILED
+from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+    VALIDATION_WORKTREE_STATUS_FAILED,
+)
 from tests.postgres import postgres_test_engine
 
 from .executor_paths import _test_worktree_path, _test_worktrees_root
@@ -641,24 +644,25 @@ class TestValidationSideEffectCleanup:
         fake.queue_result(returncode=0, stdout="")  # clean after cleanup
         fake.queue_result(returncode=0, stdout="deadbeef01\n")  # verify restore ref before push
         fake.queue_result(returncode=0, stdout="deadbeef01\n")  # verify HEAD after cleanup
-        _queue_push_and_pr(fake)
 
         await executor.execute(ws_id)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_url == "https://github.com/x/y/pull/1"
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "validation_failure"
+            assert ws.failure_message == "validation failed: validation worktree side-effect guard"
+            assert ws.pr_url is None
+        assert runs[-1].status == "failed"
+        assert runs[-1].reason_code == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
         joined_calls = [" ".join(call.args) for call in fake.calls]
-        restore_index = next(
-            index
-            for index, call in enumerate(joined_calls)
-            if "restore --source deadbeef01 --staged --worktree -- apps/console/next-env.d.ts"
-            in call
+        assert any(
+            "restore --source deadbeef01 --staged --worktree -- apps/console/next-env.d.ts" in call
+            for call in joined_calls
         )
-        push_index = next(index for index, call in enumerate(joined_calls) if "push" in call)
-        assert restore_index < push_index
+        assert all("push" not in call for call in joined_calls)
 
     @pytest.mark.unit
     async def test_executor_cleanup_failure_fails_validation_before_push(

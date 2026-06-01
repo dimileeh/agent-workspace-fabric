@@ -54,3 +54,52 @@ Plan reference: `plans/CI_PR349_VALIDATION_CLEANUP_PLAN.md`
 Full coverage, whole-repository pytest, frontend builds, and CI-equivalent
 validation were intentionally not run inside the agent phase per the AWF
 workspace contract; AWF/GitHub owns those after completion.
+
+## Iteration 2 Validation
+
+Plan reference: `plans/CI_PR349_VALIDATION_CLEANUP_PLAN.md`, Iteration 2.
+
+Requirement status:
+
+- Keep the cleaned-validation-side-effect safety policy intact: Complete.
+- Update the executor side-effect cleanup regression to assert cleanup and push
+  blocking: Complete.
+- Split the two oversized test modules without weakening the line-limit guard:
+  Complete.
+- Run only focused local checks and leave broad AWF/GitHub validation to
+  post-agent CI: Complete.
+- Commit locally without switching branches or pushing: Complete after the
+  local commit for this iteration.
+
+Evidence:
+
+- Updated `tests/unit/control/test_executor_validation_fix_cycle.py` so the
+  tracked validation side-effect test now expects `failed`, records
+  `VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED`, verifies restore happened, and
+  verifies push did not happen.
+- Split ignored-path cleanup cases into
+  `tests/unit/runtime/test_validation_worktree_ignored_cleanup.py`, leaving
+  `tests/unit/runtime/test_validation_worktree.py` under the 1500-line guard.
+- Split the later executor/planning/salvage edge cases into
+  `tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_008.py`,
+  leaving part 007 under the 1500-line guard.
+
+Commands run:
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit tests/unit/control/test_executor_validation_fix_cycle.py::TestValidationSideEffectCleanup::test_executor_tracked_validation_side_effect_cleans_before_pr_push -q`
+  - Result: `2 passed`
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_validation_worktree.py tests/unit/runtime/test_validation_worktree_ignored_cleanup.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_007.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_008.py -q`
+  - Result: `69 passed`
+- `uv run --python 3.12 --extra dev ruff check tests/unit/runtime/test_validation_worktree.py tests/unit/runtime/test_validation_worktree_ignored_cleanup.py tests/unit/control/test_executor_validation_fix_cycle.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_007.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_008.py`
+  - Result: passed
+- `uv run --python 3.12 --extra dev pytest tests/unit/control/test_executor_validation_fix_cycle.py::TestValidationSideEffectCleanup -q`
+  - Result: `8 passed`
+- `git diff --check`
+  - Result: passed after removing trailing blank lines from the mechanical split.
+
+Line-count evidence:
+
+- `tests/unit/runtime/test_validation_worktree.py`: 991 lines.
+- `tests/unit/runtime/test_validation_worktree_ignored_cleanup.py`: 893 lines.
+- `tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_007.py`: 690 lines.
+- `tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_008.py`: 892 lines.

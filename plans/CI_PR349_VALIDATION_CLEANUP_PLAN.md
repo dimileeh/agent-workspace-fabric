@@ -49,3 +49,31 @@ uv run --python 3.12 --extra dev ruff check <changed python files>
 Pass criteria: all focused commands pass. Full coverage, whole-repository
 pytest, frontend builds, and CI-equivalent validation remain managed by
 AWF/GitHub after agent completion.
+
+## Iteration 2: CI Run 26777939607
+
+The current CI repro still fails on:
+
+- `tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit`
+- `tests/unit/control/test_executor_validation_fix_cycle.py::TestValidationSideEffectCleanup::test_executor_tracked_validation_side_effect_cleans_before_pr_push`
+
+Iteration 2 requirements:
+
+- [ ] Keep the cleaned-validation-side-effect safety policy intact: if validation
+      passed before AWF restored/deleted side effects, do not push that restored
+      tree as validated.
+- [ ] Update the executor side-effect cleanup regression to assert cleanup and
+      push blocking, instead of expecting completion.
+- [ ] Split the two oversized test modules into cohesive companion test modules
+      without weakening the line-limit guard.
+- [ ] Run only focused repro, line-limit, moved-module, and changed-file lint
+      checks; leave broad AWF/GitHub validation to post-agent CI.
+- [ ] Commit locally without switching branches or pushing.
+
+Iteration 2 verification:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit tests/unit/control/test_executor_validation_fix_cycle.py::TestValidationSideEffectCleanup::test_executor_tracked_validation_side_effect_cleans_before_pr_push -q
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_validation_worktree.py tests/unit/runtime/test_validation_worktree_ignored_cleanup.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_007.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_008.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/runtime/test_validation_worktree.py tests/unit/runtime/test_validation_worktree_ignored_cleanup.py tests/unit/control/test_executor_validation_fix_cycle.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_007.py tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_008.py
+```
