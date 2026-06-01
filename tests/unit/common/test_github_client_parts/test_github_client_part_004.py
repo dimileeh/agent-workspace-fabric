@@ -1080,6 +1080,8 @@ class TestMutations:
         assert "allow_merge_commit" in exc.value.stderr
         assert "allow_squash_merge" in exc.value.stderr
         assert "allow_rebase_merge" in exc.value.stderr
+        assert exc.value.returncode == 1
+        assert "temporarily unavailable" in exc.value.stderr
 
     @pytest.mark.unit
     async def test_fetch_repo_merge_methods_rejects_partial_repo_flags(self) -> None:
@@ -1097,6 +1099,8 @@ class TestMutations:
         assert "allow_rebase_merge" in exc.value.stderr
         assert "allow_merge_commit" not in exc.value.stderr
         assert "allow_squash_merge" not in exc.value.stderr
+        assert exc.value.returncode == 1
+        assert "try again" in exc.value.stderr
 
     @pytest.mark.unit
     async def test_fetch_repo_merge_methods_all_false_is_empty_policy(self) -> None:

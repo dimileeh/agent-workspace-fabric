@@ -1202,8 +1202,11 @@ class GitHubClient:
             missing = ", ".join(missing_flags)
             raise GitHubClientError(
                 operation="gh api repo",
-                returncode=0,
-                stderr=f"GitHub repository response omitted merge method flags: {missing}",
+                returncode=1,
+                stderr=(
+                    "GitHub repository response omitted merge method flags; "
+                    f"API response may be temporarily unavailable, try again: {missing}"
+                ),
             )
         methods: list[str] = []
         for flag, method in merge_flags:
