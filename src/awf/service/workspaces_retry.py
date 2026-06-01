@@ -392,6 +392,11 @@ async def retry_workspace_row(
             phase=source_reservation.phase,
         )
     elif target_node_id is not None:
+        # No source reservation: fall back to settings defaults.
+        # dind_mode is conservatively "none" because we cannot infer
+        # the original DinD configuration without a reservation row.
+        # This is a narrow edge case (reservation INSERT failed before
+        # provisioning) and accepted capacity-tracking drift.
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
