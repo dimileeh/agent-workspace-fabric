@@ -135,6 +135,31 @@ class CompanionImageBuilder:
         self._compose = compose
         self._builds: dict[tuple[str, float], asyncio.Task[str | None]] = {}
 
+    async def companion_image_exists(self, tag: str) -> bool:
+        """Return whether ``tag`` still exists, preserving genuine probe errors.
+
+        This launch-time check distinguishes a confirmed missing image from a
+        Docker probe failure. The cache path's cheaper existence helper treats
+        inspect failures as "not present" so it can build; point-of-use
+        revalidation must not hide daemon errors behind an inline-build fallback.
+        """
+        try:
+            await self._compose._docker_capture(  # noqa: SLF001
+                ["image", "inspect", tag],
+                operation="image inspect",
+            )
+        except ComposeOperationError as exc:
+            if _is_missing_image_inspect_failure(exc):
+                return False
+            _log.warning(
+                "companion_image.revalidate_failed",
+                tag=tag,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            raise
+        return True
+
     async def ensure(
         self,
         *,
@@ -256,3 +281,11 @@ class CompanionImageBuilder:
             return None
         _log.info("companion_image.built", companion=name, tag=tag)
         return tag
+
+
+def _is_missing_image_inspect_failure(exc: ComposeOperationError) -> bool:
+    """Return whether an ``image inspect`` failure confirms an absent tag."""
+    if exc.reason_code != "COMPOSE_COMMAND_FAILED":
+        return False
+    detail = f"{exc.stderr}\n{exc.stdout}".lower()
+    return "no such image" in detail or "not found" in detail

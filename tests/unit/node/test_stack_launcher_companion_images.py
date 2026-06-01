@@ -10,7 +10,8 @@ import pytest
 from awf.node.companion_services import MaterializedCompanionService, WorkspaceCompanionSpec
 from awf.node.compose_manager import ComposeProjectPaths, WorkspaceComposeSpec
 from awf.node.git_manager import WorktreeLayout
-from awf.node.stack_launcher import ComposeStackLauncher
+from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
+from awf.profiles.models import WorkspaceProfile
 
 
 class _StubCompose:
@@ -19,10 +20,26 @@ class _StubCompose:
         raise AssertionError("up should not be called by these tests")
 
 
+class _RecordingCompose:
+    def __init__(self) -> None:
+        self.specs: list[WorkspaceComposeSpec] = []
+        self.waits: list[bool] = []
+
+    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+        self.specs.append(spec)
+        self.waits.append(wait)
+        return ComposeProjectPaths(
+            project_dir=Path("/tmp/awf-compose/ws_launcher"),
+            compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+        )
+
+
 class _RecordingBuilder:
-    def __init__(self, *, tag: str | None) -> None:
+    def __init__(self, *, tag: str | None, exists: bool = True) -> None:
         self.tag = tag
+        self.exists = exists
         self.calls: list[dict[str, object]] = []
+        self.exists_calls: list[str] = []
 
     async def ensure(
         self,
@@ -46,6 +63,10 @@ class _RecordingBuilder:
         )
         return self.tag
 
+    async def companion_image_exists(self, tag: str) -> bool:
+        self.exists_calls.append(tag)
+        return self.exists
+
 
 def _materialized(
     root: Path, *, name: str = "backend", commit_sha: str = "abc123def456"
@@ -67,6 +88,24 @@ def _launcher(builder: _RecordingBuilder | None) -> ComposeStackLauncher:
         compose=_StubCompose(),  # type: ignore[arg-type]
         agent_runtime_image="awf-agent-runtime:latest",
         companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+
+
+def _launch_request(
+    root: Path,
+    *,
+    companion_name: str = "backend",
+) -> WorkspaceStackLaunchRequest:
+    return WorkspaceStackLaunchRequest(
+        workspace_id="ws_launcher",
+        layout=WorktreeLayout(
+            mirror_path=root / "repo.git",
+            worktree_path=root / "repo",
+            branch_name="awf/ws_launcher",
+        ),
+        profile=WorkspaceProfile(name="generic"),
+        companions=(_materialized(root / companion_name, name=companion_name),),
+        companion_graph_prevalidated=True,
     )
 
 
@@ -105,6 +144,51 @@ async def test_failed_prebuild_falls_back_to_build(tmp_path: Path) -> None:
 
     assert services[0].image is None
     assert builder.calls  # builder was consulted
+
+
+@pytest.mark.unit
+async def test_launch_keeps_prebuilt_companion_image_when_revalidation_succeeds(
+    tmp_path: Path,
+) -> None:
+    """Launch-time revalidation keeps a cache-hit image that still exists."""
+    compose = _RecordingCompose()
+    builder = _RecordingBuilder(tag="awf-companion-backend:abc123def456", exists=True)
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+
+    await launcher.launch(_launch_request(tmp_path))
+
+    companion = compose.specs[0].companions[0]
+    assert companion.image == "awf-companion-backend:abc123def456"
+    assert companion.build_context == str((tmp_path / "backend").resolve())
+    assert companion.dockerfile == "Dockerfile"
+    assert builder.exists_calls == ["awf-companion-backend:abc123def456"]
+
+
+@pytest.mark.unit
+async def test_launch_revalidates_prebuilt_companion_image_and_falls_back_when_missing(
+    tmp_path: Path,
+) -> None:
+    """A pruned cache-hit image falls back to inline build before compose up."""
+    compose = _RecordingCompose()
+    builder = _RecordingBuilder(tag="awf-companion-backend:abc123def456", exists=False)
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+
+    await launcher.launch(_launch_request(tmp_path))
+
+    companion = compose.specs[0].companions[0]
+    assert companion.image is None
+    assert companion.build_context == str((tmp_path / "backend").resolve())
+    assert companion.dockerfile == "Dockerfile"
+    assert builder.exists_calls == ["awf-companion-backend:abc123def456"]
+    assert compose.waits == [True]
 
 
 @pytest.mark.unit

@@ -189,6 +189,7 @@ class ComposeStackLauncher:
             host_gateway_enabled=egress_plan.host_gateway_enabled,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
+        spec = await self._revalidate_prebuilt_companion_images(spec)
         try:
             paths = await self._compose.up(spec, wait=True)
         except ComposeOperationError as e:
@@ -261,6 +262,28 @@ class ComposeStackLauncher:
 
         services = await asyncio.gather(*(_build_single(companion) for companion in companions))
         return tuple(services)
+
+    async def _revalidate_prebuilt_companion_images(
+        self,
+        spec: WorkspaceComposeSpec,
+    ) -> WorkspaceComposeSpec:
+        """Clear vanished pre-built companion images so compose builds inline."""
+        if self._companion_image_builder is None:
+            return spec
+        companions: list[CompanionService] = []
+        changed = False
+        for companion in spec.companions:
+            if companion.image is None:
+                companions.append(companion)
+                continue
+            if await self._companion_image_builder.companion_image_exists(companion.image):
+                companions.append(companion)
+                continue
+            companions.append(replace(companion, image=None))
+            changed = True
+        if not changed:
+            return spec
+        return replace(spec, companions=tuple(companions))
 
 
 def _stack_secret_metadata(
