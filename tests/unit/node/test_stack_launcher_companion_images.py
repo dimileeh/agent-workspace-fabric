@@ -46,9 +46,15 @@ class _RecordingCompose:
 class _MissingImageOnceCompose:
     """Compose double that loses a pre-built companion tag on the first launch."""
 
-    def __init__(self, *, missing_tag: str) -> None:
+    def __init__(
+        self,
+        *,
+        missing_tag: str,
+        reason_code: str = "COMPOSE_COMMAND_FAILED",
+    ) -> None:
         """Initialize the missing-image failure and recorded launch specs."""
         self.missing_tag = missing_tag
+        self.reason_code = reason_code
         self.specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
 
@@ -62,7 +68,7 @@ class _MissingImageOnceCompose:
                 returncode=1,
                 stdout="",
                 stderr=f"Error response from daemon: No such image: {self.missing_tag}",
-                reason_code="COMPOSE_COMMAND_FAILED",
+                reason_code=self.reason_code,
             )
         return ComposeProjectPaths(
             project_dir=Path("/tmp/awf-compose/ws_launcher"),
@@ -237,6 +243,32 @@ async def test_launch_retries_with_inline_build_when_prebuilt_image_pruned_after
     """A tag pruned after revalidation is cleared and retried as an inline build."""
     tag = "awf-companion-backend:abc123def456"
     compose = _MissingImageOnceCompose(missing_tag=tag)
+    builder = _RecordingBuilder(tag=tag, exists=True)
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+
+    await launcher.launch(_launch_request(tmp_path))
+
+    first_companion = compose.specs[0].companions[0]
+    retry_companion = compose.specs[1].companions[0]
+    assert first_companion.image == tag
+    assert retry_companion.image is None
+    assert retry_companion.build_context == str((tmp_path / "backend").resolve())
+    assert retry_companion.dockerfile == "Dockerfile"
+    assert builder.exists_calls == [tag]
+    assert compose.waits == [True, True]
+
+
+@pytest.mark.unit
+async def test_launch_retries_daemon_classified_missing_prebuilt_companion_image(
+    tmp_path: Path,
+) -> None:
+    """A daemon-classified missing companion tag still retries with an inline build."""
+    tag = "awf-companion-backend:abc123def456"
+    compose = _MissingImageOnceCompose(missing_tag=tag, reason_code="DOCKER_UNAVAILABLE")
     builder = _RecordingBuilder(tag=tag, exists=True)
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]

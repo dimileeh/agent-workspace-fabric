@@ -316,8 +316,6 @@ def _missing_prebuilt_companion_image_retry_spec(
     exc: ComposeOperationError,
 ) -> WorkspaceComposeSpec | None:
     """Clear missing pre-built companion images after a compose-up race."""
-    if exc.reason_code == "DOCKER_UNAVAILABLE":
-        return None
     missing_images = frozenset(
         companion.image
         for companion in spec.companions
