@@ -434,37 +434,6 @@ async def run_validation_and_fix_cycle(
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                 has_known_non_plan_output=has_known_non_plan_output,
             )
-        validation_workspace_head_sha = await self._capture_workspace_head_sha(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-        )
-        if validation_workspace_head_sha is None:
-            validation_run_id = await self._start_validation_run(
-                workspace_id=workspace_id,
-                profile=profile,
-                base_commit=base_commit,
-                workspace_head_sha=validation_workspace_head_sha,
-                target_branch=expected_branch,
-                target_head_sha=None,
-                tier=validation_tier,
-            )
-            return await _fail_validation_worktree_guard(
-                self,
-                workspace_id=workspace_id,
-                validation_run_id=validation_run_id,
-                validation_tier=validation_tier,
-                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
-                message="could not capture workspace HEAD before AWF validation",
-            )
-        validation_run_id = await self._start_validation_run(
-            workspace_id=workspace_id,
-            profile=profile,
-            base_commit=base_commit,
-            workspace_head_sha=validation_workspace_head_sha,
-            target_branch=expected_branch,
-            target_head_sha=None,
-            tier=validation_tier,
-        )
         pre_validation_check = await check_validation_worktree_clean(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
@@ -476,6 +445,19 @@ async def run_validation_and_fix_cycle(
             pre_validation_check.ignored_paths_snapshot_signatures
         )
         pre_validation_ignored_roots_snapshot = pre_validation_check.ignored_paths
+        validation_workspace_head_sha = await self._capture_workspace_head_sha(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+        validation_run_id = await self._start_validation_run(
+            workspace_id=workspace_id,
+            profile=profile,
+            base_commit=base_commit,
+            workspace_head_sha=validation_workspace_head_sha,
+            target_branch=expected_branch,
+            target_head_sha=None,
+            tier=validation_tier,
+        )
         if setup_ignored_paths_snapshot is None:
             setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
             setup_ignored_paths_snapshot_signatures = (
@@ -530,6 +512,15 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
+            )
+        if validation_workspace_head_sha is None:
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                validation_tier=validation_tier,
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                message="could not capture workspace HEAD before AWF validation",
             )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
