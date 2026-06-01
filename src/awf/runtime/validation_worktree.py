@@ -574,17 +574,19 @@ async def cleanup_validation_worktree_side_effects(
             ["restore", "--source", restore_ref, "--staged", "--worktree", "--", *tracked_paths]
         )
         if not restore.ok:
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=(
-                    "AWF validation left dirty tracked files and `git restore` "
-                    "could not restore them."
-                ),
-                cleanup_command="git restore",
-                cleanup_stderr=(restore.stderr or "")[:1000],
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation left dirty tracked files and `git restore` "
+                        "could not restore them."
+                    ),
+                    cleanup_command="git restore",
+                    cleanup_stderr=(restore.stderr or "")[:1000],
+                )
             )
 
     ignored_paths = {_normalize_porcelain_path(path) for path in (ignore_ignored_paths or ())}
@@ -691,16 +693,18 @@ async def cleanup_validation_worktree_side_effects(
     if cleanup_untracked_paths:
         clean = await run_git(["clean", "-fdx", "--", *cleanup_untracked_paths])
         if not clean.ok:
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=(
-                    "AWF validation left untracked files and `git clean` could not remove them."
-                ),
-                cleanup_command="git clean",
-                cleanup_stderr=(clean.stderr or "")[:1000],
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation left untracked files and `git clean` could not remove them."
+                    ),
+                    cleanup_command="git clean",
+                    cleanup_stderr=(clean.stderr or "")[:1000],
+                )
             )
 
     if check.clean:

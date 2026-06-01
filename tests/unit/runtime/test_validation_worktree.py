@@ -262,6 +262,10 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
             return _CommandResultLike(0, " M tracked.py\n", "")
         if args[:1] == ["restore"]:
             return _CommandResultLike(1, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
         raise AssertionError(f"unexpected git command: {args!r}")
 
     cleanup = await cleanup_validation_worktree_side_effects(
@@ -273,6 +277,51 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command == "git restore"
     assert cleanup.cleanup_stderr == ""
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_rolls_back_head_when_restore_fails(
+    tmp_path: Path,
+) -> None:
+    """Failed tracked-file restore should not strand a validation-authored HEAD."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    current_head = "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate restore failure after validation also advanced HEAD."""
+        calls.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, " M tracked.py\n", "")
+        if args == [
+            "restore",
+            "--source",
+            restore_ref,
+            "--staged",
+            "--worktree",
+            "--",
+            "tracked.py",
+        ]:
+            return _CommandResultLike(1, "", "restore failed")
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{current_head}\n", None)
+        if args == ["reset", "--hard", restore_ref]:
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleanup_command == "git reset --hard"
+    assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
+    assert ("reset", "--hard", restore_ref) in calls
 
 
 @pytest.mark.unit
@@ -297,6 +346,43 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
     assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert cleanup.cleanup_command == "git clean"
     assert cleanup.cleanup_stderr == ""
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_rolls_back_head_when_clean_fails(
+    tmp_path: Path,
+) -> None:
+    """Failed untracked cleanup should still rollback a validation-authored HEAD."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    current_head = "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate clean failure after validation also advanced HEAD."""
+        calls.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? untracked.py\n", "")
+        if args == ["clean", "-fdx", "--", "untracked.py"]:
+            return _CommandResultLike(1, "", "clean failed")
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{current_head}\n", None)
+        if args == ["reset", "--hard", restore_ref]:
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleanup_command == "git reset --hard"
+    assert "Expected aaaaaaaa, found bbbbbbbb." in cleanup.message
+    assert ("reset", "--hard", restore_ref) in calls
 
 
 @pytest.mark.unit
