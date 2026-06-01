@@ -794,12 +794,13 @@ const searchParams = useSearchParams();
     [overview, taskDetailsWorkspaceId],
   );
 
-  // Per-source stale flags: saturation-backed KPIs and reliability-summary KPIs
-  // dim independently so a failure in one feed never fades fresh values from the
-  // other.
-  const apiDown = apiState === "error";
-  const saturationStale = (apiDown || resourceError != null) && resourceSaturation != null;
-  const summaryStale = (apiDown || workspaceSummaryError != null) && workspaceSummary != null;
+  // Per-source stale flags: each feed polls on its own timer, so staleness is
+  // keyed off that feed's OWN refresh error (showing a cached snapshot), not the
+  // shared /health check (which is surfaced separately via the API pill). This
+  // keeps freshly-refreshed values bright even if /health blips, and a real
+  // outage still fails each feed's poll and sets its own error.
+  const saturationStale = resourceError != null && resourceSaturation != null;
+  const summaryStale = workspaceSummaryError != null && workspaceSummary != null;
 
   const fleetKpis = useMemo<FleetKpi[]>(() => {
     const counts = resourceSaturation?.workspace_counts ?? null;
@@ -884,8 +885,8 @@ const searchParams = useSearchParams();
   // previously-loaded snapshot AND its feed errored. On first-load failures
   // there is no cached snapshot, so the panel shows its loading/error state
   // instead of a misleading "last snapshot" badge.
-  const mergeErrored = apiDown || mergeQueueError != null || mergeQueueStatus === "error";
-  const failureErrored = apiDown || failureSummaryStatus === "error";
+  const mergeErrored = mergeQueueError != null || mergeQueueStatus === "error";
+  const failureErrored = failureSummaryStatus === "error";
   const capacityStale = saturationStale;
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
