@@ -1463,7 +1463,7 @@ async def run_validation_and_fix_cycle(
             return await _fail_validation_worktree_guard(
                 self,
                 workspace_id=workspace_id,
-                validation_run_id=validation_run_id,
+                validation_run_id=None,
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,

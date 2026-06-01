@@ -1194,6 +1194,138 @@ async def test_execution_validation_rejects_ignored_signature_drift_after_fix_pa
 
 
 @pytest.mark.unit
+async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_reclosing_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fail post-fix dirty worktrees without finishing the closed validation run again."""
+    profile = WorkspaceProfile.model_validate({"name": "validation-fix-pass-dirty"})
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "validation-fix-pass-dirty"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Task with dirty fix pass",
+        agent="codex",
+        owned_paths=(),
+        id="ws_dirty_fix",
+    )
+
+    setup_check = ValidationWorktreeCheck(clean=True)
+    dirty_fix_pass_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("generated.log",),
+        untracked_paths=("generated.log",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+        message="fix pass left an untracked file",
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_command_result(tmp_path, returncode=1)])
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(max_validation_fix_passes=1, planning_max_iterations_default=3),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-fix-dirty"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _repair_agent_git_ownership=AsyncMock(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(side_effect=[setup_check, dirty_fix_pass_check]),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=setup_check,
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_dirty_fix",
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_dirty_fix",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_dirty_fix",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert result.successful_validation_run_id is None
+    executor._start_validation_run.assert_awaited_once()
+    executor._finish_validation_run.assert_awaited_once()
+    finish_run_kwargs = executor._finish_validation_run.await_args.kwargs
+    assert finish_run_kwargs["status"] == "failed"
+    assert finish_run_kwargs["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+    finish_pending_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_pending_kwargs["validation_run_id"] is None
+    assert finish_pending_kwargs["status"] == OperationStatus.failed
+    assert finish_pending_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert adapter.run.await_count == 1
+
+
+@pytest.mark.unit
 async def test_execution_validation_rejects_fix_pass_ignored_artifacts_when_snapshot_drifts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
