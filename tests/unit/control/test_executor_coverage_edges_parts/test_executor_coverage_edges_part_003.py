@@ -994,7 +994,7 @@ async def test_execution_validation_rejects_new_ignored_paths_after_initial_vali
     monkeypatch.setattr(
         executor_execution_validation,
         "check_validation_worktree_clean",
-        AsyncMock(side_effect=[setup_check, later_check]),
+        AsyncMock(side_effect=[setup_check, setup_check, later_check]),
     )
     monkeypatch.setattr(
         executor_execution_validation,
@@ -1042,6 +1042,151 @@ async def test_execution_validation_rejects_new_ignored_paths_after_initial_vali
     mark_kwargs = executor._mark_failed.await_args.kwargs
     assert getattr(mark_kwargs["from_status"], "value", mark_kwargs["from_status"]) == "validating"
     assert mark_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert adapter.run.await_count == 1
+
+
+@pytest.mark.unit
+async def test_execution_validation_tracks_fix_pass_ignored_artifacts_in_next_pass_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Track fix-pass-generated ignored files so they do not trigger a false drift failure."""
+    profile = WorkspaceProfile.model_validate({"name": "validation-ignored-baseline"})
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "validation-ignored-baseline"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Task with ignored artifact",
+        agent="codex",
+        owned_paths=(),
+        id="ws_ignored",
+    )
+
+    setup_check = ValidationWorktreeCheck(
+        clean=True,
+        ignored_paths=("ignored-output/",),
+        ignored_paths_snapshot=("ignored-output/stable.txt",),
+    )
+    fix_pass_check = ValidationWorktreeCheck(
+        clean=True,
+        ignored_paths=("ignored-output/",),
+        ignored_paths_snapshot=("ignored-output/stable.txt", "ignored-output/new.pyc"),
+    )
+
+    class _Validation:
+        def __init__(self) -> None:
+            self.run_profile_calls = 0
+
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            self.run_profile_calls += 1
+            returncode = 1 if self.run_profile_calls == 1 else 0
+            return ValidationResult(commands=[_command_result(tmp_path, returncode=returncode)])
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(max_validation_fix_passes=1, planning_max_iterations_default=3),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(side_effect=["vr-1", "vr-2"]),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _repair_agent_git_ownership=AsyncMock(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+    git_in_worktree = AsyncMock(
+        side_effect=[
+            CommandResult(0, "", ""),
+            CommandResult(0, "", ""),
+        ]
+    )
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(side_effect=[setup_check, fix_pass_check, fix_pass_check]),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=setup_check,
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_ignored",
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_ignored",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_ignored",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=git_in_worktree,
+    )
+
+    assert not result.stop
+    assert result.successful_validation_run_id == "vr-2"
+    assert result.successful_validation_workspace_head_sha == "c" * 40
+    assert executor._validation.run_profile_calls == 2
+    assert executor._start_validation_run.await_count == 2
+    assert executor._finish_validation_run.await_count == 2
+    finish_kwargs = executor._finish_validation_run.await_args_list[1].kwargs
+    assert finish_kwargs["status"] == "succeeded"
+    assert finish_kwargs["reason_code"] == "VALIDATION_OK"
+    assert finish_kwargs["retry_count"] == 0
+    assert finish_kwargs["coverage"] is None
+    assert finish_kwargs["command_retries"] == [0]
+    assert executor._mark_failed.await_count == 0
     assert adapter.run.await_count == 1
 
 

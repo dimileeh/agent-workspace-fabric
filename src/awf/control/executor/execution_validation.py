@@ -80,6 +80,27 @@ from awf.runtime.validation_worktree import (
 )
 
 
+def _setup_ignored_snapshot_drift(
+    *,
+    setup_ignored_paths: tuple[str, ...],
+    setup_ignored_roots: tuple[str, ...] | None,
+    current_ignored_paths: tuple[str, ...],
+    current_ignored_roots: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    """Return ignored snapshot entries that differ from setup baseline."""
+    setup_path_set = set(setup_ignored_paths)
+    setup_root_set = set(setup_ignored_roots or ())
+    current_path_set = set(current_ignored_paths)
+    current_root_set = set(current_ignored_roots or ())
+    drift = (
+        tuple(path for path in current_ignored_roots or () if path not in setup_root_set)
+        + tuple(path for path in current_ignored_paths if path not in setup_path_set)
+        + tuple(path for path in (setup_ignored_roots or ()) if path not in current_root_set)
+        + tuple(path for path in setup_ignored_paths if path not in current_path_set)
+    )
+    return tuple(dict.fromkeys(drift))
+
+
 @dataclass(frozen=True)
 class ExecutionValidationResult:
     """Result for the execution validation loop."""
@@ -347,24 +368,17 @@ async def run_validation_and_fix_cycle(
             setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
             setup_ignored_roots_snapshot = pre_validation_ignored_roots_snapshot
         else:
-            setup_ignored_set = set(setup_ignored_paths_snapshot)
-            setup_ignored_roots_set = set(setup_ignored_roots_snapshot or ())
-            new_ignored_paths = tuple(
-                path
-                for path in pre_validation_ignored_paths_snapshot
-                if path not in setup_ignored_set
+            setup_ignored_drift = _setup_ignored_snapshot_drift(
+                setup_ignored_paths=setup_ignored_paths_snapshot,
+                setup_ignored_roots=setup_ignored_roots_snapshot,
+                current_ignored_paths=pre_validation_ignored_paths_snapshot,
+                current_ignored_roots=pre_validation_ignored_roots_snapshot,
             )
-            new_ignored_roots = tuple(
-                path
-                for path in pre_validation_ignored_roots_snapshot
-                if path not in setup_ignored_roots_set
-            )
-            if new_ignored_paths or new_ignored_roots:
-                dirty_paths = tuple(dict.fromkeys((*new_ignored_roots, *new_ignored_paths)))
+            if setup_ignored_drift:
                 dirty_check = ValidationWorktreeCheck(
                     clean=False,
-                    paths=dirty_paths,
-                    untracked_paths=dirty_paths,
+                    paths=setup_ignored_drift,
+                    untracked_paths=setup_ignored_drift,
                     reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                     message=(
                         "Validation worktree gained ignored entries after setup "
@@ -1411,6 +1425,34 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     has_known_non_plan_output=has_known_non_plan_output,
                 )
+
+        fix_pass_ignored_check = await check_validation_worktree_clean(
+            run_git=git_in_worktree,
+            worktree_path=worktree_path,
+            ignore_all_ignored=True,
+            capture_ignored_paths_snapshot=True,
+        )
+        if not fix_pass_ignored_check.clean:
+            reason_code = (
+                fix_pass_ignored_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+            )
+            message = (
+                fix_pass_ignored_check.message
+                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                else validation_worktree_preexisting_dirty_message(fix_pass_ignored_check)
+            )
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                validation_tier=validation_tier,
+                reason_code=reason_code,
+                message=message,
+            )
+
+        setup_ignored_paths_snapshot = fix_pass_ignored_check.ignored_paths_snapshot
+        setup_ignored_roots_snapshot = fix_pass_ignored_check.ignored_paths
+
         # Loop back to re-validate.
 
     return ExecutionValidationResult(
