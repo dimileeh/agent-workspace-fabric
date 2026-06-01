@@ -808,7 +808,9 @@ async def cleanup_validation_worktree_side_effects(
             ),
         )
     if cleanup_untracked_paths:
-        clean = await run_git(["clean", "-fdx", "--", *cleanup_untracked_paths])
+        clean = await run_git(
+            ["--literal-pathspecs", "clean", "-fdx", "--", *cleanup_untracked_paths]
+        )
         if not clean.ok:
             return await _return_after_head_verification(
                 ValidationWorktreeCleanup(
