@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from awf.control.quality_gates import QualityGateViolation
+from awf.runtime import git_porcelain, validation_worktree
 from awf.runtime.pr_monitor_runner import path_parsing
 from awf.runtime.pr_monitor_runner.commit_autofix import (
     _worktree_modified_paths_from_porcelain,
@@ -85,6 +86,36 @@ def test_path_parsing_name_only_z_helper_remains_deduplicating() -> None:
 def test_path_parsing_porcelain_z_records_handles_unterminated_output() -> None:
     assert path_parsing._porcelain_z_records(" M src/one.py") == [  # noqa: SLF001
         (" M", "src/one.py", None)
+    ]
+
+
+def test_non_nul_porcelain_parser_uses_shared_runtime_helpers() -> None:
+    status_stdout = 'R  "old\\040name.py" -> "new\\040name.py"\n!! "ignored\\040root/"\n'
+
+    assert (  # noqa: SLF001
+        validation_worktree._changed_paths_from_porcelain
+        is git_porcelain.changed_paths_from_porcelain
+    )
+    assert (  # noqa: SLF001
+        validation_worktree._untracked_paths_from_porcelain
+        is git_porcelain.untracked_paths_from_porcelain
+    )
+    assert (  # noqa: SLF001
+        validation_worktree._unquote_porcelain_path is git_porcelain.unquote_porcelain_path
+    )
+    assert (  # noqa: SLF001
+        path_parsing._split_porcelain_rename_paths is git_porcelain.split_porcelain_rename_paths
+    )
+    assert (  # noqa: SLF001
+        path_parsing._unquote_porcelain_path is git_porcelain.unquote_porcelain_path
+    )
+    assert path_parsing._changed_paths_from_porcelain(status_stdout) == [  # noqa: SLF001
+        "old name.py",
+        "new name.py",
+        "ignored root/",
+    ]
+    assert path_parsing._untracked_paths_from_porcelain(status_stdout) == [  # noqa: SLF001
+        "ignored root/",
     ]
 
 
