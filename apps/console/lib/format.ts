@@ -228,9 +228,11 @@ export function compactDuration(seconds: number | null | undefined): string {
 // (provision, execution), clamped to 0-100. Any dimension flagged saturated via
 // a *_SATURATED pressure reason counts as fully utilized, so the strip cannot
 // read healthy while a hard constraint the capacity panel already shows as
-// saturated has no headroom left.
-export function capacityUtilizationPct(saturation: ResourceSaturationSummary): number {
+// saturated has no headroom left. Returns null when no limit is comparable, so
+// the headline can show "unknown" rather than a misleading 0%.
+export function capacityUtilizationPct(saturation: ResourceSaturationSummary): number | null {
   let pct = 0;
+  let known = false;
   const allocated = saturation.allocated_capacity;
   const dimensions = [
     allocated.steady_cpu,
@@ -242,16 +244,22 @@ export function capacityUtilizationPct(saturation: ResourceSaturationSummary): n
   ];
   for (const dimension of dimensions) {
     if (dimension && dimension.limit && dimension.limit > 0) {
+      known = true;
       pct = Math.max(pct, (dimension.reserved / dimension.limit) * 100);
     }
   }
   for (const lane of [saturation.concurrency.provision, saturation.concurrency.execution]) {
     if (lane && lane.limit > 0) {
+      known = true;
       pct = Math.max(pct, (lane.in_use / lane.limit) * 100);
     }
   }
   if (allocated.pressure_reasons?.some((reason) => reason.endsWith("_SATURATED"))) {
+    known = true;
     pct = Math.max(pct, 100);
+  }
+  if (!known) {
+    return null;
   }
   return Math.min(100, Math.max(0, Math.round(pct)));
 }

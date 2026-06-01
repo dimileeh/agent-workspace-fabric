@@ -859,18 +859,26 @@ const searchParams = useSearchParams();
         label: "Capacity",
         value: capacity ?? dash,
         suffix: capacity != null ? "%" : undefined,
-        tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : "info") : undefined,
+        // Only flag pressure (warn/bad). Low/idle utilization stays neutral so a
+        // value below the warn threshold is not styled like an active signal.
+        tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : undefined) : undefined,
       },
     ];
   }, [resourceSaturation, workspaceSummary]);
 
-  // Stale dimming per concern: a panel is stale when the API health check fails
-  // OR that panel's own refresh kept the last snapshot after an error.
+  // Stale dimming per concern: a panel is stale only when it is actually showing
+  // a previously-loaded snapshot AND its data is no longer fresh (API health
+  // check failed, or that panel's own refresh errored). On first-load failures
+  // there is no cached snapshot, so the panel shows its loading/error state
+  // instead of a misleading "last snapshot" badge.
   const apiDown = apiState === "error";
-  const capacityStale = apiDown || resourceError != null || workspaceSummaryError != null;
-  const mergeStale = apiDown || mergeQueueError != null || mergeQueueStatus === "error";
-  const failureStale = apiDown || failureSummaryStatus === "error";
-  const fleetStale = apiDown || resourceError != null || workspaceSummaryError != null;
+  const resourceErrored = apiDown || resourceError != null || workspaceSummaryError != null;
+  const mergeErrored = apiDown || mergeQueueError != null || mergeQueueStatus === "error";
+  const failureErrored = apiDown || failureSummaryStatus === "error";
+  const capacityStale = resourceErrored && resourceSaturation != null;
+  const mergeStale = mergeErrored && mergeQueue.length > 0;
+  const failureStale = failureErrored && failureSummary != null;
+  const fleetStale = resourceErrored && (resourceSaturation != null || workspaceSummary != null);
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">

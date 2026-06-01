@@ -244,6 +244,25 @@ test("capacityUtilizationPct counts a saturated provision lane", () => {
   assert.equal(capacityUtilizationPct(saturation), 100);
 });
 
+test("capacityUtilizationPct returns null when no limit is comparable", () => {
+  const saturation = saturationFixture({
+    allocated_capacity: {
+      steady_cpu: dim(0, 0),
+      peak_cpu: dim(0, null),
+      steady_memory_gb: dim(0, 0),
+      peak_memory_gb: dim(0, null),
+      disk_mb: dim(0, 0),
+      dind_slots: dim(0, 0),
+      pressure_reasons: [],
+    },
+    concurrency: {
+      provision: { limit: 0, in_use: 0, queued: 0, available: 0 },
+      execution: { limit: 0, in_use: 0, queued: 0, available: 0 },
+    },
+  });
+  assert.equal(capacityUtilizationPct(saturation), null);
+});
+
 test("capacityUtilizationPct honors a *_SATURATED pressure reason with no comparable limit", () => {
   const saturation = saturationFixture({
     allocated_capacity: {
