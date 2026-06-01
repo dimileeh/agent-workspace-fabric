@@ -1263,10 +1263,13 @@ class GitHubClient:
         method: str = "squash",
         delete_branch: bool = True,
     ) -> str:
-        """Squash-merge (or merge / rebase) and return the merge commit SHA.
+        """Merge a pull request using the given method and return the merge commit SHA.
 
-        Branch protection may reject the merge — that's how the runner
-        decides to fall back to NotifyHuman.
+        The caller is responsible for resolving the effective merge method via
+        ``fetch_repo_merge_methods`` and
+        ``fetch_branch_pull_request_allowed_merge_methods`` before calling this.
+        Method-specific rejections are classified by the merge loop to retry with
+        an alternative or escalate to NotifyHuman.
         """
         args = ["gh", "pr", "merge", str(pr_number), "--repo", repo.slug(), f"--{method}"]
         if delete_branch:
