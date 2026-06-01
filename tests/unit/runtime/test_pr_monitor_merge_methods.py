@@ -124,6 +124,36 @@ def test_merge_method_rejection_classifier_is_specific() -> None:
             GitHubClientError(
                 operation="gh pr merge",
                 returncode=1,
+                stderr="GraphQL: Merge method squash merging is not allowed.",
+            )
+        )
+        == "squash"
+    )
+    assert (
+        _merge_method_rejection_method(
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Merge method merge commit is not allowed.",
+            )
+        )
+        == "merge"
+    )
+    assert (
+        _merge_method_rejection_method(
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Merge method rebase is not allowed.",
+            )
+        )
+        == "rebase"
+    )
+    assert (
+        _merge_method_rejection_method(
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
                 stderr="HTTP 502 Bad Gateway",
             )
         )

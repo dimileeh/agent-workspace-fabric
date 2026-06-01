@@ -124,11 +124,17 @@ def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
     # GitHubClientError stores redacted stderr. These policy phrases contain no
     # secret-like material, so redaction should preserve the classifier signal.
     text = exc.stderr.lower()
-    if "squash merges are not allowed" in text:
+    if (
+        "squash merges are not allowed" in text
+        or "merge method squash merging is not allowed" in text
+    ):
         return "squash"
-    if "merge commits are not allowed" in text:
+    if (
+        "merge commits are not allowed" in text
+        or "merge method merge commit is not allowed" in text
+    ):
         return "merge"
-    if "rebase merges are not allowed" in text:
+    if "rebase merges are not allowed" in text or "merge method rebase is not allowed" in text:
         return "rebase"
     return None
 
