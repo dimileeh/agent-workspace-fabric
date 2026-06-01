@@ -85,9 +85,13 @@ _MAX_REVOKE_EVENTS: Final = 3
 
 When ``_launch_lost_to_terminal_cleanup`` records this many consecutive
 ``terminal_runtime_release_revoked`` events (orphan container stop failures),
-further revokes are suppressed to break the indefinite release-revoke loop
-and let the workspace appear as effectively released.  An operator-surfaced
-stale-reason event is recorded instead so a human can intervene.
+further revokes are suppressed to avoid an unbounded release-revoke loop.
+The workspace remains effectively unreleased (ports stay blocked) and
+continues to appear in the cleanup-worker sweep until the cleanup worker
+successfully stops the orphan containers and records a fresh
+``terminal_runtime_released`` event.  An operator-surfaced stale-reason
+event is recorded so a human can intervene if the containers cannot be
+stopped automatically.
 """
 
 _log = get_logger(__name__)
