@@ -596,7 +596,7 @@ async def handle_merge_action(
                                     merge_method_notification_reason,
                                 )
                                 await self._persist_state(workspace_id, state)
-                            for attempt_index, merge_method in enumerate(effective_methods[:2]):
+                            for attempt_index, merge_method in enumerate(effective_methods):
                                 merge_operation = await self._begin_monitor_state_operation(
                                     workspace_id=workspace_id,
                                     action="merge",
@@ -669,9 +669,11 @@ async def handle_merge_action(
                                             "error_message": str(exc),
                                         },
                                     )
+                                    has_remaining_alternative = (
+                                        attempt_index < len(effective_methods) - 1
+                                    )
                                     if (
-                                        attempt_index == 0
-                                        and len(effective_methods[:2]) > 1
+                                        has_remaining_alternative
                                         and _merge_error_supports_method_alternative(exc)
                                     ):
                                         continue

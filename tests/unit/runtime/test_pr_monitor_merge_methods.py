@@ -394,6 +394,44 @@ async def test_method_rejection_retries_once_with_allowed_alternative(
 
 
 @pytest.mark.unit
+async def test_method_rejection_tries_third_allowed_alternative_before_notifying(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A method-specific rejection exhausts allowed alternatives before notifying."""
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash", "rebase"),
+        branch_methods=("merge", "squash", "rebase"),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Squash merges are not allowed on this repository.",
+            ),
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Merge commits are not allowed on this repository.",
+            ),
+            "MERGESHA_REBASE",
+        ],
+    )
+
+    terminal, state, _sleep, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is True
+    assert gh.merge_calls == ["squash", "merge", "rebase"]
+    assert gh.comments == []
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
