@@ -137,6 +137,29 @@ class _CommandlessFailureValidationResult(ValidationResult):
         return self._first_failure
 
 
+class _OverriddenFirstFailureValidationResult(ValidationResult):
+    """Validation result whose provider-level first failure differs from commands."""
+
+    _first_failure: ValidationCommandResult
+
+    def __init__(
+        self,
+        *,
+        commands: list[ValidationCommandResult],
+        first_failure: ValidationCommandResult,
+    ) -> None:
+        super().__init__(commands=commands)
+        object.__setattr__(self, "_first_failure", first_failure)
+
+    @property
+    def all_passed(self) -> bool:
+        return False
+
+    @property
+    def first_failure(self) -> ValidationCommandResult | None:
+        return self._first_failure
+
+
 def _coverage_result(tmp_path: Path) -> ValidationCoverageResult:
     """Build a successful explicit coverage result for pre-push coverage tests."""
     return ValidationCoverageResult(
@@ -423,6 +446,41 @@ def test_pre_push_failure_helpers_identify_pure_coverage_toolchain_failure(
     assert (
         pre_push_validation_module._pre_push_validation_reason_code(result)
         == "COVERAGE_COMMAND_FAILED"
+    )
+
+
+@pytest.mark.unit
+def test_pre_push_failure_helpers_prefer_non_127_first_failure_over_command_127(
+    tmp_path: Path,
+) -> None:
+    """Provider failures must not be hidden by all-127 command records."""
+    command_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="ruff check .",
+        returncode=127,
+        reason_code="COMMAND_FAILED",
+        artifact_name="ruff_missing_with_provider_failure",
+    )
+    provider_failure = _command_result(
+        tmp_path,
+        ok=False,
+        command="coverage provider",
+        returncode=2,
+        reason_code="COVERAGE_PROVIDER_FAILED",
+        artifact_name="coverage_provider_failed",
+    )
+    result = _OverriddenFirstFailureValidationResult(
+        commands=[command_failure],
+        first_failure=provider_failure,
+    )
+
+    assert pre_push_validation_module._first_real_pre_push_failure(result) is provider_failure
+    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is None
+    assert pre_push_validation_module._preferred_pre_push_failure(result) is provider_failure
+    assert (
+        pre_push_validation_module._pre_push_validation_reason_code(result)
+        == "COVERAGE_PROVIDER_FAILED"
     )
 
 

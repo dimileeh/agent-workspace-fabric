@@ -74,7 +74,35 @@ def _failed_pre_push_commands(result: ValidationResult) -> tuple[ValidationComma
 
 def _first_real_pre_push_failure(result: ValidationResult) -> ValidationCommandResult | None:
     """Return the first non-127 failure, giving real lint/test failures precedence."""
-    return _first_real_pre_push_failure_from_failures(_failed_pre_push_commands(result))
+    failures = _failed_pre_push_commands(result)
+    return _first_real_pre_push_failure_for_result(result, failures)
+
+
+def _first_failure_outside_collected_failures(
+    result: ValidationResult,
+    failures: tuple[ValidationCommandResult, ...],
+) -> ValidationCommandResult | None:
+    """Return ``first_failure`` when it is not represented in collected commands."""
+    first_failure = result.first_failure
+    if first_failure is None:
+        return None
+    if any(first_failure is failure for failure in failures):
+        return None
+    return first_failure
+
+
+def _first_real_pre_push_failure_for_result(
+    result: ValidationResult,
+    failures: tuple[ValidationCommandResult, ...],
+) -> ValidationCommandResult | None:
+    """Return the first non-127 failure across command and provider records."""
+    real_failure = _first_real_pre_push_failure_from_failures(failures)
+    if real_failure is not None:
+        return real_failure
+    first_failure = _first_failure_outside_collected_failures(result, failures)
+    if first_failure is not None and first_failure.returncode != 127:
+        return first_failure
+    return None
 
 
 def _first_real_pre_push_failure_from_failures(
@@ -104,10 +132,14 @@ def _pure_toolchain_missing_failure_for_result(
     failures: tuple[ValidationCommandResult, ...],
 ) -> ValidationCommandResult | None:
     """Return a pure 127 failure, including command-less provider failures."""
+    first_failure = _first_failure_outside_collected_failures(result, failures)
+    if first_failure is not None and first_failure.returncode != 127:
+        return None
     toolchain_failure = _pure_toolchain_missing_failure_from_failures(failures)
-    if toolchain_failure is not None or failures:
+    if toolchain_failure is not None:
         return toolchain_failure
-    first_failure = result.first_failure
+    if failures:
+        return None
     if first_failure is not None and first_failure.returncode == 127:
         return first_failure
     return None
@@ -137,7 +169,7 @@ def _preferred_pre_push_failure_from_failures(
     failures: tuple[ValidationCommandResult, ...],
 ) -> ValidationCommandResult | None:
     """Return the preferred failure using an already collected failure tuple."""
-    real_failure = _first_real_pre_push_failure_from_failures(failures)
+    real_failure = _first_real_pre_push_failure_for_result(result, failures)
     if real_failure is not None:
         return real_failure
     toolchain_failure = _pure_toolchain_missing_failure_from_failures(failures)

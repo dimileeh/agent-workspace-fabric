@@ -760,6 +760,88 @@ async def _persist_monitor_handoff_setup_failure_directly(
         raise
 
 
+async def _persist_monitor_handoff_failure_directly(
+    self: Any,
+    *,
+    workspace_id: str,
+    from_status: WorkspaceStatus,
+    failure_reason: FailureReason,
+    message: str,
+    reason_code: str,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    """Last-resort terminal transition for handoff failures outside setup."""
+    session_factory = getattr(self, "_session_factory", None)
+    if session_factory is None:
+        return
+    safe_message = redact_audit_text(message, limit=2000)
+    payload: dict[str, Any] = {
+        "failure_reason": failure_reason.value,
+        "reason_code": reason_code,
+        "message": safe_message,
+    }
+    if details is not None:
+        payload["details"] = cast(
+            dict[str, Any],
+            redact_audit_value(dict(details)),
+        )
+    try:
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                workspace_id,
+                from_status=from_status,
+                to=WorkspaceStatus.failed,
+                reason_code=reason_code,
+                payload=payload,
+            )
+            if ws is None:
+                await session.commit()
+                return
+            ws.failure_reason = failure_reason.value
+            ws.failure_message = safe_message
+            await session.commit()
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_failure_terminal_fallback_failed",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+        )
+        raise
+
+
+async def _mark_monitor_unavailable_failed(
+    self: Any,
+    *,
+    workspace_id: str,
+    message: str,
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
+) -> None:
+    """Mark a no-monitor handoff failure, falling back if the wrapper raises."""
+    try:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=from_status,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=message,
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_monitor_unavailable_mark_failed_failed",
+            workspace_id=workspace_id,
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+        await _persist_monitor_handoff_failure_directly(
+            self,
+            workspace_id=workspace_id,
+            from_status=from_status,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=message,
+            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+        )
+
+
 async def _build_handoff_pr_monitor(
     self: Any,
     *,
@@ -786,12 +868,10 @@ async def _build_handoff_pr_monitor(
     if profile is not None and run_profile_setup:
         raise ValueError("pre-resolved handoff profiles must pass run_profile_setup=False")
     if monitor is None and self._pr_monitor_factory is None:
-        await self._mark_failed(
+        await _mark_monitor_unavailable_failed(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
-            failure_reason=FailureReason.infrastructure_failure,
             message=f"{build_failed_message_prefix}no PR monitor configured",
-            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
         )
         return None
 
@@ -877,12 +957,10 @@ async def _build_handoff_pr_monitor(
         return None
 
     if monitor is None:
-        await self._mark_failed(
+        await _mark_monitor_unavailable_failed(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
-            failure_reason=FailureReason.infrastructure_failure,
             message=f"{build_failed_message_prefix}no PR monitor configured",
-            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
         )
         return None
     return monitor
@@ -953,12 +1031,10 @@ async def _handoff_sync_release_pr_monitor(
         return
 
     if self._pr_monitor is None and self._pr_monitor_factory is None:
-        await self._mark_failed(
+        await _mark_monitor_unavailable_failed(
+            self,
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
-            failure_reason=FailureReason.infrastructure_failure,
             message="release PR monitor handoff failed: no PR monitor configured",
-            reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
         )
         return
 
@@ -1058,7 +1134,7 @@ async def _handoff_sync_release_pr_monitor(
         build_failed_message_prefix="release PR monitor handoff failed: ",
         profile=profile,
         run_profile_setup=False,
-        stale_action="sync_release_pr_handoff",
+        stale_action="sync_release_pr_monitor_build",
     )
     if monitor is None:
         return

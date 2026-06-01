@@ -953,12 +953,12 @@ class TestSyncReleasePrHandoff:
             recheck_actions.append(action)
             if action == "sync_release_pr_handoff":
                 release_handoff_rechecks += 1
-                if release_handoff_rechecks == 2:
-                    async with factory() as s:
-                        ws = await WorkspaceRepository(s).get(workspace_id)
-                        assert ws is not None
-                        ws.status = WorkspaceStatus.cancelled.value
-                        await s.commit()
+            if action == "sync_release_pr_monitor_build":
+                async with factory() as s:
+                    ws = await WorkspaceRepository(s).get(workspace_id)
+                    assert ws is not None
+                    ws.status = WorkspaceStatus.cancelled.value
+                    await s.commit()
             return await original_recheck_status(
                 workspace_id,
                 expected=expected,
@@ -972,7 +972,8 @@ class TestSyncReleasePrHandoff:
 
         assert factory_calls == []
         assert monitor_calls == []
-        assert recheck_actions.count("sync_release_pr_handoff") == 2
+        assert recheck_actions.count("sync_release_pr_handoff") == 1
+        assert recheck_actions.count("sync_release_pr_monitor_build") == 1
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
@@ -980,7 +981,7 @@ class TestSyncReleasePrHandoff:
             assert ws.pr_url is None
             assert ws.events[-1].event_type == "workspace.stale_action_skipped"
             assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
-            assert ws.events[-1].payload["action"] == "sync_release_pr_handoff"
+            assert ws.events[-1].payload["action"] == "sync_release_pr_monitor_build"
 
     @pytest.mark.unit
     async def test_ahead_reuses_existing_open_release_pr(

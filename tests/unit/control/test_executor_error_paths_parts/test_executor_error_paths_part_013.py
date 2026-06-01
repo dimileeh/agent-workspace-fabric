@@ -214,6 +214,54 @@ class TestExecutorMonitorHandoffSetup:
         assert mark_failed_calls == []
 
     @pytest.mark.unit
+    async def test_handoff_monitor_unavailable_mark_failed_error_uses_direct_fallback(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await session.commit()
+
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Executor:
+            _pr_monitor = None
+            _pr_monitor_factory = None
+            _session_factory = factory
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+                raise RuntimeError("primary failure persistence unavailable")
+
+        monitor = await _build_handoff_pr_monitor(
+            _Executor(),
+            workspace_id=ws_id,
+            workspace=object(),
+            worktree_path=tmp_path,
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            build_failed_log_event="test.handoff_monitor_build_failed",
+            build_failed_message_prefix="handoff failed: ",
+        )
+
+        assert monitor is None
+        assert [call["reason_code"] for call in mark_failed_calls] == [
+            "PR_ADOPTION_MONITOR_UNAVAILABLE"
+        ]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert ws.failure_message == "handoff failed: no PR monitor configured"
+            assert ws.events[-1].reason_code == "PR_ADOPTION_MONITOR_UNAVAILABLE"
+
+    @pytest.mark.unit
     async def test_setup_dependency_exhausted_event_without_retry_event_when_count_zero(
         self,
         factory: async_sessionmaker[AsyncSession],
