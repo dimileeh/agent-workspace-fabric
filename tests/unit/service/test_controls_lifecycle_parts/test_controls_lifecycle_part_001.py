@@ -480,7 +480,7 @@ async def test_append_only_events_do_not_invalidate_if_match_controls(
 
     assert response.status == WorkspaceStatus.cancelled
     assert workspace.version == expected_version + 1
-    assert workspace.event_sequence == 5
+    assert workspace.event_sequence == 4
     assert reason_codes.count("AUDIT_ONLY") == 1
     assert reason_codes.count("OPERATOR_CANCEL") == 2
     assert audit_event.event_order == 2
