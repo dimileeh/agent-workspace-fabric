@@ -294,14 +294,29 @@ class Provisioner:
                 ):
                     return
                 if profile_resolution is not None:
-                    await self._check_auto_resolved_profile_host_ports(
-                        workspace_id=workspace_id,
-                        profile=profile,
-                        profile_resolution=profile_resolution,
-                        excluding_workspace_id=workspace_id,
-                        task_policy=ws.task_policy,
-                        resolved_profile_dict=resolved_profile_dict,
-                    )
+                    try:
+                        await self._check_auto_resolved_profile_host_ports(
+                            workspace_id=workspace_id,
+                            profile=profile,
+                            profile_resolution=profile_resolution,
+                            excluding_workspace_id=workspace_id,
+                            task_policy=ws.task_policy,
+                            resolved_profile_dict=resolved_profile_dict,
+                        )
+                    except Exception:
+                        _log.warning(
+                            "provisioner.auto_profile_host_port_check_failed",
+                            workspace_id=workspace_id,
+                            reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message="auto-resolved profile host-port check failed; compose not started",
+                            from_status=WorkspaceStatus.provisioning,
+                            reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        )
+                        return
                 try:
                     async with self._session_factory() as pre_launch_session:
                         pre_launch_repo = WorkspaceRepository(pre_launch_session)
