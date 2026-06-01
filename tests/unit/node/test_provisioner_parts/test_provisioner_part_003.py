@@ -211,6 +211,7 @@ class TestFailureHandling:
             )
             source.node_id = "test-node-01"
             source.resolved_profile = resolved_profile
+            source.compose_project_name = f"awf_{source.id}"
             await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
             target = await repo.create(
                 repo_url=str(origin_repo),
