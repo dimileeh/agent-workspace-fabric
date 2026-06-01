@@ -217,7 +217,7 @@ def _ignored_untracked_snapshot_from_ls_files(
     """Parse a null-delimited `git ls-files` output of ignored untracked paths."""
     if not stdout:
         return ()
-    records = tuple(line for line in stdout.split("\0") if line and line != "\x00")
+    records = tuple(line for line in stdout.split("\0") if line)
     return tuple(dict.fromkeys(records))
 
 

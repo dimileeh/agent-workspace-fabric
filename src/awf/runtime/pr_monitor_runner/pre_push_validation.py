@@ -367,7 +367,7 @@ async def _run_pre_push_validation_with_fix_passes(
         )
         if baseline_ignored_paths is None:
             baseline_ignored_paths = validation_result.ignore_ignored_paths
-            baseline_ignored_roots = validation_result.ignore_ignored_paths
+            baseline_ignored_roots = baseline_ignored_paths
             baseline_ignored_paths_snapshot = validation_result.ignore_ignored_paths_snapshot
             baseline_ignored_paths_snapshot_signatures = (
                 validation_result.ignore_ignored_paths_snapshot_signatures
