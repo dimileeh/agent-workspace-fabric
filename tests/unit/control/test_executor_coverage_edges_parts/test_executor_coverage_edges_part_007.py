@@ -30,7 +30,10 @@ from awf.runtime.planning import (
 )
 from awf.runtime.validation import ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
-from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+)
 from tests.unit.control.test_executor_coverage_edges_parts.test_executor_coverage_edges_part_003 import (
     _command_result,
     _executor_with_runner,
@@ -415,6 +418,145 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
     assert executor._finish_validation_callback_if_terminal.await_count == 2
     executor._finish_validation_run.assert_not_awaited()
     executor._finish_pending_validate_operations.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("callback_results", "expected_callback_checks", "workspace_suffix"),
+    [
+        pytest.param((True,), 1, "already_stale", id="callback-already-stale"),
+        pytest.param((False, True), 2, "became_stale", id="callback-becomes-stale"),
+    ],
+)
+async def test_execution_validation_fails_cleanup_when_callback_becomes_stale_after_cleanup_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    callback_results: tuple[bool, ...],
+    expected_callback_checks: int,
+    workspace_suffix: str,
+) -> None:
+    profile = WorkspaceProfile.model_validate({"name": "validation-stale-cleanup-failure"})
+    workspace_id = f"ws_stale_cleanup_failure_{workspace_suffix}"
+    validation_run_id = f"vr-stale-cleanup-failure-{workspace_suffix}"
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "validation-stale-cleanup-failure"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        test_commands=[],
+        task_class=None,
+        operations=[],
+    )
+
+    class _ThrowingValidation:
+        async def run_profile_phases(self, **_kwargs: object) -> object:
+            raise ComposeExecCleanupError(
+                invocation_id="validate-stale-cleanup-failure",
+                source="agent",
+                label="validate",
+                message="cleanup timed out",
+            )
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(max_validation_fix_passes=0, planning_max_iterations_default=3),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value=validation_run_id),
+        _finish_validation_callback_if_terminal=AsyncMock(side_effect=callback_results),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=_ThrowingValidation(),
+    )
+
+    async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("generated.log",),
+        untracked_paths=("generated.log",),
+    )
+    cleanup_result = ValidationWorktreeCleanup(
+        cleaned=False,
+        check=dirty_check,
+        restore_ref="c" * 40,
+        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        message="restore failed",
+        cleanup_command="git restore --source cccccccc -- generated.log",
+        cleanup_stderr="restore failed",
+        verify_check=dirty_check,
+    )
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_resolved_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(return_value=cleanup_result),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace_id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch=f"awf/{workspace_id}",
+        adapter=object(),  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert result.successful_validation_run_id is None
+    assert executor._finish_validation_callback_if_terminal.await_count == expected_callback_checks
+    executor._finish_validation_run.assert_awaited_once_with(
+        validation_run_id,
+        status="failed",
+        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+    )
+    finish_pending_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_pending_kwargs["workspace_id"] == workspace_id
+    assert finish_pending_kwargs["status"] == OperationStatus.failed
+    assert finish_pending_kwargs["validation_run_id"] == validation_run_id
+    assert finish_pending_kwargs["requested_tier"] == 1
+    assert finish_pending_kwargs["reason_code"] == VALIDATION_WORKTREE_CLEANUP_FAILED
+    mark_failed_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_failed_kwargs["workspace_id"] == workspace_id
+    assert mark_failed_kwargs["reason_code"] == VALIDATION_WORKTREE_CLEANUP_FAILED
 
 
 @pytest.mark.unit
