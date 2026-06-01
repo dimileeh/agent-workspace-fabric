@@ -19,19 +19,22 @@ from awf.node.compose_manager import (
 
 
 class _FakeCompose:
-    """Minimal ComposeManager stand-in exposing only the builder's docker calls."""
+    """Minimal ComposeManager stand-in exposing only the builder's public calls."""
 
     def __init__(
         self,
         *,
         exists: bool = False,
+        inspect_error: ComposeOperationError | None = None,
         build_error: Exception | None = None,
         build_gate: asyncio.Event | None = None,
     ) -> None:
         self.exists_result = exists
+        self.inspect_error = inspect_error
         self.build_error = build_error
         self.build_gate = build_gate
         self.exists_calls: list[str] = []
+        self.inspect_calls: list[list[str]] = []
         self.build_calls: list[dict[str, object]] = []
         self._built_tags: set[str] = set()
 
@@ -67,6 +70,16 @@ class _FakeCompose:
         if self.build_error is not None:
             raise self.build_error
         self._built_tags.add(tag)  # a successful build makes that exact tag present
+
+    async def companion_image_inspect(self, tag: str) -> bool:
+        """Record inspect probes and return whether the fake tag is present."""
+        self.inspect_calls.append(["image", "inspect", tag])
+        if self.inspect_error is not None:
+            detail = f"{self.inspect_error.stderr}\n{self.inspect_error.stdout}".lower()
+            if "no such image" in detail:
+                return False
+            raise self.inspect_error
+        return self.exists_result or tag in self._built_tags
 
 
 @pytest.mark.unit
@@ -151,6 +164,82 @@ async def test_ensure_reuses_existing_image_without_building() -> None:
         "backend", "abc123def456", build_context=".", dockerfile="Dockerfile"
     )
     assert compose.build_calls == []
+
+
+@pytest.mark.unit
+async def test_companion_image_exists_returns_true_when_tag_present() -> None:
+    """The launch-time existence helper returns True for a present image."""
+    compose = _FakeCompose(exists=True)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    assert await builder.companion_image_exists("awf-companion-backend:abc") is True
+    assert compose.inspect_calls == [["image", "inspect", "awf-companion-backend:abc"]]
+
+
+@pytest.mark.unit
+async def test_companion_image_exists_returns_false_when_tag_missing() -> None:
+    """The launch-time existence helper returns False for a confirmed missing image."""
+    compose = _FakeCompose(exists=False)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    assert await builder.companion_image_exists("missing:tag") is False
+    assert compose.inspect_calls == [["image", "inspect", "missing:tag"]]
+
+
+@pytest.mark.unit
+async def test_companion_image_exists_treats_docker_unavailable_no_such_image_as_missing() -> None:
+    """Docker inspect may classify missing-image stderr as daemon unavailable."""
+    probe_error = ComposeOperationError(
+        operation="image inspect",
+        returncode=1,
+        stdout="",
+        stderr="Error response from daemon: No such image: awf-companion-backend:abc",
+        reason_code="DOCKER_UNAVAILABLE",
+    )
+    compose = _FakeCompose(exists=False, inspect_error=probe_error)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    assert await builder.companion_image_exists("awf-companion-backend:abc") is False
+    assert compose.inspect_calls == [["image", "inspect", "awf-companion-backend:abc"]]
+
+
+@pytest.mark.unit
+async def test_companion_image_exists_preserves_probe_error_reason_code() -> None:
+    """The launch-time existence helper does not convert Docker errors to missing."""
+    probe_error = ComposeOperationError(
+        operation="image inspect",
+        returncode=1,
+        stdout="",
+        stderr="Cannot connect to the Docker daemon",
+        reason_code="DOCKER_UNAVAILABLE",
+    )
+    compose = _FakeCompose(exists=False, inspect_error=probe_error)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    with pytest.raises(ComposeOperationError) as raised:
+        await builder.companion_image_exists("awf-companion-backend:abc")
+
+    assert raised.value is probe_error
+    assert raised.value.reason_code == "DOCKER_UNAVAILABLE"
+
+
+@pytest.mark.unit
+async def test_companion_image_exists_preserves_unexpected_inspect_failure() -> None:
+    """Only confirmed missing-image inspect failures become False."""
+    probe_error = ComposeOperationError(
+        operation="image inspect",
+        returncode=1,
+        stdout="",
+        stderr="permission denied",
+        reason_code="COMPOSE_COMMAND_FAILED",
+    )
+    compose = _FakeCompose(exists=False, inspect_error=probe_error)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    with pytest.raises(ComposeOperationError) as raised:
+        await builder.companion_image_exists("awf-companion-backend:abc")
+
+    assert raised.value is probe_error
 
 
 @pytest.mark.unit

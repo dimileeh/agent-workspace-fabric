@@ -37,6 +37,7 @@ from tests.unit.node.test_stack_launcher_parts._helpers import (
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_uses_profile_compose_timeout() -> None:
+    """The launcher passes the profile compose timeout into the spec."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -72,6 +73,7 @@ async def test_compose_stack_launcher_uses_effective_companion_compose_timeout(
     companion_timeouts: list[int],
     expected: int,
 ) -> None:
+    """The launcher uses the max profile and companion compose timeout."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -164,6 +166,7 @@ async def test_compose_stack_launcher_prebuilds_companion_with_effective_compose
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_fails_when_docker_missing_without_required_services() -> None:
+    """Docker-unavailable generic launches raise a workspace service error."""
     compose = _DockerUnavailableCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -185,6 +188,7 @@ async def test_compose_stack_launcher_fails_when_docker_missing_without_required
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_reports_required_services_when_docker_missing() -> None:
+    """Docker-unavailable serviceful launches include required service names."""
     compose = _DockerUnavailableCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -209,7 +213,87 @@ async def test_compose_stack_launcher_reports_required_services_when_docker_miss
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_maps_revalidation_docker_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Docker-unavailable revalidation failures use workspace service errors."""
+
+    class _RevalidationUnavailableBuilder:
+        """Builder double that returns a tag then fails the revalidation probe."""
+
+        async def ensure(
+            self,
+            *,
+            name: str,
+            commit_sha: str,
+            build_context: str,
+            dockerfile: str,
+            relative_build_context: str,
+            capture_timeout_seconds: float,
+        ) -> str | None:
+            """Return a pre-built companion image tag for revalidation."""
+            del name, commit_sha, build_context, dockerfile, relative_build_context
+            del capture_timeout_seconds
+            return "awf-companion-backend:abc123def456"
+
+        async def companion_image_exists(self, tag: str) -> bool:
+            """Raise the Docker-unavailable probe error under test."""
+            del tag
+            raise ComposeOperationError(
+                operation="image inspect",
+                returncode=1,
+                stdout="",
+                stderr="Cannot connect to the Docker daemon",
+                reason_code="DOCKER_UNAVAILABLE",
+            )
+
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        companion_image_builder=_RevalidationUnavailableBuilder(),  # type: ignore[arg-type]
+    )
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+        commit_sha="abc123def456",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        docker=ProfileDocker(mode=DockerMode.dind),
+        services=[ProfileService(name="postgres", image="postgres:16-alpine")],
+    )
+
+    with pytest.raises(WorkspaceServiceExecutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=profile,
+                companions=(companion,),
+                companion_graph_prevalidated=True,
+            )
+        )
+
+    message = str(raised.value)
+    assert "Cannot start workspace agent container" in message
+    assert "required services: ['postgres', 'docker']" in message
+    assert "Cannot connect to the Docker daemon" in message
+    assert compose.specs == []
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_reraises_non_docker_unavailable_errors() -> None:
+    """Non-docker-unavailable compose errors propagate unchanged."""
     compose = _DockerUnavailableCompose(reason_code="COMPOSE_COMMAND_FAILED")
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -230,6 +314,7 @@ async def test_compose_stack_launcher_reraises_non_docker_unavailable_errors() -
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
+    """The launcher maps profile settings into a compose spec."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -281,6 +366,7 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_passes_profile_dind_image_to_spec() -> None:
+    """The launcher passes the profile DinD image into the compose spec."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -307,6 +393,7 @@ async def test_compose_stack_launcher_passes_profile_dind_image_to_spec() -> Non
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_preflights_profile_dependencies_without_companions() -> None:
+    """The launcher preflights profile service dependencies without companions."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -341,6 +428,7 @@ async def test_compose_stack_launcher_preflights_profile_dependencies_without_co
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_default_restricted_egress_uses_internal_flags() -> None:
+    """Default restricted egress uses internal-network compose flags."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -363,6 +451,7 @@ async def test_compose_stack_launcher_default_restricted_egress_uses_internal_fl
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_explicit_open_egress_keeps_compatible_flags() -> None:
+    """Explicit open egress keeps public-network compatible flags."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -387,6 +476,7 @@ async def test_compose_stack_launcher_explicit_open_egress_keeps_compatible_flag
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_offline_egress_uses_internal_network_flags() -> None:
+    """Offline egress uses internal-network compose flags."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -410,6 +500,7 @@ async def test_compose_stack_launcher_offline_egress_uses_internal_network_flags
 
 @pytest.mark.unit
 async def test_compose_stack_launcher_restricted_egress_uses_internal_network_flags() -> None:
+    """Restricted egress uses internal-network compose flags."""
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -435,6 +526,7 @@ async def test_compose_stack_launcher_restricted_egress_uses_internal_network_fl
 async def test_compose_stack_launcher_resolves_profile_services_in_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Profile service resolution is dispatched through asyncio.to_thread."""
     calls: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
 
     async def fake_to_thread(
