@@ -809,6 +809,28 @@ class WorkspaceProfile(BaseModel):
         )
 
 
+def normalize_inline_profile_snapshot(
+    profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalize a stored/requested inline-profile snapshot for idempotent-replay comparison.
+
+    Create idempotency (``workspace_create_payload_matches``) and PR-adoption
+    policy checks (``_raise_if_policy_conflicts``) compare the persisted
+    ``requested_profile`` JSON against a freshly dumped request profile
+    byte-for-byte. The ``forge`` field (issue #345) was added after some
+    workspaces were persisted, so their stored snapshot has no ``forge`` key while
+    an otherwise-identical replay now dumps ``"forge": "auto"`` (the unresolved
+    input default). Default a missing ``forge`` to ``"auto"`` so replays of
+    pre-forge inline profiles stay idempotent instead of raising a spurious
+    conflict. Returns a shallow copy; the input is never mutated.
+    """
+    if profile is None:
+        return None
+    if "forge" in profile:
+        return dict(profile)
+    return {**profile, "forge": "auto"}
+
+
 def _normalized_endpoint_env_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").upper()
 

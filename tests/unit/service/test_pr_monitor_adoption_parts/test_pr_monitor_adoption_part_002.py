@@ -739,6 +739,55 @@ class TestPullRequestMonitorAdoptionServicePart002:
         }
 
     @pytest.mark.unit
+    async def test_replay_with_legacy_inline_profile_missing_forge_attaches(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """An adopted workspace persisted before the ``forge`` field (issue #345)
+        has a requested_profile without the key; an identical replay now dumps
+        ``forge="auto"`` and must still attach to the existing monitor rather than
+        raise a spurious inline-profile policy conflict."""
+        inline_profile = {
+            "name": "inline-a",
+            "monitor": {"initial_review_grace_period_seconds": 10},
+        }
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    profile=inline_profile,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            assert workspace.requested_profile is not None
+            assert workspace.requested_profile.get("forge") == "auto"
+            workspace.requested_profile = {
+                key: value for key, value in workspace.requested_profile.items() if key != "forge"
+            }
+            await session.commit()
+
+        async with factory() as session:
+            replay = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    profile=inline_profile,
+                )
+            )
+            await session.commit()
+
+        assert replay.attached_existing is True
+        assert replay.workspace_id == first.workspace_id
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "initial_kwargs, replay_kwargs, expected_detail",
         [

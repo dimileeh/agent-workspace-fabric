@@ -40,6 +40,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.utils import escape_like_pattern as _escape_like_pattern
+from awf.profiles.models import normalize_inline_profile_snapshot
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
 
@@ -1045,7 +1046,9 @@ def _raise_if_policy_conflicts(
                 "requested_profile_ref": request.profile_ref,
             },
         )
-    if workspace.requested_profile != requested_profile:
+    if normalize_inline_profile_snapshot(
+        workspace.requested_profile
+    ) != normalize_inline_profile_snapshot(requested_profile):
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
             message="Existing adopted PR monitor uses a different inline profile policy.",

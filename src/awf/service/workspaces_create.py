@@ -37,7 +37,7 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import WorkspaceProfile, normalize_inline_profile_snapshot
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.service.config import resolve_service_settings
 from awf.service.coordination import (
@@ -238,7 +238,8 @@ def workspace_create_payload_matches(
         and existing.agent == payload.task.agent.value
         and stored_task_kind == payload.task.kind
         and _profile_ref_matches(existing, payload)
-        and getattr(existing, "requested_profile", None) == requested_profile
+        and normalize_inline_profile_snapshot(getattr(existing, "requested_profile", None))
+        == normalize_inline_profile_snapshot(requested_profile)
         and _stored_validation_requested_tier_matches(existing, payload)
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
