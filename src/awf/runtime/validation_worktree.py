@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import stat
 from collections.abc import Awaitable, Callable
@@ -41,6 +42,9 @@ _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 
 _IgnoredPathSignature = tuple[str, str]
 _IGNORED_DIRECTORY_SIGNATURE = "directory"
+# Keep small ignored snapshots content-sensitive without letting dependency
+# caches dominate validation startup.
+_DEFAULT_IGNORED_SNAPSHOT_CONTENT_HASH_BYTES = 16 * 1024 * 1024
 
 
 def _first_output_line(stdout: str | None) -> str:
@@ -265,36 +269,82 @@ async def _snapshot_ignored_paths(
     return _ignored_untracked_snapshot_from_ls_files(result.stdout), ""
 
 
-def _hash_file_contents(path: Path) -> str:
-    """Compute a stable content signature for an ignored file snapshot entry."""
+def _regular_file_metadata_signature(file_stats: os.stat_result) -> str:
+    """Return a bounded fallback signature for ignored regular files."""
+    return (
+        f"metadata:{file_stats.st_mode:o}:{file_stats.st_dev}:"
+        f"{file_stats.st_ino}:{file_stats.st_size}:{file_stats.st_mtime_ns}"
+    )
+
+
+def _hash_regular_file_contents(path: Path) -> str:
+    """Compute a stable content signature for a regular file."""
+    hasher = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _ignored_path_signature(
+    path: Path,
+    *,
+    remaining_content_hash_bytes: int | None,
+) -> tuple[str, int | None]:
+    """Build an ignored path signature while honoring the content hash budget."""
     try:
         file_stats = path.lstat()
         if stat.S_ISLNK(file_stats.st_mode):
-            return f"symlink:{path.readlink()}"
+            return f"symlink:{path.readlink()}", remaining_content_hash_bytes
         if stat.S_ISDIR(file_stats.st_mode):
-            return _IGNORED_DIRECTORY_SIGNATURE
+            return _IGNORED_DIRECTORY_SIGNATURE, remaining_content_hash_bytes
         if not stat.S_ISREG(file_stats.st_mode):
             return (
                 f"special:{file_stats.st_mode:o}:{file_stats.st_dev}:"
                 f"{file_stats.st_ino}:{file_stats.st_size}:{file_stats.st_mtime_ns}"
+            ), remaining_content_hash_bytes
+        if (
+            remaining_content_hash_bytes is not None
+            and file_stats.st_size > remaining_content_hash_bytes
+        ):
+            return (
+                _regular_file_metadata_signature(file_stats),
+                remaining_content_hash_bytes,
             )
-        hasher = hashlib.sha256()
-        with path.open("rb") as source:
-            while chunk := source.read(1024 * 1024):
-                hasher.update(chunk)
-        return hasher.hexdigest()
+        signature = _hash_regular_file_contents(path)
+        if remaining_content_hash_bytes is None:
+            return signature, None
+        return signature, remaining_content_hash_bytes - file_stats.st_size
     except OSError:
-        return ""
+        return "", remaining_content_hash_bytes
+
+
+def _hash_file_contents(path: Path) -> str:
+    """Compute a stable content signature for an ignored file snapshot entry."""
+    signature, _ = _ignored_path_signature(path, remaining_content_hash_bytes=None)
+    return signature
 
 
 def _snapshot_ignored_path_signatures(
     worktree_path: Path,
     snapshot_paths: tuple[str, ...],
+    *,
+    max_content_hash_bytes: int | None = _DEFAULT_IGNORED_SNAPSHOT_CONTENT_HASH_BYTES,
 ) -> tuple[_IgnoredPathSignature, ...]:
     """Build per-path digests for ignored file snapshot entries."""
     if not snapshot_paths:
         return ()
-    return tuple((path, _hash_file_contents(worktree_path / path)) for path in snapshot_paths)
+    remaining_content_hash_bytes = (
+        None if max_content_hash_bytes is None else max(0, max_content_hash_bytes)
+    )
+    signatures: list[_IgnoredPathSignature] = []
+    for path in snapshot_paths:
+        signature, remaining_content_hash_bytes = _ignored_path_signature(
+            worktree_path / path,
+            remaining_content_hash_bytes=remaining_content_hash_bytes,
+        )
+        signatures.append((path, signature))
+    return tuple(signatures)
 
 
 def _ignored_signature_lookup_by_normalized_path(
