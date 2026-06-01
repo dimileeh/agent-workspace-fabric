@@ -373,6 +373,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#mcp_egress_audit_error](#mcp_egress_audit_error)
 
+### MERGE_METHOD_MISMATCH
+**Problem:** AWF could not merge a PR because no effective merge method succeeded.
+**Likely Cause:** Repository merge settings and base-branch rules left AWF with no allowed method, or GitHub rejected every allowed merge method.
+**Operator Fix:** Inspect the repository and base-branch merge policy, enable a compatible merge method, or update the branch ruleset before remonitoring the workspace.
+**Related Command:** `awf workspace remonitor <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#merge_method_mismatch](#merge_method_mismatch)
+
 ### MONITOR_RECOVERY_CANCELLED
 **Problem:** AWF cancelled a PR-monitor recovery (remonitor) operation before it finished resuming the monitor.
 **Likely Cause:** A stale-monitor reconcile cancelled the resume task because the workspace left the monitoring_pr state while recovery was still dispatching. This is the expected outcome of normal reconciliation, not a runtime error.

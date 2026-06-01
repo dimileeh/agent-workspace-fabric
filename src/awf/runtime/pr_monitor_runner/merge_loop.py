@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,6 +14,7 @@ from awf.db.enums import (
     OperationType,
 )
 from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.monitor_state_keys import _merge_method_blocked_key
 from awf.runtime.pr_monitor import (
     Merge,
     MonitorAction,
@@ -20,7 +23,6 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     decide,
 )
-from awf.runtime.pr_monitor_operations import MonitorOperationHandle
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_MERGE_ATTEMPT_EVENT,
     _AUDIT_MERGE_RESULT_EVENT,
@@ -48,6 +50,338 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 from awf.service.merge_queue import MergeQueueBlocker
 
+_MERGE_METHOD_PREFERENCE = ("squash", "merge", "rebase")
+_KNOWN_MERGE_METHODS = frozenset(_MERGE_METHOD_PREFERENCE)
+_MERGE_METHOD_MISMATCH_REASON = "MERGE_METHOD_MISMATCH"
+
+
+class _MergeAttemptOutcome(StrEnum):
+    """Terminal categories for one merge-method attempt."""
+
+    SUCCESS = "success"
+    RETRY_NEXT_METHOD = "retry_next_method"
+    METHOD_BLOCKER = "method_blocker"
+    BLOCKER = "blocker"
+
+
+@dataclass(frozen=True)
+class _MergeAttemptResult:
+    """Structured result from trying one explicit merge method."""
+
+    outcome: _MergeAttemptOutcome
+    merge_sha: str | None = None
+    blocker: GitHubClientError | None = None
+    notification_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Enforce the state value required to suppress repeat merge attempts."""
+        if self.outcome is _MergeAttemptOutcome.METHOD_BLOCKER and not self.notification_reason:
+            raise ValueError("method-blocker merge attempt result requires a notification reason")
+
+    @property
+    def method_blocker_notification_reason(self) -> str:
+        """Return the non-empty reason required for METHOD_BLOCKER outcomes."""
+        if self.outcome is not _MergeAttemptOutcome.METHOD_BLOCKER:
+            raise RuntimeError("merge attempt result is not a method blocker")
+        if not self.notification_reason:  # pragma: no cover
+            raise RuntimeError("method-blocker merge attempt result has no reason")
+        return self.notification_reason
+
+
+def _effective_merge_methods(
+    *,
+    repo_methods: tuple[str, ...],
+    branch_methods: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    """Intersect repo and branch merge policies in AWF preference order."""
+    repo_allowed = {method for method in repo_methods if method in _KNOWN_MERGE_METHODS}
+    branch_allowed = (
+        None
+        if branch_methods is None
+        else {method for method in branch_methods if method in _KNOWN_MERGE_METHODS}
+    )
+    allowed = repo_allowed if branch_allowed is None else repo_allowed.intersection(branch_allowed)
+    return tuple(method for method in _MERGE_METHOD_PREFERENCE if method in allowed)
+
+
+async def _resolve_effective_merge_methods(
+    self: Any,
+    *,
+    repo: RepoRef,
+    base_branch: str,
+) -> tuple[str, ...]:
+    """Fetch repository and base-branch policy before selecting merge methods.
+
+    ``self`` is the ``PullRequestMonitorRunner`` instance; this follows the
+    extract-to-module-function pattern used throughout this module.
+    """
+    repo_methods = await self._deps.gh.fetch_repo_merge_methods(repo=repo)
+    branch_methods = await self._deps.gh.fetch_branch_pull_request_allowed_merge_methods(
+        repo=repo,
+        branch=base_branch,
+    )
+    return _effective_merge_methods(repo_methods=repo_methods, branch_methods=branch_methods)
+
+
+def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
+    """Return the merge method explicitly rejected by GitHub, when known."""
+    # GitHubClientError stores redacted stderr. These policy phrases contain no
+    # secret-like material, so redaction should preserve the classifier signal.
+    text = exc.stderr.lower()
+    if (
+        "squash merges are not allowed" in text
+        or "merge method squash merging is not allowed" in text
+    ):
+        return "squash"
+    if (
+        "merge commits are not allowed" in text
+        or "merge method merge commit is not allowed" in text
+    ):
+        return "merge"
+    if "rebase merges are not allowed" in text or "merge method rebase is not allowed" in text:
+        return "rebase"
+    return None
+
+
+def _merge_error_supports_method_alternative(exc: GitHubClientError) -> bool:
+    """Detect GitHub merge failures that can be retried with another method."""
+    return _merge_method_rejection_method(exc) is not None
+
+
+def _merge_method_mismatch_message(
+    *,
+    base_branch: str,
+    attempted_method: str | None,
+    effective_methods: tuple[str, ...],
+    detail: str | None = None,
+) -> str:
+    """Build the human-facing merge-method mismatch notification."""
+    allowed = ", ".join(effective_methods) if effective_methods else "none"
+    attempted = attempted_method or "none"
+    suffix = f" GitHub reported: {detail}" if detail else ""
+    return (
+        "MERGE_METHOD_MISMATCH: AWF could not merge this PR because no merge "
+        f"method succeeded for base branch {base_branch!r}. "
+        f"attempted={attempted}; effective_allowed={allowed}.{suffix}"
+    )[:2000]
+
+
+def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
+    """Build an operator-facing reason for merge-method policy preflight failures."""
+    detail = " ".join(_redact_and_truncate_github_error(exc.stderr).split())[:240]
+    if detail:
+        return f"GitHub rejected merge-method preflight: {detail}"
+    return "GitHub rejected merge-method preflight"
+
+
+def _merge_completion_marker(
+    *,
+    merge_sha: str | None,
+    head_sha: str,
+) -> str:
+    """Return the non-empty marker used to record a completed PR merge."""
+    normalized_merge_sha = merge_sha.strip() if merge_sha else None
+    if normalized_merge_sha:
+        return normalized_merge_sha
+    return head_sha
+
+
+async def _record_empty_effective_merge_methods_blocker(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    merge_status: PRStatus,
+    base_branch: str,
+    remote_branch: str,
+    monitor_log: WorkspaceLogSink | None,
+    notification_reason: str,
+) -> None:
+    """Record operator evidence when policy intersection leaves no merge method."""
+    merge_operation = await self._begin_monitor_state_operation(
+        workspace_id=workspace_id,
+        action="merge",
+        requested_action="merge",
+        reason=notification_reason,
+        reason_code=_MERGE_METHOD_MISMATCH_REASON,
+        pr_number=pr_number,
+        status=merge_status,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+    )
+    operation_id = merge_operation.operation_id if merge_operation is not None else None
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
+        action="merge",
+        outcome="blocked",
+        reason_code=_MERGE_METHOD_MISMATCH_REASON,
+        pr_number=pr_number,
+        status=merge_status,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=OperationType.monitor_state.value,
+        monitor_log=monitor_log,
+        evidence={
+            "operation": "resolve_effective_merge_methods",
+            "effective_methods": [],
+        },
+    )
+    await self._finish_monitor_operation(
+        merge_operation,
+        status=OperationStatus.failed,
+        result={
+            "status": "failed",
+            "outcome": "merge_method_mismatch",
+            "reason_code": _MERGE_METHOD_MISMATCH_REASON,
+            "effective_methods": [],
+        },
+        error_code=_MERGE_METHOD_MISMATCH_REASON,
+        error_message=notification_reason,
+    )
+
+
+async def _attempt_merge_method(
+    self: Any,
+    *,
+    workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
+    merge_method: str,
+    merge_status: PRStatus,
+    base_branch: str,
+    remote_branch: str,
+    monitor_log: WorkspaceLogSink | None,
+    state: MonitorState,
+    effective_methods: tuple[str, ...],
+    attempt_index: int,
+) -> _MergeAttemptResult:
+    """Try one explicit merge method and classify the result for the merge loop."""
+    merge_operation = await self._begin_monitor_state_operation(
+        workspace_id=workspace_id,
+        action="merge",
+        requested_action="merge",
+        reason="Merging PR after all monitor gates passed.",
+        reason_code="MERGE",
+        pr_number=pr_number,
+        status=merge_status,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+    )
+    operation_id = merge_operation.operation_id if merge_operation is not None else None
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
+        action="merge",
+        outcome="attempted",
+        reason_code="MERGE",
+        pr_number=pr_number,
+        status=merge_status,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=OperationType.monitor_state.value,
+        monitor_log=monitor_log,
+    )
+    try:
+        merge_sha = await self._deps.gh.merge_pr(
+            repo=repo,
+            pr_number=pr_number,
+            method=merge_method,
+        )
+    except GitHubClientError as exc:
+        rejected_method = _merge_method_rejection_method(exc)
+        is_confirmed_method_rejection = rejected_method == merge_method
+        await self._finish_monitor_operation(
+            merge_operation,
+            status=OperationStatus.failed,
+            result={
+                "status": "failed",
+                "outcome": "github_merge_failed",
+                "reason_code": "GITHUB_MERGE_FAILED",
+            },
+            error_code="GITHUB_MERGE_FAILED",
+            error_message=str(exc),
+        )
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_MERGE_RESULT_EVENT,
+            action="merge",
+            outcome="failed",
+            reason_code="GITHUB_MERGE_FAILED",
+            pr_number=pr_number,
+            status=merge_status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=OperationType.monitor_state.value,
+            monitor_log=monitor_log,
+            evidence={
+                "operation": "merge_pr",
+                "merge_method": merge_method,
+                "error_message": str(exc),
+            },
+        )
+        has_remaining_alternative = attempt_index < len(effective_methods) - 1
+        if has_remaining_alternative and is_confirmed_method_rejection:
+            return _MergeAttemptResult(_MergeAttemptOutcome.RETRY_NEXT_METHOD)
+        if is_confirmed_method_rejection:
+            notification_reason = _merge_method_mismatch_message(
+                base_branch=base_branch,
+                attempted_method=merge_method,
+                effective_methods=effective_methods,
+                detail=" ".join(_redact_and_truncate_github_error(exc.stderr).split())[:240]
+                or None,
+            )
+            state.mark_addressed(
+                _merge_method_blocked_key(
+                    pr_number=merge_status.number,
+                    head_sha=merge_status.head_sha,
+                ),
+                notification_reason,
+            )
+            await self._persist_state(workspace_id, state)
+            return _MergeAttemptResult(
+                _MergeAttemptOutcome.METHOD_BLOCKER,
+                notification_reason=notification_reason,
+            )
+        return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
+
+    merge_marker = _merge_completion_marker(
+        merge_sha=merge_sha,
+        head_sha=merge_status.head_sha,
+    )
+    await self._finish_monitor_operation(
+        merge_operation,
+        status=OperationStatus.succeeded,
+        result={
+            "status": "succeeded",
+            "outcome": "merged",
+            "merge_sha": merge_marker,
+        },
+    )
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_MERGE_RESULT_EVENT,
+        action="merge",
+        outcome="succeeded",
+        reason_code="MERGE",
+        pr_number=pr_number,
+        status=merge_status,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=OperationType.monitor_state.value,
+        monitor_log=monitor_log,
+        evidence={
+            "merge_sha": merge_marker,
+        },
+    )
+    return _MergeAttemptResult(_MergeAttemptOutcome.SUCCESS, merge_sha=merge_marker)
+
 
 async def handle_merge_action(
     self: Any,
@@ -66,6 +400,7 @@ async def handle_merge_action(
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool | None:
+    """Execute a merge action and report whether monitor processing reached a terminal state."""
     if isinstance(action, Merge):
         merge_gate = await self._merge_gate_with_legacy_head_support(
             workspace_id,
@@ -250,7 +585,8 @@ async def handle_merge_action(
         fresh_status: PRStatus | None = None
         merge_sha: str | None = None
         merge_blocker: GitHubClientError | None = None
-        merge_operation: MonitorOperationHandle | None = None
+        merge_method_preflight_error: GitHubClientError | None = None
+        merge_method_notification_reason: str | None = None
         recheck_error: GitHubClientError | None = None
         recheck_base_error: BaseFetchError | None = None
         recheck_behind_error: BaseBehindCountError | None = None
@@ -501,105 +837,74 @@ async def handle_merge_action(
                         and settle_recheck_decision is None
                         and initial_grace_recheck_wait_seconds <= 0
                     ):
-                        merge_operation = await self._begin_monitor_state_operation(
-                            workspace_id=workspace_id,
-                            action="merge",
-                            requested_action="merge",
-                            reason="Merging PR after all monitor gates passed.",
-                            reason_code="MERGE",
-                            pr_number=pr_number,
-                            status=merge_status,
-                            base_branch=base_branch,
-                            remote_branch=remote_branch,
-                            monitor_log=monitor_log,
-                        )
-                        await self._record_pr_monitor_audit_event(
-                            workspace_id=workspace_id,
-                            event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
-                            action="merge",
-                            outcome="attempted",
-                            reason_code="MERGE",
-                            pr_number=pr_number,
-                            status=merge_status,
-                            base_branch=base_branch,
-                            remote_branch=remote_branch,
-                            operation_id=(
-                                merge_operation.operation_id
-                                if merge_operation is not None
-                                else None
-                            ),
-                            operation_type=OperationType.monitor_state.value,
-                            monitor_log=monitor_log,
-                        )
                         try:
-                            merge_sha = await self._deps.gh.merge_pr(
+                            effective_methods = await _resolve_effective_merge_methods(
+                                self,
                                 repo=repo,
-                                pr_number=pr_number,
+                                base_branch=base_branch,
                             )
                         except GitHubClientError as exc:
-                            merge_blocker = exc
-                            await self._finish_monitor_operation(
-                                merge_operation,
-                                status=OperationStatus.failed,
-                                result={
-                                    "status": "failed",
-                                    "outcome": "github_merge_failed",
-                                    "reason_code": "GITHUB_MERGE_FAILED",
-                                },
-                                error_code="GITHUB_MERGE_FAILED",
-                                error_message=str(exc),
-                            )
-                            await self._record_pr_monitor_audit_event(
-                                workspace_id=workspace_id,
-                                event_type=_AUDIT_MERGE_RESULT_EVENT,
-                                action="merge",
-                                outcome="failed",
-                                reason_code="GITHUB_MERGE_FAILED",
-                                pr_number=pr_number,
-                                status=merge_status,
-                                base_branch=base_branch,
-                                remote_branch=remote_branch,
-                                operation_id=(
-                                    merge_operation.operation_id
-                                    if merge_operation is not None
-                                    else None
-                                ),
-                                operation_type=OperationType.monitor_state.value,
-                                monitor_log=monitor_log,
-                                evidence={
-                                    "operation": "merge_pr",
-                                    "error_message": str(exc),
-                                },
-                            )
+                            merge_method_preflight_error = exc
                         else:
-                            await self._finish_monitor_operation(
-                                merge_operation,
-                                status=OperationStatus.succeeded,
-                                result={
-                                    "status": "succeeded",
-                                    "outcome": "merged",
-                                    "merge_sha": merge_sha,
-                                },
-                            )
-                            await self._record_pr_monitor_audit_event(
-                                workspace_id=workspace_id,
-                                event_type=_AUDIT_MERGE_RESULT_EVENT,
-                                action="merge",
-                                outcome="succeeded",
-                                reason_code="MERGE",
-                                pr_number=pr_number,
-                                status=merge_status,
-                                base_branch=base_branch,
-                                remote_branch=remote_branch,
-                                operation_id=(
-                                    merge_operation.operation_id
-                                    if merge_operation is not None
-                                    else None
-                                ),
-                                operation_type=OperationType.monitor_state.value,
-                                monitor_log=monitor_log,
-                                evidence={"merge_sha": merge_sha},
-                            )
+                            if not effective_methods:
+                                merge_method_notification_reason = _merge_method_mismatch_message(
+                                    base_branch=base_branch,
+                                    attempted_method=None,
+                                    effective_methods=effective_methods,
+                                )
+                                await _record_empty_effective_merge_methods_blocker(
+                                    self,
+                                    workspace_id=workspace_id,
+                                    pr_number=pr_number,
+                                    merge_status=merge_status,
+                                    base_branch=base_branch,
+                                    remote_branch=remote_branch,
+                                    monitor_log=monitor_log,
+                                    notification_reason=merge_method_notification_reason,
+                                )
+                                state.mark_addressed(
+                                    _merge_method_blocked_key(
+                                        pr_number=merge_status.number,
+                                        head_sha=merge_status.head_sha,
+                                    ),
+                                    merge_method_notification_reason,
+                                )
+                                await self._persist_state(workspace_id, state)
+                            else:
+                                for attempt_index, merge_method in enumerate(effective_methods):
+                                    merge_attempt = await _attempt_merge_method(
+                                        self,
+                                        workspace_id=workspace_id,
+                                        repo=repo,
+                                        pr_number=pr_number,
+                                        merge_method=merge_method,
+                                        merge_status=merge_status,
+                                        base_branch=base_branch,
+                                        remote_branch=remote_branch,
+                                        monitor_log=monitor_log,
+                                        state=state,
+                                        effective_methods=effective_methods,
+                                        attempt_index=attempt_index,
+                                    )
+                                    if merge_attempt.outcome is _MergeAttemptOutcome.SUCCESS:
+                                        merge_sha = merge_attempt.merge_sha
+                                        break
+                                    if (
+                                        merge_attempt.outcome
+                                        is _MergeAttemptOutcome.RETRY_NEXT_METHOD
+                                    ):
+                                        continue
+                                    if merge_attempt.outcome is _MergeAttemptOutcome.METHOD_BLOCKER:
+                                        merge_method_notification_reason = (
+                                            merge_attempt.method_blocker_notification_reason
+                                        )
+                                        break
+                                    merge_blocker = merge_attempt.blocker
+                                    if merge_blocker is None:  # pragma: no cover
+                                        raise RuntimeError(
+                                            "merge attempt blocker outcome without blocker"
+                                        )
+                                    break
 
         if initial_grace_recheck_wait_seconds > 0:
             _log.info(
@@ -758,6 +1063,81 @@ async def handle_merge_action(
                 message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[:2000],
             )
             return True
+
+        if merge_method_preflight_error is not None:
+            if await self._wait_after_transient_github_error(
+                merge_method_preflight_error,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="merge_method_preflight",
+                monitor_log=monitor_log,
+            ):
+                return False
+            _log.warning(
+                "monitor.merge_method_preflight_falling_back_to_notify",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                base_branch=base_branch,
+                stderr=_redact_and_truncate_github_error(merge_method_preflight_error.stderr),
+            )
+            notification_reason = _merge_method_preflight_rejection_reason(
+                merge_method_preflight_error
+            )
+            state.mark_addressed(
+                _merge_method_blocked_key(
+                    pr_number=merge_status.number,
+                    head_sha=merge_status.head_sha,
+                ),
+                notification_reason,
+            )
+            await self._persist_state(workspace_id, state)
+            try:
+                await self._post_human_notification_once(
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    state=state,
+                    blocker_reason=notification_reason,
+                )
+            except GitHubClientError as exc:
+                if await self._wait_after_transient_github_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="post_human_notification",
+                    monitor_log=monitor_log,
+                ):
+                    return False
+                raise
+            await self._deps.sleep(self._config.poll_interval_seconds)
+            return False
+
+        if merge_method_notification_reason is not None:
+            _log.warning(
+                "monitor.merge_method_mismatch_notify_human",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                base_branch=base_branch,
+                reason=merge_method_notification_reason,
+            )
+            return cast(
+                bool | None,
+                await self._execute(
+                    action=NotifyHuman(message=merge_method_notification_reason),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                ),
+            )
 
         if merge_blocker is not None:
             if await self._wait_after_transient_github_error(

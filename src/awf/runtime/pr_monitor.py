@@ -39,6 +39,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
+from awf.runtime.monitor_state_keys import _merge_method_blocked_key
+
 # ── Wire-shape dataclasses — what the runner assembles after polling GH ────
 
 
@@ -981,6 +983,12 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         MergeStateStatus.HAS_HOOKS,
     ):
         return NotifyHuman()
+
+    merge_method_blocker = state.threads_addressed_ids.get(
+        _merge_method_blocked_key(pr_number=status.number, head_sha=status.head_sha)
+    )
+    if merge_method_blocker:
+        return NotifyHuman(message=merge_method_blocker)
 
     # 10. All green — terminal success action.
     if config.auto_merge:

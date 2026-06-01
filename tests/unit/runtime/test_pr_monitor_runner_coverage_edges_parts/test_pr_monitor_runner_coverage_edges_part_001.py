@@ -541,6 +541,16 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
             stderr="secondary rate limit hit; please try again",
         )
     )
+    assert _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api repo",
+            returncode=1,
+            stderr=(
+                "GitHub repository response omitted merge method flags; "
+                "API response may be temporarily unavailable, try again: allow_rebase_merge"
+            ),
+        )
+    )
     assert not _is_transient_github_client_error(
         GitHubClientError(
             operation="gh api graphql",
