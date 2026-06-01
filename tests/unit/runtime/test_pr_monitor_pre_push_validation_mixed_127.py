@@ -56,6 +56,7 @@ async def test_mixed_127_fix_commit_failure_reports_real_pre_push_details(
     """Mixed toolchain and real failures should report the real terminal failure."""
     workspace_id, worktree, cmd, adapter = await _mixed_failure_setup(factory, tmp_path)
     cmd.queue_result(returncode=0, stdout=f"{'4' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'5' * 40}\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -121,6 +122,8 @@ async def test_mixed_127_fix_pass_exhaustion_reports_real_pre_push_details(
     workspace_id, worktree, cmd, adapter = await _mixed_failure_setup(factory, tmp_path)
     cmd.queue_result(returncode=0, stdout=f"{'5' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'6' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'7' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'8' * 40}\n")
     first_mixed = ValidationResult(
         commands=[
             _command_result(
