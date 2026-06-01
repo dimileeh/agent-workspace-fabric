@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final, Protocol, cast
 
 from sqlalchemy import (
@@ -123,7 +123,7 @@ def _scheduler_scoring_time(
 ) -> datetime:
     """Determine the effective scoring timestamp, enforcing pagination consistency."""
     if after is None:
-        return scoring_at or datetime.now()
+        return scoring_at or datetime.now(UTC)
     if scoring_at is not None and scoring_at != after.scoring_at:
         raise ValueError("scoring_at must match after.scoring_at for scheduler pagination")
     return after.scoring_at
