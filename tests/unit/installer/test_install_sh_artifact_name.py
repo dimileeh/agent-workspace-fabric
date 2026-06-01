@@ -260,7 +260,7 @@ def test_unpinned_missing_manifest_version_accepts_wheel(harness: InstallerHarne
     """
     harness.add_uname("Linux", "x86_64")
     harness.add_uv()
-    harness.add_awf()
+    harness.add_awf(version="0.2.0")
     wheel, digest = harness.write_wheel(version="0.2.0")
     manifest = harness.write_manifest(
         wheel=wheel,

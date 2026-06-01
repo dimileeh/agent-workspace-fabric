@@ -69,6 +69,45 @@ def test_reachability_failure_does_not_claim_success(harness: InstallerHarness) 
 
 
 @pytest.mark.unit
+def test_default_install_rejects_stale_path_awf_when_bin_dir_empty(
+    harness: InstallerHarness,
+) -> None:
+    """A stale PATH awf cannot mask a default install that produced no binary."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # install "succeeds" but produces no awf in uv's bin dir
+    harness.add_awf(version="9.9.9")  # unrelated stale binary already on PATH
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "AWF_NOT_REACHABLE" in result.stderr
+    assert "export PATH=" in result.stderr
+    assert "Installed agent-workspace-fabric" not in result.stdout
+
+
+@pytest.mark.unit
+def test_default_install_accepts_matching_path_awf_when_bin_dir_empty(
+    harness: InstallerHarness,
+) -> None:
+    """The default fallback still accepts the newly installed awf on PATH."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # bin-dir prediction misses where the tool linked awf
+    harness.add_awf(version="0.1.0")  # matching newly installed binary on PATH
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "AWF_NOT_REACHABLE" not in result.stderr
+    advice = result.stdout + result.stderr
+    assert "export PATH=" not in advice
+    assert "fish_add_path" not in advice
+
+
+@pytest.mark.unit
 def test_default_install_bin_off_path_is_reachable_with_advice(
     harness: InstallerHarness,
 ) -> None:
@@ -529,7 +568,7 @@ def test_prerelease_style_version_is_accepted(harness: InstallerHarness) -> None
     """
     harness.add_uname("Linux", "x86_64")
     harness.add_uv()
-    harness.add_awf()
+    harness.add_awf(version="1.2.3rc1")
     wheel, digest = harness.write_wheel(version="1.2.3rc1")
     manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="1.2.3rc1")
 

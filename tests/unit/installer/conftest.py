@@ -156,9 +156,29 @@ class InstallerHarness:
         )
         self._write_stub("pipx", behavior)
 
-    def add_awf(self, *, directory: Path | None = None, rc: int = 0) -> Path:
-        """Place an ``awf`` stub on ``PATH`` or in ``directory`` (exits ``rc``)."""
-        return self._write_stub("awf", f"exit {rc}", directory=directory)
+    def add_awf(
+        self,
+        *,
+        directory: Path | None = None,
+        rc: int = 0,
+        version: str = "0.1.0",
+    ) -> Path:
+        """Place an ``awf`` stub on ``PATH`` or in ``directory``.
+
+        The stub models the two commands installer verification cares about:
+        ``awf --version`` reports a release identity and ``awf --help`` follows
+        ``rc`` so tests can distinguish a stale-but-runnable PATH binary from a
+        broken executable.
+        """
+        behavior = (
+            'case "$1" in\n'
+            "  --version)\n"
+            f"    printf '%s\\n' 'awf {version}'\n"
+            f"    exit {rc} ;;\n"
+            f"  *) exit {rc} ;;\n"
+            "esac"
+        )
+        return self._write_stub("awf", behavior, directory=directory)
 
     def add_curl(self, *, rc: int = 0) -> None:
         """Stub ``curl`` to record its argv (download flags) then exit ``rc``.
