@@ -28,12 +28,19 @@ def _make_push_result(reason_code: str) -> _GitPushResult:
         "PRE_PUSH_VALIDATION_FAILED",
         "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED",
         "PRE_PUSH_VALIDATION_FIX_FAILED",
-        "PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING",
     ],
 )
 @pytest.mark.unit
 def test_git_push_failure_outcome_maps_pre_push_validation_reasons(reason_code: str) -> None:
     assert _git_push_failure_outcome(_make_push_result(reason_code)) == "pre_push_validation_failed"
+
+
+@pytest.mark.unit
+def test_git_push_failure_outcome_maps_toolchain_missing_separately() -> None:
+    assert (
+        _git_push_failure_outcome(_make_push_result("PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"))
+        == "pre_push_validation_toolchain_missing"
+    )
 
 
 @pytest.mark.unit

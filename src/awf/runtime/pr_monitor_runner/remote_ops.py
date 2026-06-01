@@ -184,11 +184,12 @@ class _WorkflowScopePushBlock:
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
     """Map a push result to the monitor operation outcome label."""
+    if push_result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
+        return "pre_push_validation_toolchain_missing"
     if push_result.reason_code in {
         _PRE_PUSH_VALIDATION_FAILED_REASON,
         _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
         _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
-        _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
     }:
         return "pre_push_validation_failed"
     if push_result.workflow_scope_required:
