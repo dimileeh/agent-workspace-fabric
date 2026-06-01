@@ -323,6 +323,78 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exc", "expected_body"),
+    [
+        (
+            workspaces_service.WorkspaceCreateHostPortConflictError(
+                host_port=8080,
+                conflicting_workspace_id="ws_busy",
+            ),
+            {
+                "error_code": "HOST_PORT_CONFLICT",
+                "message": "Host port 8080 is already in use by workspace ws_busy",
+                "detail": {
+                    "host_port": 8080,
+                    "conflicting_workspace_id": "ws_busy",
+                },
+            },
+        ),
+        (
+            workspaces_service.WorkspaceCreateDuplicateHostPortError(host_port=8080),
+            {
+                "error_code": "DUPLICATE_HOST_PORT",
+                "message": (
+                    "Host port 8080 is claimed by more than one service "
+                    "or companion in the same request"
+                ),
+                "detail": {"host_port": 8080},
+            },
+        ),
+    ],
+)
+def test_workspace_conflict_error_response_uses_structured_payload(
+    exc: Exception,
+    expected_body: dict[str, object],
+) -> None:
+    response = workspace_routes._workspace_conflict_error_response(exc)  # noqa: SLF001
+
+    assert response.status_code == 409
+    body = json.loads(response.body)
+    assert body == expected_body
+    assert_no_internal_error_fields(body)
+
+
+@pytest.mark.unit
+async def test_retry_workspace_reports_source_runtime_not_released_via_retry_error_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def raise_not_released(*_args: object, **_kwargs: object) -> object:
+        raise workspaces_service.WorkspaceRetrySourceRuntimeNotReleasedError("ws_source")
+
+    monkeypatch.setattr(workspace_routes, "retry_workspace_row", raise_not_released)
+    session = SimpleNamespace(rollback=AsyncMock())
+
+    response = await workspace_routes.retry_workspace(
+        "ws_source",
+        session=session,  # type: ignore[arg-type]
+    )
+
+    session.rollback.assert_awaited_once()
+    assert response.status_code == 409
+    body = json.loads(response.body)
+    assert body == {
+        "error_code": "SOURCE_RUNTIME_NOT_RELEASED",
+        "message": (
+            "Source workspace ws_source runtime has not been released yet; "
+            "host ports may still be in use"
+        ),
+        "detail": {"source_workspace_id": "ws_source"},
+    }
+    assert_no_internal_error_fields(body)
+
+
+@pytest.mark.unit
 def test_workspace_override_reason_matching_uses_redacted_parts_as_wildcards() -> None:
     assert not workspaces_service._override_reasons_match(  # noqa: SLF001
         "operator checked <redacted> manually",

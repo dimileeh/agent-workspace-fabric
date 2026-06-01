@@ -18,7 +18,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Protocol, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -96,9 +96,7 @@ from awf.service.workspaces import (
     WorkspaceCreateHostPortConflictError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
-    WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
-    WorkspaceRetrySourceRuntimeNotReleasedError,
     _egress_audit_response,
     check_host_port_conflicts,
     create_workspace_row,
@@ -364,26 +362,12 @@ async def create_workspace(
                 detail={"external_id": exc.external_id},
             ).model_dump(),
         )
-    except WorkspaceCreateHostPortConflictError as exc:
+    except (
+        WorkspaceCreateHostPortConflictError,
+        WorkspaceCreateDuplicateHostPortError,
+    ) as exc:
         await session.rollback()
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=ErrorResponse(
-                error_code=exc.error_code,
-                message=exc.message,
-                detail=exc.detail,
-            ).model_dump(),
-        )
-    except WorkspaceCreateDuplicateHostPortError as exc:
-        await session.rollback()
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=ErrorResponse(
-                error_code=exc.error_code,
-                message=exc.message,
-                detail=exc.detail,
-            ).model_dump(),
-        )
+        return _workspace_conflict_error_response(exc)
     except WorkspaceProviderReadinessBlockedError as exc:
         await session.rollback()
         return _provider_readiness_blocked_response(exc)
@@ -532,14 +516,20 @@ def _insufficient_disk_response(disk_check: DiskCheck) -> JSONResponse:
     )
 
 
-def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
-    """Map a ``WorkspaceRetryError`` subclass to the appropriate HTTP error response."""
-    if isinstance(exc, WorkspaceRetryNotFoundError):
-        status_code = status.HTTP_404_NOT_FOUND
-    elif isinstance(exc, WorkspaceRetryNotAllowedError):
-        status_code = status.HTTP_409_CONFLICT
-    else:  # pragma: no cover - future retry error subclasses
-        status_code = status.HTTP_409_CONFLICT
+class _StructuredRouteError(Protocol):
+    """Error shape used by route helpers for structured JSON errors."""
+
+    error_code: str
+    message: str
+    detail: dict[str, Any] | None
+
+
+def _structured_error_response(
+    exc: _StructuredRouteError,
+    *,
+    status_code: int,
+) -> JSONResponse:
+    """Build a structured JSON error response from a service-layer error."""
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(
@@ -550,18 +540,25 @@ def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
     )
 
 
+def _workspace_conflict_error_response(exc: _StructuredRouteError) -> JSONResponse:
+    """Build a 409 JSON response for workspace admission conflicts."""
+    return _structured_error_response(exc, status_code=status.HTTP_409_CONFLICT)
+
+
+def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
+    """Map a ``WorkspaceRetryError`` subclass to the appropriate HTTP error response."""
+    if isinstance(exc, WorkspaceRetryNotFoundError):
+        status_code = status.HTTP_404_NOT_FOUND
+    else:
+        status_code = status.HTTP_409_CONFLICT
+    return _structured_error_response(exc, status_code=status_code)
+
+
 def _provider_readiness_blocked_response(
     exc: WorkspaceProviderReadinessBlockedError,
 ) -> JSONResponse:
     """Build a 409 JSON response for a provider-readiness blocked error."""
-    return JSONResponse(
-        status_code=status.HTTP_409_CONFLICT,
-        content=ErrorResponse(
-            error_code=exc.error_code,
-            message=exc.message,
-            detail=exc.detail,
-        ).model_dump(),
-    )
+    return _workspace_conflict_error_response(exc)
 
 
 @router.get("/overview", response_model=WorkspaceOverviewListResponse)
@@ -728,36 +725,12 @@ async def retry_workspace(
             provider_readiness_override=provider_readiness_override,
             provider_readiness_override_reason=provider_readiness_override_reason,
         )
-    except WorkspaceCreateHostPortConflictError as exc:
+    except (
+        WorkspaceCreateHostPortConflictError,
+        WorkspaceCreateDuplicateHostPortError,
+    ) as exc:
         await session.rollback()
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=ErrorResponse(
-                error_code=exc.error_code,
-                message=exc.message,
-                detail=exc.detail,
-            ).model_dump(),
-        )
-    except WorkspaceCreateDuplicateHostPortError as exc:
-        await session.rollback()
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=ErrorResponse(
-                error_code=exc.error_code,
-                message=exc.message,
-                detail=exc.detail,
-            ).model_dump(),
-        )
-    except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
-        await session.rollback()
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=ErrorResponse(
-                error_code=exc.error_code,
-                message=exc.message,
-                detail=exc.detail,
-            ).model_dump(),
-        )
+        return _workspace_conflict_error_response(exc)
     except WorkspaceRetryError as exc:
         await session.rollback()
         return _retry_error_response(exc)
