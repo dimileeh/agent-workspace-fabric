@@ -834,7 +834,7 @@ default_bin_dir() {
 
 normalize_version_token() {
     printf '%s' "$1" \
-        | sed 's/^[^[:alnum:]]*//; s/[^[:alnum:].+_-]*$//; s/^v//' \
+        | sed 's/^[^[:alnum:]]*//; s/[^[:alnum:].+_-]*$//; s/^[vV]//' \
         | tr '[:upper:]' '[:lower:]'
 }
 

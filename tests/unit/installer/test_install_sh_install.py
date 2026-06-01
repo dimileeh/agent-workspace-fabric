@@ -127,6 +127,24 @@ def test_default_install_accepts_matching_path_awf_when_bin_dir_empty(
 
 
 @pytest.mark.unit
+def test_default_install_accepts_uppercase_tag_style_path_awf_version(
+    harness: InstallerHarness,
+) -> None:
+    """A PATH fallback ``awf --version`` token may use an uppercase tag prefix."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # bin-dir prediction misses where the tool linked awf
+    harness.add_awf(version="V0.1.0")
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "AWF_NOT_REACHABLE" not in result.stderr
+    assert "Installed agent-workspace-fabric" in result.stdout
+
+
+@pytest.mark.unit
 def test_default_install_bin_off_path_is_reachable_with_advice(
     harness: InstallerHarness,
 ) -> None:
