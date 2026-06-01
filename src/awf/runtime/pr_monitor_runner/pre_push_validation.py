@@ -95,7 +95,12 @@ def _first_real_pre_push_failure_for_result(
     result: ValidationResult,
     failures: tuple[ValidationCommandResult, ...],
 ) -> ValidationCommandResult | None:
-    """Return the first non-127 failure across command and provider records."""
+    """Return the first non-127 failure across command and provider records.
+
+    Provider-level ``first_failure`` may describe a policy failure whose
+    underlying command succeeded, such as coverage below threshold with
+    ``ok=True`` and ``returncode=0``.
+    """
     real_failure = _first_real_pre_push_failure_from_failures(failures)
     if real_failure is not None:
         return real_failure

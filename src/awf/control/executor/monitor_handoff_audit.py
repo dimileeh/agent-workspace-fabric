@@ -100,6 +100,8 @@ async def _add_executor_pr_audit_event(
         operation_type=operation_type,
         pr_number=pr_number if pr_number is not None else workspace.pr_number,
         pr_url=pr_url or workspace.pr_url,
+        # Preserve a commit reference on audit records even when the caller
+        # does not supply a source head explicitly.
         source_head_sha=source_head_sha or workspace.monitor_last_commit_sha,
         source_base_sha=source_base_sha or workspace.base_commit,
         target_branch=workspace.branch_base,
