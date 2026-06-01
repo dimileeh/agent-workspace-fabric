@@ -7,7 +7,7 @@ import re
 import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from awf.common.commands import CommandResult
 from awf.runtime.validation_worktree_constants import (
@@ -190,6 +190,81 @@ def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
         if not ignored_path.endswith("/") and normalized_path.startswith(f"{ignored_path}/"):
             return True
     return False
+
+
+def _matching_ignored_root(path: str, ignored_paths: set[str]) -> str | None:
+    """Return the most specific ignored root containing a path."""
+    normalized_path = _normalize_porcelain_path(path)
+    matches: list[str] = []
+    for ignored_path in ignored_paths:
+        normalized_ignored_path = _normalize_porcelain_path(ignored_path)
+        if not normalized_ignored_path:
+            continue
+        if normalized_path == normalized_ignored_path or normalized_path.startswith(
+            f"{normalized_ignored_path}/"
+        ):
+            matches.append(normalized_ignored_path)
+    if not matches:
+        return None
+    return max(matches, key=len)
+
+
+def _ignored_cleanup_parent_dirs(path: str, ignored_paths: set[str]) -> tuple[str, ...]:
+    """Return parent dirs below the ignored root that may be empty after cleanup."""
+    ignored_root = _matching_ignored_root(path, ignored_paths)
+    if ignored_root is None:
+        return ()
+
+    parent = PurePosixPath(_normalize_porcelain_path(path)).parent
+    cleanup_dirs: list[str] = []
+    while True:
+        parent_text = parent.as_posix()
+        if parent_text in {"", "."} or parent_text == ignored_root:
+            break
+        cleanup_dirs.append(parent_text)
+        parent = parent.parent
+    return tuple(cleanup_dirs)
+
+
+def _cleanup_empty_ignored_dirs(
+    *,
+    worktree_path: Path,
+    cleanup_paths: tuple[str, ...],
+    ignored_paths: set[str],
+) -> tuple[str, ...]:
+    """Remove empty generated directories left below preserved ignored roots."""
+    candidate_dirs = {
+        cleanup_dir
+        for cleanup_path in cleanup_paths
+        for cleanup_dir in _ignored_cleanup_parent_dirs(cleanup_path, ignored_paths)
+    }
+    ordered_dirs = sorted(
+        candidate_dirs,
+        key=lambda cleanup_dir: len(PurePosixPath(cleanup_dir).parts),
+        reverse=True,
+    )
+    failed_dirs: list[str] = []
+    for cleanup_dir in ordered_dirs:
+        directory = worktree_path / cleanup_dir
+        if not directory.exists() or not directory.is_dir():
+            continue
+        try:
+            next(directory.iterdir())
+        except StopIteration:
+            pass
+        except OSError:
+            failed_dirs.append(cleanup_dir)
+            continue
+        else:
+            continue
+
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            failed_dirs.append(cleanup_dir)
+    return tuple(dict.fromkeys(failed_dirs))
 
 
 def _ignored_path_still_reported(
@@ -750,6 +825,25 @@ async def cleanup_validation_worktree_side_effects(
                     ),
                     cleanup_command="git clean",
                     cleanup_stderr=(clean.stderr or "")[:1000],
+                )
+            )
+        failed_empty_ignored_dirs = _cleanup_empty_ignored_dirs(
+            worktree_path=worktree_path,
+            cleanup_paths=tuple(cleanup_untracked_paths),
+            ignored_paths=ignored_paths,
+        )
+        if failed_empty_ignored_dirs:
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation left empty ignored directories and cleanup could not "
+                        f"remove them: {', '.join(failed_empty_ignored_dirs)}"
+                    ),
+                    cleanup_command="rmdir",
                 )
             )
 
