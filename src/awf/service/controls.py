@@ -374,6 +374,7 @@ class WorkspaceControlService:
             )
         if (
             workspace.compose_project_name is not None
+            and workspace.status in HOST_PORT_TERMINAL_RELEASE_STATUSES
             and not await has_terminal_runtime_released_event(self._session, workspace.id)
         ):
             await repo.add_event(
