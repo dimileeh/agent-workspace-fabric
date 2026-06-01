@@ -71,6 +71,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
+    ValidationWorktreeCheck,
     ValidationWorktreeCleanup,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
@@ -283,6 +284,7 @@ async def run_validation_and_fix_cycle(
         else 0
     )
     setup_ignored_paths_snapshot: tuple[str, ...] | None = None
+    setup_ignored_roots_snapshot: tuple[str, ...] | None = None
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
     for pass_number in range(max_validation_attempts):
         # This loop covers the initial validation plus any validation or
@@ -337,7 +339,49 @@ async def run_validation_and_fix_cycle(
             capture_ignored_paths_snapshot=True,
         )
         pre_validation_ignored_paths_snapshot = pre_validation_check.ignored_paths_snapshot
-        setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
+        pre_validation_ignored_roots_snapshot = pre_validation_check.ignored_paths
+        if setup_ignored_paths_snapshot is None:
+            setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
+            setup_ignored_roots_snapshot = pre_validation_ignored_roots_snapshot
+        else:
+            setup_ignored_set = set(setup_ignored_paths_snapshot)
+            setup_ignored_roots_set = set(setup_ignored_roots_snapshot or ())
+            new_ignored_paths = tuple(
+                path
+                for path in pre_validation_ignored_paths_snapshot
+                if path not in setup_ignored_set
+            )
+            new_ignored_roots = tuple(
+                path
+                for path in pre_validation_ignored_roots_snapshot
+                if path not in setup_ignored_roots_set
+            )
+            if new_ignored_paths or new_ignored_roots:
+                dirty_paths = tuple(dict.fromkeys((*new_ignored_roots, *new_ignored_paths)))
+                dirty_check = ValidationWorktreeCheck(
+                    clean=False,
+                    paths=dirty_paths,
+                    untracked_paths=dirty_paths,
+                    reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                    message=(
+                        "Validation worktree gained ignored entries after setup "
+                        "baseline and will not proceed to validation."
+                    ),
+                )
+                reason_code = dirty_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+                message = (
+                    dirty_check.message
+                    if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                    else validation_worktree_preexisting_dirty_message(dirty_check)
+                )
+                return await _fail_validation_worktree_guard(
+                    self,
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    validation_tier=validation_tier,
+                    reason_code=reason_code,
+                    message=message,
+                )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
             message = (
@@ -398,7 +442,7 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
                 ignore_ignored_paths=pre_validation_check.ignored_paths,
-                ignore_ignored_paths_snapshot=setup_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -458,7 +502,7 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
                 ignore_ignored_paths=pre_validation_check.ignored_paths,
-                ignore_ignored_paths_snapshot=setup_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -506,7 +550,7 @@ async def run_validation_and_fix_cycle(
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
             ignore_ignored_paths=pre_validation_check.ignored_paths,
-            ignore_ignored_paths_snapshot=setup_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
         )
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(
