@@ -738,16 +738,16 @@ async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
 
 
 @pytest.mark.unit
-async def test_retry_auto_retry_detects_source_port_conflict(
+async def test_retry_auto_retry_excludes_source_from_port_conflict(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
     """When ignore_source_runtime_check=True (auto-retry path), the
-    runtime-not-released gate is skipped, but the source workspace
-    must NOT be excluded from port conflict scanning.  If the
-    source's compose stack is still holding a host port, retry must
-    raise WorkspaceCreateHostPortConflictError rather than silently
-    create a workspace that will collide during compose launch."""
+    runtime-not-released gate is skipped, and the source workspace
+    is excluded from port conflict scanning because the retry replaces
+    the source.  Even though the source still holds host ports (no
+    runtime release event), retry succeeds because excluding the
+    source avoids a false conflict with itself."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
     companion_req = {
@@ -772,16 +772,16 @@ async def test_retry_auto_retry_detects_source_port_conflict(
     await _mark_failed(factory, source.id, release_runtime=False)
 
     async with factory() as session:
-        with pytest.raises(WorkspaceCreateHostPortConflictError):
-            await retry_workspace_row(
-                session,
-                source.id,
-                settings=settings,
-                provider_readiness_override=True,
-                provider_readiness_override_reason="auto-retry port conflict",
-                provider_environ={},
-                ignore_source_runtime_check=True,
-            )
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="auto-retry port conflict",
+            provider_environ={},
+            ignore_source_runtime_check=True,
+        )
+        assert retry.new_workspace.id != source.id
 
 
 @pytest.mark.unit
