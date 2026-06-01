@@ -82,6 +82,16 @@ async def _run_monitor_handoff_profile_setup(
 ) -> bool:
     """Run profile setup before handing an adopted/release PR to the monitor."""
     try:
+        validation = getattr(self, "_validation", None)
+        if validation is None:
+            await _mark_failed_or_raise_setup_failure(
+                self,
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.infrastructure_failure,
+                message="monitor handoff profile setup failed: no validation runner configured",
+                reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            )
+            return False
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,
@@ -98,7 +108,7 @@ async def _run_monitor_handoff_profile_setup(
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             )
             return False
-        setup_result = await self._validation.run_profile_phases(
+        setup_result = await validation.run_profile_phases(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,

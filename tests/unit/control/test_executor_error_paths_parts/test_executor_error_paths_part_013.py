@@ -946,6 +946,44 @@ class TestExecutorMonitorHandoffSetup:
         assert "supersecret" not in message
 
     @pytest.mark.unit
+    async def test_handoff_setup_missing_validation_marks_clear_setup_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Executor:
+            _validation = None
+
+            async def _record_setup_dependency_network_events(
+                self,
+                **_kwargs: object,
+            ) -> None:
+                raise AssertionError("missing validation should not record setup events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        result = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-missing-validation",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert result is False
+        assert mark_failed_calls
+        failure = mark_failed_calls[-1]
+        assert failure["failure_reason"] == FailureReason.infrastructure_failure
+        assert failure["reason_code"] == PR_MONITOR_SETUP_FAILED_REASON_CODE
+        assert (
+            failure["message"]
+            == "monitor handoff profile setup failed: no validation runner configured"
+        )
+
+    @pytest.mark.unit
     async def test_handoff_setup_mark_failed_error_after_command_failure_falls_back(
         self,
         tmp_path: Path,
