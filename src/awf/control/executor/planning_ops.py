@@ -89,6 +89,8 @@ from awf.service.coordination import (
     coordination_warnings_from_task_policy,
 )
 from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
+    WorkspaceCreateHostPortConflictError,
     WorkspaceRetryError,
     retry_workspace_row,
 )
@@ -549,7 +551,11 @@ async def _auto_retry_planning_scope_failure(
             return
         try:
             result = await retry_workspace_row(session, workspace_id)
-        except WorkspaceRetryError as exc:
+        except (
+            WorkspaceCreateDuplicateHostPortError,
+            WorkspaceCreateHostPortConflictError,
+            WorkspaceRetryError,
+        ) as exc:
             await repo.add_event(
                 workspace,
                 event_type="workspace.planning_scope_auto_retry_failed",
@@ -557,7 +563,7 @@ async def _auto_retry_planning_scope_failure(
                 payload={
                     "source_reason_code": failure.reason_code,
                     "error": str(exc)[:2000],
-                    "detail": exc.detail,
+                    "detail": getattr(exc, "detail", None),
                 },
             )
             await session.commit()

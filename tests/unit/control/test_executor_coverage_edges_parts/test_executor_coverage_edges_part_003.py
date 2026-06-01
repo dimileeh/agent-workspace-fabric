@@ -596,6 +596,35 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
     assert events[-1][0] == "workspace.planning_scope_auto_retry_failed"
     assert events[-1][2]["detail"] == {"reason": "busy"}
 
+    _WorkspaceRepo.workspace = SimpleNamespace(id="ws_retry", task_policy={})
+
+    async def _retry_dup_port(_session: object, _workspace_id: str) -> object:
+        raise executor_planning_ops.WorkspaceCreateDuplicateHostPortError(host_port=8080)
+
+    monkeypatch.setattr(executor_planning_ops, "retry_workspace_row", _retry_dup_port)
+    await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+        failure=failure,
+    )
+    assert events[-1][0] == "workspace.planning_scope_auto_retry_failed"
+    assert events[-1][2]["detail"] == {"host_port": 8080}
+
+    async def _retry_port_conflict(_session: object, _workspace_id: str) -> object:
+        raise executor_planning_ops.WorkspaceCreateHostPortConflictError(
+            host_port=9090,
+            conflicting_workspace_id="ws_other",
+        )
+
+    monkeypatch.setattr(executor_planning_ops, "retry_workspace_row", _retry_port_conflict)
+    await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+        failure=failure,
+    )
+    assert events[-1][0] == "workspace.planning_scope_auto_retry_failed"
+    assert events[-1][2]["detail"]["host_port"] == 9090
+
 
 @pytest.mark.unit
 async def test_execution_validation_returns_stop_when_start_transition_is_stale(
