@@ -1450,9 +1450,6 @@ async def run_validation_and_fix_cycle(
                 message=message,
             )
 
-        setup_ignored_paths_snapshot = fix_pass_ignored_check.ignored_paths_snapshot
-        setup_ignored_roots_snapshot = fix_pass_ignored_check.ignored_paths
-
         # Loop back to re-validate.
 
     return ExecutionValidationResult(

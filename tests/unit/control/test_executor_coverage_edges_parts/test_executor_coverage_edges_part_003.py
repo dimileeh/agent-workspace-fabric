@@ -1046,11 +1046,11 @@ async def test_execution_validation_rejects_new_ignored_paths_after_initial_vali
 
 
 @pytest.mark.unit
-async def test_execution_validation_tracks_fix_pass_ignored_artifacts_in_next_pass_snapshot(
+async def test_execution_validation_rejects_fix_pass_ignored_artifacts_when_snapshot_drifts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Track fix-pass-generated ignored files so they do not trigger a false drift failure."""
+    """Fail when validation fix pass generates ignored files not present at setup."""
     profile = WorkspaceProfile.model_validate({"name": "validation-ignored-baseline"})
     workspace = SimpleNamespace(
         resolved_profile={"name": "validation-ignored-baseline"},
@@ -1174,19 +1174,16 @@ async def test_execution_validation_tracks_fix_pass_ignored_artifacts_in_next_pa
         git_in_worktree=git_in_worktree,
     )
 
-    assert not result.stop
-    assert result.successful_validation_run_id == "vr-2"
-    assert result.successful_validation_workspace_head_sha == "c" * 40
-    assert executor._validation.run_profile_calls == 2
+    assert result.stop
+    assert result.successful_validation_run_id is None
+    assert result.successful_validation_workspace_head_sha is None
+    assert executor._validation.run_profile_calls == 1
     assert executor._start_validation_run.await_count == 2
     assert executor._finish_validation_run.await_count == 2
-    finish_kwargs = executor._finish_validation_run.await_args_list[1].kwargs
-    assert finish_kwargs["status"] == "succeeded"
-    assert finish_kwargs["reason_code"] == "VALIDATION_OK"
-    assert finish_kwargs["retry_count"] == 0
-    assert finish_kwargs["coverage"] is None
-    assert finish_kwargs["command_retries"] == [0]
-    assert executor._mark_failed.await_count == 0
+    finish_kwargs = executor._finish_validation_run.await_args.kwargs
+    assert finish_kwargs["status"] == "failed"
+    assert finish_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert executor._mark_failed.await_count == 1
     assert adapter.run.await_count == 1
 
 
