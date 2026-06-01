@@ -23,6 +23,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.merge_loop import (
     _effective_merge_methods,
+    _merge_error_supports_method_alternative,
     _merge_method_rejection_method,
 )
 from tests.postgres import postgres_test_engine
@@ -124,6 +125,16 @@ def test_merge_method_rejection_classifier_is_specific() -> None:
             )
         )
         is None
+    )
+    assert (
+        _merge_error_supports_method_alternative(
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            )
+        )
+        is False
     )
 
 
@@ -355,7 +366,7 @@ async def test_non_transient_merge_method_preflight_error_notifies_human(
     assert "merge-method preflight" in gh.comments[0]
     assert "HTTP 403" in gh.comments[0]
     assert sleep_fn.calls == [60]
-    assert not any(
+    assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
 
@@ -365,7 +376,7 @@ async def test_merge_method_preflight_notification_transient_error_retries(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Transient notification failures during preflight fallback keep polling."""
+    """Transient notification failures retry handoff without re-running preflight."""
     gh = _MergeMethodClient(
         branch_error=GitHubClientError(
             operation=(
@@ -391,7 +402,7 @@ async def test_merge_method_preflight_notification_transient_error_retries(
     assert gh.merge_calls == []
     assert gh.comments == []
     assert sleep_fn.calls == [60]
-    assert not any(
+    assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
 
@@ -552,11 +563,11 @@ async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
 
 
 @pytest.mark.unit
-async def test_unclassified_first_merge_failure_retries_allowed_alternative(
+async def test_unclassified_first_merge_failure_notifies_without_method_mismatch(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """An unclassified first merge failure still retries the next allowed method."""
+    """An unclassified merge failure notifies as a regular merge blocker."""
     gh = _MergeMethodClient(
         repo_methods=("merge", "squash"),
         branch_methods=("merge", "squash"),
@@ -576,9 +587,11 @@ async def test_unclassified_first_merge_failure_retries_allowed_alternative(
         gh=gh,
     )
 
-    assert terminal is True
-    assert gh.merge_calls == ["squash", "merge"]
-    assert gh.comments == []
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert len(gh.comments) == 1
+    assert "GitHub rejected the merge attempt" in gh.comments[0]
+    assert "MERGE_METHOD_MISMATCH" not in gh.comments[0]
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
@@ -654,11 +667,11 @@ async def test_mismatched_last_merge_rejection_records_method_blocker(
 
 
 @pytest.mark.unit
-async def test_unclassified_last_method_rejection_records_method_blocker(
+async def test_unclassified_single_merge_failure_notifies_without_method_blocker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """An unclassified method-related rejection blocks after alternatives are exhausted."""
+    """An unclassified single-method failure does not record a method blocker."""
     gh = _MergeMethodClient(
         repo_methods=("squash",),
         branch_methods=("squash",),
@@ -680,10 +693,9 @@ async def test_unclassified_last_method_rejection_records_method_blocker(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert len(gh.comments) == 1
-    assert "no merge method succeeded" in gh.comments[0]
-    assert "selected merge method is not allowed" not in gh.comments[0]
-    assert "attempted=squash; effective_allowed=squash" in gh.comments[0]
+    assert "GitHub rejected the merge attempt" in gh.comments[0]
+    assert "MERGE_METHOD_MISMATCH" not in gh.comments[0]
     assert sleep_fn.calls == [60]
-    assert any(
+    assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )

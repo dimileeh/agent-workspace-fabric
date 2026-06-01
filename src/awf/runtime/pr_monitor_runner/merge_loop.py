@@ -118,13 +118,7 @@ def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
 
 def _merge_error_supports_method_alternative(exc: GitHubClientError) -> bool:
     """Detect GitHub merge failures that can be retried with another method."""
-    text = str(exc).lower()
-    return (
-        _merge_method_rejection_method(exc) is not None
-        # GitHub's generic wording does not name the rejected method, but it is
-        # the only stable signal available for trying the next allowed method.
-        or "could not be merged with this method" in text
-    )
+    return _merge_method_rejection_method(exc) is not None
 
 
 def _merge_method_mismatch_message(
@@ -974,15 +968,24 @@ async def handle_merge_action(
                 base_branch=base_branch,
                 stderr=_redact_and_truncate_github_error(merge_method_preflight_error.stderr),
             )
+            notification_reason = _merge_method_preflight_rejection_reason(
+                merge_method_preflight_error
+            )
+            state.mark_addressed(
+                _merge_method_blocked_key(
+                    pr_number=merge_status.number,
+                    head_sha=merge_status.head_sha,
+                ),
+                notification_reason,
+            )
+            await self._persist_state(workspace_id, state)
             try:
                 await self._post_human_notification_once(
                     repo=repo,
                     pr_number=pr_number,
                     status=merge_status,
                     state=state,
-                    blocker_reason=_merge_method_preflight_rejection_reason(
-                        merge_method_preflight_error
-                    ),
+                    blocker_reason=notification_reason,
                 )
             except GitHubClientError as exc:
                 if await self._wait_after_transient_github_error(
