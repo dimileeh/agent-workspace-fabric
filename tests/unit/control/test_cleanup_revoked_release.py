@@ -205,6 +205,74 @@ async def test_has_terminal_runtime_release_event_returns_false_when_revoked_new
 
 
 @pytest.mark.asyncio
+async def test_revoke_at_cap_still_records_revoked_event(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression: revoke event must be recorded even at the _MAX_REVOKE_EVENTS cap.
+
+    Before the fix, when revoke_count >= _MAX_REVOKE_EVENTS the provisioner
+    suppressed the ``terminal_runtime_release_revoked`` event, leaving the
+    latest event as ``terminal_runtime_released``.  This falsely marked the
+    workspace as effectively released, even though orphan containers still
+    held host ports.  The fix ensures the revoke event is always recorded so
+    that ``terminal_runtime_effectively_released_expr`` correctly returns
+    False.
+    """
+    sweeper = _sweeper(factory)
+    ws_id: str | None = None
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        released_ev = (
+            await session.execute(
+                sa.select(WorkspaceEvent)
+                .where(WorkspaceEvent.workspace_id == ws.id)
+                .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+            )
+        ).scalar_one()
+        released_ev.occurred_at = datetime(2026, 5, 31, 12, 0, 0, tzinfo=UTC)
+
+        for i in range(5):
+            await repo.add_event(
+                ws,
+                event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+            )
+            revoked_ev = (
+                await session.execute(
+                    sa.select(WorkspaceEvent)
+                    .where(WorkspaceEvent.workspace_id == ws.id)
+                    .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+                    .order_by(WorkspaceEvent.event_order.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+            revoked_ev.occurred_at = datetime(2026, 5, 31, 12, 0, i + 1, tzinfo=UTC)
+        await session.commit()
+
+    candidates = await sweeper._list_terminal_runtime_candidates()  # noqa: SLF001
+    candidate_ids = [c.workspace_id for c in candidates]
+    assert ws_id in candidate_ids, (
+        "workspace with revoked release (even at cap) must appear in candidate sweep"
+    )
+
+    async with factory() as session:
+        result = await sweeper._has_terminal_runtime_release_event(  # noqa: SLF001
+            session,
+            ws_id,
+        )
+    assert result is False, (
+        "revoked release at cap must cause _has_terminal_runtime_release_event to return False"
+    )
+
+
+@pytest.mark.asyncio
 async def test_has_terminal_runtime_release_event_returns_true_when_release_newer(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

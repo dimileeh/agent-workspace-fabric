@@ -85,13 +85,13 @@ _MAX_REVOKE_EVENTS: Final = 3
 
 When ``_launch_lost_to_terminal_cleanup`` records this many consecutive
 ``terminal_runtime_release_revoked`` events (orphan container stop failures),
-further revokes are suppressed to avoid an unbounded release-revoke loop.
-The workspace remains effectively unreleased (ports stay blocked) and
-continues to appear in the cleanup-worker sweep until the cleanup worker
-successfully stops the orphan containers and records a fresh
-``terminal_runtime_released`` event.  An operator-surfaced stale-reason
-event is recorded so a human can intervene if the containers cannot be
-stopped automatically.
+an additional escalation event is recorded to surface the problem to an
+operator.  The revoke event itself is always recorded regardless of the cap
+so that the workspace remains effectively unreleased (ports stay blocked) in
+the ``terminal_runtime_effectively_released_expr`` check.  Without the
+revoke event, the latest event would remain ``terminal_runtime_released``,
+falsely marking the workspace as released even though orphan containers
+still hold host ports.
 """
 
 _log = get_logger(__name__)
@@ -1201,23 +1201,15 @@ class Provisioner:
                     )
                 )
                 revoke_count = revoke_count_result.scalar() or 0
-                if revoke_count >= _MAX_REVOKE_EVENTS:
-                    _log.warning(
-                        "provisioner.revoke_cap_reached",
-                        workspace_id=workspace_id,
-                        revoke_count=revoke_count,
-                        reason_code="REVOKE_CAP_REACHED",
-                    )
-                else:
-                    await repo.add_event(
-                        ws,
-                        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-                        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-                        payload={
-                            "workspace_id": workspace_id,
-                            "orphan_stop_error": orphan_stop_error,
-                        },
-                    )
+                await repo.add_event(
+                    ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                    payload={
+                        "workspace_id": workspace_id,
+                        "orphan_stop_error": orphan_stop_error,
+                    },
+                )
                 if revoke_count >= _MAX_REVOKE_EVENTS:
                     await repo.add_event(
                         ws,
