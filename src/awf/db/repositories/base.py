@@ -676,7 +676,7 @@ def terminal_runtime_effectively_released_expr(
         select(WorkspaceEvent.event_type)
         .where(WorkspaceEvent.event_type.in_(both_types))
         .where(WorkspaceEvent.reason_code.in_(both_reasons))
-        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.event_order.desc())
+        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.event_order.desc().nullslast())
         .limit(1)
     )
     if correlated_to is not None:
