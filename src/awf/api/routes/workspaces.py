@@ -759,6 +759,7 @@ async def retry_workspace(
             ).model_dump(),
         )
     except WorkspaceRetryError as exc:
+        await session.rollback()
         return _retry_error_response(exc)
 
     return workspace_retry_response(result)
