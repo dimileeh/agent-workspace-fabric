@@ -69,6 +69,7 @@ def test_handle_response_uses_response_request_without_global_context() -> None:
 
 @pytest.mark.unit
 def test_root_version_option_reports_package_version() -> None:
+    """``awf --version`` reports the installed package version."""
     result = _runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0

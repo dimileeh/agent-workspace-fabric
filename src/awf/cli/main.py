@@ -85,6 +85,7 @@ app = typer.Typer(
 
 
 def _version_callback(value: bool) -> None:
+    """Print the package version for the eager root ``--version`` option."""
     if value:
         typer.echo(f"awf {__version__}")
         raise typer.Exit()
@@ -100,6 +101,7 @@ def root_callback(
         help="Show the AWF version and exit.",
     ),
 ) -> None:
+    """Register root-level CLI options shared by all AWF commands."""
     del version
 
 
