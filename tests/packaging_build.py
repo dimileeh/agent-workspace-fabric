@@ -5,10 +5,16 @@ backend), so the in-process ``hatchling.build`` hooks are unavailable. These
 helpers instead drive the repo's standard build frontend, ``uv build``, into a
 process-lifetime temp directory and hand tests the built wheel/sdist paths.
 
-Building is gated behind ``uv`` availability and a successful (possibly offline)
-build; callers ``pytest.skip`` via :class:`PackageBuildUnavailableError` when the
-build cannot run so the unit suite stays robust on hosts without a populated
-build environment. CI, which builds release artifacts, exercises the full path.
+Building is gated behind ``uv`` availability and a populated build environment:
+when ``uv`` is missing, or the build environment cannot be set up offline (the
+build backend cannot be fetched), callers ``pytest.skip`` via
+:class:`PackageBuildUnavailableError` so the unit suite stays robust on hosts
+without a populated build environment. A build that actually runs against this
+checkout but fails to produce artifacts — a real packaging regression such as a
+malformed ``pyproject.toml``, missing build input, or broken artifact
+generation — raises :class:`PackageBuildFailedError`, which is *not* on the skip
+path, so the package-artifact guard fails loudly instead of reporting skipped.
+CI, which has network and builds release artifacts, exercises the full path.
 
 The build runs at most once per worker process (``functools.lru_cache``); under
 ``pytest -n … --dist=loadscope`` each module-scoped group lands on one worker, so
@@ -33,7 +39,50 @@ _BUILD_TIMEOUT_SECONDS = 600
 
 
 class PackageBuildUnavailableError(RuntimeError):
-    """Raised when the wheel/sdist cannot be built in this environment."""
+    """Raised when the wheel/sdist cannot be built because the build environment
+    is not set up: ``uv`` is missing, the build could not start, or it failed to
+    fetch the build backend offline. Build-backed tests ``pytest.skip`` on this
+    so the unit suite stays robust on hosts without a populated build environment.
+    """
+
+
+class PackageBuildFailedError(AssertionError):
+    """Raised when ``uv build`` ran against this checkout but failed to produce
+    artifacts — a real packaging regression (malformed ``pyproject.toml``,
+    missing build input, broken artifact generation). Subclassing
+    :class:`AssertionError` keeps this off the unavailable/skip path so the
+    package-artifact guard fails loudly rather than reporting skipped.
+    """
+
+
+# Substrings in a nonzero ``uv build`` output that mark the failure as an
+# unpopulated build environment (offline / the build backend cannot be fetched)
+# rather than a real packaging regression. A real offline build still surfaces
+# one of these because ``uv`` reports the network/cache miss; anything else is
+# treated as a genuine build failure. Kept network-focused on purpose so a real
+# regression is never masked as "unavailable".
+_BUILD_ENV_UNAVAILABLE_SIGNATURES = (
+    "network connectivity is disabled",
+    "offline",
+    "failed to fetch",
+    "failed to download",
+    "error sending request",
+    "could not connect",
+    "could not resolve host",
+    "failed to lookup address",
+    "temporary failure in name resolution",
+    "connection refused",
+    "connection reset",
+    "no such host",
+    "operation timed out",
+)
+
+
+def _build_failure_is_environmental(output: str) -> bool:
+    """Return ``True`` when a nonzero ``uv build`` looks like an unpopulated build
+    environment (offline / build backend unfetchable) rather than a regression."""
+    lowered = output.lower()
+    return any(signature in lowered for signature in _BUILD_ENV_UNAVAILABLE_SIGNATURES)
 
 
 @dataclass(frozen=True)
@@ -48,8 +97,12 @@ class BuiltDistributions:
 def build_distributions() -> BuiltDistributions:
     """Build the AWF wheel and sdist once per process via ``uv build``.
 
-    Raises :class:`PackageBuildUnavailableError` (never a hard error) when ``uv`` is
-    missing or the build fails, so build-backed tests can skip cleanly.
+    Raises :class:`PackageBuildUnavailableError` when the build environment is not
+    set up (``uv`` missing, build cannot start, or the backend cannot be fetched
+    offline) so build-backed tests can skip cleanly. Raises
+    :class:`PackageBuildFailedError` when ``uv build`` runs against this checkout
+    but fails to produce artifacts, so a real packaging regression fails the
+    tests instead of skipping.
     """
     uv = shutil.which("uv")
     if uv is None:
@@ -74,15 +127,28 @@ def build_distributions() -> BuiltDistributions:
         raise PackageBuildUnavailableError(f"uv build could not run: {exc}") from exc
 
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip().splitlines()[-5:]
-        raise PackageBuildUnavailableError(
-            "uv build failed (likely no network/build backend): " + " ".join(tail)
+        output = "\n".join(part for part in (result.stderr, result.stdout) if part)
+        tail = " ".join(output.strip().splitlines()[-5:])
+        if _build_failure_is_environmental(output):
+            raise PackageBuildUnavailableError(
+                "uv build could not set up a build environment "
+                "(offline / build backend unavailable): " + tail
+            )
+        # The build ran against this checkout and failed for a non-environmental
+        # reason — a real packaging regression. Fail loudly instead of skipping.
+        raise PackageBuildFailedError(
+            "uv build ran against this checkout but failed to produce artifacts "
+            "(packaging regression): " + tail
         )
 
     wheels = sorted(out_dir.glob("*.whl"))
     sdists = sorted(out_dir.glob("*.tar.gz"))
     if not wheels or not sdists:
-        raise PackageBuildUnavailableError("uv build did not produce both a wheel and an sdist")
+        # uv build reported success yet emitted nothing usable — broken artifact
+        # generation is a regression, not an unavailable environment.
+        raise PackageBuildFailedError(
+            "uv build reported success but did not produce both a wheel and an sdist"
+        )
     return BuiltDistributions(wheel=wheels[0], sdist=sdists[0])
 
 
