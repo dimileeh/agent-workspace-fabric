@@ -313,6 +313,14 @@ async def retry_workspace_row(
         or source.node_id
         or "local"
     )
+    # Phase 1 single-node assumption: when source_effective_node_id is None
+    # (legacy row with no node_id and no ResourceReservation), it is treated
+    # as a wildcard that matches any target_node_id.  This is safe when AWF
+    # runs a single worker node — the source's containers must be on that
+    # node — but in a multi-node deployment it could over-block retries on
+    # sibling nodes whose ports are not actually held by the source.  When
+    # Phase 2 introduces multi-node, this branch should require a resolved
+    # node_id or be replaced by a per-node runtime-release query.
     if await _source_runtime_not_yet_released(session, source) and (
         source_effective_node_id is None or source_effective_node_id == target_node_id
     ):
