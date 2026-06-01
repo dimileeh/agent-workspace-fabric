@@ -993,19 +993,81 @@ async def test_retry_auto_retry_succeeds_no_host_ports_runtime_not_released(
 
 
 @pytest.mark.unit
-async def test_retry_prefers_stamped_source_node_id_over_reservation_node_id(
+async def test_retry_defaults_unset_worker_node_to_local_for_legacy_source_hostname(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
-    """When the source workspace has a stamped node_id (set by the provisioner
-    to the actual hostname) that differs from the reservation's node_id
-    (recorded as "local" at create time), the retry must prefer the stamped
-    source.node_id for target_node_id.  Without this, target_node_id falls
-    back to "local" while source_effective_node_id is the hostname, so the
-    runtime-release guard sees them as different nodes and does not block;
-    the conflict scan then queries the wrong node, missing the source's
-    port claims, and a retry can proceed while the source stack still
-    holds the port on the same physical host."""
+    """An upgraded local install may have failed source rows stamped with the
+    old container hostname while current local workers default to "local".
+    When the source runtime is already released, the retry reservation must be
+    placed on "local" so the local scheduler can list and claim it."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        ws.node_id = "legacy-container-hostname"
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        )
+        assert len(reservations) == 1
+        assert reservations[0].node_id == "local"
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="legacy local hostname normalization test",
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(retry.new_workspace.id)
+        assert len(retried_reservations) == 1
+        assert retried_reservations[0].node_id == "local"
+
+
+@pytest.mark.unit
+async def test_retry_blocks_unreleased_legacy_source_hostname_with_local_reservation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When a legacy source hostname differs from the local reservation node,
+    retry admission must still treat them as the same local host for the
+    runtime-release gate. Otherwise a retry can proceed while the source stack
+    still holds the port on that host."""
     settings = Settings(
         _env_file=None,
         host_home=str(tmp_path / "home"),

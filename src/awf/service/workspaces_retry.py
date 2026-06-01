@@ -309,17 +309,13 @@ async def retry_workspace_row(
     source_effective_node_id = source.node_id or (
         source_reservation.node_id if source_reservation else None
     )
-    configured_target_node_id = (
-        effective_worker_node_id(resolved_settings)
-        if resolved_settings.worker_node_id is not None
-        else None
-    )
-    target_node_id = (
-        configured_target_node_id
-        or source.node_id
-        or (source_reservation.node_id if source_reservation else None)
-        or "local"
-    )
+    target_node_id = effective_worker_node_id(resolved_settings)
+    if not (resolved_settings.worker_node_id or "").strip() and source_effective_node_id:
+        # Local service installs now default workers/provisioners to "local";
+        # older failed rows may still carry a container hostname. Normalize
+        # that legacy source node so retries stay claimable by local workers
+        # while the runtime-release gate still compares against the same host.
+        source_effective_node_id = target_node_id
     if host_ports:
         # The runtime-release gate is only meaningful when the source
         # workspace holds host ports that could conflict with the retry.
