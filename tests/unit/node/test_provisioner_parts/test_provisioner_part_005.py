@@ -54,6 +54,53 @@ def _companion_task_policy(*host_ports: int) -> dict[str, Any]:
     }
 
 
+def _profile_with_duplicate_service_ports(host_port: int) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "test-profile",
+            "docker": {"mode": "dind"},
+            "services": [
+                {
+                    "name": "db",
+                    "image": "postgres:16",
+                    "ports": [[5432, host_port]],
+                },
+                {
+                    "name": "cache",
+                    "image": "redis:7",
+                    "ports": [[6379, host_port]],
+                },
+            ],
+            "security": {"egress": {"mode": "restricted"}},
+        }
+    )
+
+
+class TestAutoResolvedProfileIntraProfileDuplicate:
+    """Regression: two profile services claiming the same host port."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_detected(self) -> None:
+        session_factory = AsyncMock()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=AsyncMock(),
+            stack_launcher=None,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        profile = _profile_with_duplicate_service_ports(8080)
+        task_policy: dict[str, Any] = {"companions": []}
+        with pytest.raises(WorkspaceCreateDuplicateHostPortError) as exc_info:
+            await provisioner._check_auto_resolved_profile_host_ports(
+                workspace_id="ws-1",
+                profile=profile,
+                excluding_workspace_id="ws-1",
+                task_policy=task_policy,
+            )
+        assert exc_info.value.host_port == 8080
+        assert session_factory.call_count == 0
+
+
 class TestAutoResolvedProfileIntraWorkspaceDuplicate:
     """Regression: companion and profile sharing a host port within the same workspace."""
 

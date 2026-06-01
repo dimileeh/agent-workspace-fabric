@@ -931,6 +931,11 @@ class Provisioner:
         auto_profile_host_ports = host_ports_from_resolved_profile(resolved_profile_dict)
         if not auto_profile_host_ports:
             return
+        seen_profile: set[int] = set()
+        for hp in auto_profile_host_ports:
+            if hp in seen_profile:
+                raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
+            seen_profile.add(hp)
         companion_host_ports = host_ports_from_task_policy_companions(task_policy)
         for hp in auto_profile_host_ports:
             if hp in companion_host_ports:
