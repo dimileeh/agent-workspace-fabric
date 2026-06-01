@@ -40,6 +40,8 @@ from awf.db.repositories import (
 from awf.db.repositories.base import (
     PROVISIONING_LAUNCHING_EVENT_TYPE,
     PROVISIONING_LAUNCHING_REASON_CODE,
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     has_terminal_runtime_released_event,
@@ -759,6 +761,20 @@ class Provisioner:
                     reason_code=reason_code or failure_reason.value.upper(),
                     payload=event_payload,
                 )
+                if (
+                    ws.compose_project_name is not None
+                    and not await has_terminal_runtime_released_event(session, workspace_id)
+                ):
+                    await repo.add_event(
+                        ws,
+                        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                        payload={
+                            "compose_project_name": ws.compose_project_name,
+                            "workspace_status": ws.status,
+                            "source": "provisioner_mark_failed",
+                        },
+                    )
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
