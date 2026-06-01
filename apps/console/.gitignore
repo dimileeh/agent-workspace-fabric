@@ -7,3 +7,6 @@ next-env.d.ts
 *.tsbuildinfo
 playwright-report/
 test-results/
+
+# Local design-system specimen (sign-off preview, not shipped)
+design-preview.html
