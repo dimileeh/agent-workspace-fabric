@@ -29,7 +29,7 @@ from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
 )
-from awf.db.models import Workspace
+from awf.db.models import ResourceReservation, Workspace
 from awf.service.scheduler import (
     AGE_BOOST_INTERVAL_SECONDS,
     AGE_BOOST_MAX,
@@ -85,7 +85,7 @@ def _schedulable_workspace_ids_stmt(
     )
     stmt = select(Workspace).where(Workspace.status == status.value)
     if node_id is not None:
-        stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+        stmt = stmt.where(_scheduler_node_scope_condition(status=status, node_id=node_id))
     if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
         stmt = stmt.where(
             or_(
@@ -114,6 +114,37 @@ def _schedulable_workspace_ids_stmt(
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt
+
+
+def _scheduler_node_scope_condition(
+    *,
+    status: WorkspaceStatus,
+    node_id: str,
+) -> ColumnElement[bool]:
+    """Build the node-scope condition for scheduler candidate queries."""
+    if status != WorkspaceStatus.requested:
+        return or_(Workspace.node_id == node_id, Workspace.node_id.is_(None))
+
+    planned_node_id = func.coalesce(
+        Workspace.node_id,
+        _latest_active_resource_reservation_node_id_expr(),
+    )
+    return or_(planned_node_id == node_id, planned_node_id.is_(None))
+
+
+def _latest_active_resource_reservation_node_id_expr() -> ColumnElement[Any]:
+    """Return the latest active resource reservation node for the workspace row."""
+    return cast(
+        "ColumnElement[Any]",
+        select(ResourceReservation.node_id)
+        .where(
+            ResourceReservation.workspace_id == Workspace.id,
+            ResourceReservation.released_at.is_(None),
+        )
+        .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+        .limit(1)
+        .scalar_subquery(),
+    )
 
 
 def _scheduler_scoring_time(

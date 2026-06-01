@@ -19,6 +19,9 @@ from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
     WorkspaceRepository,
     _schedulable_workspace_ids_stmt,
 )
@@ -58,6 +61,40 @@ async def _create_policy_workspace(
     workspace.status = status.value
     await session.flush()
     return workspace
+
+
+async def _reserve_policy_workspace(
+    session: AsyncSession,
+    workspace: Workspace,
+    *,
+    node_id: str,
+) -> None:
+    task = await TaskRepository(session).create_or_get(
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        title=workspace.task_title,
+        prompt=workspace.task_prompt,
+        external_id=None,
+        idempotency_key=f"scheduler-node-scope:{workspace.id}",
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=workspace,
+    )
+    await ResourceReservationRepository(session).create(
+        workspace_id=workspace.id,
+        attempt_id=attempt.id,
+        node_id=node_id,
+        steady_cpu=1.0,
+        steady_memory_gb=1.0,
+        peak_cpu=1.0,
+        peak_memory_gb=1.0,
+        disk_mb=None,
+        dind_slots=0,
+        phase="workspace_lifecycle",
+    )
 
 
 class _FakeScalarResult:
@@ -638,9 +675,48 @@ class TestOwnedPathOverlapLookup:
             )
         )
         assert "workspaces.status = 'requested'" in sql
-        assert "workspaces.node_id = 'worker-node-a'" in sql
-        assert "workspaces.node_id IS NULL" in sql
+        assert "coalesce(workspaces.node_id, (SELECT resource_reservations.node_id" in sql
+        assert "resource_reservations.workspace_id = workspaces.id" in sql
+        assert "resource_reservations.released_at IS NULL" in sql
+        assert "= 'worker-node-a'" in sql
         assert "LIMIT 3" in sql
+
+    @pytest.mark.unit
+    async def test_requested_scheduler_scopes_null_workspace_node_to_active_reservation_node(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Verify requested rows use active reservations for planned node placement."""
+        repo = WorkspaceRepository(session)
+        reserved_for_node_a = await _create_policy_workspace(session, repo)
+        reserved_for_node_b = await _create_policy_workspace(session, repo)
+        unreserved = await _create_policy_workspace(session, repo)
+        already_stamped = await _create_policy_workspace(session, repo)
+        already_stamped.node_id = "worker-node-a"
+        await _reserve_policy_workspace(
+            session,
+            reserved_for_node_a,
+            node_id="worker-node-a",
+        )
+        await _reserve_policy_workspace(
+            session,
+            reserved_for_node_b,
+            node_id="worker-node-b",
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            node_id="worker-node-a",
+            scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+        )
+
+        listed_ids = {workspace.id for workspace in listed}
+        assert reserved_for_node_a.id in listed_ids
+        assert unreserved.id in listed_ids
+        assert already_stamped.id in listed_ids
+        assert reserved_for_node_b.id not in listed_ids
 
     @pytest.mark.unit
     async def test_list_schedulable_workspaces_returns_empty_for_non_positive_limit(self) -> None:
