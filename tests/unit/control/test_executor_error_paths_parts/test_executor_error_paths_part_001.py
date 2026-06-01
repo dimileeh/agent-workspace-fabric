@@ -1339,6 +1339,12 @@ class TestOperatorControlRaces:
         fake.queue_result(returncode=0)  # commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base
+        validation_head = "d" * 40
+        fake.queue_result(returncode=0, stdout=f"{validation_head}\n")  # validation HEAD
+        fake.queue_result(returncode=0, stdout="")  # pre-validation status
+        fake.queue_result(returncode=0, stdout="")  # cleanup status
+        fake.queue_result(returncode=0, stdout=f"{validation_head}\n")  # restore ref
+        fake.queue_result(returncode=0, stdout=f"{validation_head}\n")  # current HEAD
         executor = _make_executor(fake, factory, tmp_path, validation=validation)
 
         await executor.execute(ws_id)
@@ -1409,6 +1415,9 @@ class TestMissingWorktreeFailure:
         fake.queue_result(returncode=0)  # commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base
+        validation_head = "e" * 40
+        fake.queue_result(returncode=0, stdout=f"{validation_head}\n")  # validation HEAD
+        fake.queue_result(returncode=0, stdout="")  # pre-validation status
         executor = _make_executor(fake, factory, tmp_path, validation=validation)
 
         await executor.execute(ws_id)
