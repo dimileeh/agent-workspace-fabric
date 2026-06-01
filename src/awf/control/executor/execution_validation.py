@@ -282,6 +282,7 @@ async def run_validation_and_fix_cycle(
         if planning_validation_handoff is not None and recovery is None
         else 0
     )
+    setup_ignored_paths_snapshot: tuple[str, ...] | None = None
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
     for pass_number in range(max_validation_attempts):
         # This loop covers the initial validation plus any validation or
@@ -336,6 +337,7 @@ async def run_validation_and_fix_cycle(
             capture_ignored_paths_snapshot=True,
         )
         pre_validation_ignored_paths_snapshot = pre_validation_check.ignored_paths_snapshot
+        setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
             message = (
@@ -396,7 +398,7 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
                 ignore_ignored_paths=pre_validation_check.ignored_paths,
-                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot=setup_ignored_paths_snapshot,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -456,7 +458,7 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
                 ignore_ignored_paths=pre_validation_check.ignored_paths,
-                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot=setup_ignored_paths_snapshot,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -504,7 +506,7 @@ async def run_validation_and_fix_cycle(
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
             ignore_ignored_paths=pre_validation_check.ignored_paths,
-            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot=setup_ignored_paths_snapshot,
         )
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(
