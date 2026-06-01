@@ -107,6 +107,24 @@ def test_default_install_rejects_glob_expansion_in_path_awf_version(
 
 
 @pytest.mark.unit
+def test_default_install_rejects_nonzero_path_awf_version_probe(
+    harness: InstallerHarness,
+) -> None:
+    """A matching ``awf --version`` string is rejected when the probe fails."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # install "succeeds" but produces no awf in uv's bin dir
+    harness.add_awf(version="0.1.0", version_rc=1)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "AWF_NOT_REACHABLE" in result.stderr
+    assert "Installed agent-workspace-fabric" not in result.stdout
+
+
+@pytest.mark.unit
 def test_default_install_accepts_matching_path_awf_when_bin_dir_empty(
     harness: InstallerHarness,
 ) -> None:

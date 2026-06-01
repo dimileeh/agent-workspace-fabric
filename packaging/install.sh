@@ -846,7 +846,7 @@ awf_version_matches_install() {
     expected="$(normalize_version_token "$INSTALL_VERSION")"
     [ -n "$expected" ] || return 1
 
-    reported="$("$candidate" --version 2>/dev/null || true)"
+    reported="$("$candidate" --version 2>/dev/null)" || return 1
     [ -n "$reported" ] || return 1
 
     while IFS= read -r token; do
