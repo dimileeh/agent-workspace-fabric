@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
@@ -23,6 +23,8 @@ from awf.runtime.validation import (
     ValidationResult,
 )
 
+_UNSET_SOURCE_HEAD_SHA = object()
+
 
 async def _record_executor_pr_audit_event(
     self: Any,
@@ -36,7 +38,7 @@ async def _record_executor_pr_audit_event(
     remote_branch: str | None = None,
     pr_number: int | None = None,
     pr_url: str | None = None,
-    source_head_sha: str | None = None,
+    source_head_sha: str | None | object = _UNSET_SOURCE_HEAD_SHA,
     source_base_sha: str | None = None,
     operation_id: str | None = None,
     operation_type: str | None = None,
@@ -80,7 +82,7 @@ async def _add_executor_pr_audit_event(
     remote_branch: str | None = None,
     pr_number: int | None = None,
     pr_url: str | None = None,
-    source_head_sha: str | None = None,
+    source_head_sha: str | None | object = _UNSET_SOURCE_HEAD_SHA,
     source_base_sha: str | None = None,
     operation_id: str | None = None,
     operation_type: str | None = None,
@@ -89,6 +91,13 @@ async def _add_executor_pr_audit_event(
     _ = self
     resolved_branch_name = branch_name or workspace.branch_name
     resolved_remote_branch = remote_branch or workspace.remote_push_branch or workspace.branch_name
+    # Omitted source heads get the workspace's last known monitor commit; an
+    # explicit None remains null so genuinely SHA-less events stay visible.
+    resolved_source_head_sha = (
+        workspace.monitor_last_commit_sha
+        if source_head_sha is _UNSET_SOURCE_HEAD_SHA
+        else cast(str | None, source_head_sha)
+    )
     await repo.add_audit_event(
         workspace,
         event_type=event_type,
@@ -100,9 +109,7 @@ async def _add_executor_pr_audit_event(
         operation_type=operation_type,
         pr_number=pr_number if pr_number is not None else workspace.pr_number,
         pr_url=pr_url or workspace.pr_url,
-        # Preserve a commit reference on audit records even when the caller
-        # does not supply a source head explicitly.
-        source_head_sha=source_head_sha or workspace.monitor_last_commit_sha,
+        source_head_sha=resolved_source_head_sha,
         source_base_sha=source_base_sha or workspace.base_commit,
         target_branch=workspace.branch_base,
         remote_branch=resolved_remote_branch,

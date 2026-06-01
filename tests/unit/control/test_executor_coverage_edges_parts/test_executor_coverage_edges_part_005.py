@@ -792,6 +792,38 @@ async def test_executor_pr_audit_event_defaults_source_head_sha_from_workspace()
 
 
 @pytest.mark.unit
+async def test_executor_pr_audit_event_preserves_explicit_none_source_head_sha() -> None:
+    captured_events: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        async def add_audit_event(self, _workspace: object, **kwargs: object) -> None:
+            captured_events.append(kwargs)
+
+    workspace = SimpleNamespace(
+        branch_name="awf/ws",
+        remote_push_branch=None,
+        pr_number=348,
+        pr_url="https://example.test/pr/348",
+        monitor_last_commit_sha="h" * 40,
+        base_commit="b" * 40,
+        branch_base="main",
+    )
+
+    await executor_monitor_handoff_audit._add_executor_pr_audit_event(
+        object(),
+        FakeWorkspaceRepository(),  # type: ignore[arg-type]
+        workspace,  # type: ignore[arg-type]
+        event_type="monitor_handoff.audit",
+        action="handoff",
+        outcome="succeeded",
+        reason_code="monitor_handoff",
+        source_head_sha=None,
+    )
+
+    assert captured_events[0]["source_head_sha"] is None
+
+
+@pytest.mark.unit
 def test_active_recovery_payload_ignores_rebase_validate_only_operations() -> None:
     workspace = SimpleNamespace(
         operations=[
