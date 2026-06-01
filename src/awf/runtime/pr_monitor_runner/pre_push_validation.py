@@ -407,12 +407,16 @@ async def _run_pre_push_validation_with_fix_passes(
         )
         if fix_pass_failure_reason is not None:
             failure_label = (
-                "cleanup failed"
-                if committed
+                "infrastructure failed"
+                if fix_pass_failure_reason == PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
                 else (
-                    "rollback failed"
-                    if fix_pass_failure_reason == PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
-                    else "rollback cleanup failed"
+                    "cleanup failed"
+                    if committed
+                    else (
+                        "rollback failed"
+                        if fix_pass_failure_reason == PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+                        else "rollback cleanup failed"
+                    )
                 )
             )
             return replace(
@@ -772,7 +776,7 @@ async def _run_pre_push_validation_fix_pass(
                 workspace_id=workspace_id,
                 pass_number=pass_number,
             )
-            return True, VALIDATION_WORKTREE_CLEANUP_FAILED
+            return True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
         cleanup = await _pre_push_validation_cleanup(
             self,
             worktree_path=worktree_path,

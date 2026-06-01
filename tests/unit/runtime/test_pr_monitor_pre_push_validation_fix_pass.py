@@ -450,6 +450,78 @@ async def test_pre_push_validation_fix_pass_cleans_ignored_artifacts_after_commi
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_commit_head_capture_failure_is_infrastructure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-commit HEAD capture failure is not a validation-worktree cleanup failure."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed tests\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fix_start_head = "1" * 40
+    rev_parse_results: list[str | None] = [fix_start_head, None]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return True
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **_kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        raise AssertionError("cleanup should not run without a committed HEAD")
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert failure_reason == pre_push_validation.PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+    assert rev_parse_results == []
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_cleanup_failure_stops_retry(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -520,6 +592,82 @@ async def test_pre_push_validation_fix_pass_cleanup_failure_stops_retry(
     assert validation_calls == 1
     assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
     assert "fix pass cleanup failed" in result.message
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_infrastructure_failure_avoids_cleanup_label(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committed fix-pass infrastructure failures should not be reported as cleanup failures."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = "workspace_fix_commit_head_unavailable"
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True, exist_ok=True)
+    validation_calls = 0
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr1",
+        workspace_head_sha="a" * 40,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="attempt 1 failed",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
+    )
+
+    async def _run_pre_push_validation(
+        _self: Any,
+        **_kwargs: object,
+    ) -> pre_push_validation._PrePushValidationResult:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls > 1:
+            raise AssertionError("infrastructure failure should stop before retry validation")
+        return validation_result
+
+    async def _run_fix_pass(_runner: object, **_kwargs: object) -> tuple[bool, str | None]:
+        return True, pre_push_validation.PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation",
+        _run_pre_push_validation,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation_fix_pass",
+        _run_fix_pass,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation_with_fix_passes(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+        remote_url=None,
+        state=None,
+    )
+
+    assert validation_calls == 1
+    assert (
+        result.reason_code == pre_push_validation.PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+    )
+    assert "fix pass infrastructure failed" in result.message
+    assert "cleanup failed" not in result.message
 
 
 @pytest.mark.unit
