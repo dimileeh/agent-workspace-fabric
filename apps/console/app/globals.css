@@ -1,48 +1,189 @@
 @import "tailwindcss";
 
+/*
+ * AWF Console design tokens — "control room".
+ * One source of truth: every theme (light / dark / high-contrast) re-declares
+ * the same semantic variables; utilities below reference them via @theme inline.
+ * Legacy aliases (--background, --panel, --border, ...) are kept so existing
+ * Tailwind arbitrary-value utilities keep resolving against the same palette.
+ */
+
+@theme inline {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", Menlo,
+    ui-monospace, monospace;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-elevated: var(--elevated);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+  --color-fg-strong: var(--fg-strong);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-border: var(--info-border);
+  --color-info-text: var(--info-text);
+
+  --color-healthy: var(--healthy);
+  --color-healthy-soft: var(--healthy-soft);
+  --color-healthy-border: var(--healthy-border);
+  --color-healthy-text: var(--healthy-text);
+
+  --color-attention: var(--attention);
+  --color-attention-soft: var(--attention-soft);
+  --color-attention-border: var(--attention-border);
+  --color-attention-text: var(--attention-text);
+
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-border: var(--danger-border);
+  --color-danger-text: var(--danger-text);
+
+  --color-pr: var(--pr);
+  --color-pr-soft: var(--pr-soft);
+  --color-pr-border: var(--pr-border);
+  --color-pr-text: var(--pr-text);
+
+  --color-idle: var(--idle);
+  --color-idle-soft: var(--idle-soft);
+  --color-idle-border: var(--idle-border);
+  --color-idle-text: var(--idle-text);
+
+  --radius-control: 4px;
+  --radius-panel: 8px;
+}
+
 :root {
   color-scheme: light;
   font-size: 100%;
-  --background: #f7f8fa;
-  --foreground: #17202b;
-  --panel: #ffffff;
-  --panel-muted: #f0f3f6;
-  --border: #d7dde5;
-  --border-strong: #aeb8c5;
-  --muted: #5e6a78;
-  --muted-strong: #3f4a56;
-  --accent: #1677ff;
+
+  /* control-room neutrals */
+  --canvas: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #eef2f7;
+  --elevated: #ffffff;
+  --line: #d7dde5;
+  --line-strong: #aeb8c5;
+  --fg: #16202b;
+  --fg-strong: #2b3744;
+  --fg-muted: #5a6675;
+  --fg-faint: #8593a3;
+  --accent: #2f6fe0;
   --accent-soft: #e7f1ff;
-  --success: #148f63;
-  --warning: #a76100;
-  --danger: #c24135;
-  --terminal: #101722;
-  --terminal-foreground: #f1f5f9;
-  --focus-ring: #1677ff;
-  --focus-shadow: rgb(22 119 255 / 18%);
+
+  /* semantic status — main / soft / border / text */
+  --info: #2f6fe0;
+  --info-soft: #e7f1ff;
+  --info-border: #b9d2f7;
+  --info-text: #14478f;
+
+  --healthy: #15875a;
+  --healthy-soft: #e3f5ec;
+  --healthy-border: #a7dcc3;
+  --healthy-text: #0d5f3f;
+
+  --attention: #9a6400;
+  --attention-soft: #fdf3e0;
+  --attention-border: #f0d9a8;
+  --attention-text: #7a4f00;
+
+  --danger: #c0392f;
+  --danger-soft: #fdecea;
+  --danger-border: #f3b9b3;
+  --danger-text: #8f2820;
+
+  --pr: #2f6fe0;
+  --pr-soft: #e7f1ff;
+  --pr-border: #b9d2f7;
+  --pr-text: #14478f;
+
+  --idle: #64748b;
+  --idle-soft: #eef2f7;
+  --idle-border: #d7dde5;
+  --idle-text: #475569;
+
+  --terminal: #0b1220;
+  --terminal-foreground: #e7edf6;
+
+  --focus-ring: #2f6fe0;
+  --focus-shadow: rgb(47 111 224 / 18%);
   --focus-width: 2px;
   --selection: #cfe3ff;
   --scrollbar-thumb: #c7d0dc;
   --scrollbar-thumb-hover: #9aa8b8;
+
+  /* legacy aliases kept for existing arbitrary-value utilities */
+  --background: var(--canvas);
+  --foreground: var(--fg);
+  --panel: var(--surface);
+  --panel-muted: var(--surface-2);
+  --border: var(--line);
+  --border-strong: var(--line-strong);
+  --muted: var(--fg-muted);
+  --muted-strong: var(--fg-strong);
+  --success: var(--healthy);
+  --warning: var(--attention);
+  --danger-legacy: var(--danger);
 }
 
 :root[data-awf-theme="dark"] {
   color-scheme: dark;
-  --background: #0b1118;
-  --foreground: #e7edf6;
-  --panel: #101823;
-  --panel-muted: #162231;
-  --border: #273649;
-  --border-strong: #5a6d84;
-  --muted: #a8b4c4;
-  --muted-strong: #d3dce8;
-  --accent: #7db7ff;
-  --accent-soft: #102b47;
-  --success: #6ee7a8;
-  --warning: #f4c86a;
+
+  --canvas: #0b0e14;
+  --surface: #111722;
+  --surface-2: #161d2b;
+  --elevated: #1b2433;
+  --line: rgb(226 232 240 / 14%);
+  --line-strong: rgb(226 232 240 / 28%);
+  --fg: rgb(226 232 240);
+  --fg-strong: rgb(226 232 240 / 85%);
+  --fg-muted: rgb(226 232 240 / 66%);
+  --fg-faint: rgb(226 232 240 / 42%);
+  --accent: #5b9dff;
+  --accent-soft: rgb(91 157 255 / 16%);
+
+  /* solid, saturated dark tints so status reads vividly (not washed-out overlays) */
+  --info: #5b9dff;
+  --info-soft: #102b47;
+  --info-border: #3b82c4;
+  --info-text: #bfdbfe;
+
+  --healthy: #34d399;
+  --healthy-soft: #0d2f24;
+  --healthy-border: #24845f;
+  --healthy-text: #b7f7d4;
+
+  --attention: #f4c86a;
+  --attention-soft: #322507;
+  --attention-border: #946a1d;
+  --attention-text: #fde68a;
+
   --danger: #fb8b83;
-  --terminal: #050a12;
+  --danger-soft: #3a1111;
+  --danger-border: #a34444;
+  --danger-text: #fecaca;
+
+  --pr: #5b9dff;
+  --pr-soft: #102b47;
+  --pr-border: #3b82c4;
+  --pr-text: #bfdbfe;
+
+  --idle: #8896a8;
+  --idle-soft: #1b2433;
+  --idle-border: rgb(226 232 240 / 16%);
+  --idle-text: #c1cbd8;
+
+  --terminal: #05080e;
   --terminal-foreground: #e7edf6;
+
   --focus-ring: #8bc2ff;
   --focus-shadow: rgb(125 183 255 / 28%);
   --selection: #214f7a;
@@ -51,31 +192,58 @@
 }
 
 :root[data-awf-contrast="high"] {
-  --foreground: #07111f;
-  --border: #6b7280;
-  --border-strong: #111827;
-  --muted: #273241;
-  --muted-strong: #111827;
+  --fg: #07111f;
+  --fg-strong: #111827;
+  --fg-muted: #273241;
+  --fg-faint: #3f4a56;
+  --line: #6b7280;
+  --line-strong: #111827;
   --accent: #0046b8;
+  --info: #0046b8;
+  --info-border: #0046b8;
+  --info-text: #07111f;
+  --healthy-border: #0d5f3f;
+  --healthy-text: #07111f;
+  --attention-border: #7a4f00;
+  --attention-text: #2b1a00;
+  --danger-border: #8f2820;
+  --danger-text: #4a0f0a;
+  --pr-border: #4a2599;
+  --pr-text: #2c0f6b;
   --focus-ring: #003cff;
   --focus-shadow: rgb(0 60 255 / 28%);
   --focus-width: 3px;
 }
 
 :root[data-awf-theme="dark"][data-awf-contrast="high"] {
-  --background: #000000;
-  --foreground: #ffffff;
-  --panel: #060a10;
-  --panel-muted: #101721;
-  --border: #9ca3af;
-  --border-strong: #ffffff;
-  --muted: #f3f4f6;
-  --muted-strong: #ffffff;
+  --canvas: #000000;
+  --surface: #060a10;
+  --surface-2: #101721;
+  --elevated: #141c28;
+  --line: #9ca3af;
+  --line-strong: #ffffff;
+  --fg: #ffffff;
+  --fg-strong: #ffffff;
+  --fg-muted: #f3f4f6;
+  --fg-faint: #d1d5db;
   --accent: #facc15;
-  --accent-soft: #302b06;
-  --success: #86efac;
-  --warning: #fde68a;
+  --accent-soft: rgb(250 204 21 / 18%);
+  --info: #facc15;
+  --info-soft: rgb(250 204 21 / 18%);
+  --info-border: #facc15;
+  --info-text: #fde68a;
+  --healthy: #86efac;
+  --healthy-text: #bbf7d0;
+  --healthy-border: #86efac;
+  --attention: #fde68a;
+  --attention-text: #fef3c7;
+  --attention-border: #fde68a;
   --danger: #fca5a5;
+  --danger-text: #fecaca;
+  --danger-border: #fca5a5;
+  --pr: #e9d5ff;
+  --pr-text: #f3e8ff;
+  --pr-border: #e9d5ff;
   --terminal: #000000;
   --terminal-foreground: #ffffff;
   --focus-ring: #facc15;
@@ -97,10 +265,9 @@ html,
 body {
   min-height: 100%;
   margin: 0;
-  background: var(--background);
-  color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--canvas);
+  color: var(--fg);
+  font-family: var(--font-sans);
   letter-spacing: 0;
 }
 
@@ -134,8 +301,94 @@ textarea:focus-visible,
 pre,
 code,
 .mono {
-  font-family:
-    "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", Menlo, ui-monospace, monospace;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* numeric alignment for metrics, counts, costs, capacity readouts */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* type-scale helpers (control-room) */
+.label-caps {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.kpi-value {
+  font-size: 22px;
+  line-height: 1.1;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Status tones as explicit classes rather than Tailwind-generated utilities.
+ * These are composed at runtime in lib/format.ts, which Tailwind's content
+ * scanner does not reliably pick up — defining them here guarantees they ship,
+ * while staying theme-reactive through the tokens. Border width/radius come
+ * from utility classes already on the element.
+ */
+.tone-neutral {
+  border-color: var(--line);
+  background-color: var(--surface-2);
+  color: var(--fg-muted);
+}
+.tone-info {
+  border-color: var(--info-border);
+  background-color: var(--info-soft);
+  color: var(--info-text);
+}
+.tone-good {
+  border-color: var(--healthy-border);
+  background-color: var(--healthy-soft);
+  color: var(--healthy-text);
+}
+.tone-warn {
+  border-color: var(--attention-border);
+  background-color: var(--attention-soft);
+  color: var(--attention-text);
+}
+.tone-bad {
+  border-color: var(--danger-border);
+  background-color: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.tone-text-neutral {
+  color: var(--idle);
+}
+.tone-text-info {
+  color: var(--info);
+}
+.tone-text-good {
+  color: var(--healthy);
+}
+.tone-text-warn {
+  color: var(--attention);
+}
+.tone-text-bad {
+  color: var(--danger);
+}
+
+.tone-fill-neutral {
+  background-color: var(--idle);
+}
+.tone-fill-info {
+  background-color: var(--info);
+}
+.tone-fill-good {
+  background-color: var(--healthy);
+}
+.tone-fill-warn {
+  background-color: var(--attention);
+}
+.tone-fill-bad {
+  background-color: var(--danger);
 }
 
 ::selection {
@@ -163,24 +416,30 @@ code,
   background-clip: padding-box;
 }
 
+/*
+ * Compatibility bridge: existing components style chrome with hardcoded slate/
+ * tint utilities. These map them onto the semantic tokens so every theme stays
+ * in lockstep with the single token source above. New components should prefer
+ * the semantic utilities (bg-surface, text-fg-muted, border-line, ...).
+ */
 [data-awf-theme="dark"] .bg-white {
-  background-color: var(--panel) !important;
+  background-color: var(--surface) !important;
 }
 
 [data-awf-theme="dark"] .bg-white\/70 {
-  background-color: rgb(16 24 35 / 82%) !important;
+  background-color: color-mix(in srgb, var(--surface) 82%, transparent) !important;
 }
 
 [data-awf-theme="dark"] .bg-slate-50 {
-  background-color: var(--panel-muted) !important;
+  background-color: var(--surface-2) !important;
 }
 
 [data-awf-theme="dark"] .bg-slate-100 {
-  background-color: #202e40 !important;
+  background-color: var(--elevated) !important;
 }
 
 [data-awf-theme="dark"] .bg-slate-200 {
-  background-color: #304057 !important;
+  background-color: var(--line-strong) !important;
 }
 
 [data-awf-theme="dark"] .bg-slate-900,
@@ -195,28 +454,28 @@ code,
 
 [data-awf-theme="dark"] .border-slate-100,
 [data-awf-theme="dark"] .border-slate-200 {
-  border-color: var(--border) !important;
+  border-color: var(--line) !important;
 }
 
 [data-awf-theme="dark"] .border-slate-300 {
-  border-color: var(--border-strong) !important;
+  border-color: var(--line-strong) !important;
 }
 
 [data-awf-theme="dark"] .text-slate-950,
 [data-awf-theme="dark"] .text-slate-900,
 [data-awf-theme="dark"] .text-slate-800 {
-  color: var(--foreground) !important;
+  color: var(--fg) !important;
 }
 
 [data-awf-theme="dark"] .text-slate-700,
 [data-awf-theme="dark"] .text-slate-600 {
-  color: var(--muted-strong) !important;
+  color: var(--fg-strong) !important;
 }
 
 [data-awf-theme="dark"] .text-slate-500,
 [data-awf-theme="dark"] .text-slate-400,
 [data-awf-theme="dark"] .text-slate-300 {
-  color: var(--muted) !important;
+  color: var(--fg-muted) !important;
 }
 
 [data-awf-theme="dark"] .text-slate-100 {
@@ -225,75 +484,84 @@ code,
 
 [data-awf-theme="dark"] .hover\:bg-white:hover,
 [data-awf-theme="dark"] .hover\:bg-slate-50:hover {
-  background-color: #1c2a3a !important;
+  background-color: var(--elevated) !important;
 }
 
 [data-awf-theme="dark"] .bg-blue-50 {
-  background-color: #102b47 !important;
+  background-color: var(--info-soft) !important;
 }
 
+[data-awf-theme="dark"] .bg-blue-100 {
+  background-color: var(--info-soft) !important;
+}
+
+[data-awf-theme="dark"] .border-blue-100,
 [data-awf-theme="dark"] .border-blue-200,
 [data-awf-theme="dark"] .border-blue-300,
 [data-awf-theme="dark"] .border-blue-400 {
-  border-color: #3b82c4 !important;
+  border-color: var(--info-border) !important;
 }
 
 [data-awf-theme="dark"] .text-blue-700,
-[data-awf-theme="dark"] .text-blue-800 {
-  color: #bfdbfe !important;
+[data-awf-theme="dark"] .text-blue-800,
+[data-awf-theme="dark"] .text-blue-900,
+[data-awf-theme="dark"] .text-blue-950 {
+  color: var(--info-text) !important;
 }
 
-[data-awf-theme="dark"] .bg-emerald-50 {
-  background-color: #0d2f24 !important;
+[data-awf-theme="dark"] .bg-emerald-50,
+[data-awf-theme="dark"] .bg-emerald-100 {
+  background-color: var(--healthy-soft) !important;
 }
 
 [data-awf-theme="dark"] .border-emerald-200 {
-  border-color: #24845f !important;
+  border-color: var(--healthy-border) !important;
 }
 
 [data-awf-theme="dark"] .text-emerald-700,
 [data-awf-theme="dark"] .text-emerald-800,
 [data-awf-theme="dark"] .text-emerald-900 {
-  color: #b7f7d4 !important;
+  color: var(--healthy-text) !important;
 }
 
-[data-awf-theme="dark"] .bg-amber-50 {
-  background-color: #322507 !important;
+[data-awf-theme="dark"] .bg-amber-50,
+[data-awf-theme="dark"] .bg-amber-100 {
+  background-color: var(--attention-soft) !important;
 }
 
 [data-awf-theme="dark"] .border-amber-100,
 [data-awf-theme="dark"] .border-amber-200,
 [data-awf-theme="dark"] .border-amber-300 {
-  border-color: #946a1d !important;
+  border-color: var(--attention-border) !important;
 }
 
 [data-awf-theme="dark"] .text-amber-700,
 [data-awf-theme="dark"] .text-amber-800,
 [data-awf-theme="dark"] .text-amber-900,
 [data-awf-theme="dark"] .text-amber-950 {
-  color: #fde68a !important;
+  color: var(--attention-text) !important;
 }
 
 [data-awf-theme="dark"] .bg-red-50 {
-  background-color: #3a1111 !important;
+  background-color: var(--danger-soft) !important;
 }
 
 [data-awf-theme="dark"] .border-red-200 {
-  border-color: #a34444 !important;
+  border-color: var(--danger-border) !important;
 }
 
 [data-awf-theme="dark"] .text-red-700,
 [data-awf-theme="dark"] .text-red-800,
 [data-awf-theme="dark"] .text-red-900,
 [data-awf-theme="dark"] .text-red-950 {
-  color: #fecaca !important;
+  color: var(--danger-text) !important;
 }
 
 [data-awf-theme="dark"] table,
 [data-awf-theme="dark"] tr,
 [data-awf-theme="dark"] td,
 [data-awf-theme="dark"] th {
-  border-color: var(--border) !important;
+  border-color: var(--line) !important;
 }
 
 [data-awf-theme="dark"] pre.bg-\[var\(--terminal\)\] {
@@ -311,7 +579,7 @@ code,
 [data-awf-contrast="high"] .border-amber-200,
 [data-awf-contrast="high"] .border-amber-300,
 [data-awf-contrast="high"] .border-red-200 {
-  border-color: var(--border-strong) !important;
+  border-color: var(--line-strong) !important;
 }
 
 [data-awf-contrast="high"] .text-slate-500,
@@ -330,7 +598,7 @@ code,
 [data-awf-contrast="high"] .text-red-800,
 [data-awf-contrast="high"] .text-red-900,
 [data-awf-contrast="high"] .text-red-950 {
-  color: var(--foreground) !important;
+  color: var(--fg) !important;
 }
 
 [data-awf-contrast="high"] .bg-slate-50,
@@ -338,7 +606,18 @@ code,
 [data-awf-contrast="high"] .bg-emerald-50,
 [data-awf-contrast="high"] .bg-amber-50,
 [data-awf-contrast="high"] .bg-red-50 {
-  background-color: var(--panel-muted) !important;
+  background-color: var(--surface-2) !important;
+}
+
+/*
+ * Stale data — ISA-101: never let operators act on outdated readings. When a
+ * surface is flagged stale, desaturate and dim it slightly and show a marker
+ * in the panel header rendered in React.
+ */
+[data-awf-stale="true"] {
+  filter: saturate(0.65);
+  opacity: 0.82;
+  transition: opacity 120ms ease-out, filter 120ms ease-out;
 }
 
 @media (forced-colors: active) {

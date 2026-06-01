@@ -35,18 +35,18 @@ export function WorkspaceInspector({
         />
       )}
       <div
-        className={`fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-slate-200 bg-slate-50 shadow-2xl transition-transform duration-300 xl:w-[calc(100vw-440px)] 2xl:w-[calc(100vw-500px)] ${
+        className={`fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-line bg-surface-2 shadow-2xl transition-transform duration-300 xl:w-[calc(100vw-440px)] 2xl:w-[calc(100vw-500px)] ${
           isOpen ? "translate-x-0" : "translate-x-full"
         }`}
         inert={!isOpen ? true : undefined}
       >
-        <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-5 sm:px-6">
-          <h2 className="min-w-0 truncate text-sm font-semibold text-slate-900">
+        <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-5 sm:px-6">
+          <h2 className="min-w-0 truncate text-sm font-semibold text-fg">
             {title || "Workspace Inspector"}
           </h2>
           <button
             onClick={onClose}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-fg-muted hover:bg-surface-2 hover:text-fg"
             aria-label="Close inspector"
           >
             <X size={18} />

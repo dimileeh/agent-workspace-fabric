@@ -145,6 +145,16 @@ test("mobile theme screenshots cover dashboard, workspace, and logs views", asyn
   await page.screenshot({ path: testInfo.outputPath("mobile-logs.png"), fullPage: true });
 });
 
+test("fleet health strip surfaces the status-layer KPIs", async ({ page }) => {
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const fleet = page.locator('[aria-label="Fleet health"]');
+  await expect(fleet).toBeVisible();
+  await expect(fleet.getByText("Monitoring PR")).toBeVisible();
+  await expect(fleet.getByText("Capacity", { exact: true })).toBeVisible();
+});
+
 async function seedDarkAccessiblePreferences(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.setItem(

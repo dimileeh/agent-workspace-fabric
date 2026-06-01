@@ -26,9 +26,11 @@ compactId,
 fallbackLifecycleStages,
 formatDateTime,
 relativeTime,
+statusGlyph,
 statusTone,
 toneClass,
-toneFillClass
+toneFillClass,
+toneTextClass
 } from "@/lib/format";
 import {
 formatRequiredNextAction,
@@ -84,11 +86,17 @@ type CapacityUnit,
 export function ResourceCapacityPanel({
   saturation,
   error,
+  stale = false,
+  summaryStale = false,
   workspaceSummary,
   workspaceSummaryError,
 }: {
   saturation: ResourceSaturationSummary | null;
   error: string | null;
+  stale?: boolean;
+  // Reliability-summary fields (Stuck, Reason coverage) come from a separate
+  // feed and dim independently of the saturation-driven panel staleness.
+  summaryStale?: boolean;
   workspaceSummary: WorkspaceReliabilitySummary | null;
   workspaceSummaryError: string | null;
 }) {
@@ -114,7 +122,12 @@ export function ResourceCapacityPanel({
     : "";
 
   return (
-    <Panel title="Resource / Runtime Capacity" icon={<Server size={16} aria-hidden />}>
+    <Panel
+      title="Resource / Runtime Capacity"
+      icon={<Server size={16} aria-hidden />}
+      stale={stale || summaryStale}
+      dimBody={false}
+    >
       {!saturation ? (
         <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
       ) : (
@@ -129,6 +142,23 @@ export function ResourceCapacityPanel({
               Unable to load workspace reliability metrics: {workspaceSummaryError}
             </div>
           ) : null}
+          {/* Reliability-summary facts dim with the summary feed only — kept out
+              of the saturation region so a stale saturation snapshot can't fade
+              freshly-refreshed Stuck / Reason coverage. */}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <Fact
+              label="Stuck"
+              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
+              stale={summaryStale}
+            />
+            <Fact
+              label="Reason Coverage"
+              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
+              stale={summaryStale}
+            />
+          </div>
+          {/* Saturation-driven content dims with the saturation feed. */}
+          <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
           <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-950">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold">Scheduler capacity source</span>
@@ -140,14 +170,6 @@ export function ResourceCapacityPanel({
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Fact label="Active" value={`${saturation.workspace_counts.active_total} workspaces`} />
-            <Fact
-              label="Stuck"
-              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
-            />
-            <Fact
-              label="Reason Coverage"
-              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
-            />
             <Fact
               label="Reserved runtime CPU"
               value={`${formatScalar(saturation.reserved_resources.steady_cpu)} steady / ${formatScalar(
@@ -253,6 +275,7 @@ export function ResourceCapacityPanel({
           <div className="text-[11px] text-slate-500">
             generated {relativeTime(saturation.generated_at)}
           </div>
+          </div>
         </div>
       )}
     </Panel>
@@ -309,11 +332,13 @@ export function MergeQueuePanel({
   hasMore,
   status,
   error,
+  stale = false,
 }: {
   items: MergeQueueItem[];
   hasMore: boolean;
   status: MergeQueueStatus;
   error: string | null;
+  stale?: boolean;
 }) {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const hasSnapshot = items.length > 0;
@@ -330,8 +355,11 @@ export function MergeQueuePanel({
     <Panel
       title="Merge Queue"
       icon={<GitPullRequest size={16} aria-hidden />}
+      stale={stale}
+      fill
+      className="2xl:h-full"
       action={
-        <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
+        <span className="rounded-[var(--radius-control)] border border-line bg-surface-2 px-2.5 py-1 text-[11px] text-fg-muted">
           {summary}
         </span>
       }
@@ -343,7 +371,7 @@ export function MergeQueuePanel({
       ) : !hasSnapshot ? (
         <MutedLine>No PR-backed merge candidates are queued.</MutedLine>
       ) : (
-        <div className="grid gap-2">
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
           {error ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               Showing last merge queue snapshot. Refresh failed: {error}
@@ -354,7 +382,7 @@ export function MergeQueuePanel({
               Showing first {items.length} merge candidates. More are queued.
             </div>
           ) : null}
-          <div className="grid max-h-[460px] gap-2 overflow-auto pr-1">
+          <div className="grid max-h-[460px] min-h-0 gap-2 overflow-auto pr-1 2xl:max-h-none 2xl:flex-1">
             {items.map((item, index) => {
               const rowKey = item.candidate_id ?? item.workspace_id;
               const expanded = expandedRows.has(rowKey);
@@ -581,9 +609,11 @@ export function QueueDatum({
   tone?: ReturnType<typeof statusTone>;
 }) {
   return (
-    <div className={`min-w-0 rounded-md border px-2 py-1.5 ${tone ? toneClass(tone) : "border-slate-200 bg-slate-50"}`}>
-      <div className="text-[10px] font-medium text-slate-500">{label}</div>
-      <div className={`${mono ? "mono" : ""} truncate text-[11px] text-slate-900`}>{value}</div>
+    <div className={`min-w-0 rounded-[var(--radius-control)] border px-2 py-1.5 ${tone ? toneClass(tone) : "border-line bg-surface-2"}`}>
+      <div className="label-caps">{label}</div>
+      <div className={`${mono ? "mono" : "tnum"} truncate text-[11px] ${tone && tone !== "neutral" ? "" : "text-fg"}`}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -604,11 +634,13 @@ export function QueueChip({
   return (
     <div
       title={detail ? `${label}: ${value} (${detail})` : `${label}: ${value}`}
-      className={`min-w-0 rounded-md border px-2 py-1 ${toneClass(tone)}`}
+      className={`min-w-0 rounded-[var(--radius-control)] border px-2 py-1 ${toneClass(tone)}`}
     >
-      <div className="text-[10px] font-medium text-slate-500">{label}</div>
-      <div className={`${mono ? "mono" : ""} truncate text-[11px] font-medium text-slate-900`}>{value}</div>
-      {detail ? <div className="truncate text-[10px] text-slate-500">{detail}</div> : null}
+      <div className="label-caps">{label}</div>
+      <div className={`${mono ? "mono" : "tnum"} truncate text-[11px] font-medium ${tone && tone !== "neutral" ? "" : "text-fg"}`}>
+        {value}
+      </div>
+      {detail ? <div className="truncate text-[10px] text-fg-faint">{detail}</div> : null}
     </div>
   );
 }
@@ -771,25 +803,33 @@ export function satisfiedTierTone(label: string): ReturnType<typeof statusTone> 
 }
 
 export function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
-  const items: [string, number][] = [
-    ["requested", counts.requested],
-    ["provisioning", counts.provisioning],
-    ["ready", counts.ready],
-    ["running", counts.running],
-    ["validating", counts.validating],
-    ["pushing", counts.pushing],
-    ["pr", counts.monitoring_pr],
-    ["destroying", counts.destroying],
+  const items: [string, string, number][] = [
+    ["requested", "requested", counts.requested],
+    ["provisioning", "provisioning", counts.provisioning],
+    ["ready", "ready", counts.ready],
+    ["running", "running", counts.running],
+    ["validating", "validating", counts.validating],
+    ["pushing", "pushing", counts.pushing],
+    ["pr", "monitoring_pr", counts.monitoring_pr],
+    ["destroying", "destroying", counts.destroying],
   ];
 
   return (
     <div className="grid grid-cols-2 gap-1 text-xs sm:grid-cols-4 xl:grid-cols-8">
-      {items.map(([label, value]) => (
-        <div key={label} className="min-w-0 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
-          <div className="truncate text-[10px] font-medium text-slate-500">{label}</div>
-          <div className="mono text-sm text-slate-950">{value}</div>
-        </div>
-      ))}
+      {items.map(([label, status, value]) => {
+        const tone = statusTone(status);
+        return (
+          <div key={label} className="min-w-0 rounded-[var(--radius-control)] border border-line bg-surface-2 px-2 py-1.5">
+            <div className="label-caps flex items-center gap-1 truncate">
+              <span aria-hidden className={toneTextClass(tone)}>
+                {statusGlyph(status)}
+              </span>
+              {label}
+            </div>
+            <div className={`mono text-sm ${value > 0 ? toneTextClass(tone) : "text-fg"}`}>{value}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -801,17 +841,17 @@ export function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLan
   const limitLabel = hasFiniteLimit ? `${lane.in_use}/${lane.limit}` : `${lane.in_use} active`;
 
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+    <div className="rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-semibold text-slate-900">{label}</span>
-        <span className={saturated ? "font-semibold text-amber-800" : "text-slate-600"}>
+        <span className="font-semibold text-fg">{label}</span>
+        <span className={`tnum ${saturated ? "font-semibold text-attention-text" : "text-fg-muted"}`}>
           {hasFiniteLimit ? `${limitLabel} in use` : `${limitLabel} / no limit`}
         </span>
       </div>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
-        <div className={saturated ? "h-full bg-amber-500" : "h-full bg-blue-500"} style={{ width: `${fill}%` }} />
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-line">
+        <div className={saturated ? "h-full bg-attention" : "h-full bg-info"} style={{ width: `${fill}%` }} />
       </div>
-      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-fg-muted">
         <span>{lane.queued} queued</span>
         <span>{lane.available} available</span>
       </div>
@@ -835,18 +875,18 @@ export function ResourceDimensionMeter({
   const tone = safeDimension.reason_code ? (safeDimension.reason_code.endsWith("_UNKNOWN") ? "warn" : "bad") : "good";
 
   return (
-    <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
+    <div className={`rounded-[var(--radius-control)] border px-3 py-2 text-xs ${toneClass(tone)}`}>
       <div className="flex items-center justify-between gap-2">
-        <span className="font-semibold text-slate-900">{label}</span>
-        <span className="mono text-slate-700">
+        <span className="font-semibold text-fg">{label}</span>
+        <span className="mono text-fg-strong">
           {formatCapacityValue(safeDimension.reserved, unit)}
           {hasLimit ? ` / ${formatCapacityValue(limit, unit)}` : " / unknown"}
         </span>
       </div>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/70">
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-line">
         <div className={`h-full ${toneFillClass(tone)}`} style={{ width: `${fill}%` }} />
       </div>
-      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-700">
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-fg-strong">
         <span>{formatCapacityValue(safeDimension.available, unit)} available</span>
         <span>{formatCapacityValue(safeDimension.available_after_next_default, unit)} after next</span>
       </div>
@@ -871,32 +911,40 @@ export function LifecycleRail({
     <Panel title="Lifecycle" icon={<GitPullRequest size={16} aria-hidden />}>
       <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
         {stages.map((stage) => {
+          const isActive = stage.status === "active";
+          const isPr = stage.stage === "monitoring_pr";
+          const cellTone =
+            stage.status === "completed"
+              ? "good"
+              : isActive
+                ? "info"
+                : stage.status === "terminal_skipped"
+                  ? "warn"
+                  : "neutral";
           return (
             <div
               key={stage.stage}
-              className={`min-h-16 rounded-md border p-2 ${
-                stage.status === "active"
-                  ? "border-blue-300 bg-blue-50"
-                  : stage.status === "completed"
-                    ? "border-emerald-200 bg-emerald-50"
-                    : stage.status === "terminal_skipped"
-                      ? "border-amber-200 bg-amber-50"
-                      : "border-slate-200 bg-white"
+              className={`min-h-16 rounded-[var(--radius-control)] border p-2 ${
+                stage.status === "pending" ? "border-line bg-surface" : toneClass(cellTone)
               }`}
             >
               <div className="flex items-center gap-1.5">
                 {stage.status === "completed" ? (
-                  <CheckCircle2 size={14} className="text-emerald-700" aria-hidden />
-                ) : stage.status === "active" ? (
-                  <CircleDot size={14} className="text-blue-700" aria-hidden />
+                  <CheckCircle2 size={14} className="text-healthy" aria-hidden />
+                ) : isActive ? (
+                  isPr ? (
+                    <GitPullRequest size={14} className="text-info" aria-hidden />
+                  ) : (
+                    <CircleDot size={14} className="text-info" aria-hidden />
+                  )
                 ) : stage.status === "terminal_skipped" ? (
-                  <AlertCircle size={14} className="text-amber-700" aria-hidden />
+                  <AlertCircle size={14} className="text-attention" aria-hidden />
                 ) : (
-                  <Clock3 size={14} className="text-slate-400" aria-hidden />
+                  <Clock3 size={14} className="text-fg-faint" aria-hidden />
                 )}
                 <span className="truncate text-xs font-medium">{stage.stage}</span>
               </div>
-              <div className="mt-2 grid gap-1 text-[11px] text-slate-600">
+              <div className="mt-2 grid gap-1 text-[11px] text-fg-muted">
                 <div className="truncate">start {formatDateTime(stage.started_at)}</div>
                 <div className="truncate">
                   end {stage.status === "active" ? "active" : formatDateTime(stage.ended_at)}
@@ -908,7 +956,7 @@ export function LifecycleRail({
         })}
       </div>
       {terminal ? (
-        <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <div className="mt-3 inline-flex items-center gap-2 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-3 py-2 text-xs text-attention-text">
           <AlertCircle size={14} aria-hidden />
           Terminal state: {status}
         </div>

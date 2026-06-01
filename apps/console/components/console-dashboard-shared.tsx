@@ -6,8 +6,11 @@ import { createContext,useContext } from "react";
 import { omitUndefined } from "@/lib/api-payload";
 import {
 bytes,
+statusGlyph,
 statusTone,
-toneClass
+toneClass,
+toneTextClass,
+type StatusTone
 } from "@/lib/format";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
@@ -270,48 +273,139 @@ export function Panel({
   title,
   icon,
   action,
+  stale = false,
+  staleLabel = "stale",
+  fill = false,
+  dimBody = true,
+  className = "",
   children,
 }: {
   title: string;
   icon: React.ReactNode;
   action?: React.ReactNode;
+  stale?: boolean;
+  staleLabel?: string;
+  // When true the panel is a flex column so a scrollable child can grow to
+  // fill the panel height (used where a grid column is stretched to a sibling).
+  fill?: boolean;
+  // When false the body is not dimmed on stale (the header badge still shows);
+  // used by panels that dim their content regions individually per data source.
+  dimBody?: boolean;
+  className?: string;
   children: React.ReactNode;
 }) {
   const variant = useContext(PanelContext);
   const isGhost = variant === "ghost";
 
   return (
-    <section className={`min-w-0 w-full max-w-full ${isGhost ? "" : "rounded-md border border-[var(--border)] bg-white"}`}>
-      <div className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 border-slate-100 ${isGhost ? "px-1 py-2" : "px-3 py-2 border-b"}`}>
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
+    <section
+      className={`min-w-0 w-full max-w-full ${fill ? "flex min-h-0 flex-col " : ""}${isGhost ? "" : "rounded-[var(--radius-panel)] border border-line bg-surface"} ${className}`}
+    >
+      <div
+        className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 ${
+          isGhost ? "px-1 py-2" : "border-b border-line px-3 py-2"
+        }`}
+      >
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-fg">
           {icon}
           {title}
         </h2>
-        {action}
+        <div className="flex min-w-0 items-center gap-2">
+          {stale ? (
+            <span
+              title="Showing the last snapshot — live data may be stale"
+              className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 text-[10px] font-medium text-attention-text"
+            >
+              <span aria-hidden>⚠</span>
+              {staleLabel}
+            </span>
+          ) : null}
+          {action}
+        </div>
       </div>
-      <div className={`min-w-0 ${isGhost ? "py-3" : "p-3"}`}>{children}</div>
+      {/* Only the body dims when stale (data-awf-stale) so the header's stale
+          warning badge keeps full opacity. Panels that mix data sources set
+          dimBody={false} and dim their content regions individually instead. */}
+      <div
+        data-awf-stale={stale && dimBody ? "true" : undefined}
+        className={`min-w-0 ${fill ? "flex min-h-0 flex-1 flex-col " : ""}${isGhost ? "py-3" : "p-3"}`}
+      >
+        {children}
+      </div>
     </section>
   );
 }
 
-export function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+export function Fact({
+  label,
+  value,
+  mono = false,
+  stale = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  stale?: boolean;
+}) {
   return (
-    <div className="min-w-0 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-      <div className="text-[11px] font-medium text-slate-500">{label}</div>
-      <div className={`${mono ? "mono" : ""} truncate text-sm text-slate-950`}>{value}</div>
+    <div
+      data-awf-stale={stale ? "true" : undefined}
+      className="min-w-0 rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2"
+    >
+      <div className="label-caps">{label}</div>
+      <div className={`${mono ? "mono" : "tnum"} truncate text-sm text-fg`}>{value}</div>
     </div>
   );
 }
 
+// Status as color + glyph + label (never color alone). Keeps the `Badge` name
+// so existing call sites are unchanged; the rendered status text stays a
+// distinct node so text-based selectors still match exactly.
 export function Badge({ value }: { value: string }) {
+  const tone = statusTone(value);
   return (
     <span
-      className={`inline-flex h-6 shrink-0 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
-        statusTone(value),
+      className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-[var(--radius-control)] border px-2 text-[11px] font-medium ${toneClass(
+        tone,
       )}`}
     >
-      {value}
+      <span aria-hidden className="text-[10px] leading-none">
+        {statusGlyph(value)}
+      </span>
+      <span>{value}</span>
     </span>
+  );
+}
+
+// Single-glance KPI for the Status layer: a big tabular value with optional
+// tone color and a contextual hint.
+export function KpiStat({
+  label,
+  value,
+  tone,
+  suffix,
+  hint,
+  stale = false,
+}: {
+  label: string;
+  value: string | number;
+  tone?: StatusTone;
+  suffix?: string;
+  hint?: string;
+  stale?: boolean;
+}) {
+  return (
+    <div
+      data-awf-stale={stale ? "true" : undefined}
+      className="min-w-0 rounded-[var(--radius-panel)] border border-line bg-surface px-3 py-2"
+    >
+      <div className="label-caps truncate">{label}</div>
+      <div className={`kpi-value mt-0.5 truncate ${tone ? toneTextClass(tone) : "text-fg"}`}>
+        {value}
+        {suffix ? <span className="ml-0.5 text-sm font-normal text-fg-faint">{suffix}</span> : null}
+      </div>
+      {hint ? <div className="mt-0.5 truncate text-[11px] text-fg-muted">{hint}</div> : null}
+    </div>
   );
 }
 

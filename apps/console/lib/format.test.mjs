@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  capacityUtilizationPct,
   fallbackLifecycleStages,
   fallbackLlmUsage,
   formatCostWithPricing,
@@ -10,6 +11,36 @@ import {
   renderLogEntries,
   toneFillClass,
 } from "./format.ts";
+
+function dim(reserved, limit) {
+  return { limit, reserved, available: null, available_after_next_default: null, reason_code: null };
+}
+
+function saturationFixture(overrides = {}) {
+  return {
+    allocated_capacity: {
+      steady_cpu: dim(0, 8),
+      peak_cpu: dim(0, 8),
+      steady_memory_gb: dim(0, 16),
+      peak_memory_gb: dim(0, 16),
+      disk_mb: dim(0, 10240),
+      dind_slots: dim(0, 2),
+      pressure_reasons: [],
+      ...(overrides.allocated_capacity ?? {}),
+    },
+    capacity: {
+      pressure_reasons: [],
+      ...(overrides.capacity ?? {}),
+    },
+    concurrency: {
+      provision: { limit: 2, in_use: 0, queued: 0, available: 2 },
+      execution: { limit: 2, in_use: 0, queued: 0, available: 2 },
+      ...(overrides.concurrency ?? {}),
+    },
+    disk: { ok: true, ...(overrides.disk ?? {}) },
+    admission: { ok: true, ...(overrides.admission ?? {}) },
+  };
+}
 
 test("fallbackLifecycleStages marks terminal successors skipped", () => {
   const stages = Object.fromEntries(
@@ -174,9 +205,111 @@ test("formatCostWithPricing suppresses stale-pricing suffix when source is ccusa
 });
 
 test("toneFillClass maps warning and bad pressure to distinct fills", () => {
-  assert.equal(toneFillClass("good"), "bg-emerald-500");
-  assert.equal(toneFillClass("warn"), "bg-amber-500");
-  assert.equal(toneFillClass("bad"), "bg-red-500");
+  assert.equal(toneFillClass("good"), "tone-fill-good");
+  assert.equal(toneFillClass("warn"), "tone-fill-warn");
+  assert.equal(toneFillClass("bad"), "tone-fill-bad");
+});
+
+test("capacityUtilizationPct takes the worst CPU/memory dimension", () => {
+  const saturation = saturationFixture({
+    allocated_capacity: {
+      steady_cpu: dim(2, 8),
+      peak_cpu: dim(6, 8),
+      steady_memory_gb: dim(4, 16),
+      peak_memory_gb: dim(8, 16),
+      disk_mb: dim(0, 10240),
+      dind_slots: dim(0, 2),
+      pressure_reasons: [],
+    },
+  });
+  assert.equal(capacityUtilizationPct(saturation), 75);
+});
+
+test("capacityUtilizationPct flags a saturated DinD-slot constraint while CPU/memory are idle", () => {
+  const saturation = saturationFixture({
+    allocated_capacity: {
+      steady_cpu: dim(0, 8),
+      peak_cpu: dim(0, 8),
+      steady_memory_gb: dim(0, 16),
+      peak_memory_gb: dim(0, 16),
+      disk_mb: dim(0, 10240),
+      dind_slots: dim(2, 2),
+      pressure_reasons: [],
+    },
+  });
+  assert.equal(capacityUtilizationPct(saturation), 100);
+});
+
+test("capacityUtilizationPct counts a saturated provision lane", () => {
+  const saturation = saturationFixture({
+    concurrency: {
+      provision: { limit: 2, in_use: 2, queued: 1, available: 0 },
+      execution: { limit: 2, in_use: 0, queued: 0, available: 2 },
+    },
+  });
+  assert.equal(capacityUtilizationPct(saturation), 100);
+});
+
+test("capacityUtilizationPct falls back to capacity.pressure_reasons when allocated is empty", () => {
+  const saturation = saturationFixture({
+    allocated_capacity: {
+      steady_cpu: dim(1, 8),
+      peak_cpu: dim(1, 8),
+      steady_memory_gb: dim(0, 16),
+      peak_memory_gb: dim(0, 16),
+      disk_mb: dim(0, 10240),
+      dind_slots: dim(0, 2),
+      pressure_reasons: [],
+    },
+    capacity: { pressure_reasons: ["DIND_CAPACITY_SATURATED"] },
+  });
+  assert.equal(capacityUtilizationPct(saturation), 100);
+});
+
+test("capacityUtilizationPct treats blocked disk/admission as exhausted", () => {
+  assert.equal(capacityUtilizationPct(saturationFixture({ disk: { ok: false } })), 100);
+  assert.equal(capacityUtilizationPct(saturationFixture({ admission: { ok: false } })), 100);
+});
+
+test("capacityUtilizationPct reflects admission saturated as at-least-warn", () => {
+  assert.equal(
+    capacityUtilizationPct(saturationFixture({ admission: { ok: true, status: "saturated" } })),
+    75,
+  );
+});
+
+test("capacityUtilizationPct returns null when no limit is comparable", () => {
+  const saturation = saturationFixture({
+    allocated_capacity: {
+      steady_cpu: dim(0, 0),
+      peak_cpu: dim(0, null),
+      steady_memory_gb: dim(0, 0),
+      peak_memory_gb: dim(0, null),
+      disk_mb: dim(0, 0),
+      dind_slots: dim(0, 0),
+      pressure_reasons: [],
+    },
+    concurrency: {
+      provision: { limit: 0, in_use: 0, queued: 0, available: 0 },
+      execution: { limit: 0, in_use: 0, queued: 0, available: 0 },
+    },
+  });
+  assert.equal(capacityUtilizationPct(saturation), null);
+});
+
+test("capacityUtilizationPct honors a *_SATURATED pressure reason with no comparable limit", () => {
+  const saturation = saturationFixture({
+    allocated_capacity: {
+      steady_cpu: dim(0, 8),
+      peak_cpu: dim(0, 8),
+      steady_memory_gb: dim(0, 16),
+      peak_memory_gb: dim(0, 16),
+      disk_mb: dim(0, 0),
+      dind_slots: dim(0, 0),
+      pressure_reasons: ["DIND_CAPACITY_SATURATED"],
+    },
+  });
+  assert.equal(capacityUtilizationPct(saturation), 100);
 });
 
 test("renderLogEntries preserves message order inside chunks in asc mode", () => {

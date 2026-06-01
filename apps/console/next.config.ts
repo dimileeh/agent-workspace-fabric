@@ -3,9 +3,11 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
-const allowedDevOrigins = parseAllowedDevOrigins(
-  process.env.AWF_CONSOLE_ALLOWED_DEV_ORIGINS,
-);
+const defaultAllowedDevOrigins = ["127.0.0.1", "localhost"];
+const allowedDevOrigins = uniqueAllowedDevOrigins([
+  ...defaultAllowedDevOrigins,
+  ...parseAllowedDevOrigins(process.env.AWF_CONSOLE_ALLOWED_DEV_ORIGINS),
+]);
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -22,4 +24,8 @@ function parseAllowedDevOrigins(value: string | undefined): string[] {
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
+}
+
+function uniqueAllowedDevOrigins(origins: string[]): string[] {
+  return Array.from(new Set(origins));
 }
