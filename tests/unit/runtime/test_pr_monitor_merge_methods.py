@@ -529,3 +529,71 @@ async def test_mismatched_first_merge_rejection_retries_allowed_alternative(
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_mismatched_last_merge_rejection_records_method_blocker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A mismatched method-specific rejection blocks after alternatives are exhausted."""
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Merge commits are not allowed on this repository.",
+            )
+        ],
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert len(gh.comments) == 1
+    assert "merge method" in gh.comments[0]
+    assert sleep_fn.calls == [60]
+    assert any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_unclassified_last_method_rejection_records_method_blocker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An unclassified method-related rejection blocks after alternatives are exhausted."""
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            )
+        ],
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert len(gh.comments) == 1
+    assert "merge method" in gh.comments[0]
+    assert sleep_fn.calls == [60]
+    assert any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )

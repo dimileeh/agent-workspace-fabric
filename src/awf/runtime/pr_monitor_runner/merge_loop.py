@@ -634,7 +634,9 @@ async def handle_merge_action(
                                         method=merge_method,
                                     )
                                 except GitHubClientError as exc:
-                                    rejected_method = _merge_method_rejection_method(exc)
+                                    is_method_rejection = _merge_error_supports_method_alternative(
+                                        exc
+                                    )
                                     await self._finish_monitor_operation(
                                         merge_operation,
                                         status=OperationStatus.failed,
@@ -672,12 +674,9 @@ async def handle_merge_action(
                                     has_remaining_alternative = (
                                         attempt_index < len(effective_methods) - 1
                                     )
-                                    if (
-                                        has_remaining_alternative
-                                        and _merge_error_supports_method_alternative(exc)
-                                    ):
+                                    if has_remaining_alternative and is_method_rejection:
                                         continue
-                                    if rejected_method == merge_method:
+                                    if is_method_rejection:
                                         merge_method_notification_reason = (
                                             _merge_method_mismatch_message(
                                                 base_branch=base_branch,
