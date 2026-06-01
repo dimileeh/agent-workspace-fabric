@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +52,15 @@ from awf.control.executor.types import (
     _PostValidationConformanceReportWriteError,
     _RebaseRecoveryResult,
 )
+from awf.control.executor.validation_cleanup_guards import (
+    ExecutionValidationResult,
+)
+from awf.control.executor.validation_cleanup_guards import (
+    fail_validation_worktree_guard as _fail_validation_worktree_guard,
+)
+from awf.control.executor.validation_cleanup_guards import (
+    handle_validation_cleanup_guard as _handle_validation_cleanup_guard,
+)
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
     find_protected_quality_gate_changes,
@@ -65,15 +74,109 @@ from awf.control.validation_fix_cycle import (
 )
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.runtime.validation import ValidationCoverageResult, profile_phase_command_plan
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationCoverageResult,
+    ValidationResult,
+    profile_phase_command_plan,
+)
+from awf.runtime.validation_worktree import (
+    VALIDATION_INFRASTRUCTURE_ERROR,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+    VALIDATION_WORKTREE_STATUS_FAILED,
+    ValidationWorktreeCheck,
+    ValidationWorktreeCleanup,
+    check_validation_worktree_clean,
+    cleanup_validation_worktree_side_effects,
+    validation_worktree_preexisting_dirty_message,
+)
 
 
-@dataclass(frozen=True)
-class ExecutionValidationResult:
-    stop: bool
-    successful_validation_run_id: str | None
-    successful_validation_workspace_head_sha: str | None
-    has_known_non_plan_output: bool
+def _setup_ignored_snapshot_drift(
+    *,
+    setup_ignored_paths: tuple[str, ...],
+    setup_ignored_roots: tuple[str, ...] | None,
+    setup_ignored_path_signatures: tuple[tuple[str, str], ...] | None = None,
+    current_ignored_paths: tuple[str, ...],
+    current_ignored_roots: tuple[str, ...] | None,
+    current_ignored_path_signatures: tuple[tuple[str, str], ...] | None = None,
+) -> tuple[str, ...]:
+    """Return ignored snapshot entries that differ from setup baseline."""
+    setup_path_set = set(setup_ignored_paths)
+    setup_root_set = set(setup_ignored_roots or ())
+    current_path_set = set(current_ignored_paths)
+    current_root_set = set(current_ignored_roots or ())
+    signature_drift: tuple[str, ...] = ()
+    if setup_ignored_path_signatures or current_ignored_path_signatures:
+        setup_signature_map = dict(setup_ignored_path_signatures or ())
+        current_signature_map = dict(current_ignored_path_signatures or ())
+        signature_drift = tuple(
+            path
+            for path in setup_ignored_paths
+            if path in current_path_set
+            and setup_signature_map.get(path) != current_signature_map.get(path)
+        )
+    drift = (
+        tuple(path for path in current_ignored_roots or () if path not in setup_root_set)
+        + tuple(path for path in current_ignored_paths if path not in setup_path_set)
+        + tuple(path for path in (setup_ignored_roots or ()) if path not in current_root_set)
+        + tuple(path for path in setup_ignored_paths if path not in current_path_set)
+        + signature_drift
+    )
+    return tuple(dict.fromkeys(drift))
+
+
+def _safe_validation_artifact_name(value: str) -> str:
+    """Return a filesystem-safe artifact name for validation evidence."""
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+    return safe or "validation"
+
+
+def _cleaned_side_effect_paths(cleanup_result: ValidationWorktreeCleanup) -> tuple[str, ...]:
+    """Return stable path evidence for cleaned validation side effects."""
+    return cleanup_result.side_effect_paths
+
+
+def _side_effect_failure_result(
+    *,
+    val_result: ValidationResult,
+    cleanup_result: ValidationWorktreeCleanup,
+    workspace_id: str,
+    validation_run_id: str,
+    artifacts_root: Path,
+) -> ValidationResult:
+    """Add a synthetic validation failure for cleaned successful side effects."""
+    side_effect_paths = _cleaned_side_effect_paths(cleanup_result)
+    paths_text = ", ".join(side_effect_paths) if side_effect_paths else "<unknown>"
+    artifacts_dir = artifacts_root / workspace_id / "validation_worktree"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    safe_validation_run_id = _safe_validation_artifact_name(validation_run_id)
+    stdout_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stdout"
+    stderr_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stderr"
+    stdout_path.write_text(
+        (
+            "AWF validation commands passed only before validation worktree cleanup "
+            "restored or deleted side effects. The restored commit state was not "
+            f"validated. Cleaned paths: {paths_text}."
+        ),
+        encoding="utf-8",
+    )
+    stderr_path.write_text("", encoding="utf-8")
+    command = ValidationCommandResult(
+        command="validation worktree side-effect guard",
+        returncode=1,
+        duration_seconds=0.0,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        reason_code=VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+        policy_failed=True,
+        metadata={
+            "cleaned_paths": list(side_effect_paths),
+            "restore_ref": cleanup_result.restore_ref,
+        },
+    )
+    return replace(val_result, commands=[*val_result.commands, command])
 
 
 async def run_validation_and_fix_cycle(
@@ -96,6 +199,7 @@ async def run_validation_and_fix_cycle(
     has_known_non_plan_output: bool,
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
 ) -> ExecutionValidationResult:
+    """Run validate/fix attempts and emit the terminal validation state."""
     if run_model is None:
         run_model = default_model
 
@@ -149,6 +253,9 @@ async def run_validation_and_fix_cycle(
         if planning_validation_handoff is not None and recovery is None
         else 0
     )
+    setup_ignored_paths_snapshot: tuple[str, ...] | None = None
+    setup_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None
+    setup_ignored_roots_snapshot: tuple[str, ...] | None = None
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
     for pass_number in range(max_validation_attempts):
         # This loop covers the initial validation plus any validation or
@@ -169,6 +276,17 @@ async def run_validation_and_fix_cycle(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
         )
+        pre_validation_check = await check_validation_worktree_clean(
+            run_git=git_in_worktree,
+            worktree_path=worktree_path,
+            ignore_all_ignored=True,
+            capture_ignored_paths_snapshot=True,
+        )
+        pre_validation_ignored_paths_snapshot = pre_validation_check.ignored_paths_snapshot
+        pre_validation_ignored_paths_snapshot_signatures = (
+            pre_validation_check.ignored_paths_snapshot_signatures
+        )
+        pre_validation_ignored_roots_snapshot = pre_validation_check.ignored_paths
         validation_run_id = await self._start_validation_run(
             workspace_id=workspace_id,
             profile=profile,
@@ -178,6 +296,73 @@ async def run_validation_and_fix_cycle(
             target_head_sha=None,
             tier=validation_tier,
         )
+        if not pre_validation_check.clean:
+            reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+            message = (
+                pre_validation_check.message
+                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                else validation_worktree_preexisting_dirty_message(pre_validation_check)
+            )
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                validation_tier=validation_tier,
+                reason_code=reason_code,
+                message=message,
+                has_known_non_plan_output=has_known_non_plan_output,
+            )
+        if validation_workspace_head_sha is None:
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                validation_tier=validation_tier,
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                message="could not capture workspace HEAD before AWF validation",
+                has_known_non_plan_output=has_known_non_plan_output,
+            )
+        if setup_ignored_paths_snapshot is None:
+            setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
+            setup_ignored_paths_snapshot_signatures = (
+                pre_validation_ignored_paths_snapshot_signatures
+            )
+            setup_ignored_roots_snapshot = pre_validation_ignored_roots_snapshot
+        else:
+            setup_ignored_drift = _setup_ignored_snapshot_drift(
+                setup_ignored_paths=setup_ignored_paths_snapshot,
+                setup_ignored_roots=setup_ignored_roots_snapshot,
+                setup_ignored_path_signatures=setup_ignored_paths_snapshot_signatures,
+                current_ignored_paths=pre_validation_ignored_paths_snapshot,
+                current_ignored_roots=pre_validation_ignored_roots_snapshot,
+                current_ignored_path_signatures=(pre_validation_ignored_paths_snapshot_signatures),
+            )
+            if setup_ignored_drift:
+                dirty_check = ValidationWorktreeCheck(
+                    clean=False,
+                    paths=setup_ignored_drift,
+                    untracked_paths=setup_ignored_drift,
+                    reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                    message=(
+                        "Validation worktree ignored entries changed after setup "
+                        "baseline and will not proceed to validation."
+                    ),
+                )
+                reason_code = dirty_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+                message = (
+                    dirty_check.message
+                    if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                    else validation_worktree_preexisting_dirty_message(dirty_check)
+                )
+                return await _fail_validation_worktree_guard(
+                    self,
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    validation_tier=validation_tier,
+                    reason_code=reason_code,
+                    message=message,
+                    has_known_non_plan_output=has_known_non_plan_output,
+                )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
         try:
@@ -213,17 +398,34 @@ async def run_validation_and_fix_cycle(
                 invocation_id=exc.invocation_id,
                 reason_code=exc.reason_code,
             )
-            if await self._finish_validation_callback_if_terminal(
+            callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
                 requested_tier=validation_tier,
-            ):
-                return ExecutionValidationResult(
-                    stop=True,
+            )
+            cleanup_result = await cleanup_validation_worktree_side_effects(
+                run_git=git_in_worktree,
+                worktree_path=worktree_path,
+                restore_ref=validation_workspace_head_sha,
+                ignore_ignored_paths=pre_validation_check.ignored_paths,
+                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
+            )
+            if (
+                cleanup_guard_result := await _handle_validation_cleanup_guard(
+                    self,
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    validation_tier=validation_tier,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     has_known_non_plan_output=has_known_non_plan_output,
+                    callback_ignored=callback_ignored,
+                    cleanup_result=cleanup_result,
+                    check_callback_after_cleanup=True,
                 )
+            ) is not None:
+                return cleanup_guard_result
             await self._finish_validation_run(
                 validation_run_id,
                 status="failed",
@@ -257,28 +459,45 @@ async def run_validation_and_fix_cycle(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
             )
-            if await self._finish_validation_callback_if_terminal(
+            callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
                 requested_tier=validation_tier,
-            ):
-                return ExecutionValidationResult(
-                    stop=True,
+            )
+            cleanup_result = await cleanup_validation_worktree_side_effects(
+                run_git=git_in_worktree,
+                worktree_path=worktree_path,
+                restore_ref=validation_workspace_head_sha,
+                ignore_ignored_paths=pre_validation_check.ignored_paths,
+                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
+            )
+            if (
+                cleanup_guard_result := await _handle_validation_cleanup_guard(
+                    self,
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    validation_tier=validation_tier,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     has_known_non_plan_output=has_known_non_plan_output,
+                    callback_ignored=callback_ignored,
+                    cleanup_result=cleanup_result,
+                    check_callback_after_cleanup=True,
                 )
+            ) is not None:
+                return cleanup_guard_result
             await self._finish_validation_run(
                 validation_run_id,
                 status="failed",
-                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
             )
             await self._finish_pending_validate_operations(
                 workspace_id=workspace_id,
                 status=OperationStatus.failed,
                 validation_run_id=validation_run_id,
                 requested_tier=validation_tier,
-                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 error_message=message,
             )
             await self._mark_failed(
@@ -286,7 +505,7 @@ async def run_validation_and_fix_cycle(
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
                 message=message,
-                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
             )
             return ExecutionValidationResult(
                 stop=True,
@@ -294,6 +513,35 @@ async def run_validation_and_fix_cycle(
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                 has_known_non_plan_output=has_known_non_plan_output,
             )
+        cleanup_result = await cleanup_validation_worktree_side_effects(
+            run_git=git_in_worktree,
+            worktree_path=worktree_path,
+            restore_ref=validation_workspace_head_sha,
+            ignore_ignored_paths=pre_validation_check.ignored_paths,
+            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
+        )
+        if not cleanup_result.ok:
+            callback_ignored = await self._finish_validation_callback_if_terminal(
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+            )
+            if (
+                cleanup_guard_result := await _handle_validation_cleanup_guard(
+                    self,
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    validation_tier=validation_tier,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                    has_known_non_plan_output=has_known_non_plan_output,
+                    callback_ignored=callback_ignored,
+                    cleanup_result=cleanup_result,
+                    check_callback_after_cleanup=True,
+                )
+            ) is not None:
+                return cleanup_guard_result
         if await self._finish_validation_callback_if_terminal(
             workspace_id=workspace_id,
             validation_run_id=validation_run_id,
@@ -309,6 +557,19 @@ async def run_validation_and_fix_cycle(
             val_result,
             baseline_coverage=baseline_coverage,
         )
+        cleaned_side_effects = bool(cleanup_result.side_effect_paths)
+        if (
+            val_result.all_passed
+            and cleanup_result.ok
+            and (cleaned_side_effects or not cleanup_result.check.clean)
+        ):
+            val_result = _side_effect_failure_result(
+                val_result=val_result,
+                cleanup_result=cleanup_result,
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                artifacts_root=self._config.compose_projects_root,
+            )
         validation_coverage = _validation_run_coverage_metadata(
             val_result,
             baseline_coverage=baseline_coverage,
@@ -877,6 +1138,7 @@ async def run_validation_and_fix_cycle(
             operation: str,
             result: CommandResult,
         ) -> None:
+            """Record a validation fix-pass git failure and mark workspace failed."""
             command_output = (result.stderr or result.stdout).strip()
             message = (
                 f"validation fix pass {operation} failed with exit {result.returncode}"
@@ -1125,6 +1387,32 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     has_known_non_plan_output=has_known_non_plan_output,
                 )
+
+        fix_pass_ignored_check = await check_validation_worktree_clean(
+            run_git=git_in_worktree,
+            worktree_path=worktree_path,
+            ignore_all_ignored=True,
+            capture_ignored_paths_snapshot=True,
+        )
+        if not fix_pass_ignored_check.clean:
+            reason_code = (
+                fix_pass_ignored_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+            )
+            message = (
+                fix_pass_ignored_check.message
+                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                else validation_worktree_preexisting_dirty_message(fix_pass_ignored_check)
+            )
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=None,
+                validation_tier=validation_tier,
+                reason_code=reason_code,
+                message=message,
+                has_known_non_plan_output=has_known_non_plan_output,
+            )
+
         # Loop back to re-validate.
 
     return ExecutionValidationResult(

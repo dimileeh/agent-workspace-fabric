@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
@@ -31,10 +32,12 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
@@ -49,12 +52,25 @@ from awf.runtime.validation_types import (
     ValidationCoverageResult,
     ValidationResult,
 )
+from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+    VALIDATION_WORKTREE_STATUS_FAILED,
+)
+
+if TYPE_CHECKING:
+    from awf.runtime.validation_worktree import (
+        ValidationWorktreeCheck,
+        ValidationWorktreeCleanup,
+    )
 
 _log = get_logger(__name__)
 
 PRE_PUSH_VALIDATION_FAILED_REASON = _PRE_PUSH_VALIDATION_FAILED_REASON
 PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
 PRE_PUSH_VALIDATION_FIX_FAILED_REASON = _PRE_PUSH_VALIDATION_FIX_FAILED_REASON
+PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
 PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON = _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON
 
 _FAILING_COMMAND_DETAIL_LIMIT = 1000
@@ -211,6 +227,66 @@ def _pre_push_validation_reason_code(result: ValidationResult) -> str:
     )
 
 
+def _safe_pre_push_validation_artifact_name(value: str) -> str:
+    """Return a filesystem-safe artifact name for pre-push validation evidence."""
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+    return safe or "validation"
+
+
+def _pre_push_side_effect_failure_result(
+    *,
+    result: ValidationResult,
+    cleanup: ValidationWorktreeCleanup,
+    workspace_id: str,
+    validation_run_id: str,
+    artifacts_root: Path,
+) -> tuple[ValidationResult, Mapping[str, object]]:
+    """Add a synthetic failure for passing validation that required cleanup side effects."""
+    side_effect_paths = cleanup.side_effect_paths
+    paths_text = ", ".join(side_effect_paths) if side_effect_paths else "<unknown>"
+    artifacts_dir = artifacts_root / workspace_id / "pre_push_validation_worktree"
+    safe_validation_run_id = _safe_pre_push_validation_artifact_name(validation_run_id)
+    stdout_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stdout"
+    stderr_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stderr"
+    stdout = (
+        "AWF pre-push validation commands passed only before validation worktree "
+        "cleanup restored or deleted side effects. The restored commit state was "
+        f"not validated. Cleaned paths: {paths_text}."
+    )
+    try:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text(stdout, encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+    except OSError as exc:
+        _log.warning(
+            "pre_push_validation.side_effect_artifact_write_failed",
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            error_message=str(exc)[:500],
+        )
+    command = ValidationCommandResult(
+        command="validation worktree side-effect guard",
+        returncode=1,
+        duration_seconds=0.0,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        reason_code=VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+        policy_failed=True,
+        metadata={
+            "cleaned_paths": list(side_effect_paths),
+            "restore_ref": cleanup.restore_ref,
+        },
+        captured_stdout=stdout,
+        captured_stderr="",
+    )
+    details: dict[str, object] = {
+        "side_effect_reason_code": VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
+        "cleaned_paths": list(side_effect_paths),
+        "validation_worktree_cleanup": cleanup.details(),
+    }
+    return replace(result, commands=[*result.commands, command]), details
+
+
 @dataclass(frozen=True)
 class _PrePushValidationResult:
     """Pre-push validation outcome for a single workspace push attempt."""
@@ -223,6 +299,10 @@ class _PrePushValidationResult:
     validation_reason_code: str | None = None
     result: ValidationResult | None = None
     coverage: ValidationCoverageResult | None = None
+    extra_details: Mapping[str, object] | None = None
+    ignore_ignored_paths: tuple[str, ...] = ()
+    ignore_ignored_paths_snapshot: tuple[str, ...] = ()
+    ignore_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] = ()
 
     @property
     def first_failure(self) -> ValidationCommandResult | None:
@@ -244,6 +324,8 @@ class _PrePushValidationResult:
             details["target_head_sha"] = self.workspace_head_sha
         if self.validation_reason_code is not None:
             details["validation_reason_code"] = self.validation_reason_code
+        if self.extra_details is not None:
+            details.update(self.extra_details)
         first_failure = self.first_failure
         if first_failure is not None and not first_failure.ok:
             details["failing_command"] = redact_audit_text(
@@ -322,7 +404,12 @@ async def _run_pre_push_validation_with_fix_passes(
     max_fix_passes = max(0, self._runner_config.pre_push_validation_fix_passes)
     pass_index = 0
     validation_commands: tuple[str, ...] | None = None
+    baseline_ignored_paths: tuple[str, ...] | None = None
+    baseline_ignored_roots: tuple[str, ...] | None = None
+    baseline_ignored_paths_snapshot: tuple[str, ...] | None = None
+    baseline_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None
     while True:
+        ignore_all_ignored = baseline_ignored_paths is None or not baseline_ignored_paths
         validation_result = await _run_pre_push_validation(
             self,
             workspace_id=workspace_id,
@@ -330,12 +417,30 @@ async def _run_pre_push_validation_with_fix_passes(
             compose_project=compose_project,
             compose_file=compose_file,
             remote_branch=remote_branch,
+            ignore_ignored_paths=baseline_ignored_paths,
+            ignore_all_ignored=ignore_all_ignored,
+            capture_ignored_paths_snapshot=(
+                baseline_ignored_paths is None or bool(baseline_ignored_paths)
+            ),
+            baseline_ignored_roots=baseline_ignored_roots,
+            baseline_ignored_paths_snapshot=baseline_ignored_paths_snapshot,
+            baseline_ignored_paths_snapshot_signatures=baseline_ignored_paths_snapshot_signatures,
         )
+        if baseline_ignored_paths is None:
+            baseline_ignored_paths = validation_result.ignore_ignored_paths
+            baseline_ignored_roots = baseline_ignored_paths
+            baseline_ignored_paths_snapshot = validation_result.ignore_ignored_paths_snapshot
+            baseline_ignored_paths_snapshot_signatures = (
+                validation_result.ignore_ignored_paths_snapshot_signatures
+            )
+
         if validation_result.passed:
             return validation_result
         if validation_result.reason_code == PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON:
             return validation_result
         if validation_result.reason_code == PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
+            return validation_result
+        if validation_result.validation_reason_code == VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED:
             return validation_result
         if validation_result.first_failure is None:
             return validation_result
@@ -347,7 +452,7 @@ async def _run_pre_push_validation_with_fix_passes(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
             )
-        committed = await _run_pre_push_validation_fix_pass(
+        committed, fix_pass_failure_reason = await _run_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -356,10 +461,36 @@ async def _run_pre_push_validation_with_fix_passes(
             remote_url=remote_url,
             state=state,
             validation_result=validation_result,
+            ignore_ignored_paths=baseline_ignored_paths or (),
+            ignore_ignored_paths_snapshot=baseline_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=baseline_ignored_paths_snapshot_signatures,
             pass_number=pass_index + 1,
             total_passes=max_fix_passes,
             validation_commands=validation_commands,
         )
+        if fix_pass_failure_reason is not None:
+            failure_label = (
+                "infrastructure failed"
+                if fix_pass_failure_reason == PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+                else (
+                    "cleanup failed"
+                    if committed
+                    else (
+                        "rollback failed"
+                        if fix_pass_failure_reason == PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+                        else "rollback cleanup failed"
+                    )
+                )
+            )
+            return replace(
+                validation_result,
+                reason_code=fix_pass_failure_reason,
+                message=(
+                    f"PR monitor pre-push validation fix pass {failure_label} "
+                    f"after {pass_index + 1}/{max_fix_passes} attempts: "
+                    f"{validation_result.message}"
+                ),
+            )
         if not committed:
             return replace(
                 validation_result,
@@ -370,6 +501,36 @@ async def _run_pre_push_validation_with_fix_passes(
                 ),
             )
         pass_index += 1
+
+
+def _pre_push_validation_ignored_entries_drifted(
+    *,
+    baseline_ignored_roots: tuple[str, ...],
+    baseline_ignored_snapshot: tuple[str, ...],
+    baseline_ignored_snapshot_signatures: tuple[tuple[str, str], ...],
+    current_ignored_roots: tuple[str, ...],
+    current_ignored_snapshot: tuple[str, ...],
+    current_ignored_snapshot_signatures: tuple[tuple[str, str], ...],
+) -> bool:
+    """Detect added, removed, or materially changed ignored worktree entries."""
+    baseline_roots = set(baseline_ignored_roots)
+    current_roots = set(current_ignored_roots)
+    if baseline_roots != current_roots:
+        return True
+
+    baseline_snapshot = set(baseline_ignored_snapshot)
+    current_snapshot = set(current_ignored_snapshot)
+    if baseline_snapshot != current_snapshot:
+        return True
+
+    current_signature_map = dict(current_ignored_snapshot_signatures)
+    baseline_signature_map = dict(baseline_ignored_snapshot_signatures)
+    if baseline_ignored_snapshot_signatures or current_ignored_snapshot_signatures:
+        for path in baseline_snapshot:
+            if baseline_signature_map.get(path) != current_signature_map.get(path):
+                return True
+
+    return False
 
 
 async def _pre_push_validation_commands(
@@ -390,6 +551,107 @@ async def _pre_push_validation_commands(
     )
 
 
+async def _pre_push_validation_worktree_check(
+    self: Any,
+    *,
+    worktree_path: Path,
+    ignore_all_ignored: bool = True,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
+    capture_ignored_paths_snapshot: bool = True,
+) -> ValidationWorktreeCheck:
+    """Check pre-push validation preconditions for clean validation worktree state."""
+
+    async def _run_git(args: list[str]) -> Any:
+        """Run git command arguments inside the workspace worktree."""
+        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    from awf.runtime.validation_worktree import check_validation_worktree_clean
+
+    return await check_validation_worktree_clean(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        ignore_all_ignored=ignore_all_ignored,
+        ignore_ignored_paths=ignore_ignored_paths,
+        capture_ignored_paths_snapshot=capture_ignored_paths_snapshot,
+    )
+
+
+async def _pre_push_validation_cleanup(
+    self: Any,
+    *,
+    worktree_path: Path,
+    restore_ref: str,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
+    ignore_ignored_paths_snapshot: tuple[str, ...] | None = None,
+    ignore_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None,
+) -> ValidationWorktreeCleanup:
+    """Clean validation side effects and restore the worktree to the requested ref."""
+
+    async def _run_git(args: list[str]) -> Any:
+        """Run git command arguments inside the workspace worktree."""
+        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    from awf.runtime.validation_worktree import cleanup_validation_worktree_side_effects
+
+    return await cleanup_validation_worktree_side_effects(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=ignore_ignored_paths,
+        ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+        ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+    )
+
+
+def _pre_push_dirty_result(
+    *,
+    workspace_head_sha: str | None,
+    check: ValidationWorktreeCheck,
+) -> _PrePushValidationResult:
+    """Build a pre-push validation result for pre-existing dirt."""
+    from awf.runtime.validation_worktree import validation_worktree_preexisting_dirty_message
+
+    reason_code = check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    message = (
+        check.message
+        if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+        else validation_worktree_preexisting_dirty_message(check)
+    )
+    return _PrePushValidationResult(
+        passed=False,
+        validation_run_id=None,
+        workspace_head_sha=workspace_head_sha,
+        reason_code=reason_code,
+        message=message,
+        extra_details=check.details(),
+        ignore_ignored_paths_snapshot=check.ignored_paths_snapshot,
+        ignore_ignored_paths_snapshot_signatures=check.ignored_paths_snapshot_signatures,
+    )
+
+
+def _pre_push_cleanup_result(
+    validation_run_id: str | None,
+    workspace_head_sha: str | None,
+    cleanup: ValidationWorktreeCleanup,
+    *,
+    upstream_failure: Mapping[str, object] | None = None,
+) -> _PrePushValidationResult:
+    """Build a pre-push validation result from cleanup failure details."""
+    from awf.runtime.validation_worktree import validation_worktree_cleanup_failure_message
+
+    extra_details: dict[str, object] = cleanup.details()
+    if upstream_failure is not None:
+        extra_details.update(upstream_failure)
+    return _PrePushValidationResult(
+        passed=False,
+        validation_run_id=validation_run_id,
+        workspace_head_sha=workspace_head_sha,
+        reason_code=cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED,
+        message=validation_worktree_cleanup_failure_message(cleanup),
+        extra_details=extra_details,
+    )
+
+
 async def _run_pre_push_validation_fix_pass(
     self: Any,
     *,
@@ -400,14 +662,26 @@ async def _run_pre_push_validation_fix_pass(
     remote_url: str | None,
     state: object | None,
     validation_result: _PrePushValidationResult,
+    ignore_ignored_paths: tuple[str, ...] = (),
+    ignore_ignored_paths_snapshot: tuple[str, ...] | None = None,
+    ignore_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None,
     pass_number: int,
     total_passes: int,
     validation_commands: tuple[str, ...],
-) -> bool:
-    """Attempt a validation fix pass using the failure context and evidence."""
+) -> tuple[bool, str | None]:
+    """Attempt a validation fix pass and return commit status plus terminal failure reason."""
     first_fail = validation_result.first_failure
     if first_fail is None:
-        return False
+        return False, None
+    worktree_path = self._worktrees_root / workspace_id
+    fix_start_head = await self._rev_parse_head(worktree_path)
+    if fix_start_head is None:
+        _log.warning(
+            "monitor.pre_push_validation_fix_start_head_unavailable",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+        )
+        return False, None
     context = ValidationFixContext(
         failed_command=first_fail.command,
         returncode=first_fail.returncode,
@@ -473,7 +747,20 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason_code=exc.reason_code,
         )
-        return False
+        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            ignore_ignored_paths=ignore_ignored_paths,
+            ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+            pass_number=pass_number,
+            reason="compose_cleanup_failed",
+        )
+        if rollback_failure_reason is not None:
+            return False, rollback_failure_reason
+        return False, None
     except Exception as exc:
         _log.warning(
             "monitor.pre_push_validation_fix_failed",
@@ -481,20 +768,157 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             error=repr(exc),
         )
-        return False
-
-    return bool(
-        await self._commit_dirty_worktree(
+        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
+            self,
             workspace_id=workspace_id,
-            message=f"awf: pre-push validation fix for {workspace_id}",
-            compose_project=compose_project,
-            compose_file=compose_file,
-            state=state,
-            command_evidence=command_evidence,
-            protected_scope_revert_remote_branch=remote_branch,
-            remote_push_url=remote_url,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            ignore_ignored_paths=ignore_ignored_paths,
+            ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+            pass_number=pass_number,
+            reason="agent_exception",
         )
+        if rollback_failure_reason is not None:
+            return False, rollback_failure_reason
+        return False, None
+
+    try:
+        committed = bool(
+            await self._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=f"awf: pre-push validation fix for {workspace_id}",
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                command_evidence=command_evidence,
+                protected_scope_revert_remote_branch=remote_branch,
+                remote_push_url=remote_url,
+            )
+        )
+    except Exception as exc:
+        _log.warning(
+            "monitor.pre_push_validation_fix_commit_failed",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            error=repr(exc),
+        )
+        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            ignore_ignored_paths=ignore_ignored_paths,
+            ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+            pass_number=pass_number,
+            reason="commit_exception",
+        )
+        if rollback_failure_reason is not None:
+            return False, rollback_failure_reason
+        return False, None
+    if not committed:
+        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            ignore_ignored_paths=ignore_ignored_paths,
+            ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+            pass_number=pass_number,
+            reason="commit_failed",
+        )
+        if rollback_failure_reason is not None:
+            return False, rollback_failure_reason
+    if committed:
+        committed_head = await self._rev_parse_head(worktree_path)
+        if committed_head is None:
+            _log.warning(
+                "monitor.pre_push_validation_fix_commit_head_unavailable",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+            )
+            return True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+        cleanup = await _pre_push_validation_cleanup(
+            self,
+            worktree_path=worktree_path,
+            restore_ref=committed_head,
+            ignore_ignored_paths=ignore_ignored_paths,
+            ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+        )
+        ok = bool(cleanup.ok)
+        log = _log.info if ok else _log.warning
+        log(
+            "monitor.pre_push_validation_fix_commit_cleanup",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            restore_ref=committed_head,
+            reason_code=None if ok else cleanup.reason_code,
+            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
+        )
+        if not ok:
+            return True, cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
+    return committed, None
+
+
+async def _rollback_failed_pre_push_validation_fix_pass(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    restore_ref: str,
+    ignore_ignored_paths: tuple[str, ...] = (),
+    ignore_ignored_paths_snapshot: tuple[str, ...] | None = None,
+    ignore_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None,
+    pass_number: int,
+    reason: str,
+) -> str | None:
+    """Rollback fix-pass edits and return a failure reason when recovery fails."""
+    reset = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
     )
+    if not reset.ok:
+        log = _log.warning
+        log(
+            "monitor.pre_push_validation_fix_rollback",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            reason=reason,
+            restore_ref=restore_ref,
+            reset_returncode=reset.returncode,
+            clean_returncode=None,
+            reset_stderr=(reset.stderr or "")[:400],
+            clean_stderr=None,
+        )
+        return PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+
+    cleanup = await _pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=ignore_ignored_paths,
+        ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+        ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+    )
+    ok = bool(cleanup.ok)
+    log = _log.info if ok else _log.warning
+    log(
+        "monitor.pre_push_validation_fix_rollback",
+        workspace_id=workspace_id,
+        pass_number=pass_number,
+        reason=reason,
+        restore_ref=restore_ref,
+        reset_returncode=reset.returncode,
+        clean_returncode=0 if ok else None,
+        clean_reason_code=None if ok else cleanup.reason_code,
+        reset_stderr=(reset.stderr or "")[:400],
+        clean_stderr=(cleanup.cleanup_stderr or "")[:400],
+    )
+    if ok:
+        return None
+    return cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
 
 
 async def _run_pre_push_validation(
@@ -505,6 +929,12 @@ async def _run_pre_push_validation(
     compose_project: str,
     compose_file: Path,
     remote_branch: str,
+    ignore_ignored_paths: tuple[str, ...] | None = None,
+    ignore_all_ignored: bool = True,
+    capture_ignored_paths_snapshot: bool = True,
+    baseline_ignored_roots: tuple[str, ...] | None = None,
+    baseline_ignored_paths_snapshot: tuple[str, ...] | None = None,
+    baseline_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None,
 ) -> _PrePushValidationResult:
     """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
@@ -522,6 +952,20 @@ async def _run_pre_push_validation(
         base_commit = ws.base_commit
 
     workspace_head_sha = await self._rev_parse_head(worktree_path)
+    pre_validation_check = await _pre_push_validation_worktree_check(
+        self,
+        worktree_path=worktree_path,
+        ignore_all_ignored=ignore_all_ignored,
+        ignore_ignored_paths=ignore_ignored_paths,
+        capture_ignored_paths_snapshot=(
+            capture_ignored_paths_snapshot or bool(baseline_ignored_roots)
+        ),
+    )
+    if not pre_validation_check.clean:
+        return _pre_push_dirty_result(
+            workspace_head_sha=workspace_head_sha,
+            check=pre_validation_check,
+        )
     if workspace_head_sha is None:
         return _PrePushValidationResult(
             passed=False,
@@ -530,6 +974,11 @@ async def _run_pre_push_validation(
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message="could not capture local HEAD before PR monitor pre-push validation",
         )
+    pre_validation_ignore_paths = pre_validation_check.ignored_paths
+    pre_validation_ignored_paths_snapshot = pre_validation_check.ignored_paths_snapshot
+    pre_validation_ignored_paths_snapshot_signatures = (
+        pre_validation_check.ignored_paths_snapshot_signatures
+    )
 
     validation_run_id = await _start_pre_push_validation_run(
         self,
@@ -547,7 +996,43 @@ async def _run_pre_push_validation(
             workspace_head_sha=workspace_head_sha,
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message="workspace has no task attempt before PR monitor pre-push validation",
+            ignore_ignored_paths=pre_validation_ignore_paths,
+            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
         )
+    if baseline_ignored_roots is not None and baseline_ignored_paths_snapshot is not None:
+        ignored_entries_drifted = _pre_push_validation_ignored_entries_drifted(
+            baseline_ignored_roots=baseline_ignored_roots,
+            baseline_ignored_snapshot=baseline_ignored_paths_snapshot,
+            baseline_ignored_snapshot_signatures=(baseline_ignored_paths_snapshot_signatures or ()),
+            current_ignored_roots=pre_validation_check.ignored_paths,
+            current_ignored_snapshot=pre_validation_check.ignored_paths_snapshot,
+            current_ignored_snapshot_signatures=(
+                pre_validation_check.ignored_paths_snapshot_signatures
+            ),
+        )
+        if ignored_entries_drifted:
+            await _finish_pre_push_validation_run(
+                self,
+                validation_run_id,
+                status="failed",
+                reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+            )
+            return _PrePushValidationResult(
+                passed=False,
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                message=(
+                    "Validation worktree ignored entries changed after setup "
+                    "baseline and will not proceed to validation."
+                ),
+                ignore_ignored_paths=pre_validation_check.ignored_paths,
+                ignore_ignored_paths_snapshot=pre_validation_check.ignored_paths_snapshot,
+                ignore_ignored_paths_snapshot_signatures=(
+                    pre_validation_check.ignored_paths_snapshot_signatures
+                ),
+            )
     coverage_result: ValidationCoverageResult | None = None
     try:
         assert self._deps.validation is not None
@@ -573,6 +1058,43 @@ async def _run_pre_push_validation(
                 result = replace(result, coverage=coverage_result)
     except ComposeExecCleanupError as exc:
         message = cleanup_failure_message(exc)
+        compose_failure_context: dict[str, object] = {
+            "compose_exec_reason_code": exc.reason_code,
+            "compose_exec_source": exc.source,
+            "compose_exec_label": exc.label,
+            "compose_exec_invocation_id": exc.invocation_id,
+            "compose_exec_message": message,
+        }
+        _log.warning(
+            "pre_push_validation.compose_exec_cleanup_failed",
+            workspace_id=workspace_id,
+            compose_exec_reason_code=exc.reason_code,
+            compose_exec_source=exc.source,
+            compose_exec_label=exc.label,
+            compose_exec_invocation_id=exc.invocation_id,
+            compose_exec_message=message,
+        )
+        cleanup_result = await _pre_push_validation_cleanup(
+            self,
+            worktree_path=worktree_path,
+            restore_ref=workspace_head_sha,
+            ignore_ignored_paths=pre_validation_check.ignored_paths,
+            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
+        )
+        if not cleanup_result.ok:
+            await _finish_pre_push_validation_run(
+                self,
+                validation_run_id,
+                status="failed",
+                reason_code=cleanup_result.reason_code,
+            )
+            return _pre_push_cleanup_result(
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                cleanup=cleanup_result,
+                upstream_failure=compose_failure_context,
+            )
         await _finish_pre_push_validation_run(
             self,
             validation_run_id,
@@ -585,9 +1107,43 @@ async def _run_pre_push_validation(
             workspace_head_sha=workspace_head_sha,
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message=message,
+            ignore_ignored_paths=pre_validation_ignore_paths,
+            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
         )
     except Exception as exc:
         message = f"unexpected error during PR monitor pre-push validation: {exc!r}"[:2000]
+        unexpected_failure_context: dict[str, object] = {
+            "unexpected_exception_type": exc.__class__.__name__,
+            "unexpected_exception_message": message,
+        }
+        _log.warning(
+            "pre_push_validation.unexpected_error",
+            workspace_id=workspace_id,
+            error_type=exc.__class__.__name__,
+            error_message=message,
+        )
+        cleanup_result = await _pre_push_validation_cleanup(
+            self,
+            worktree_path=worktree_path,
+            restore_ref=workspace_head_sha,
+            ignore_ignored_paths=pre_validation_check.ignored_paths,
+            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
+        )
+        if not cleanup_result.ok:
+            await _finish_pre_push_validation_run(
+                self,
+                validation_run_id,
+                status="failed",
+                reason_code=cleanup_result.reason_code,
+            )
+            return _pre_push_cleanup_result(
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                cleanup=cleanup_result,
+                upstream_failure=unexpected_failure_context,
+            )
         await _finish_pre_push_validation_run(
             self,
             validation_run_id,
@@ -600,6 +1156,40 @@ async def _run_pre_push_validation(
             workspace_head_sha=workspace_head_sha,
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message=message,
+            ignore_ignored_paths=pre_validation_ignore_paths,
+            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
+        )
+
+    cleanup_result = await _pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=workspace_head_sha,
+        ignore_ignored_paths=pre_validation_check.ignored_paths,
+        ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+        ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
+    )
+    if not cleanup_result.ok:
+        await _finish_pre_push_validation_run(
+            self,
+            validation_run_id,
+            status="failed",
+            reason_code=cleanup_result.reason_code,
+        )
+        return _pre_push_cleanup_result(
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            cleanup=cleanup_result,
+        )
+
+    side_effect_details: Mapping[str, object] | None = None
+    if result.all_passed and (cleanup_result.side_effect_paths or not cleanup_result.check.clean):
+        result, side_effect_details = _pre_push_side_effect_failure_result(
+            result=result,
+            cleanup=cleanup_result,
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            artifacts_root=self._artifacts_root,
         )
 
     failed_commands = () if result.all_passed else _failed_pre_push_commands(result)
@@ -653,6 +1243,10 @@ async def _run_pre_push_validation(
         validation_reason_code=None if result.all_passed else validation_reason_code,
         result=result,
         coverage=coverage_result or result.coverage,
+        extra_details=side_effect_details,
+        ignore_ignored_paths=pre_validation_ignore_paths,
+        ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
+        ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
     )
 
 

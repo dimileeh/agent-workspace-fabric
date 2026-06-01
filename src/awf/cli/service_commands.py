@@ -458,7 +458,6 @@ def service_gc(
 
     async def _run() -> object:
         """Execute run."""
-
         try:
             result = await run_terminal_workspace_gc(
                 session_factory,
@@ -531,7 +530,6 @@ def service_reconcile_target(
 
     async def _run() -> TargetBranchMonitorResult:
         """Execute run."""
-
         return await run_target_branch_reconcile_once(
             runner=AsyncioSubprocessRunner(),
             work_dir=state_dir,

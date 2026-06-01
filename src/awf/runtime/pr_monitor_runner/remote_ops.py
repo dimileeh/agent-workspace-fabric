@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -33,6 +34,11 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
+)
+from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
 )
 
 if TYPE_CHECKING:
@@ -142,10 +148,14 @@ class _GitPushResult:
             or self.reason_code
             in {
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
                 _PRE_EXISTING_DIRTY_WORKTREE_REASON,
                 _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
                 _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+                VALIDATION_WORKTREE_CLEANUP_FAILED,
+                VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                VALIDATION_WORKTREE_STATUS_FAILED,
             }
         )
 
@@ -190,6 +200,10 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _PRE_PUSH_VALIDATION_FAILED_REASON,
         _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
         _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+        _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
+        VALIDATION_WORKTREE_CLEANUP_FAILED,
+        VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+        VALIDATION_WORKTREE_STATUS_FAILED,
     }:
         return "pre_push_validation_failed"
     if push_result.workflow_scope_required:
@@ -476,7 +490,7 @@ async def _git_push_result(
     refspec: str | None = None,
 ) -> _GitPushResult:
     """Push HEAD and return detailed failure or resync information."""
-    from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     remote = remote_url or "origin"
     refspec = refspec or f"HEAD:refs/heads/{remote_branch}"
@@ -488,7 +502,7 @@ async def _git_push_result(
             returncode=1,
             stderr=policy_block_message,
         )
-    r = await runner._deps.runner.run(_git_worktree_command(worktree_path, "push", remote, refspec))
+    r = await runner._deps.runner.run(git_worktree_command(worktree_path, "push", remote, refspec))
     if r.ok:
         pushed = "up-to-date" not in (r.stderr or "").lower()
         return _GitPushResult(
@@ -551,7 +565,7 @@ async def _git_push_result(
     )
     if remote_url:
         fetch_result = await runner._deps.runner.run(
-            _git_worktree_command(
+            git_worktree_command(
                 worktree_path,
                 "fetch",
                 remote_url,
@@ -561,7 +575,7 @@ async def _git_push_result(
         reset_target = "FETCH_HEAD"
     else:
         fetch_result = await runner._deps.runner.run(
-            _git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
+            git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
         )
         reset_target = f"origin/{remote_branch}"
     if not fetch_result.ok:
@@ -584,7 +598,7 @@ async def _git_push_result(
             stderr=stderr,
         )
     await runner._deps.runner.run(
-        _git_worktree_command(worktree_path, "reset", "--hard", reset_target)
+        git_worktree_command(worktree_path, "reset", "--hard", reset_target)
     )
     return _GitPushResult(
         pushed=False,
@@ -597,10 +611,12 @@ async def _git_push_result(
 
 
 def _combined_git_output(*outputs: str | None) -> str:
+    """Join git output fragments, ignoring empty pieces."""
     return "\n".join(output for output in outputs if output)
 
 
 def _log_unmatched_workflow_file_push_output(output: str) -> None:
+    """Log detected workflow file context from a push-failure output."""
     paths = tuple(
         dict.fromkeys(
             match.group(0).rstrip(".,;:") for match in _WORKFLOW_FILE_PATH_RE.finditer(output)
@@ -616,6 +632,7 @@ def _log_unmatched_workflow_file_push_output(output: str) -> None:
 
 
 def _workflow_scope_push_block(output: str) -> _WorkflowScopePushBlock:
+    """Detect whether push failure is due to missing workflow scope."""
     normalized = " ".join(output.split())
     if not any(pattern.search(normalized) for pattern in _MISSING_WORKFLOW_SCOPE_PATTERNS):
         return _WorkflowScopePushBlock(blocked=False)
@@ -655,13 +672,13 @@ async def _run_sync_base(
 ) -> _GitPushResult:
     """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
-    from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     worktree_path = runner._worktrees_root / workspace_id
 
     async def _git(*args: str) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""
-        r = await runner._deps.runner.run(_git_worktree_command(worktree_path, *args))
+        r = await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
         return r.returncode, r.stdout, r.stderr
 
     await _git("merge", "--abort")
@@ -777,7 +794,7 @@ async def _refresh_staleness_after_sync_base(
         StaleReasonRepository,
         sync_candidate_readiness,
     )
-    from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     try:
         async with runner._deps.session_factory() as session:
@@ -795,7 +812,7 @@ async def _refresh_staleness_after_sync_base(
             ]
             worktree_path = runner._worktrees_root / workspace_id
             rev_parse = await runner._deps.runner.run(
-                _git_worktree_command(worktree_path, "rev-parse", f"origin/{base_branch}")
+                git_worktree_command(worktree_path, "rev-parse", f"origin/{base_branch}")
             )
             if rev_parse.returncode != 0 or not rev_parse.stdout.strip():
                 _log.warning(
