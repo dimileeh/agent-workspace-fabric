@@ -378,6 +378,15 @@ async def retry_workspace_row(
     retry_policy[SCHEDULER_POLICY_KEY] = retry_scheduler_policy
     retried.task_policy = retry_policy
     retry_resource_summary: dict[str, Any] = {}
+    # A ResourceReservation is always created on retry, even when the source
+    # workspace had no prior reservation (e.g. it failed during early
+    # provisioning steps before a reservation was created). The retry
+    # workspace needs a node_id for host-port admission scoping, and the
+    # reservation row is the canonical source of that assignment. Without it,
+    # the retried workspace would lack a node_id, breaking admission checks
+    # and scheduler scoring. When source_reservation is None, the retry
+    # reservation uses defaulted values (disk_mb=None, dind_slots=0) which
+    # carry zero capacity cost but still anchor the node_id.
     if source_reservation is not None:
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
