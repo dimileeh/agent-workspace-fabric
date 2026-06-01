@@ -203,11 +203,31 @@ async def _list_terminal_runtime_candidates(
         .correlate(Workspace)
         .scalar_subquery()
     )
+    released_order = (
+        select(func.max(WorkspaceEvent.event_order))
+        .where(WorkspaceEvent.workspace_id == Workspace.id)
+        .where(WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        .where(WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    revoked_order = (
+        select(func.max(WorkspaceEvent.event_order))
+        .where(WorkspaceEvent.workspace_id == Workspace.id)
+        .where(WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+        .where(WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
     effectively_released = and_(
         latest_released_at.isnot(None),
         or_(
             latest_revoked_at.is_(None),
             latest_released_at > latest_revoked_at,
+            and_(
+                latest_released_at == latest_revoked_at,
+                func.coalesce(released_order, 0) > func.coalesce(revoked_order, 0),
+            ),
         ),
     )
     stmt = (

@@ -268,11 +268,34 @@ async def find_host_port_conflicts(
         .scalar_subquery()
     )
 
+    terminal_runtime_released_order = (
+        select(func.max(WorkspaceEvent.event_order))
+        .where(WorkspaceEvent.workspace_id == Workspace.id)
+        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+
+    terminal_runtime_revoked_order = (
+        select(func.max(WorkspaceEvent.event_order))
+        .where(WorkspaceEvent.workspace_id == Workspace.id)
+        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+
     terminal_runtime_effectively_released = and_(
         terminal_runtime_latest_released_at.isnot(None),
         or_(
             terminal_runtime_latest_revoked_at.is_(None),
             terminal_runtime_latest_released_at > terminal_runtime_latest_revoked_at,
+            and_(
+                terminal_runtime_latest_released_at == terminal_runtime_latest_revoked_at,
+                func.coalesce(terminal_runtime_released_order, 0)
+                > func.coalesce(terminal_runtime_revoked_order, 0),
+            ),
         ),
     )
 
