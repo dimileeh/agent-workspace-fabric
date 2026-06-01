@@ -23,6 +23,7 @@ import httpx
 import typer
 from click.core import ParameterSource
 
+from awf import __version__
 from awf.cli.common import (
     OutputFormat,
     _call,
@@ -81,6 +82,26 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"awf {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def root_callback(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the AWF version and exit.",
+    ),
+) -> None:
+    del version
+
 
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")

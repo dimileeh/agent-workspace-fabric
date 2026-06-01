@@ -16,6 +16,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from awf import __version__
 from awf.cli import common as cli_main
 from awf.cli.main import app
 
@@ -64,6 +65,14 @@ def test_handle_response_uses_response_request_without_global_context() -> None:
     assert not hasattr(cli_main, "_CALL_CONTEXT")
     cli_main._handle_response(response, cli_main.OutputFormat.json)
     assert not hasattr(cli_main, "_CALL_CONTEXT")
+
+
+@pytest.mark.unit
+def test_root_version_option_reports_package_version() -> None:
+    result = _runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert __version__ in result.stdout
 
 
 class TestWorkspaceCreate:
