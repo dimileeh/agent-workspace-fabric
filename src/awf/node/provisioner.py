@@ -1078,6 +1078,15 @@ class Provisioner:
         closes that gap by re-checking host ports after the profile has been
         resolved inside the provisioner.
 
+        Scope boundary: companion port checks and auto-profile service port
+        checks run in separate short transactions because profile service ports
+        are unknown until the provisioner materializes and resolves the repo
+        profile.  No advisory lock spans that earlier companion-check
+        transaction.  If a concurrent workspace commits a matching profile port
+        before this method publishes our ``resolved_profile``, this method fails
+        this workspace before launch.  That is intentional first-committer-wins
+        behavior, not a dispatch-time guarantee for auto profiles.
+
         Before the cross-workspace DB conflict check, this method also detects
         intra-workspace duplicates — the same host port claimed by both a
         companion and an auto-resolved profile service within the same workspace.

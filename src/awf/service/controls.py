@@ -255,6 +255,14 @@ class WorkspaceControlService:
                 payload=event_payload,
             )
         _cancel_final_status = workspace.status
+        # ``stop_stack=False`` means this control path did not prove the
+        # runtime has stopped, so cleanup owns emitting terminal release. In the
+        # narrow pre-launch race where the provisioner has stamped
+        # compose_project_name but Docker has not started containers yet, this
+        # can conservatively block host-port reuse until cleanup performs the
+        # no-op compose down and records the release event. That bounded false
+        # positive is safer than declaring ports free while a stack may still
+        # exist.
         if (
             stop_stack
             and workspace.compose_project_name is not None
