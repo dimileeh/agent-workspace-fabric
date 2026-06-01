@@ -945,7 +945,7 @@ class Provisioner:
             if hp in seen_profile:
                 raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
             seen_profile.add(hp)
-        companion_host_ports = host_ports_from_task_policy_companions(task_policy)
+        companion_host_ports = set(host_ports_from_task_policy_companions(task_policy))
         for hp in auto_profile_host_ports:
             if hp in companion_host_ports:
                 raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
