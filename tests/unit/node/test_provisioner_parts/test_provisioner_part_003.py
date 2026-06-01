@@ -161,6 +161,86 @@ class TestFailureHandling:
             )
 
     @pytest.mark.unit
+    async def test_stored_resolved_profile_host_port_conflict_fails_before_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        resolved_profile = WorkspaceProfile.model_validate(
+            {
+                "name": "stored-profile",
+                "docker": {"mode": "dind"},
+                "services": [
+                    {
+                        "name": "db",
+                        "image": "postgres:16",
+                        "ports": [[5432, 5434]],
+                    }
+                ],
+                "security": {"egress": {"mode": "restricted"}},
+            }
+        ).model_dump(mode="json", by_alias=True)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            source = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="source",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            source.node_id = "test-node-01"
+            source.resolved_profile = resolved_profile
+            await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            target = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="target",
+                task_prompt="p",
+                agent="codex",
+                resolved_profile=resolved_profile,
+                test_commands=[],
+            )
+            await s.commit()
+            target_id = target.id
+
+        await provisioner.provision(target_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(target_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message is not None
+            assert "Host port 5434 is already in use by workspace" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
+            assert any(
+                event.reason_code == "AUTO_PROFILE_HOST_PORT_CHECK_FATAL"
+                for event in reloaded.events
+            )
+
+    @pytest.mark.unit
     async def test_invalid_inline_profile_marks_workspace_failed_as_profile_resolution(
         self,
         provisioner: Provisioner,

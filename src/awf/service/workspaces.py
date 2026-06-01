@@ -403,7 +403,14 @@ async def check_host_port_conflicts(
     scoped (``pg_advisory_xact_lock``) and released automatically on commit
     or rollback.
     """
-    host_ports = [hp for c in companions for _, hp in c.ports]
+    host_ports: list[int] = []
+    for companion in companions:
+        for port_mapping in companion.ports:
+            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+                try:
+                    host_ports.append(int(port_mapping[1]))
+                except (ValueError, TypeError):
+                    continue
     host_ports.extend(host_ports_from_resolved_profile(resolved_profile))
     seen: set[int] = set()
     for hp in host_ports:

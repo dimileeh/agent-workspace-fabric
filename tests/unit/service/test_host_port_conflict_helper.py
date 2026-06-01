@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -244,3 +245,27 @@ class TestCheckHostPortConflictsIntraRequestDuplicate:
         repo = AsyncMock()
         await check_host_port_conflicts(repo, [], resolved_profile=None)
         repo.acquire_host_port_admission_lock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_malformed_companion_port_entries_are_skipped(self) -> None:
+        repo = AsyncMock()
+        repo.find_host_port_conflicts.return_value = []
+        companions = [
+            SimpleNamespace(
+                ports=[
+                    [80],
+                    "bad",
+                    [443, "abc"],
+                    [3000, 3001, "extra"],
+                ]
+            )
+        ]
+
+        await check_host_port_conflicts(repo, companions, resolved_profile=None)
+
+        repo.acquire_host_port_admission_lock.assert_awaited_once_with(host_ports=[3001])
+        repo.find_host_port_conflicts.assert_awaited_once_with(
+            host_ports=[3001],
+            excluding_workspace_id=None,
+            node_id=None,
+        )
