@@ -138,6 +138,7 @@ class _MergeMethodClient:
         repo_error: GitHubClientError | None = None,
         branch_error: GitHubClientError | None = None,
         merge_results: list[str | GitHubClientError] | None = None,
+        post_comment_error: GitHubClientError | None = None,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
@@ -145,6 +146,7 @@ class _MergeMethodClient:
         self.repo_error = repo_error
         self.branch_error = branch_error
         self.merge_results = merge_results or ["MERGESHA123"]
+        self.post_comment_error = post_comment_error
         self.merge_calls: list[str] = []
         self.comments: list[str] = []
         self.expected_repo = _TEST_REPO
@@ -205,6 +207,8 @@ class _MergeMethodClient:
         """Record human notification comments emitted by the merge loop."""
         assert repo == self.expected_repo
         assert pr_number == self.expected_pr_number
+        if self.post_comment_error is not None:
+            raise self.post_comment_error
         self.comments.append(body)
 
 
@@ -350,6 +354,42 @@ async def test_non_transient_merge_method_preflight_error_notifies_human(
     assert len(gh.comments) == 1
     assert "merge-method preflight" in gh.comments[0]
     assert "HTTP 403" in gh.comments[0]
+    assert sleep_fn.calls == [60]
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_merge_method_preflight_notification_transient_error_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Transient notification failures during preflight fallback keep polling."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 403 Resource not accessible by integration",
+        ),
+        post_comment_error=GitHubClientError(
+            operation="gh pr comment",
+            returncode=1,
+            stderr="HTTP 502 Bad Gateway",
+        ),
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == []
+    assert gh.comments == []
     assert sleep_fn.calls == [60]
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids

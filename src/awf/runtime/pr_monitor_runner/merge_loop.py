@@ -975,15 +975,26 @@ async def handle_merge_action(
                 base_branch=base_branch,
                 stderr=_redact_and_truncate_github_error(merge_method_preflight_error.stderr),
             )
-            await self._post_human_notification_once(
-                repo=repo,
-                pr_number=pr_number,
-                status=merge_status,
-                state=state,
-                blocker_reason=_merge_method_preflight_rejection_reason(
-                    merge_method_preflight_error
-                ),
-            )
+            try:
+                await self._post_human_notification_once(
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    state=state,
+                    blocker_reason=_merge_method_preflight_rejection_reason(
+                        merge_method_preflight_error
+                    ),
+                )
+            except GitHubClientError as exc:
+                if await self._wait_after_transient_github_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="post_human_notification",
+                    monitor_log=monitor_log,
+                ):
+                    return False
+                raise
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False
 
