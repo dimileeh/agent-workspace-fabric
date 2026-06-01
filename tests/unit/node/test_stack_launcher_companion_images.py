@@ -481,6 +481,20 @@ def test_missing_image_detector_accepts_no_such_image_for_companion_tag() -> Non
 
 
 @pytest.mark.unit
+def test_missing_image_detector_rejects_other_image_when_companion_tag_is_elsewhere() -> None:
+    """Missing-image text must name the companion tag, not just mention it elsewhere."""
+    tag = "awf-companion-backend:abc123def456"
+
+    assert not _compose_up_reports_missing_image(
+        _compose_error(
+            f"using pre-built companion image {tag}\n"
+            "Error response from daemon: No such image: postgres:16"
+        ),
+        tag,
+    )
+
+
+@pytest.mark.unit
 def test_missing_image_detector_rejects_unrelated_not_found_when_tag_is_elsewhere() -> None:
     """Unrelated not-found text must not retry just because the tag is mentioned."""
     tag = "awf-companion-backend:abc123def456"

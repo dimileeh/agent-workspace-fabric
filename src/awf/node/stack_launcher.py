@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -335,15 +336,22 @@ def _missing_prebuilt_companion_image_retry_spec(
 
 def _compose_up_reports_missing_image(exc: ComposeOperationError, image: str) -> bool:
     """Return whether Compose reported that a specific local image tag is absent."""
-    detail = f"{exc.stderr}\n{exc.stdout}".lower()
-    image_lower = image.lower()
-    if image_lower not in detail:
-        return False
-    return (
-        "no such image" in detail
-        or "pull access denied" in detail
-        or "repository does not exist" in detail
+    detail = f"{exc.stderr}\n{exc.stdout}"
+    image_ref = _compose_image_ref_regex(image)
+    patterns = (
+        rf"no such image:\s*{image_ref}",
+        rf"{image_ref}\s*:\s*no such image",
+        rf"pull access denied for\s+{image_ref}",
+        rf"(?:repository\s+)?{image_ref}\s+does not exist",
     )
+    return any(re.search(pattern, detail, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _compose_image_ref_regex(image: str) -> str:
+    """Return a regex fragment matching an exact Compose image reference."""
+    image_ref_chars = r"A-Za-z0-9_.:/-"
+    escaped_image = re.escape(image)
+    return rf"(?<![{image_ref_chars}])['\"]?{escaped_image}['\"]?(?![{image_ref_chars}])"
 
 
 def _stack_secret_metadata(
