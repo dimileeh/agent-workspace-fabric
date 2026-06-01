@@ -285,6 +285,7 @@ class Provisioner:
                         profile_resolution=profile_resolution,
                         excluding_workspace_id=workspace_id,
                         task_policy=ws.task_policy,
+                        resolved_profile_dict=resolved_profile_dict,
                     )
                 try:
                     async with self._session_factory() as pre_launch_session:
@@ -890,6 +891,7 @@ class Provisioner:
         profile_resolution: ProfileResolution | None = None,
         excluding_workspace_id: str | None = None,
         task_policy: Mapping[str, Any] | None = None,
+        resolved_profile_dict: dict[str, Any] | None = None,
     ) -> None:
         """Check auto-resolved profile service ports for admission after provision-time resolution.
 
@@ -933,7 +935,8 @@ class Provisioner:
         cross-workspace conflicts so the caller can mark the workspace as
         failed.
         """
-        resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+        if resolved_profile_dict is None:
+            resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
         auto_profile_host_ports = host_ports_from_resolved_profile(resolved_profile_dict)
         if not auto_profile_host_ports:
             return
