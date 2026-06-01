@@ -2,13 +2,14 @@
 
 ## Problem Statement and Scope
 
-PR review comment `issue:4587587225` flagged two robustness items in PR monitor
-handoff behavior:
+PR review comment `issue:4587587225` flagged one robustness issue in PR
+monitor handoff setup-failure handling:
 
-- `_mark_failed_from_monitor_handoff_setup_failure` can let a final
-  `_mark_failed` persistence error escape the handoff setup-failure path.
-- The second `count_commits_ahead` call after release handoff setup is
-  intentional but not documented at the call site.
+- `_mark_failed_from_monitor_handoff_setup_failure` catches a failed
+  high-level `_mark_failed` call, checks that `_session_factory` exists, then
+  retries the same `_mark_failed` wrapper before reaching the useful direct DB
+  fallback. Non-transient wrapper failures therefore produce duplicate
+  exception logs and delay the fallback path.
 
 Scope is limited to monitor handoff code and focused unit coverage for the
 helper guard. No GitHub writes, branch switching, pushing, or broad AWF/CI
@@ -16,12 +17,13 @@ validation will be performed.
 
 ## Requirements Checklist
 
-- Add a regression test that fails before the helper catches/logs a final
-  `_mark_failed` failure for monitor handoff setup errors.
-- Update `_mark_failed_from_monitor_handoff_setup_failure` to log and swallow a
-  final `_mark_failed` exception so the setup-failure handler does not escape
-  through the sync feature/release handoff path.
-- Add a concise inline comment explaining the post-setup release commit recount.
+- Update the focused regression so a setup-failure direct fallback error proves
+  only one high-level `_mark_failed` attempt occurs before direct persistence.
+- Update `_mark_failed_from_monitor_handoff_setup_failure` to call
+  `_persist_monitor_handoff_setup_failure_directly` immediately after a failed
+  `_mark_failed` when `_session_factory` is available.
+- Remove the redundant
+  `executor.monitor_handoff_setup_failure_final_mark_failed_failed` log path.
 - Preserve existing setup-failure reason codes, details, and successful
   fallback persistence behavior.
 - Run focused tests for the changed helper/release handoff behavior only; note
@@ -29,11 +31,13 @@ validation will be performed.
 
 ## Implementation Steps
 
-1. Add the failing regression test in the monitor handoff setup test file.
+1. Update the existing direct-fallback regression in the monitor handoff setup
+   test file to expect one `_mark_failed` call and no duplicate final-wrapper
+   exception log.
 2. Run the narrow regression test and confirm it fails on the current code.
-3. Add the helper try/except logging guard and the release recount comment.
-4. Run targeted tests covering the new helper case and existing handoff setup
-   behavior.
+3. Simplify the helper fallback flow so the direct persistence path is reached
+   after the first wrapper failure.
+4. Run targeted tests covering the updated helper behavior.
 5. Write validation evidence in
    `plans/ADDRESS_REVIEW_4587587225_VALIDATION.md`.
 6. Stage only touched files and commit locally with a conventional commit

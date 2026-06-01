@@ -708,20 +708,11 @@ async def _mark_failed_from_monitor_handoff_setup_failure(
         )
     if getattr(self, "_session_factory", None) is None:
         return
-    try:
-        await self._mark_failed(**mark_failed_kwargs)
-        return
-    except Exception:
-        _log.exception(
-            "executor.monitor_handoff_setup_failure_final_mark_failed_failed",
-            workspace_id=workspace_id,
-            setup_failure_reason_code=setup_failure.reason_code,
-        )
-        await _persist_monitor_handoff_setup_failure_directly(
-            self,
-            workspace_id=workspace_id,
-            setup_failure=setup_failure,
-        )
+    await _persist_monitor_handoff_setup_failure_directly(
+        self,
+        workspace_id=workspace_id,
+        setup_failure=setup_failure,
+    )
 
 
 async def _persist_monitor_handoff_setup_failure_directly(

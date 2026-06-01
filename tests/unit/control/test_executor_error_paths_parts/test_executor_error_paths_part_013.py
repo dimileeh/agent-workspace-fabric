@@ -603,7 +603,7 @@ class TestExecutorMonitorHandoffSetup:
             assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
 
     @pytest.mark.unit
-    async def test_sync_feature_pr_handoff_setup_mark_failed_double_error_preserves_setup_failure(
+    async def test_sync_feature_pr_handoff_setup_mark_failed_error_direct_fallback_preserves_setup_failure(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -653,13 +653,10 @@ class TestExecutorMonitorHandoffSetup:
             validation=validation,
             pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
         )
-        original_mark_failed = executor._mark_failed
 
         async def _mark_failed(**kwargs: Any) -> None:
             mark_failed_calls.append(kwargs)
-            if len(mark_failed_calls) <= 2:
-                raise RuntimeError(f"persistence attempt {len(mark_failed_calls)} failed")
-            await original_mark_failed(**kwargs)
+            raise RuntimeError(f"persistence attempt {len(mark_failed_calls)} failed")
 
         monkeypatch.setattr(executor, "_mark_failed", _mark_failed)
 
@@ -668,7 +665,6 @@ class TestExecutorMonitorHandoffSetup:
         assert validation.calls == [("setup", "pre_agent")]
         assert monitor_runs == []
         assert [call["reason_code"] for call in mark_failed_calls] == [
-            SETUP_DEPENDENCY_NETWORK_FAILURE,
             SETUP_DEPENDENCY_NETWORK_FAILURE,
             SETUP_DEPENDENCY_NETWORK_FAILURE,
         ]
@@ -684,7 +680,7 @@ class TestExecutorMonitorHandoffSetup:
             assert ws.events[-1].payload["details"]["retry_exhausted"] is True
 
     @pytest.mark.unit
-    async def test_sync_feature_pr_handoff_setup_final_mark_failed_error_terminal_fallback(
+    async def test_sync_feature_pr_handoff_setup_wrapper_error_terminal_fallback(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -748,7 +744,6 @@ class TestExecutorMonitorHandoffSetup:
         assert [call["reason_code"] for call in mark_failed_calls] == [
             SETUP_DEPENDENCY_NETWORK_FAILURE,
             SETUP_DEPENDENCY_NETWORK_FAILURE,
-            SETUP_DEPENDENCY_NETWORK_FAILURE,
         ]
         assert all(call["details"]["retry_exhausted"] is True for call in mark_failed_calls)
         async with factory() as s:
@@ -766,7 +761,7 @@ class TestExecutorMonitorHandoffSetup:
             }
 
     @pytest.mark.unit
-    async def test_sync_release_pr_handoff_setup_mark_failed_double_error_preserves_setup_failure(
+    async def test_sync_release_pr_handoff_setup_mark_failed_error_direct_fallback_preserves_setup_failure(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -814,13 +809,10 @@ class TestExecutorMonitorHandoffSetup:
             validation=validation,
             pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
         )
-        original_mark_failed = executor._mark_failed
 
         async def _mark_failed(**kwargs: Any) -> None:
             mark_failed_calls.append(kwargs)
-            if len(mark_failed_calls) <= 2:
-                raise RuntimeError(f"persistence attempt {len(mark_failed_calls)} failed")
-            await original_mark_failed(**kwargs)
+            raise RuntimeError(f"persistence attempt {len(mark_failed_calls)} failed")
 
         monkeypatch.setattr(executor, "_mark_failed", _mark_failed)
 
@@ -833,7 +825,6 @@ class TestExecutorMonitorHandoffSetup:
             ["git", "rev-list", "--count"],
         ]
         assert [call["reason_code"] for call in mark_failed_calls] == [
-            SETUP_DEPENDENCY_NETWORK_FAILURE,
             SETUP_DEPENDENCY_NETWORK_FAILURE,
             SETUP_DEPENDENCY_NETWORK_FAILURE,
         ]
@@ -1205,7 +1196,7 @@ class TestExecutorMonitorHandoffSetup:
         ]
 
     @pytest.mark.unit
-    async def test_mark_failed_from_monitor_handoff_setup_failure_reraises_direct_fallback_error(
+    async def test_mark_failed_from_monitor_handoff_setup_failure_uses_direct_fallback_after_wrapper_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1263,20 +1254,10 @@ class TestExecutorMonitorHandoffSetup:
             "reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
             "details": {"phase": "setup"},
         }
-        assert mark_failed_calls == [
-            expected_mark_failed_call,
-            expected_mark_failed_call,
-        ]
+        assert mark_failed_calls == [expected_mark_failed_call]
         assert log_events == [
             (
                 "executor.monitor_handoff_setup_failure_mark_failed_failed",
-                {
-                    "workspace_id": "ws-final-fail",
-                    "setup_failure_reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
-                },
-            ),
-            (
-                "executor.monitor_handoff_setup_failure_final_mark_failed_failed",
                 {
                     "workspace_id": "ws-final-fail",
                     "setup_failure_reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
