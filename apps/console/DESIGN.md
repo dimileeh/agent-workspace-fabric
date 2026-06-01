@@ -94,7 +94,7 @@ Respect `prefers-reduced-motion` (already enforced globally).
 
 ## Components
 
-`KpiStat` · `Badge` / `StatusDot` (glyph + color + label) · `Panel` (elevation + stale state) ·
+`KpiStat` · `Badge` (glyph + color + label) · `Panel` (elevation + stale state) ·
 `Fact` · `Chip` / `QueueChip` · `LifecycleRail`.
 
 ## Decisions Log

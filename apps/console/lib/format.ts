@@ -254,7 +254,20 @@ export function capacityUtilizationPct(saturation: ResourceSaturationSummary): n
       pct = Math.max(pct, (lane.in_use / lane.limit) * 100);
     }
   }
-  if (allocated.pressure_reasons?.some((reason) => reason.endsWith("_SATURATED"))) {
+  // Mirror the capacity panel: fall back to capacity.pressure_reasons when the
+  // allocated list is empty.
+  const pressureReasons =
+    allocated.pressure_reasons && allocated.pressure_reasons.length > 0
+      ? allocated.pressure_reasons
+      : (saturation.capacity?.pressure_reasons ?? []);
+  if (pressureReasons.some((reason) => reason.endsWith("_SATURATED"))) {
+    known = true;
+    pct = Math.max(pct, 100);
+  }
+  // The scheduler is actively refusing new work (disk threshold breached or
+  // admission blocked, e.g. INSUFFICIENT_DISK) → capacity is effectively
+  // exhausted regardless of how much workspace disk is reserved.
+  if (saturation.disk?.ok === false || saturation.admission?.ok === false) {
     known = true;
     pct = Math.max(pct, 100);
   }

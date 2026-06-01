@@ -359,18 +359,6 @@ export function Badge({ value }: { value: string }) {
   );
 }
 
-export function StatusDot({ status, label }: { status: string; label?: string }) {
-  const tone = statusTone(status);
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span aria-hidden className={`text-[11px] leading-none ${toneTextClass(tone)}`}>
-        {statusGlyph(status)}
-      </span>
-      {label ? <span className="truncate">{label}</span> : null}
-    </span>
-  );
-}
-
 // Single-glance KPI for the Status layer: a big tabular value with optional
 // tone color and a contextual hint.
 export function KpiStat({

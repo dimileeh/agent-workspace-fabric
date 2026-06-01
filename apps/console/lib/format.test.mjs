@@ -28,11 +28,17 @@ function saturationFixture(overrides = {}) {
       pressure_reasons: [],
       ...(overrides.allocated_capacity ?? {}),
     },
+    capacity: {
+      pressure_reasons: [],
+      ...(overrides.capacity ?? {}),
+    },
     concurrency: {
       provision: { limit: 2, in_use: 0, queued: 0, available: 2 },
       execution: { limit: 2, in_use: 0, queued: 0, available: 2 },
       ...(overrides.concurrency ?? {}),
     },
+    disk: { ok: true, ...(overrides.disk ?? {}) },
+    admission: { ok: true, ...(overrides.admission ?? {}) },
   };
 }
 
@@ -242,6 +248,27 @@ test("capacityUtilizationPct counts a saturated provision lane", () => {
     },
   });
   assert.equal(capacityUtilizationPct(saturation), 100);
+});
+
+test("capacityUtilizationPct falls back to capacity.pressure_reasons when allocated is empty", () => {
+  const saturation = saturationFixture({
+    allocated_capacity: {
+      steady_cpu: dim(1, 8),
+      peak_cpu: dim(1, 8),
+      steady_memory_gb: dim(0, 16),
+      peak_memory_gb: dim(0, 16),
+      disk_mb: dim(0, 10240),
+      dind_slots: dim(0, 2),
+      pressure_reasons: [],
+    },
+    capacity: { pressure_reasons: ["DIND_CAPACITY_SATURATED"] },
+  });
+  assert.equal(capacityUtilizationPct(saturation), 100);
+});
+
+test("capacityUtilizationPct treats blocked disk/admission as exhausted", () => {
+  assert.equal(capacityUtilizationPct(saturationFixture({ disk: { ok: false } })), 100);
+  assert.equal(capacityUtilizationPct(saturationFixture({ admission: { ok: false } })), 100);
 });
 
 test("capacityUtilizationPct returns null when no limit is comparable", () => {
