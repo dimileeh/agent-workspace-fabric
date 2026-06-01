@@ -194,16 +194,16 @@ async def find_host_port_conflicts(
 
     Active and destroying workspaces always conflict because their
     compose stacks are still running (or being torn down).  For these
-    statuses ``compose_project_name`` is deliberately not checked: an
-    active workspace that never reached compose launch still holds an
-    intended port claim that must block concurrent requests at dispatch
-    time.  Terminal workspaces (failed, cancelled, completed,
-    destroyed) conflict only when they actually acquired runtime
-    resources — i.e. their ``compose_project_name`` is not NULL — and
-    their runtime has not been effectively released yet.  A workspace
-    that failed during provisioning before the compose stack was
-    launched never bound a host port, so it does not block port reuse
-    even without a release event.
+    statuses runtime metadata is deliberately not checked: an active
+    workspace that never reached compose launch still holds an intended
+    port claim that must block concurrent requests at dispatch time.
+    Terminal workspaces (failed, cancelled, completed, destroyed)
+    conflict when their runtime metadata or legacy row shape means they
+    may still own a Docker Compose project and their runtime has not
+    been effectively released yet.  Modern workspaces that fail before
+    Compose launch keep null compose metadata but still carry node or
+    reservation attribution, so they do not block port reuse without a
+    release event.
 
     When *node_id* is provided, only workspaces on that node are
     considered.  For claimed workspaces, ``Workspace.node_id`` is used
@@ -215,9 +215,12 @@ async def find_host_port_conflicts(
     created before the provisioner started stamping ``node_id`` on
     failure), the latest reservation regardless of release status
     provides a last-resort node assignment so that unreleased containers
-    on that node are still detected.  Host ports are Docker host ports
-    and are scoped to the worker node, so a workspace on node A binding
-    port 8080 must not block a create on node B that also wants 8080.
+    on that node are still detected.  Legacy terminal rows with null
+    compose metadata, null node, and no reservation are treated as
+    possible default-project port holders on every node until cleanup
+    records a release event.  Host ports are Docker host ports and are
+    scoped to the worker node, so a workspace on node A binding port
+    8080 must not block a create on node B that also wants 8080.
 
     NOTE: The TOCTOU window between this SELECT and the subsequent INSERT
     is closed by acquiring a per-port ``pg_advisory_xact_lock`` before
@@ -259,6 +262,23 @@ async def find_host_port_conflicts(
     terminal_runtime_effectively_released = terminal_runtime_effectively_released_expr(
         correlated_to=Workspace,
     )
+    resource_reservation_exists = (
+        select(ResourceReservation.id)
+        .where(ResourceReservation.workspace_id == Workspace.id)
+        .correlate(Workspace)
+        .exists()
+    )
+    legacy_null_runtime_metadata = and_(
+        Workspace.compose_project_name.is_(None),
+        Workspace.compose_file_path.is_(None),
+        Workspace.node_id.is_(None),
+        ~resource_reservation_exists,
+    )
+    terminal_runtime_may_hold_ports = or_(
+        Workspace.compose_project_name.isnot(None),
+        Workspace.compose_file_path.isnot(None),
+        legacy_null_runtime_metadata,
+    )
 
     host_ports_set = set(host_ports)
     stmt = select(Workspace.id, Workspace.task_policy, Workspace.resolved_profile).where(
@@ -266,19 +286,7 @@ async def find_host_port_conflicts(
             Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES),
             and_(
                 Workspace.status.in_(HOST_PORT_TERMINAL_RELEASE_STATUSES),
-                # INVARIANT: ``compose_project_name`` is NULL iff the workspace
-                # never launched a compose stack, so it holds no host ports and
-                # must NOT block reuse.  The provisioner guarantees this: it
-                # persists ``compose_project_name`` under a row lock
-                # (``get_for_update``) *before* launching containers (see the
-                # pre-launch block in ``provisioner.py``) and never persists it
-                # for pre-launch failures.  So a terminal workspace with live
-                # containers always has a non-NULL ``compose_project_name``, and
-                # excluding NULL rows here cannot miss a real port holder.
-                # Do NOT widen this to also match ``compose_project_name IS
-                # NULL`` terminal rows: that would falsely flag never-launched
-                # workspaces (which bound no ports) as conflicts.
-                Workspace.compose_project_name.isnot(None),
+                terminal_runtime_may_hold_ports,
                 ~terminal_runtime_effectively_released,
             ),
         )

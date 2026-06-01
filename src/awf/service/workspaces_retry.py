@@ -102,9 +102,17 @@ async def _source_runtime_not_yet_released(
     """
     source_status = WorkspaceStatus(source.status)
     if source_status in HOST_PORT_TERMINAL_RELEASE_STATUSES:
-        if source.compose_project_name is None:
+        if await has_terminal_runtime_released_event(session, source.id):
             return False
-        return not await has_terminal_runtime_released_event(session, source.id)
+        if source.compose_project_name is not None or source.compose_file_path is not None:
+            return True
+        if source.node_id is not None:
+            return False
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+            limit=1,
+        )
+        return not reservations
     return False
 
 

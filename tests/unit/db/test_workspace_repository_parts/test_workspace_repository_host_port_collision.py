@@ -40,6 +40,7 @@ async def _make_workspace(
     task_policy: dict | None = None,
     resolved_profile: dict | None = None,
     compose_project_name: str | None = None,
+    node_id: str | None = None,
 ) -> Workspace:
     ws = await repo.create(
         repo_url=_H2,
@@ -52,6 +53,8 @@ async def _make_workspace(
         resolved_profile=resolved_profile,
     )
     ws.status = status.value
+    if node_id is not None:
+        ws.node_id = node_id
     if compose_project_name is not None:
         ws.compose_project_name = compose_project_name
     await session.commit()
@@ -1195,16 +1198,17 @@ class TestCrossNodeAndEdgeCases:
 
         When a workspace fails during provisioning before the compose stack
         is launched (e.g. git failure, profile resolution failure, egress
-        policy failure), ``compose_project_name`` stays NULL because no
-        container ever bound the host port.  Such pre-runtime terminal
-        workspaces must not block port reuse even without a
-        ``terminal_runtime_released`` event.
+        policy failure), ``compose_project_name`` stays NULL and the
+        provisioner records the worker node that owned the attempt.  Such
+        modern pre-runtime terminal workspaces must not block port reuse even
+        without a ``terminal_runtime_released`` event.
         """
         repo = WorkspaceRepository(session)
         await _make_workspace(
             session,
             repo,
             status=WorkspaceStatus.failed,
+            node_id="node-a",
             task_policy={
                 "companions": [
                     {
@@ -1228,14 +1232,16 @@ class TestCrossNodeAndEdgeCases:
     ) -> None:
         """A cancelled workspace with no compose_project_name does not block host ports.
 
-        A workspace cancelled before the compose stack launched never bound
-        a host port, so it must not block port reuse.
+        A workspace cancelled before the compose stack launched but after it
+        has modern placement evidence never bound a host port, so it must not
+        block port reuse.
         """
         repo = WorkspaceRepository(session)
         await _make_workspace(
             session,
             repo,
             status=WorkspaceStatus.cancelled,
+            node_id="node-a",
             task_policy={
                 "companions": [
                     {
@@ -1253,25 +1259,72 @@ class TestCrossNodeAndEdgeCases:
         assert conflicts == []
 
     @pytest.mark.asyncio
+    async def test_legacy_terminal_null_runtime_metadata_blocks_declared_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Legacy terminal rows with null runtime metadata may still hold host ports.
+
+        Before AWF consistently persisted runtime metadata, a terminal row could
+        have both compose fields null even though the default Compose project
+        ``awf_<workspace_id>`` leaked on the Docker host.  The cleanup worker
+        still derives that default project name for such rows, so admission must
+        conservatively treat their declared host ports as occupied until a
+        terminal-runtime release event is recorded.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            resolved_profile={
+                "name": "legacy-null-runtime-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 15432]],
+                    }
+                ],
+            },
+        )
+        ws.node_id = None
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await session.commit()
+
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080, 15432],
+            excluding_workspace_id=None,
+            node_id="local",
+        )
+
+        assert sorted((conflict.host_port, conflict.workspace_id) for conflict in conflicts) == [
+            (8080, ws.id),
+            (15432, ws.id),
+        ]
+
+    @pytest.mark.asyncio
     async def test_compose_project_name_null_invariant_distinguishes_port_holders(
         self,
         session: AsyncSession,
     ) -> None:
-        """``compose_project_name IS NULL`` is the sole discriminator for a terminal
-        workspace that never bound a host port versus one that did.
+        """Modern null-runtime rows are distinct from real port holders.
 
-        This pins the invariant that the ``Workspace.compose_project_name.isnot(None)``
-        guard in ``find_host_port_conflicts`` relies on: the provisioner persists
-        ``compose_project_name`` under a row lock *before* launching the compose
-        stack (see the pre-launch block in ``node/provisioner.py``) and never
-        persists it for pre-launch failures.  Therefore, among terminal workspaces
-        with no ``terminal_runtime_released`` event, NULL ⟺ no containers ⟺ no ports
-        held, and non-NULL ⟺ a stack was launched and may still hold ports.
-
-        REGRESSION GUARD: widening the guard to also match ``compose_project_name
-        IS NULL`` terminal rows — as a naive reading of the query might suggest —
-        would make the never-launched workspace below start blocking port reuse.
-        Both halves are asserted together here so that change fails loudly.
+        The provisioner persists ``compose_project_name`` under a row lock
+        *before* launching the compose stack and records placement on failure.
+        A modern terminal workspace with null compose metadata and node
+        attribution did not launch a stack, while a workspace with runtime
+        metadata may still hold ports until cleanup records a release event.
         """
         repo = WorkspaceRepository(session)
         companions = {
@@ -1289,6 +1342,7 @@ class TestCrossNodeAndEdgeCases:
             repo,
             status=WorkspaceStatus.failed,
             task_policy=companions,
+            node_id="node-a",
         )
         # Launched a stack, no release event -> still a holder.
         holder = await _make_workspace(
@@ -1297,6 +1351,7 @@ class TestCrossNodeAndEdgeCases:
             status=WorkspaceStatus.failed,
             task_policy=companions,
             compose_project_name="awf_invariant_holder",
+            node_id="node-a",
         )
         conflicts = await repo.find_host_port_conflicts(
             host_ports=[8080],
