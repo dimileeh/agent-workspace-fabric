@@ -26,6 +26,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
@@ -149,6 +150,7 @@ class _GitPushResult:
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
                 _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
                 _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+                _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
                 _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -192,6 +194,8 @@ class _WorkflowScopePushBlock:
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
     """Map a push result to the monitor operation outcome label."""
+    if push_result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
+        return "pre_push_validation_toolchain_missing"
     if push_result.reason_code in {
         _PRE_PUSH_VALIDATION_FAILED_REASON,
         _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
