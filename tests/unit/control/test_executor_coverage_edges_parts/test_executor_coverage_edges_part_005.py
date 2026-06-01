@@ -16,6 +16,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import git_methods as executor_git_methods
+from awf.control.executor import monitor_handoff_audit as executor_monitor_handoff_audit
 from awf.control.executor import quality_gates as executor_quality_gates
 from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.helpers import (
@@ -757,6 +758,37 @@ async def test_monitor_rebase_recovery_reports_git_failures(
             reason="stale",
             recovery_payload={},
         )
+
+
+@pytest.mark.unit
+async def test_executor_pr_audit_event_defaults_source_head_sha_from_workspace() -> None:
+    captured_events: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        async def add_audit_event(self, _workspace: object, **kwargs: object) -> None:
+            captured_events.append(kwargs)
+
+    workspace = SimpleNamespace(
+        branch_name="awf/ws",
+        remote_push_branch=None,
+        pr_number=348,
+        pr_url="https://example.test/pr/348",
+        monitor_last_commit_sha="h" * 40,
+        base_commit="b" * 40,
+        branch_base="main",
+    )
+
+    await executor_monitor_handoff_audit._add_executor_pr_audit_event(
+        object(),
+        FakeWorkspaceRepository(),  # type: ignore[arg-type]
+        workspace,  # type: ignore[arg-type]
+        event_type="monitor_handoff.audit",
+        action="handoff",
+        outcome="succeeded",
+        reason_code="monitor_handoff",
+    )
+
+    assert captured_events[0]["source_head_sha"] == "h" * 40
 
 
 @pytest.mark.unit
