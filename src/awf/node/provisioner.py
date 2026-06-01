@@ -320,6 +320,13 @@ class Provisioner:
                             # Do not weaken or reorder this guard.
                         ):
                             pre_launch_ws.compose_project_name = f"awf_{workspace_id}"
+                            # resolved_profile update is intentionally inside
+                            # this guard: if the workspace already raced to
+                            # terminal, both compose_project_name and
+                            # resolved_profile are correctly left unwritten.
+                            # A retry provisioner will re-resolve the profile
+                            # when profile_ref == "auto", so staleness is
+                            # short-lived.
                             if (
                                 resolved_profile_dict is not None
                                 and pre_launch_ws.resolved_profile is None
