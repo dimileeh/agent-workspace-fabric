@@ -430,6 +430,35 @@ def test_overlap_risks_prefilters_candidate_owned_paths_once(
 
 
 @pytest.mark.unit
+def test_overlap_risks_skip_workspaces_without_matching_candidate_repo_base() -> None:
+    """Workspaces with no same-repo candidate have no overlap risks."""
+    from awf.service import locks as locks_service
+
+    risks_by_workspace = locks_service._workspace_overlap_risks_by_id(
+        (
+            locks_service._OverlapWorkspace(
+                workspace_id="page-api",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("src/awf/api/**",),
+                internal_plan_artifact_paths=(),
+            ),
+        ),
+        (
+            locks_service._OverlapWorkspace(
+                workspace_id="candidate-docs",
+                repo_url="git@github.com:example/docs.git",
+                branch_base="main",
+                owned_paths=("src/awf/api/routes/workspaces.py",),
+                internal_plan_artifact_paths=(),
+            ),
+        ),
+    )
+
+    assert risks_by_workspace == {}
+
+
+@pytest.mark.unit
 def test_lock_cursor_rejects_empty_workspace_id() -> None:
     """Verify lock cursors reject empty workspace IDs."""
     from awf.service.locks import InvalidWorkspaceLockCursorError, _decode_cursor

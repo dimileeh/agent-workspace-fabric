@@ -48,6 +48,8 @@ MANIFEST_CHANNEL=""
 # from "computed and legitimately empty" (a manifest that omits the field).
 MANIFEST_VERSION=""
 MANIFEST_VERSION_LOADED=0
+# Concrete version identity of the wheel this run verified and installed.
+INSTALL_VERSION=""
 ARTIFACT_NAME=""
 ARTIFACT_SHA256=""
 ARTIFACT_URL=""
@@ -689,6 +691,7 @@ verify_artifact_name() {
         expected_version="$VERSION"
         expected_source="the pinned --version is ${VERSION}"
     else
+        INSTALL_VERSION="$wheel_version"
         return 0
     fi
     local lc_wheel_version lc_expected_version
@@ -697,6 +700,7 @@ verify_artifact_name() {
     if [ "$lc_wheel_version" != "$lc_expected_version" ]; then
         fail VERSION_MISMATCH "manifest wheel artifact ${ARTIFACT_NAME} is for version ${wheel_version} but ${expected_source} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest whose wheel is for a different release"
     fi
+    INSTALL_VERSION="$expected_version"
 }
 
 download_artifact() {
@@ -828,6 +832,35 @@ default_bin_dir() {
     printf '%s' "${HOME}/.local/bin"
 }
 
+normalize_version_token() {
+    printf '%s' "$1" \
+        | sed 's/^[^[:alnum:]]*//; s/[^[:alnum:].+_-]*$//; s/^[vV]//' \
+        | tr '[:upper:]' '[:lower:]'
+}
+
+awf_version_matches_install() {
+    local candidate="$1"
+    [ -n "$INSTALL_VERSION" ] || return 1
+
+    local expected reported token normalized
+    expected="$(normalize_version_token "$INSTALL_VERSION")"
+    [ -n "$expected" ] || return 1
+
+    reported="$("$candidate" --version 2>/dev/null)" || return 1
+    [ -n "$reported" ] || return 1
+
+    while IFS= read -r token; do
+        [ -n "$token" ] || continue
+        normalized="$(normalize_version_token "$token")"
+        if [ "$normalized" = "$expected" ]; then
+            return 0
+        fi
+    done <<EOF
+$(printf '%s' "$reported" | tr '[:space:]' '\n')
+EOF
+    return 1
+}
+
 detect_shell() {
     local candidate="${SHELL_OVERRIDE:-${SHELL:-}}"
     case "$candidate" in
@@ -927,10 +960,16 @@ verify_awf() {
         # shadowing awf elsewhere on PATH and report a false success.
         resolved=""
     elif command -v awf >/dev/null 2>&1; then
-        # Default install with nothing in ~/.local/bin: uv/pipx may have placed
-        # the binary elsewhere on PATH, so trust a reachable awf as a last resort.
-        resolved="$(command -v awf)"
-        on_path=1
+        # Default install with nothing in the resolved bin dir: uv/pipx may have
+        # placed the binary elsewhere on PATH, but a stale/unrelated awf can be
+        # reachable there too. Accept the fallback only when its reported version
+        # matches the wheel identity this installer just verified.
+        local path_awf
+        path_awf="$(command -v awf)"
+        if awf_version_matches_install "$path_awf"; then
+            resolved="$path_awf"
+            on_path=1
+        fi
     fi
 
     if [ -z "$resolved" ]; then

@@ -13,6 +13,7 @@ friendly formatting is opt-in via ``--format pretty``.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata as importlib_metadata
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ import httpx
 import typer
 from click.core import ParameterSource
 
+from awf import __version__
 from awf.cli.common import (
     OutputFormat,
     _call,
@@ -74,6 +76,8 @@ _PROVIDER_HELP_PASSTHROUGH = (
     "with migration guidance; use `awf service bootstrap`."
 )
 
+_DISTRIBUTION_NAME = "agent-workspace-fabric"
+
 
 app = typer.Typer(
     name="awf",
@@ -81,6 +85,36 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+
+
+def _cli_version() -> str:
+    """Return the installed console script version, with a source-tree fallback."""
+    try:
+        return importlib_metadata.version(_DISTRIBUTION_NAME)
+    except importlib_metadata.PackageNotFoundError:
+        return __version__
+
+
+def _version_callback(value: bool) -> None:
+    """Print the package version for the eager root ``--version`` option."""
+    if value:
+        typer.echo(f"awf {_cli_version()}")
+        raise typer.Exit()
+
+
+@app.callback()
+def root_callback(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the AWF version and exit.",
+    ),
+) -> None:
+    """Register root-level CLI options shared by all AWF commands."""
+    del version
+
 
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
