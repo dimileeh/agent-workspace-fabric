@@ -1030,7 +1030,7 @@ async def test_execution_validation_rejects_new_ignored_paths_after_initial_vali
     assert result.stop
     assert result.successful_validation_run_id is None
     assert executor._start_validation_run.await_count == 2
-    assert executor._validation.run_profile_phases.await_count == 1
+    assert executor._validation.run_profile_calls == 1
     assert executor._finish_validation_run.await_args.kwargs["status"] == "failed"
     assert (
         executor._finish_validation_run.await_args.kwargs["reason_code"]
