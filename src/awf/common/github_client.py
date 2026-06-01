@@ -395,7 +395,7 @@ class RepoRef:
                     return cls(owner=parts[0], name=name, forge=url_forge)
             raise ValueError(f"Cannot parse {_FORGE_HOSTS[url_forge]} repo from URL: {repo_url!r}")
 
-        raise ValueError(f"Cannot parse GitHub repo from URL: {repo_url!r}")
+        raise ValueError(f"Cannot parse repo from URL: {repo_url!r}")
 
     def _forge_host(self) -> str:
         """Return the canonical hostname for this ref's forge."""
