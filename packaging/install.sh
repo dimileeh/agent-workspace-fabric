@@ -694,13 +694,13 @@ verify_artifact_name() {
         INSTALL_VERSION="$wheel_version"
         return 0
     fi
-    INSTALL_VERSION="$expected_version"
     local lc_wheel_version lc_expected_version
     lc_wheel_version="$(printf '%s' "$wheel_version" | tr '[:upper:]' '[:lower:]')"
     lc_expected_version="$(printf '%s' "$expected_version" | tr '[:upper:]' '[:lower:]')"
     if [ "$lc_wheel_version" != "$lc_expected_version" ]; then
         fail VERSION_MISMATCH "manifest wheel artifact ${ARTIFACT_NAME} is for version ${wheel_version} but ${expected_source} (${MANIFEST_SOURCE}); the release asset or mirror is serving a manifest whose wheel is for a different release"
     fi
+    INSTALL_VERSION="$expected_version"
 }
 
 download_artifact() {
