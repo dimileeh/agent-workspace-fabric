@@ -182,20 +182,5 @@ async def _run_monitor_handoff_profile_setup(
             workspace_id=workspace_id,
             setup_failure_reason_code=setup_failure.reason_code,
         )
-        try:
-            await _mark_failed_or_raise_setup_failure(
-                self,
-                workspace_id=workspace_id,
-                failure_reason=setup_failure.failure_reason,
-                message=setup_failure.message,
-                reason_code=setup_failure.reason_code,
-                details=setup_failure.details,
-            )
-        except _MonitorHandoffSetupFailureError:
-            _log.exception(
-                "executor.monitor_handoff_setup_mark_failed_fallback_after_command_failure_failed",
-                workspace_id=workspace_id,
-                setup_failure_reason_code=setup_failure.reason_code,
-            )
-            raise
+        raise
     return False

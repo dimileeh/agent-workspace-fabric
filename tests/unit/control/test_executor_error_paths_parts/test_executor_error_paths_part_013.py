@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import monitor_handoff as monitor_handoff_module
+from awf.control.executor import monitor_handoff_setup as monitor_handoff_setup_module
 from awf.control.executor.constants import (
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
@@ -1032,7 +1033,7 @@ class TestExecutorMonitorHandoffSetup:
         )
 
     @pytest.mark.unit
-    async def test_handoff_setup_mark_failed_error_after_command_failure_falls_back(
+    async def test_handoff_setup_mark_failed_error_after_command_failure_reraises_for_outer_fallback(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1064,32 +1065,38 @@ class TestExecutorMonitorHandoffSetup:
                 if len(mark_failed_calls) == 1:
                     raise RuntimeError("detailed failure payload rejected")
 
-        result = await _run_monitor_handoff_profile_setup(
-            _Executor(),
-            workspace_id="ws-db-down",
-            profile=object(),
-            compose_project="awf_x",
-            compose_file=tmp_path / "compose.yml",
-            worktree_path=tmp_path,
-        )
+        with pytest.raises(_MonitorHandoffSetupFailureError) as exc_info:
+            await _run_monitor_handoff_profile_setup(
+                _Executor(),
+                workspace_id="ws-db-down",
+                profile=object(),
+                compose_project="awf_x",
+                compose_file=tmp_path / "compose.yml",
+                worktree_path=tmp_path,
+            )
 
-        assert result is False
-        assert len(mark_failed_calls) == 2
+        assert exc_info.value.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+        assert exc_info.value.message == "profile setup failed: uv sync --extra dev"
+        assert exc_info.value.details is not None
+        assert exc_info.value.details["retry_exhausted"] is True
+        assert len(mark_failed_calls) == 1
         detailed_failure = mark_failed_calls[0]
         assert detailed_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
         assert detailed_failure["message"] == "profile setup failed: uv sync --extra dev"
         assert detailed_failure["details"]["retry_exhausted"] is True
-        fallback_failure = mark_failed_calls[1]
-        assert fallback_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
-        assert fallback_failure["message"] == "profile setup failed: uv sync --extra dev"
-        assert fallback_failure["details"]["retry_exhausted"] is True
 
     @pytest.mark.unit
-    async def test_handoff_setup_mark_failed_fallback_error_after_command_failure_reraises(
+    async def test_handoff_setup_mark_failed_error_after_command_failure_logs_before_reraising(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         mark_failed_calls: list[dict[str, Any]] = []
+        log_events: list[tuple[str, dict[str, Any]]] = []
+
+        class _Logger:
+            def exception(self, event: str, **kwargs: Any) -> None:
+                log_events.append((event, kwargs))
 
         class _Validation:
             async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -1116,6 +1123,8 @@ class TestExecutorMonitorHandoffSetup:
                 mark_failed_calls.append(kwargs)
                 raise RuntimeError("workspace failure state unavailable")
 
+        monkeypatch.setattr(monitor_handoff_setup_module, "_log", _Logger())
+
         with pytest.raises(_MonitorHandoffSetupFailureError) as exc_info:
             await _run_monitor_handoff_profile_setup(
                 _Executor(),
@@ -1129,13 +1138,19 @@ class TestExecutorMonitorHandoffSetup:
         assert exc_info.value.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
         assert exc_info.value.details is not None
         assert exc_info.value.details["retry_exhausted"] is True
-        assert len(mark_failed_calls) == 2
+        assert len(mark_failed_calls) == 1
         detailed_failure = mark_failed_calls[0]
         assert detailed_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
         assert detailed_failure["details"]["retry_exhausted"] is True
-        fallback_failure = mark_failed_calls[1]
-        assert fallback_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
-        assert fallback_failure["details"]["retry_exhausted"] is True
+        assert log_events == [
+            (
+                "executor.monitor_handoff_setup_mark_failed_after_command_failure_failed",
+                {
+                    "workspace_id": "ws-db-down",
+                    "setup_failure_reason_code": SETUP_DEPENDENCY_NETWORK_FAILURE,
+                },
+            )
+        ]
 
     @pytest.mark.unit
     async def test_mark_failed_from_monitor_handoff_setup_failure_swallows_mark_failed_error(
