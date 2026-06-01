@@ -33,6 +33,11 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
 )
 
+_TEST_REPO = RepoRef(owner="example-org", name="example-repo")
+_TEST_PR_NUMBER = 42
+_TEST_DEFAULT_BASE_BRANCH = "release/default"
+_TEST_MERGE_ONLY_BASE_BRANCH = "release/merge-only"
+
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
@@ -42,7 +47,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 def _mergeable_status() -> PRStatus:
     return PRStatus(
-        number=42,
+        number=_TEST_PR_NUMBER,
         head_sha="abc1234567890def",
         mergeable=MergeableState.MERGEABLE,
         check_state=CheckState.SUCCESS,
@@ -135,9 +140,23 @@ class _MergeMethodClient:
         self.merge_results = merge_results or ["MERGESHA123"]
         self.merge_calls: list[str] = []
         self.comments: list[str] = []
+        self.expected_repo = _TEST_REPO
+        self.expected_pr_number = _TEST_PR_NUMBER
+        self.expected_base_branch = _TEST_DEFAULT_BASE_BRANCH
+
+    def expect_context(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        base_branch: str,
+    ) -> None:
+        self.expected_repo = repo
+        self.expected_pr_number = pr_number
+        self.expected_base_branch = base_branch
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
-        assert repo.slug() == "dimileeh/aira-web"
+        assert repo == self.expected_repo
         if self.repo_error is not None:
             raise self.repo_error
         return self.repo_methods
@@ -148,8 +167,8 @@ class _MergeMethodClient:
         repo: RepoRef,
         branch: str,
     ) -> tuple[str, ...] | None:
-        assert repo.slug() == "dimileeh/aira-web"
-        assert branch in {"main", "development"}
+        assert repo == self.expected_repo
+        assert branch == self.expected_base_branch
         if self.branch_error is not None:
             raise self.branch_error
         return self.branch_methods
@@ -162,8 +181,8 @@ class _MergeMethodClient:
         method: str = "squash",
         delete_branch: bool = True,
     ) -> str:
-        assert repo.slug() == "dimileeh/aira-web"
-        assert pr_number == 42
+        assert repo == self.expected_repo
+        assert pr_number == self.expected_pr_number
         assert delete_branch is True
         self.merge_calls.append(method)
         result = self.merge_results.pop(0)
@@ -172,8 +191,8 @@ class _MergeMethodClient:
         return result
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
-        assert repo.slug() == "dimileeh/aira-web"
-        assert pr_number == 42
+        assert repo == self.expected_repo
+        assert pr_number == self.expected_pr_number
         self.comments.append(body)
 
 
@@ -182,10 +201,15 @@ async def _execute_merge(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     gh: _MergeMethodClient,
-    base_branch: str = "development",
+    base_branch: str = _TEST_DEFAULT_BASE_BRANCH,
 ) -> tuple[bool | None, MonitorState, RecordedSleep, str]:
     workspace_id = await seed_monitoring_workspace(factory)
     sleep_fn = RecordedSleep()
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=base_branch,
+    )
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
@@ -199,9 +223,9 @@ async def _execute_merge(
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
         status=_mergeable_status(),
         state=state,
         base_branch=base_branch,
@@ -224,7 +248,7 @@ async def test_ruleset_merge_only_base_uses_merge_method(
         factory=factory,
         tmp_path=tmp_path,
         gh=gh,
-        base_branch="main",
+        base_branch=_TEST_MERGE_ONLY_BASE_BRANCH,
     )
 
     assert terminal is True
@@ -259,7 +283,9 @@ async def test_transient_merge_method_preflight_error_retries_without_blocker(
 ) -> None:
     gh = _MergeMethodClient(
         branch_error=GitHubClientError(
-            operation="gh api repos/{owner}/{repo}/rules/branches/development",
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
             returncode=1,
             stderr="HTTP 502 Bad Gateway",
         )
