@@ -620,17 +620,19 @@ class TestExecutorMonitorHandoffSetup:
         assert monitor_runs == []
         assert [call["reason_code"] for call in mark_failed_calls] == [
             SETUP_DEPENDENCY_NETWORK_FAILURE,
-            PR_MONITOR_SETUP_FAILED_REASON_CODE,
-            PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
         ]
         assert mark_failed_calls[-1]["message"] == "profile setup failed: uv sync --extra dev"
+        assert mark_failed_calls[-1]["details"]["retry_exhausted"] is True
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "service_startup_failure"
             assert ws.failure_message == "profile setup failed: uv sync --extra dev"
-            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+            assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+            assert ws.events[-1].payload["details"]["retry_exhausted"] is True
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_setup_final_mark_failed_error_terminal_fallback(
@@ -696,20 +698,22 @@ class TestExecutorMonitorHandoffSetup:
         assert monitor_runs == []
         assert [call["reason_code"] for call in mark_failed_calls] == [
             SETUP_DEPENDENCY_NETWORK_FAILURE,
-            PR_MONITOR_SETUP_FAILED_REASON_CODE,
-            PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
         ]
+        assert all(call["details"]["retry_exhausted"] is True for call in mark_failed_calls)
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "service_startup_failure"
             assert ws.failure_message == "profile setup failed: uv sync --extra dev"
-            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+            assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
             assert ws.events[-1].payload == {
                 "failure_reason": "service_startup_failure",
-                "reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
+                "reason_code": SETUP_DEPENDENCY_NETWORK_FAILURE,
                 "message": "profile setup failed: uv sync --extra dev",
+                "details": mark_failed_calls[0]["details"],
             }
 
     @pytest.mark.unit
@@ -781,10 +785,11 @@ class TestExecutorMonitorHandoffSetup:
         ]
         assert [call["reason_code"] for call in mark_failed_calls] == [
             SETUP_DEPENDENCY_NETWORK_FAILURE,
-            PR_MONITOR_SETUP_FAILED_REASON_CODE,
-            PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
+            SETUP_DEPENDENCY_NETWORK_FAILURE,
         ]
         assert mark_failed_calls[-1]["message"] == "profile setup failed: uv sync --extra dev"
+        assert mark_failed_calls[-1]["details"]["retry_exhausted"] is True
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
@@ -792,7 +797,8 @@ class TestExecutorMonitorHandoffSetup:
             assert ws.failure_reason == "service_startup_failure"
             assert ws.failure_message == "profile setup failed: uv sync --extra dev"
             assert ws.pr_url is None
-            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+            assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+            assert ws.events[-1].payload["details"]["retry_exhausted"] is True
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_plain_setup_failure_records_named_reason_code(
@@ -988,9 +994,9 @@ class TestExecutorMonitorHandoffSetup:
         assert detailed_failure["message"] == "profile setup failed: uv sync --extra dev"
         assert detailed_failure["details"]["retry_exhausted"] is True
         fallback_failure = mark_failed_calls[1]
-        assert fallback_failure["reason_code"] == PR_MONITOR_SETUP_FAILED_REASON_CODE
+        assert fallback_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
         assert fallback_failure["message"] == "profile setup failed: uv sync --extra dev"
-        assert "details" not in fallback_failure
+        assert fallback_failure["details"]["retry_exhausted"] is True
 
     @pytest.mark.unit
     async def test_handoff_setup_mark_failed_fallback_error_after_command_failure_reraises(
@@ -1034,15 +1040,16 @@ class TestExecutorMonitorHandoffSetup:
                 worktree_path=tmp_path,
             )
 
-        assert exc_info.value.reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
-        assert exc_info.value.details is None
+        assert exc_info.value.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+        assert exc_info.value.details is not None
+        assert exc_info.value.details["retry_exhausted"] is True
         assert len(mark_failed_calls) == 2
         detailed_failure = mark_failed_calls[0]
         assert detailed_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
         assert detailed_failure["details"]["retry_exhausted"] is True
         fallback_failure = mark_failed_calls[1]
-        assert fallback_failure["reason_code"] == PR_MONITOR_SETUP_FAILED_REASON_CODE
-        assert "details" not in fallback_failure
+        assert fallback_failure["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+        assert fallback_failure["details"]["retry_exhausted"] is True
 
     @pytest.mark.unit
     async def test_mark_failed_from_monitor_handoff_setup_failure_swallows_mark_failed_error(
