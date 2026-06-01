@@ -57,6 +57,19 @@ def _request() -> WorkspaceCreateRequest:
     )
 
 
+def _request_with_companion_host_port(*, title: str, host_port: int) -> WorkspaceCreateRequest:
+    data = _request().model_dump(mode="python")
+    data["task"]["title"] = title
+    data["companions"] = [
+        {
+            "name": "postgres",
+            "repo_url": "https://github.com/example/postgres-companion",
+            "ports": [[5432, host_port]],
+        }
+    ]
+    return WorkspaceCreateRequest.model_validate(data)
+
+
 def _dind_request() -> WorkspaceCreateRequest:
     data = _request().model_dump(mode="python")
     data["workspace"] = {
@@ -242,6 +255,48 @@ async def test_create_writes_admitted_decision_and_local_reservation(
     assert reservations[0].dind_slots == 0
     assert reservations[0].phase == "workspace_lifecycle"
     assert reservations[0].released_at is None
+
+
+@pytest.mark.unit
+async def test_create_rejects_host_port_conflict_on_configured_worker_node(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(_env_file=None, worker_node_id="worker-host-1")
+    host_port = 15432
+    async with factory() as session:
+        blocker = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/service.git",
+            branch_base="main",
+            task_title="existing port holder",
+            task_prompt="already owns the companion port",
+            agent="codex",
+            task_policy={
+                "companions": [
+                    {
+                        "name": "postgres",
+                        "repo_url": "https://github.com/example/postgres-companion",
+                        "ports": [[5432, host_port]],
+                    }
+                ]
+            },
+            test_commands=[],
+        )
+        blocker.status = WorkspaceStatus.running.value
+        blocker.node_id = "worker-host-1"
+        await session.commit()
+
+    service = WorkspaceService(factory, settings=settings)
+
+    with pytest.raises(workspaces.WorkspaceCreateHostPortConflictError) as exc_info:
+        await service.create(
+            _request_with_companion_host_port(
+                title="new port holder",
+                host_port=host_port,
+            )
+        )
+
+    assert exc_info.value.host_port == host_port
+    assert exc_info.value.conflicting_workspace_id == blocker.id
 
 
 @pytest.mark.unit

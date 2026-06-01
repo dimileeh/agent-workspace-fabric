@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import socket
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +42,7 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
+from awf.service.node_identity import effective_service_node_id
 from awf.service.staleness import TargetBranchState
 from awf.service.target_branch_monitor import (
     GitCheckoutTargetBranchStateProvider,
@@ -141,7 +141,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         secret_lease_resolver=secret_lease_resolver,
         companion_image_builder=companion_image_builder,
     )
-    node_id = settings.node_id or socket.gethostname()
+    node_id = effective_service_node_id(settings)
     provisioner = Provisioner(
         session_factory=session_factory,
         git=git,

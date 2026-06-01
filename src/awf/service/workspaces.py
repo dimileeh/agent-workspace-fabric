@@ -62,6 +62,7 @@ from awf.service.controls import (
     stop_project_containers,
 )
 from awf.service.disk import DiskCheck
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.operations import decode_operation_list_cursor
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from awf.service.resource_capacity import (
@@ -590,7 +591,7 @@ class WorkspaceService:
 
             resolved_settings = self._settings or get_settings()
             req_profile, resolved_profile = workspace_create_profile_snapshots(req)
-            node_id = resolved_settings.worker_node_id or "local"
+            node_id = effective_worker_node_id(resolved_settings)
             await check_host_port_conflicts(
                 repo,
                 req.companions,

@@ -45,6 +45,7 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_readiness import (
     HttpGet,
     SubprocessRun,
@@ -972,7 +973,7 @@ def resource_reservation_plan(
     legacy_memory_gb = _parse_memory_gb(resources.memory)
     dind_mode = _dind_mode_from_profile_snapshot(resolved_profile)
     return ResourceReservationPlan(
-        node_id=settings.worker_node_id or "local",
+        node_id=effective_worker_node_id(settings),
         steady_cpu=(
             resources.steady_state_cpu_cores
             if resources.steady_state_cpu_cores is not None

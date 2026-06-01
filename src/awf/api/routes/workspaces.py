@@ -72,6 +72,7 @@ from awf.db.resilience import run_db_operation_with_retry
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.pr_monitor_adoption import (
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
@@ -326,7 +327,7 @@ async def create_workspace(
             payload.companions,
             resolved_profile=_resolved_profile,
             excluding_workspace_id=None,
-            node_id=settings.worker_node_id or "local",
+            node_id=effective_worker_node_id(settings),
         )
 
         ws = await create_workspace_row(
