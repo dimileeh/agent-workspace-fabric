@@ -19,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.common.github_client import GitHubClient
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     TaskAttemptRepository,
@@ -40,6 +39,7 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner.helpers import _initial_review_grace_started_key
 from tests.postgres import postgres_test_engine
+from tests.unit.runtime._monitor_runner_fixtures import DefaultMergeMethodGitHubClient
 
 
 @dataclass
@@ -268,7 +268,7 @@ def _make_runner(
         session_factory=factory,
         runner=cmd,
         adapter=adapter,
-        gh=GitHubClient(cmd),
+        gh=DefaultMergeMethodGitHubClient(cmd),
         monitor_config=MonitorConfig(
             auto_merge=auto_merge,
             poll_interval_seconds=60,

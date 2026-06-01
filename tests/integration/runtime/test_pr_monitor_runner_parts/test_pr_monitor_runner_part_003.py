@@ -36,6 +36,7 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner.helpers import _parse_verdict
 from tests.postgres import postgres_test_engine
+from tests.unit.runtime._monitor_runner_fixtures import DefaultMergeMethodGitHubClient
 
 
 @dataclass
@@ -265,7 +266,7 @@ def _make_runner(
         session_factory=factory,
         runner=cmd,
         adapter=adapter,
-        gh=GitHubClient(cmd),
+        gh=DefaultMergeMethodGitHubClient(cmd),
         monitor_config=MonitorConfig(
             auto_merge=auto_merge,
             poll_interval_seconds=60,

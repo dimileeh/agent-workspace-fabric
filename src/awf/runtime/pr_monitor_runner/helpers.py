@@ -562,6 +562,7 @@ def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
     redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", value)
     redacted = _AUTHORIZATION_BEARER_RE.sub(r"\1<redacted>", redacted)
     redacted = _TOKEN_RE.sub(_REDACTION, redacted).strip()
+    redacted = redacted.replace("[redacted]", _REDACTION)
     if len(redacted) <= limit:
         return redacted
     return redacted[: limit - 3] + "..."

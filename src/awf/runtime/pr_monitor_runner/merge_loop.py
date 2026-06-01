@@ -282,7 +282,6 @@ async def _attempt_merge_method(
         monitor_log=monitor_log,
         evidence={
             "merge_sha": merge_sha,
-            "merge_method": merge_method,
         },
     )
     return _MergeAttemptResult(_MergeAttemptOutcome.SUCCESS, merge_sha=merge_sha)
