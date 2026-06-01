@@ -40,6 +40,7 @@ GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 
 _IgnoredPathSignature = tuple[str, str]
+_IGNORED_DIRECTORY_SIGNATURE = "directory"
 
 
 def _first_output_line(stdout: str | None) -> str:
@@ -117,17 +118,77 @@ def _ignored_cleanup_parent_dirs(path: str, ignored_paths: set[str]) -> tuple[st
     return tuple(cleanup_dirs)
 
 
+def _ignored_cleanup_dirs(path: str, ignored_paths: set[str]) -> tuple[str, ...]:
+    """Return an ignored cleanup path plus parents that may be empty directories."""
+    normalized_path = _normalize_porcelain_path(path)
+    if _matching_ignored_root(normalized_path, ignored_paths) is None:
+        return ()
+    return (normalized_path, *_ignored_cleanup_parent_dirs(normalized_path, ignored_paths))
+
+
+def _is_directory(path: Path) -> bool:
+    """Return whether a path is a real directory without following symlinks."""
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _snapshot_empty_ignored_dirs(
+    *,
+    worktree_path: Path,
+    ignored_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Snapshot empty directories below ignored roots because git does not list them."""
+    empty_dirs: list[str] = []
+    normalized_ignored_paths = tuple(
+        dict.fromkeys(
+            normalized_path
+            for path in ignored_paths
+            if (normalized_path := _normalize_porcelain_path(path))
+        )
+    )
+    for ignored_path in normalized_ignored_paths:
+        ignored_root = worktree_path / ignored_path
+        if not _is_directory(ignored_root):
+            continue
+
+        pending_dirs = [ignored_root]
+        while pending_dirs:
+            directory = pending_dirs.pop()
+            try:
+                children = tuple(directory.iterdir())
+            except OSError:
+                continue
+
+            pending_dirs.extend(child for child in children if _is_directory(child))
+            if directory == ignored_root or children:
+                continue
+
+            try:
+                relative_dir = directory.relative_to(worktree_path).as_posix()
+            except ValueError:
+                continue
+            empty_dirs.append(f"{relative_dir}/")
+
+    return tuple(dict.fromkeys(empty_dirs))
+
+
 def _cleanup_empty_ignored_dirs(
     *,
     worktree_path: Path,
     cleanup_paths: tuple[str, ...],
     ignored_paths: set[str],
+    preserve_paths: set[str] | None = None,
 ) -> tuple[str, ...]:
     """Remove empty generated directories left below preserved ignored roots."""
+    preserved_dirs = {
+        _normalize_porcelain_path(path) for path in (preserve_paths or set()) if path.endswith("/")
+    }
     candidate_dirs = {
         cleanup_dir
         for cleanup_path in cleanup_paths
-        for cleanup_dir in _ignored_cleanup_parent_dirs(cleanup_path, ignored_paths)
+        for cleanup_dir in _ignored_cleanup_dirs(cleanup_path, ignored_paths)
     }
     ordered_dirs = sorted(
         candidate_dirs,
@@ -136,6 +197,8 @@ def _cleanup_empty_ignored_dirs(
     )
     failed_dirs: list[str] = []
     for cleanup_dir in ordered_dirs:
+        if cleanup_dir in preserved_dirs:
+            continue
         directory = worktree_path / cleanup_dir
         if not directory.exists() or not directory.is_dir():
             continue
@@ -208,6 +271,8 @@ def _hash_file_contents(path: Path) -> str:
         file_stats = path.lstat()
         if stat.S_ISLNK(file_stats.st_mode):
             return f"symlink:{path.readlink()}"
+        if stat.S_ISDIR(file_stats.st_mode):
+            return _IGNORED_DIRECTORY_SIGNATURE
         if not stat.S_ISREG(file_stats.st_mode):
             return (
                 f"special:{file_stats.st_mode:o}:{file_stats.st_dev}:"
@@ -370,7 +435,11 @@ async def check_validation_worktree_clean(
                 ),
                 command_stderr=snapshot_stderr,
             )
-        ignored_paths_snapshot = snapshot_paths
+        empty_ignored_dirs = _snapshot_empty_ignored_dirs(
+            worktree_path=worktree_path,
+            ignored_paths=tuple(ignore_ignored_paths or ignored_paths),
+        )
+        ignored_paths_snapshot = tuple(dict.fromkeys((*snapshot_paths, *empty_ignored_dirs)))
         ignored_paths_snapshot_signatures = _snapshot_ignored_path_signatures(
             worktree_path=worktree_path,
             snapshot_paths=ignored_paths_snapshot,
@@ -582,13 +651,14 @@ async def cleanup_validation_worktree_side_effects(
     ignored_paths = {_normalize_porcelain_path(path) for path in (ignore_ignored_paths or ())}
     ignored_pathspecs = tuple(ignore_ignored_paths or ())
     ignore_ignored_paths_snapshot_lookup = dict(ignore_ignored_paths_snapshot_signatures or ())
+    ignored_snapshot_set: set[str] = set()
     cleanup_untracked_paths = [
         path
         for path in check.untracked_paths
         if _normalize_porcelain_path(path) not in ignored_paths
     ]
     if ignore_ignored_paths_snapshot is not None and ignored_paths:
-        current_ignored_paths, snapshot_stderr = await _snapshot_ignored_paths(
+        current_ignored_file_paths, snapshot_stderr = await _snapshot_ignored_paths(
             run_git,
             pathspecs=tuple(ignored_pathspecs),
         )
@@ -607,6 +677,13 @@ async def cleanup_validation_worktree_side_effects(
                     cleanup_stderr=snapshot_stderr,
                 )
             )
+        current_empty_ignored_dirs = _snapshot_empty_ignored_dirs(
+            worktree_path=worktree_path,
+            ignored_paths=ignored_pathspecs,
+        )
+        current_ignored_paths = tuple(
+            dict.fromkeys((*current_ignored_file_paths, *current_empty_ignored_dirs))
+        )
         current_ignored_signatures = (
             _snapshot_ignored_path_signatures(
                 worktree_path=worktree_path,
@@ -616,10 +693,22 @@ async def cleanup_validation_worktree_side_effects(
             else ()
         )
         ignored_snapshot_set = set(ignore_ignored_paths_snapshot)
+        ignored_snapshot_normalized_set = {
+            _normalize_porcelain_path(path) for path in ignored_snapshot_set
+        }
         current_ignored_signature_lookup = dict(current_ignored_signatures)
         current_ignored_set = set(current_ignored_paths)
+        current_ignored_normalized_set = {
+            _normalize_porcelain_path(path) for path in current_ignored_set
+        }
         deleted_ignored_paths = [
-            path for path in ignore_ignored_paths_snapshot if path not in current_ignored_set
+            path
+            for path in ignore_ignored_paths_snapshot
+            if _normalize_porcelain_path(path) not in current_ignored_normalized_set
+            and not (
+                path.endswith("/")
+                and _is_directory(worktree_path / _normalize_porcelain_path(path))
+            )
         ]
         if deleted_ignored_paths:
             return await _return_after_head_verification(
@@ -685,9 +774,10 @@ async def cleanup_validation_worktree_side_effects(
                 ),
             )
         cleanup_untracked_paths.extend(
-            path
+            _normalize_porcelain_path(path)
             for path in current_ignored_paths
-            if _is_under_ignored_path(path, ignored_paths) and path not in ignored_snapshot_set
+            if _is_under_ignored_path(path, ignored_paths)
+            and _normalize_porcelain_path(path) not in ignored_snapshot_normalized_set
         )
 
     cleanup_untracked_paths = list(dict.fromkeys(cleanup_untracked_paths))
@@ -722,6 +812,7 @@ async def cleanup_validation_worktree_side_effects(
             worktree_path=worktree_path,
             cleanup_paths=tuple(cleanup_untracked_paths),
             ignored_paths=ignored_paths,
+            preserve_paths=ignored_snapshot_set,
         )
         if failed_empty_ignored_dirs:
             return await _return_after_head_verification(

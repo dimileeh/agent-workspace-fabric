@@ -199,6 +199,38 @@ async def test_check_validation_worktree_clean_can_snapshot_ignored_tree_with_ig
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_snapshots_empty_ignored_dirs(
+    tmp_path: Path,
+) -> None:
+    """Ignored snapshots include empty directories that git ls-files cannot report."""
+    worktree = _init_fake_worktree(tmp_path)
+    ignored_root = worktree / ".venv"
+    (ignored_root / "cache").mkdir(parents=True)
+    (ignored_root / "existing-artifact.log").write_text("baseline\n")
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate an ignored root with one ignored file and one empty directory."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS) + ["--", ".venv/"]:
+            return _CommandResultLike(0, ".venv/existing-artifact.log\0", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_ignored_paths=(".venv/",),
+        capture_ignored_paths_snapshot=True,
+    )
+
+    assert check.clean is True
+    assert check.ignored_paths_snapshot == (
+        ".venv/existing-artifact.log",
+        ".venv/cache/",
+    )
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_rejects_ignored_snapshot_failure_without_stderr(
     tmp_path: Path,
 ) -> None:
@@ -734,6 +766,92 @@ async def test_cleanup_validation_worktree_removes_empty_ignored_dirs_after_clea
     assert (ignored_root / "existing-artifact.log").exists()
     assert not new_artifact.exists()
     assert not new_dir.exists()
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_removes_new_empty_ignored_dirs_without_files(
+    tmp_path: Path,
+) -> None:
+    """New empty directories under ignored roots should be cleaned even without files."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    ignored_root = worktree / ".venv"
+    generated_dir = ignored_root / "generated"
+    generated_dir.mkdir(parents=True)
+    (ignored_root / "existing-artifact.log").write_text("baseline\n")
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate git reporting only the ignored root and baseline file."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
+            return _CommandResultLike(0, ".venv/existing-artifact.log\0", None)
+        if args == ["clean", "-fdx", "--", ".venv/generated"]:
+            generated_dir.rmdir()
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert ("clean", "-fdx", "--", ".venv/generated") in commands
+    assert ignored_root.exists()
+    assert (ignored_root / "existing-artifact.log").exists()
+    assert not generated_dir.exists()
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_preserves_baseline_empty_ignored_dirs(
+    tmp_path: Path,
+) -> None:
+    """Cleanup should not remove empty directories captured before validation."""
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    preserved_dir = worktree / ".venv" / "generated"
+    preserved_dir.mkdir(parents=True)
+    generated_artifact = preserved_dir / "artifact.log"
+    generated_artifact.write_text("generated\n")
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate cleaning a generated file from a baseline empty directory."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
+            return _CommandResultLike(0, ".venv/generated/artifact.log\0", None)
+        if args == ["clean", "-fdx", "--", ".venv/generated/artifact.log"]:
+            generated_artifact.unlink()
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/generated/",),
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert preserved_dir.exists()
+    assert not generated_artifact.exists()
 
 
 @pytest.mark.unit
