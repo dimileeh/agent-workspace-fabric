@@ -326,7 +326,7 @@ async def retry_workspace_row(
         await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
-            excluding_workspace_id=source.id if not ignore_source_runtime_check else None,
+            excluding_workspace_id=source.id,
             node_id=target_node_id,
         )
         if conflicts:
