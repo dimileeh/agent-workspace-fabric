@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_STATUS_FAILED,
     ValidationWorktreeCheck,
     ValidationWorktreeCleanup,
+    _hash_file_contents,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     validation_worktree_cleanup_failure_message,
@@ -200,6 +202,42 @@ async def test_check_validation_worktree_clean_rejects_ignored_snapshot_failure_
         tuple(_VALIDATION_STATUS_ARGS),
         tuple(_VALIDATION_IGNORED_LS_FILES_ARGS),
     ]
+
+
+@pytest.mark.unit
+def test_hash_file_contents_regular_file_has_stable_digest(tmp_path: Path) -> None:
+    """Regular files are hashed from content when computing ignored-file signatures."""
+    file_path = tmp_path / "data.txt"
+    file_path.write_bytes(b"signature me\n")
+
+    assert _hash_file_contents(file_path) == hashlib.sha256(b"signature me\n").hexdigest()
+
+
+@pytest.mark.unit
+def test_hash_file_contents_symlink_encodes_target(tmp_path: Path) -> None:
+    """Symlink entries are represented by their target path, not target contents."""
+    target = tmp_path / "target.txt"
+    target.write_text("target", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+
+    assert _hash_file_contents(link) == f"symlink:{link.readlink()}"
+
+
+@pytest.mark.unit
+def test_hash_file_contents_special_file_encodes_metadata(tmp_path: Path) -> None:
+    """Special files are represented by stable metadata instead of being opened."""
+    special = tmp_path / "fifo"
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo is not available")
+    os.mkfifo(special)
+    stats = special.lstat()
+    expected = (
+        f"special:{stats.st_mode:o}:{stats.st_dev}:{stats.st_ino}:"
+        f"{stats.st_size}:{stats.st_mtime_ns}"
+    )
+
+    assert _hash_file_contents(special) == expected
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:

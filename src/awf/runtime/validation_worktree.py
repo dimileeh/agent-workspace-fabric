@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,6 +220,14 @@ async def _snapshot_ignored_paths(
 def _hash_file_contents(path: Path) -> str:
     """Compute a stable content signature for an ignored file snapshot entry."""
     try:
+        file_stats = path.lstat()
+        if stat.S_ISLNK(file_stats.st_mode):
+            return f"symlink:{path.readlink()}"
+        if not stat.S_ISREG(file_stats.st_mode):
+            return (
+                f"special:{file_stats.st_mode:o}:{file_stats.st_dev}:"
+                f"{file_stats.st_ino}:{file_stats.st_size}:{file_stats.st_mtime_ns}"
+            )
         hasher = hashlib.sha256()
         with path.open("rb") as source:
             while chunk := source.read(1024 * 1024):
