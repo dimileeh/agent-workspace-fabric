@@ -21,11 +21,15 @@ class _StubCompose:
 
 
 class _RecordingCompose:
+    """Compose double that records launched specs."""
+
     def __init__(self) -> None:
+        """Initialize captured compose-up inputs."""
         self.specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
 
     async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+        """Record the rendered spec and return deterministic compose paths."""
         self.specs.append(spec)
         self.waits.append(wait)
         return ComposeProjectPaths(
@@ -36,6 +40,7 @@ class _RecordingCompose:
 
 class _RecordingBuilder:
     def __init__(self, *, tag: str | None, exists: bool = True) -> None:
+        """Initialize the fake pre-build result and existence state."""
         self.tag = tag
         self.exists = exists
         self.calls: list[dict[str, object]] = []
@@ -64,6 +69,7 @@ class _RecordingBuilder:
         return self.tag
 
     async def companion_image_exists(self, tag: str) -> bool:
+        """Record launch-time image probes and return the configured result."""
         self.exists_calls.append(tag)
         return self.exists
 
@@ -96,6 +102,7 @@ def _launch_request(
     *,
     companion_name: str = "backend",
 ) -> WorkspaceStackLaunchRequest:
+    """Build a launch request with one materialized companion."""
     return WorkspaceStackLaunchRequest(
         workspace_id="ws_launcher",
         layout=WorktreeLayout(
@@ -250,10 +257,14 @@ async def test_companion_image_revalidation_runs_concurrently(tmp_path: Path) ->
     entered = 0
 
     class _BarrierBuilder:
+        """Builder double that blocks until both revalidation probes enter."""
+
         def __init__(self) -> None:
+            """Initialize recorded launch-time probe tags."""
             self.calls: list[str] = []
 
         async def companion_image_exists(self, tag: str) -> bool:
+            """Block each probe until its peer has also reached the barrier."""
             nonlocal entered
             self.calls.append(tag)
             entered += 1

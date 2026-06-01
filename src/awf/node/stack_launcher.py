@@ -273,6 +273,7 @@ class ComposeStackLauncher:
         builder = self._companion_image_builder
 
         async def _revalidate_single(companion: CompanionService) -> CompanionService:
+            """Return a build-backed companion when its pre-built image vanished."""
             if companion.image is None:
                 return companion
             if await builder.companion_image_exists(companion.image):

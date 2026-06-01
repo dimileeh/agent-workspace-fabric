@@ -72,6 +72,7 @@ class _FakeCompose:
         self._built_tags.add(tag)  # a successful build makes that exact tag present
 
     async def companion_image_inspect(self, tag: str) -> bool:
+        """Record inspect probes and return whether the fake tag is present."""
         self.inspect_calls.append(["image", "inspect", tag])
         if self.inspect_error is not None:
             detail = f"{self.inspect_error.stderr}\n{self.inspect_error.stdout}".lower()

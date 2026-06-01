@@ -212,7 +212,11 @@ async def test_compose_stack_launcher_reports_required_services_when_docker_miss
 async def test_compose_stack_launcher_maps_revalidation_docker_unavailable(
     tmp_path: Path,
 ) -> None:
+    """Docker-unavailable revalidation failures use workspace service errors."""
+
     class _RevalidationUnavailableBuilder:
+        """Builder double that returns a tag then fails the revalidation probe."""
+
         async def ensure(
             self,
             *,
@@ -223,11 +227,13 @@ async def test_compose_stack_launcher_maps_revalidation_docker_unavailable(
             relative_build_context: str,
             capture_timeout_seconds: float,
         ) -> str | None:
+            """Return a pre-built companion image tag for revalidation."""
             del name, commit_sha, build_context, dockerfile, relative_build_context
             del capture_timeout_seconds
             return "awf-companion-backend:abc123def456"
 
         async def companion_image_exists(self, tag: str) -> bool:
+            """Raise the Docker-unavailable probe error under test."""
             del tag
             raise ComposeOperationError(
                 operation="image inspect",

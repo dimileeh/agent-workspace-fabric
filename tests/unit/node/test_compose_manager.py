@@ -1093,6 +1093,7 @@ class TestCompanionImageCommands:
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            """Record the inspect command and simulate a present image."""
             calls.append(args)
             return _FakeProcess(returncode=0, stdout=b"sha256:abc\n")
 
@@ -1122,6 +1123,7 @@ class TestCompanionImageCommands:
         calls: list[tuple[object, ...]] = []
 
         async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            """Record the inspect command and simulate a present image."""
             calls.append(args)
             return _FakeProcess(returncode=0, stdout=b"sha256:abc\n")
 
@@ -1137,6 +1139,7 @@ class TestCompanionImageCommands:
         """companion_image_inspect returns False for confirmed missing images."""
 
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            """Simulate Docker's missing-image inspect failure."""
             return _FakeProcess(
                 returncode=1,
                 stderr=b"Error response from daemon: No such image: missing:tag",
@@ -1154,6 +1157,7 @@ class TestCompanionImageCommands:
         probe_error = b"Cannot connect to the Docker daemon"
 
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            """Simulate an inspect failure caused by Docker unavailability."""
             return _FakeProcess(returncode=1, stderr=probe_error)
 
         monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
@@ -1172,6 +1176,7 @@ class TestCompanionImageCommands:
         probe_error = b"permission denied: user not found"
 
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            """Simulate an unrelated inspect failure with not-found wording."""
             return _FakeProcess(returncode=1, stderr=probe_error)
 
         monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
@@ -1189,6 +1194,7 @@ class TestCompanionImageCommands:
         """companion_image_exists still treats every inspect failure as absent."""
 
         async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            """Simulate a probe failure for the lenient existence helper."""
             return _FakeProcess(returncode=1, stderr=b"Cannot connect to the Docker daemon")
 
         monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
