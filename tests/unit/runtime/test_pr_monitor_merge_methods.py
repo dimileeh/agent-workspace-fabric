@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import OperationStatus
-from awf.db.repositories import OperationRepository, WorkspaceEventRepository
+from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -623,6 +623,38 @@ async def test_method_rejection_tries_third_allowed_alternative_before_notifying
     assert terminal is True
     assert gh.merge_calls == ["squash", "merge", "rebase"]
     assert gh.comments == []
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_rebase_merge_with_empty_merge_commit_records_head_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Rebase merges have no merge commit, so completion records the PR head."""
+    expected_head_sha = _mergeable_status().head_sha
+    gh = _MergeMethodClient(
+        repo_methods=("rebase",),
+        branch_methods=("rebase",),
+        merge_results=[""],
+    )
+
+    terminal, state, _sleep, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+
+    assert terminal is True
+    assert gh.merge_calls == ["rebase"]
+    assert gh.comments == []
+    assert workspace is not None
+    assert workspace.pr_merge_sha == expected_head_sha
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )

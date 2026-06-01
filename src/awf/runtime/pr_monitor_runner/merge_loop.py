@@ -164,6 +164,18 @@ def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
     return "GitHub rejected merge-method preflight"
 
 
+def _merge_completion_marker(
+    *,
+    merge_method: str,
+    merge_sha: str | None,
+    head_sha: str,
+) -> str | None:
+    """Return the non-empty marker used to record a completed PR merge."""
+    if merge_sha or merge_method != "rebase":
+        return merge_sha
+    return head_sha
+
+
 async def _record_empty_effective_merge_methods_blocker(
     self: Any,
     *,
@@ -327,13 +339,18 @@ async def _attempt_merge_method(
             )
         return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
 
+    merge_marker = _merge_completion_marker(
+        merge_method=merge_method,
+        merge_sha=merge_sha,
+        head_sha=merge_status.head_sha,
+    )
     await self._finish_monitor_operation(
         merge_operation,
         status=OperationStatus.succeeded,
         result={
             "status": "succeeded",
             "outcome": "merged",
-            "merge_sha": merge_sha,
+            "merge_sha": merge_marker,
         },
     )
     await self._record_pr_monitor_audit_event(
@@ -350,10 +367,10 @@ async def _attempt_merge_method(
         operation_type=OperationType.monitor_state.value,
         monitor_log=monitor_log,
         evidence={
-            "merge_sha": merge_sha,
+            "merge_sha": merge_marker,
         },
     )
-    return _MergeAttemptResult(_MergeAttemptOutcome.SUCCESS, merge_sha=merge_sha)
+    return _MergeAttemptResult(_MergeAttemptOutcome.SUCCESS, merge_sha=merge_marker)
 
 
 async def handle_merge_action(
