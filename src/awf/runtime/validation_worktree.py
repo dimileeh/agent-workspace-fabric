@@ -605,6 +605,21 @@ async def cleanup_validation_worktree_side_effects(
         )
         ignored_snapshot_set = set(ignore_ignored_paths_snapshot)
         current_ignored_signature_lookup = dict(current_ignored_signatures)
+        current_ignored_set = set(current_ignored_paths)
+        deleted_ignored_paths = [
+            path for path in ignore_ignored_paths_snapshot if path not in current_ignored_set
+        ]
+        if deleted_ignored_paths:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=check,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=(
+                    "AWF validation removed pre-existing ignored files: "
+                    f"{', '.join(deleted_ignored_paths)}"
+                ),
+            )
         cleanup_untracked_paths.extend(
             path
             for path in current_ignored_paths

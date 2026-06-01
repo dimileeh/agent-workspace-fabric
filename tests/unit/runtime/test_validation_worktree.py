@@ -481,6 +481,40 @@ async def test_cleanup_validation_worktree_cleans_modified_ignored_file_using_sn
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_fails_when_ignored_snapshot_path_disappears(
+    tmp_path: Path,
+) -> None:
+    """Deleted setup-owned ignored files should fail cleanup as non-restorable drift."""
+    worktree = _init_fake_worktree(tmp_path)
+    pre_validation_snapshot = (".venv/existing-artifact.log",)
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a validation pass that deletes a baseline ignored file."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", ".venv/")):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=pre_validation_snapshot,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert (
+        cleanup.message
+        == "AWF validation removed pre-existing ignored files: .venv/existing-artifact.log"
+    )
+    assert cleanup.cleanup_command is None
+    assert ("clean", "-fdx", "--", ".venv/existing-artifact.log") not in commands
+
+
+@pytest.mark.unit
 async def test_cleanup_validation_worktree_verify_check_does_not_report_status_as_cleanup_command(
     tmp_path: Path,
 ) -> None:
