@@ -164,6 +164,43 @@ async def test_check_validation_worktree_clean_can_snapshot_ignored_tree_with_ig
     assert check.ignored_paths_snapshot == (".venv/a.py", ".venv/b.py")
 
 
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_rejects_ignored_snapshot_failure_without_stderr(
+    tmp_path: Path,
+) -> None:
+    """A failed ignored-snapshot command with no stderr must fail the pre-check."""
+    worktree = _init_fake_worktree(tmp_path)
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate `git ls-files` failing with no stderr output."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! .venv/\n", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS):
+            return _CommandResultLike(1, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        capture_ignored_paths_snapshot=True,
+        ignore_all_ignored=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert (
+        check.message
+        == "Could not inspect ignored paths for validation pre-check with `git ls-files`."
+    )
+    assert check.command_stderr == "git ls-files command failed."
+    assert commands == [
+        tuple(_VALIDATION_STATUS_ARGS),
+        tuple(_VALIDATION_IGNORED_LS_FILES_ARGS),
+    ]
+
+
 def _init_fake_worktree(tmp_path: Path) -> Path:
     """Create a fake worktree path with a minimal `.git` marker."""
     worktree = tmp_path / "worktree"
@@ -310,6 +347,42 @@ async def test_cleanup_validation_worktree_ignores_pre_existing_ignored_paths_in
     assert cleanup.reason_code is None
     assert cleanup.cleaned is True
     assert ("clean", "-fdx", "--", "validation-artifact.log", "generated-state/") in commands
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_fails_ignored_snapshot_when_no_stderr(
+    tmp_path: Path,
+) -> None:
+    """Failed ignored-tree diffing without stderr should fail cleanup for safety."""
+    worktree = _init_fake_worktree(tmp_path)
+    commands: list[tuple[str, ...]] = []
+    args_status = list(_VALIDATION_STATUS_ARGS)
+    args_ignored_snapshot = list(_VALIDATION_IGNORED_LS_FILES_ARGS) + ["--", ".venv/"]
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate `git ls-files` snapshot failure when checking ignored diffs."""
+        commands.append(tuple(args))
+        if args == args_status:
+            return _CommandResultLike(0, "?? validation-artifact.log\n!! .venv/\n", None)
+        if args == args_ignored_snapshot:
+            return _CommandResultLike(1, None, None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/existing.log",),
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.cleanup_command == "git ls-files"
+    assert (
+        cleanup.message
+        == "Could not inspect ignored paths for validation cleanup with `git ls-files`."
+    )
+    assert cleanup.cleanup_stderr == "git ls-files command failed."
+    assert args_ignored_snapshot in commands
 
 
 @pytest.mark.unit

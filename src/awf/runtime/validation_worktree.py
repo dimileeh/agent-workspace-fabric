@@ -102,7 +102,7 @@ async def _snapshot_ignored_paths(
         args.extend(["--", *pathspecs])
     result = await run_git(args)
     if not result.ok:
-        return (), (result.stderr or "")[:1000]
+        return (), (result.stderr or "git ls-files command failed.")[:1000]
     return _ignored_untracked_snapshot_from_ls_files(result.stdout), ""
 
 
