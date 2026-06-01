@@ -461,7 +461,12 @@ def _resolve_service_api_base_url(
     require_init_field: bool = False,
     project_dotenv_lookup: _ProjectDotenvLookup | None = None,
 ) -> str:
-    """Return the host-side API base URL matching Compose port overrides."""
+    """Return the service settings API self-reference URL.
+
+    This preserves the existing ``AWF_API_BASE_URL``/Compose host-port
+    resolution used by service doctor, smoke, and status flows. Host CLI calls
+    resolve their operator-facing target separately from ``AWF_BASE_URL``.
+    """
 
     host_api_base_url = _env_value(environ, "AWF_API_BASE_URL")
     if host_api_base_url is not None and _api_base_url_env_is_explicit(
@@ -488,7 +493,7 @@ def _resolve_service_api_base_url(
 
 
 def _default_local_service_api_base_url(environ: Mapping[str, str]) -> str:
-    """Return the host-side local API URL matching Compose port overrides."""
+    """Return the local service API URL matching existing Compose port overrides."""
 
     host_port = _env_value(environ, "AWF_API_HOST_PORT")
     if not host_port:

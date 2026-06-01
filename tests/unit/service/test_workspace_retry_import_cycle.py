@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import importlib
-import sys
 
 import pytest
 
+from tests.unit._helpers import clear_cached_module
 
-def _clear_cached_workspace_modules() -> None:
+
+def _clear_cached_workspace_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     """Drop selected workspace modules to exercise import ordering from a clean cache."""
     for module_name in [
         "awf.service.workspaces",
@@ -16,29 +17,29 @@ def _clear_cached_workspace_modules() -> None:
         "awf.service.workspaces_response",
         "awf.service.workspaces_retry",
     ]:
-        sys.modules.pop(module_name, None)
+        clear_cached_module(monkeypatch, module_name)
 
 
 @pytest.mark.unit
-def test_workspace_retry_imports_without_module_cycle() -> None:
+def test_workspace_retry_imports_without_module_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Importing `workspaces_retry` from a clean module state should not fail."""
-    _clear_cached_workspace_modules()
+    _clear_cached_workspace_modules(monkeypatch)
     retry_module = importlib.import_module("awf.service.workspaces_retry")
     assert hasattr(retry_module, "retry_workspace_row")
 
 
 @pytest.mark.unit
-def test_workspace_create_imports_without_module_cycle() -> None:
+def test_workspace_create_imports_without_module_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Importing `workspaces_create` from a clean module state should not fail."""
-    _clear_cached_workspace_modules()
+    _clear_cached_workspace_modules(monkeypatch)
     create_module = importlib.import_module("awf.service.workspaces_create")
     assert hasattr(create_module, "create_workspace_row")
 
 
 @pytest.mark.unit
-def test_workspace_response_imports_without_module_cycle() -> None:
+def test_workspace_response_imports_without_module_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Importing `workspaces_response` before `workspaces` should not fail."""
-    _clear_cached_workspace_modules()
+    _clear_cached_workspace_modules(monkeypatch)
     response_module = importlib.import_module("awf.service.workspaces_response")
     assert hasattr(response_module, "workspace_response")
     workspace_module = importlib.import_module("awf.service.workspaces")
