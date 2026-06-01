@@ -13,6 +13,7 @@ from typing import Any, Final
 from sqlalchemy import (
     and_,
     func,
+    literal,
     or_,
     select,
 )
@@ -645,11 +646,11 @@ def terminal_runtime_effectively_released_expr(
 
     A release is "effective" when the latest ``terminal_runtime_released``
     event has not been superseded by a later ``terminal_runtime_release_revoked``
-    event.  When both share the same ``occurred_at``, ``event_order`` serves
-    as the deterministic tie-breaker.
-
-    The expression is built as four correlated scalar subqueries (released_at,
-    revoked_at, released_order, revoked_order) composed into a single boolean.
+    event.  The latest event is determined by ordering all release and revoke
+    events by ``(occurred_at DESC, event_order DESC)`` and picking the first
+    row's ``event_type``.  This avoids comparing two independent ``MAX``
+    projections that can diverge when ``event_order`` is not globally
+    monotonic across event types.
 
     Must pass exactly one of *correlated_to* or *workspace_id*:
 
@@ -662,51 +663,32 @@ def terminal_runtime_effectively_released_expr(
     if (correlated_to is None) == (workspace_id is None):
         raise ValueError("Pass exactly one of correlated_to or workspace_id")
 
-    def _build_sub(event_type: str, reason_code: str, column: Any) -> Any:
-        stmt = (
-            select(func.max(column))
-            .where(WorkspaceEvent.event_type == event_type)
-            .where(WorkspaceEvent.reason_code == reason_code)
-        )
-        if correlated_to is not None:
-            stmt = stmt.where(WorkspaceEvent.workspace_id == correlated_to.id).correlate(
-                correlated_to
-            )
-        else:
-            stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
-        return stmt.scalar_subquery()
+    both_types = [
+        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+    ]
+    both_reasons = [
+        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    ]
 
-    released_at = _build_sub(
-        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-        WorkspaceEvent.occurred_at,
+    stmt = (
+        select(WorkspaceEvent.event_type)
+        .where(WorkspaceEvent.event_type.in_(both_types))
+        .where(WorkspaceEvent.reason_code.in_(both_reasons))
+        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.event_order.desc())
+        .limit(1)
     )
-    revoked_at = _build_sub(
-        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-        WorkspaceEvent.occurred_at,
-    )
-    released_order = _build_sub(
-        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-        WorkspaceEvent.event_order,
-    )
-    revoked_order = _build_sub(
-        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
-        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
-        WorkspaceEvent.event_order,
-    )
+    if correlated_to is not None:
+        stmt = stmt.where(WorkspaceEvent.workspace_id == correlated_to.id).correlate(correlated_to)
+    else:
+        stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+
+    latest_type = stmt.scalar_subquery()
 
     return and_(
-        released_at.isnot(None),
-        or_(
-            revoked_at.is_(None),
-            released_at > revoked_at,
-            and_(
-                released_at == revoked_at,
-                func.coalesce(released_order, 0) > func.coalesce(revoked_order, 0),
-            ),
-        ),
+        latest_type.isnot(None),
+        latest_type == literal(TERMINAL_RUNTIME_RELEASE_EVENT_TYPE),
     )
 
 
@@ -716,10 +698,10 @@ async def has_terminal_runtime_released_event(
 ) -> bool:
     """Return True if a ``terminal_runtime_released`` event exists for *workspace_id* and has not been revoked.
 
-    When the latest release and revocation share the same ``occurred_at``
-    (e.g. backfilled or low-resolution timestamps), ``event_order`` is used
-    as a deterministic tie-breaker — the event with the higher
-    ``event_order`` is considered later.
+    The latest event among all release and revoke events is determined by
+    ordering on ``(occurred_at DESC, event_order DESC)``; if the latest
+    event's type is ``terminal_runtime_released``, the runtime is effectively
+    released.
     """
     expr = terminal_runtime_effectively_released_expr(workspace_id=workspace_id)
     stmt = select(expr)
