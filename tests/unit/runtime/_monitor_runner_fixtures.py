@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.common.github_client import GitHubClient
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -37,6 +36,7 @@ from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
 
 @dataclass
@@ -336,13 +336,14 @@ def make_runner(
     merge_coordinator: object | None = None,
     post_merge_target_reconciler: Any | None = None,
     provider_recovery_default_model: str | None = None,
+    gh: Any | None = None,
 ) -> PullRequestMonitorRunner:
     """Construct a PullRequestMonitorRunner wired for integration-style unit tests."""
     kwargs: dict = {
         "session_factory": factory,
         "runner": cmd,
         "adapter": adapter,
-        "gh": GitHubClient(cmd),
+        "gh": gh if gh is not None else DefaultMergeMethodGitHubClient(cmd),
         "monitor_config": MonitorConfig(
             auto_merge=auto_merge,
             poll_interval_seconds=60,

@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
@@ -49,11 +49,12 @@ class GitHubClientError(Exception):
     """Raised when ``gh`` or GraphQL returns a non-zero exit / error payload."""
 
     def __init__(self, *, operation: str, returncode: int, stderr: str) -> None:
+        """Store redacted command failure context for monitor diagnostics."""
         self.operation = operation
         self.returncode = returncode
-        self.stderr = stderr
+        self.stderr = redact_audit_text(stderr)
         super().__init__(
-            f"{operation} failed (exit={returncode}): {stderr.strip() or '<no output>'}"
+            f"{operation} failed (exit={returncode}): {self.stderr.strip() or '<no output>'}"
         )
 
 
@@ -1179,6 +1180,106 @@ class GitHubClient:
             )
         return result.stdout.strip()
 
+    async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
+        """Return repository-level merge methods enabled for pull requests."""
+        payload = await self._gh_json(
+            ["gh", "api", f"repos/{repo.slug()}"],
+            operation="gh api repo",
+        )
+        if not isinstance(payload, dict):
+            raise GitHubClientError(
+                operation="gh api repo",
+                returncode=0,
+                stderr="GitHub repository response was not a JSON object",
+            )
+        merge_flags = (
+            ("allow_merge_commit", "merge"),
+            ("allow_squash_merge", "squash"),
+            ("allow_rebase_merge", "rebase"),
+        )
+        missing_flags = [flag for flag, _method in merge_flags if flag not in payload]
+        if missing_flags:
+            missing = ", ".join(missing_flags)
+            raise GitHubClientError(
+                operation="gh api repo",
+                returncode=1,
+                stderr=(
+                    "GitHub repository response omitted merge method flags; "
+                    f"API response may be temporarily unavailable, try again: {missing}"
+                ),
+            )
+        methods: list[str] = []
+        for flag, method in merge_flags:
+            if payload.get(flag) is True:
+                methods.append(method)
+        return tuple(methods)
+
+    async def fetch_branch_pull_request_allowed_merge_methods(
+        self,
+        *,
+        repo: RepoRef,
+        branch: str,
+    ) -> tuple[str, ...] | None:
+        """Return base-branch pull-request ruleset merge methods.
+
+        ``None`` means the effective branch rules do not constrain merge
+        method choice. An empty tuple means recognized pull_request rules
+        conflict and no known method satisfies all of them.
+        """
+        encoded_branch = quote(branch, safe="")
+        payload = await self._gh_json(
+            [
+                "gh",
+                "api",
+                f"repos/{repo.slug()}/rules/branches/{encoded_branch}",
+                "--paginate",
+                "--slurp",
+            ],
+            operation="gh api branch rules",
+        )
+        if payload is None:
+            raise GitHubClientError(
+                operation="gh api branch rules",
+                returncode=0,
+                stderr=(
+                    "GitHub branch rules empty response despite --paginate --slurp; "
+                    "API response may be temporarily unavailable, try again"
+                ),
+            )
+        if not isinstance(payload, list):
+            raise GitHubClientError(
+                operation="gh api branch rules",
+                returncode=0,
+                stderr="GitHub branch rules response was not a JSON array",
+            )
+
+        rules = _flatten_branch_rules_pages(payload)
+        constrained: set[str] | None = None
+        for rule in rules:
+            if not isinstance(rule, dict) or rule.get("type") != "pull_request":
+                continue
+            parameters = rule.get("parameters")
+            if not isinstance(parameters, dict):
+                continue
+            allowed = parameters.get("allowed_merge_methods")
+            if not isinstance(allowed, list):
+                continue
+            if not allowed:
+                constrained = set()
+                break
+            normalized = {method for method in allowed if method in {"merge", "squash", "rebase"}}
+            if not normalized:
+                # The rule lists only unknown/future method values. AWF cannot enforce them;
+                # treat the rule as non-constraining rather than blocking every method.
+                continue
+            constrained = (
+                normalized if constrained is None else constrained.intersection(normalized)
+            )
+
+        if constrained is None:
+            return None
+        return tuple(method for method in ("merge", "squash", "rebase") if method in constrained)
+
     async def merge_pr(
         self,
         *,
@@ -1187,10 +1288,13 @@ class GitHubClient:
         method: str = "squash",
         delete_branch: bool = True,
     ) -> str:
-        """Squash-merge (or merge / rebase) and return the merge commit SHA.
+        """Merge a pull request using the given method and return the merge commit SHA.
 
-        Branch protection may reject the merge — that's how the runner
-        decides to fall back to NotifyHuman.
+        The caller is responsible for resolving the effective merge method via
+        ``fetch_repo_merge_methods`` and
+        ``fetch_branch_pull_request_allowed_merge_methods`` before calling this.
+        Method-specific rejections are classified by the merge loop to retry with
+        an alternative or escalate to NotifyHuman.
         """
         args = ["gh", "pr", "merge", str(pr_number), "--repo", repo.slug(), f"--{method}"]
         if delete_branch:
@@ -1270,7 +1374,14 @@ class GitHubClient:
             )
         if not result.stdout.strip():
             return None
-        return json.loads(result.stdout)
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise GitHubClientError(
+                operation=f"{operation} (json parse)",
+                returncode=0,
+                stderr=f"{exc}; stdout was: {result.stdout[:400]}",
+            ) from exc
 
     async def _run_gh(self, args: list[str], *, operation: str, strict: bool) -> Any:
         """Execute a GH CLI command, optionally enforcing success."""
@@ -1282,6 +1393,13 @@ class GitHubClient:
                 stderr=result.stderr,
             )
         return result
+
+
+def _flatten_branch_rules_pages(payload: list[Any]) -> list[Any]:
+    """Normalize ``gh api --paginate --slurp`` branch-rule pages."""
+    if not all(isinstance(page, list) for page in payload):
+        return payload
+    return [rule for page in payload for rule in page]
 
 
 # ── Tiny helpers kept private to avoid accidental imports ──────────────────
