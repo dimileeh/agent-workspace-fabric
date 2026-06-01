@@ -189,8 +189,8 @@ class ComposeStackLauncher:
             host_gateway_enabled=egress_plan.host_gateway_enabled,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
-        spec = await self._revalidate_prebuilt_companion_images(spec)
         try:
+            spec = await self._revalidate_prebuilt_companion_images(spec)
             paths = await self._compose.up(spec, wait=True)
         except ComposeOperationError as e:
             if e.reason_code == "DOCKER_UNAVAILABLE":

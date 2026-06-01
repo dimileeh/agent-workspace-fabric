@@ -209,6 +209,79 @@ async def test_compose_stack_launcher_reports_required_services_when_docker_miss
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_maps_revalidation_docker_unavailable(
+    tmp_path: Path,
+) -> None:
+    class _RevalidationUnavailableBuilder:
+        async def ensure(
+            self,
+            *,
+            name: str,
+            commit_sha: str,
+            build_context: str,
+            dockerfile: str,
+            relative_build_context: str,
+            capture_timeout_seconds: float,
+        ) -> str | None:
+            del name, commit_sha, build_context, dockerfile, relative_build_context
+            del capture_timeout_seconds
+            return "awf-companion-backend:abc123def456"
+
+        async def companion_image_exists(self, tag: str) -> bool:
+            del tag
+            raise ComposeOperationError(
+                operation="image inspect",
+                returncode=1,
+                stdout="",
+                stderr="Cannot connect to the Docker daemon",
+                reason_code="DOCKER_UNAVAILABLE",
+            )
+
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        companion_image_builder=_RevalidationUnavailableBuilder(),  # type: ignore[arg-type]
+    )
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+        commit_sha="abc123def456",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        docker=ProfileDocker(mode=DockerMode.dind),
+        services=[ProfileService(name="postgres", image="postgres:16-alpine")],
+    )
+
+    with pytest.raises(WorkspaceServiceExecutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=profile,
+                companions=(companion,),
+                companion_graph_prevalidated=True,
+            )
+        )
+
+    message = str(raised.value)
+    assert "Cannot start workspace agent container" in message
+    assert "required services: ['postgres', 'docker']" in message
+    assert "Cannot connect to the Docker daemon" in message
+    assert compose.specs == []
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_reraises_non_docker_unavailable_errors() -> None:
     compose = _DockerUnavailableCompose(reason_code="COMPOSE_COMMAND_FAILED")
     launcher = ComposeStackLauncher(
