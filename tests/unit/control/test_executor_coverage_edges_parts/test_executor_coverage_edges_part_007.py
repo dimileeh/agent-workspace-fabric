@@ -20,7 +20,14 @@ from awf.control.executor.helpers import (
     _raw_profile_has_explicit_planning_max_iterations,
     _validation_tier_for_workspace,
 )
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -520,6 +527,13 @@ async def test_execution_validation_fails_cleanup_when_callback_becomes_stale_af
         "cleanup_validation_worktree_side_effects",
         AsyncMock(return_value=cleanup_result),
     )
+    record_stale_cleanup_failure = AsyncMock()
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_record_stale_validation_cleanup_failure",
+        record_stale_cleanup_failure,
+        raising=False,
+    )
 
     result = await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
@@ -557,6 +571,136 @@ async def test_execution_validation_fails_cleanup_when_callback_becomes_stale_af
     mark_failed_kwargs = executor._mark_failed.await_args.kwargs
     assert mark_failed_kwargs["workspace_id"] == workspace_id
     assert mark_failed_kwargs["reason_code"] == VALIDATION_WORKTREE_CLEANUP_FAILED
+    record_stale_cleanup_failure.assert_awaited_once()
+    assert record_stale_cleanup_failure.await_args.kwargs["workspace_id"] == workspace_id
+    assert (
+        record_stale_cleanup_failure.await_args.kwargs["reason_code"]
+        == VALIDATION_WORKTREE_CLEANUP_FAILED
+    )
+
+
+@pytest.mark.unit
+async def test_stale_validation_cleanup_failure_records_secondary_failure_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    session = _FakeSession()
+    workspace = SimpleNamespace(
+        id="ws_stale_cleanup",
+        status=WorkspaceStatus.failed.value,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="pytest failed before cleanup",
+    )
+    events: list[dict[str, object]] = []
+
+    class _FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str | None = None,
+            payload: dict[str, object] | None = None,
+        ) -> object:
+            events.append(
+                {
+                    "event_type": event_type,
+                    "reason_code": reason_code,
+                    "payload": payload or {},
+                }
+            )
+            return SimpleNamespace()
+
+    async def _load_failure_causality_snapshot(
+        _session: object,
+        _workspace: object,
+    ) -> object:
+        return SimpleNamespace(
+            primary_failure={
+                "failure_reason": FailureReason.validation_failure.value,
+                "reason_code": "PYTEST_TEST_FAILURE",
+                "message": "pytest failed before cleanup",
+            },
+            secondary_failures=({"reason_code": "OLDER_SECONDARY"},),
+        )
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "WorkspaceRepository",
+        _FakeWorkspaceRepository,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "load_failure_causality_snapshot",
+        _load_failure_causality_snapshot,
+    )
+
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("generated.log",),
+        untracked_paths=("generated.log",),
+    )
+    cleanup_result = ValidationWorktreeCleanup(
+        cleaned=False,
+        check=dirty_check,
+        restore_ref="c" * 40,
+        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        message="restore failed",
+        cleanup_command="git restore --source cccccccc -- generated.log",
+        cleanup_stderr="restore failed",
+        verify_check=dirty_check,
+    )
+    executor = SimpleNamespace(_session_factory=lambda: session)
+
+    await executor_execution_validation._record_stale_validation_cleanup_failure(
+        executor,
+        workspace_id=workspace.id,
+        validation_run_id="vr-stale-cleanup",
+        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        message="VALIDATION_WORKTREE_CLEANUP_FAILED: restore failed",
+        cleanup_result=cleanup_result,
+    )
+
+    assert session.commits == 1
+    assert workspace.failure_reason == FailureReason.validation_failure.value
+    assert workspace.failure_message == "pytest failed before cleanup"
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "workspace.secondary_failure_recorded"
+    assert event["reason_code"] == "PYTEST_TEST_FAILURE"
+    payload = event["payload"]
+    assert isinstance(payload, dict)
+    assert payload["synthetic"] is True
+    assert payload["primary_failure"] == {
+        "failure_reason": FailureReason.validation_failure.value,
+        "reason_code": "PYTEST_TEST_FAILURE",
+        "message": "pytest failed before cleanup",
+    }
+    secondary_failure = payload["secondary_failure"]
+    assert isinstance(secondary_failure, dict)
+    assert secondary_failure["reason_code"] == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert secondary_failure["validation_run_id"] == "vr-stale-cleanup"
+    assert secondary_failure["cleanup"]["remaining_paths"] == ["generated.log"]
+    assert payload["secondary_failures"][-1]["reason_code"] == (VALIDATION_WORKTREE_CLEANUP_FAILED)
 
 
 @pytest.mark.unit
