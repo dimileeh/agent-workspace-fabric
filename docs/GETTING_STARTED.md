@@ -195,19 +195,24 @@ AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 If you change `AWF_POSTGRES_HOST_PORT` and set `AWF_DATABASE_URL` to a
 non-default value, update its localhost port to match.
 
-If you change `AWF_API_HOST_PORT` in the same shell that runs
-`awf service status` or `awf service doctor`, the CLI derives
-`http://localhost:<port>` automatically. Set `AWF_API_BASE_URL` explicitly only
-when running host-side CLI or HTTP checks from a different shell that does not
-carry `AWF_API_HOST_PORT`, or when targeting a non-derived API base URL. For
-example:
+For host-side `awf` workspace commands and manual HTTP checks, `AWF_BASE_URL`
+is the operator-facing API knob. Usually you do not need to set it: when
+`AWF_API_HOST_PORT` is present, the CLI derives `http://localhost:<port>`
+automatically. Set `AWF_BASE_URL` only when running host-side CLI or HTTP checks
+from a different shell that does not carry `AWF_API_HOST_PORT`, or when
+targeting a reverse proxy or other non-derived API root. `AWF_CLI_BASE_URL`
+still works for compatibility, but is deprecated.
 
 ```bash
 export AWF_API_HOST_PORT=9001
-awf service status --format pretty
-awf service doctor
-curl "http://localhost:${AWF_API_HOST_PORT}/readyz?provider=github"
+export AWF_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+awf workspace list --format pretty
+curl "${AWF_BASE_URL}/readyz?provider=github"
 ```
+
+`AWF_API_BASE_URL` is different: it is the API self-reference URL used by
+service-side doctor, smoke, and status checks. Local Compose sets that in the
+service container to `http://api:8000`; do not use it as the host CLI target.
 
 ### Local vs Production Configuration
 

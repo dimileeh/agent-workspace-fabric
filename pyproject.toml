@@ -30,6 +30,7 @@ dependencies = [
     "httpx>=0.27.0",
     "typer>=0.12.0",
     "jinja2>=3.1.0",
+    "keyring>=24",
     "docker>=7.0.0",
     "mcp>=1.9.0",
     "python-dotenv>=1.0.0",
@@ -93,6 +94,7 @@ exclude = [
 include = [
     "/.env.example",
     "/README.md",
+    "/RELEASING.md",
     "/alembic.ini",
     "/docs",
     "/docker/agent-runtime.Dockerfile",
@@ -101,7 +103,9 @@ include = [
     "/docker/control-plane.Dockerfile",
     "/migrations",
     "/openapi.json",
+    "/packaging/install.sh",
     "/pyproject.toml",
+    "/scripts/generate_install_manifest.py",
     "/src",
     "/uv.lock",
 ]

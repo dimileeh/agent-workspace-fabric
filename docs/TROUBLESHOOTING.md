@@ -130,16 +130,21 @@ done
 AWF reports these as service status readiness problems; treat them as infra issues
 before provider-level triage:
 
-If the API host port was customized with `AWF_API_HOST_PORT`, keep operator
-checks (`awf service status` / `awf service doctor`) and any manual curl requests
-pointed at the matching API base URL, for example:
+If the API host port was customized with `AWF_API_HOST_PORT`, host `awf`
+workspace commands derive the matching localhost URL automatically when that
+variable is in the same shell. Use `AWF_BASE_URL` only when the CLI or manual
+curl requests run from another shell or through a reverse proxy:
 
 ```bash
 export AWF_API_HOST_PORT=9001
-export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
-awf service status --format pretty
-curl "${AWF_API_BASE_URL}/readyz?provider=github"
+export AWF_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+awf workspace list --format pretty
+curl "${AWF_BASE_URL}/readyz?provider=github"
 ```
+
+`AWF_API_BASE_URL` remains the service-side API self-reference URL used by
+doctor, smoke, and status flows; local Compose sets it inside the service
+container to `http://api:8000`.
 
 1. Check readiness signals and status detail:
 
@@ -319,15 +324,16 @@ Readiness probes are your primary first-run signal.
 curl http://localhost:8000/readyz
 ```
 
-If `AWF_API_HOST_PORT` is customized, set `AWF_API_BASE_URL` and use that
-URL for host-side API diagnostics (`awf service status`, `awf service doctor`,
-and `curl` checks):
+If `AWF_API_HOST_PORT` is customized, host CLI calls derive
+`http://localhost:<port>` automatically when that variable is in the same shell.
+Set `AWF_BASE_URL` for host-side API diagnostics that run from a different shell
+or through a reverse proxy:
 
 ```bash
 export AWF_API_HOST_PORT=9001
-export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
-awf service status --format pretty
-curl "${AWF_API_BASE_URL}/readyz?provider=github"
+export AWF_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+awf workspace list --format pretty
+curl "${AWF_BASE_URL}/readyz?provider=github"
 ```
 
 Use provider filtering for a failing dependency:

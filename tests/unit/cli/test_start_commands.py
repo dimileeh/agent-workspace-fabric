@@ -831,3 +831,84 @@ def test_providers_summary_skips_non_mapping_providers() -> None:
     )
 
     assert summary == {"status": "ready"}
+
+
+# --------------------------------------------------------------------------- #
+# 7. Packaged-asset selection when no source checkout is configured (T13, AC2)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_resolve_start_source_checkout_none_without_stored_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No recorded source checkout resolves to None (default/packaged discovery)."""
+    monkeypatch.setattr(
+        "awf.host_setup.config.read_host_setup_config",
+        lambda **_k: SimpleNamespace(source_checkout=None),
+    )
+
+    assert start_commands._resolve_start_source_checkout(None) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_service_compose_paths_resolve_from_packaged_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With no source checkout, compose paths come from the packaged bootstrap root.
+
+    This is the asset-location contract behind ``awf start`` for a clean install:
+    ``_resolve_service_compose_paths`` selects the packaged ``bootstrap_assets``
+    compose file and the package-relative ``.env``/`.env.example` seeds.
+    """
+    from awf.cli import init_ops
+    from awf.service import bootstrap as bootstrap_mod
+
+    packaged_root = (tmp_path / "site-packages" / "awf" / "bootstrap_assets").resolve()
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: packaged_root)
+    monkeypatch.setattr(
+        bootstrap_mod,
+        "is_packaged_bootstrap_asset_root",
+        lambda candidate: candidate.resolve() == packaged_root,
+    )
+
+    compose_file, env_file, env_example = init_ops._resolve_service_compose_paths()  # noqa: SLF001
+
+    assert compose_file == packaged_root / "docker/compose/local-service.yml"
+    assert env_file == Path(".env")
+    assert env_example == packaged_root / ".env.example"
+
+
+@pytest.mark.unit
+def test_resolve_start_inputs_none_delegates_to_packaged_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Start with no source checkout pins no asset root and uses discovered compose paths.
+
+    ``asset_root is None`` lets ``run_service_bootstrap`` run its own discovery,
+    which includes the packaged fallback, while the compose file is sourced from
+    ``_resolve_service_compose_paths`` (the packaged-root selector above).
+    """
+    packaged_compose = tmp_path / "awf" / "bootstrap_assets" / "docker/compose/local-service.yml"
+    monkeypatch.setattr(
+        "awf.cli.init_ops._resolve_service_compose_paths",
+        lambda: (packaged_compose, Path(".env"), packaged_compose.parent / ".env.example"),
+    )
+    monkeypatch.setattr(
+        "awf.cli.init_ops._resolve_service_runtime_env_files",
+        lambda *_a, **_k: (Path(".env"), None),
+    )
+    monkeypatch.setattr("awf.service.config.local_service_environ", lambda **_k: {})
+    monkeypatch.setattr("awf.common.config.Settings", lambda **_k: object())
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda *_a, **_k: SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+    )
+
+    inputs = start_commands._resolve_start_bootstrap_inputs(None)  # noqa: SLF001
+
+    assert inputs.asset_root is None
+    assert inputs.compose_file == packaged_compose
+    assert inputs.compose_env_file is None
