@@ -757,6 +757,7 @@ async def _persist_monitor_handoff_setup_failure_directly(
             workspace_id=workspace_id,
             setup_failure_reason_code=setup_failure.reason_code,
         )
+        raise
 
 
 async def _build_handoff_pr_monitor(
