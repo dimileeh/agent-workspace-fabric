@@ -3,6 +3,7 @@
 import {
 Activity,
 AlertCircle,
+AlertTriangle,
 ArrowDown,
 ArrowUp,
 Bot,
@@ -12,8 +13,10 @@ ChevronDown,
 ChevronUp,
 Contrast,
 FileText,
+GitPullRequest,
 HeartPulse,
 ListFilter,
+ListTree,
 Loader2,
 Maximize2,
 Monitor,
@@ -21,6 +24,7 @@ Moon,
 Radio,
 RefreshCw,
 Search,
+Server,
 Sun,
 Terminal,
 Type,
@@ -45,7 +49,8 @@ formatUsageProvenance,
 lifecycleStages,
 pricingAvailabilityReason,
 relativeTime,
-toneClass
+toneClass,
+type StatusTone
 } from "@/lib/format";
 import {
 requiredNextActionTone,
@@ -73,6 +78,7 @@ import {
 Badge,
 ExternalAnchor,
 Fact,
+KpiStat,
 OperatorActionState,
 Panel,
 RetryActionState,
@@ -239,6 +245,82 @@ export function StatePill({
       {icon}
       {label}: {state}
     </span>
+  );
+}
+
+export type FleetKpi = {
+  id: string;
+  label: string;
+  value: string | number;
+  tone?: StatusTone;
+  suffix?: string;
+  hint?: string;
+  stale?: boolean;
+};
+
+// Status layer (ISA-101 three-layer model): a single-glance fleet HUD answering
+// "is the fleet ok?" — the 5-7 KPIs an operator scans first, most critical first.
+// KPIs dim per source (saturation vs reliability summary) so only the actually
+// stale values fade, while the warning above stays at full opacity.
+export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
+  const anyStale = kpis.some((kpi) => kpi.stale);
+  return (
+    <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
+      {anyStale ? (
+        <div className="mb-2 inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text">
+          <span aria-hidden>⚠</span>
+          some values show the last snapshot — live data may be stale
+        </div>
+      ) : null}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
+        {kpis.map((kpi) => (
+          <KpiStat
+            key={kpi.id}
+            label={kpi.label}
+            value={kpi.value}
+            tone={kpi.tone}
+            suffix={kpi.suffix}
+            hint={kpi.hint}
+            stale={kpi.stale}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const NAV_ITEMS: { id: string; label: string; icon: typeof ListTree }[] = [
+  { id: "awf-workspaces", label: "Workspaces", icon: ListTree },
+  { id: "awf-capacity", label: "Capacity", icon: Server },
+  { id: "awf-merge-queue", label: "Merge queue", icon: GitPullRequest },
+  { id: "awf-failures", label: "Failures", icon: AlertTriangle },
+];
+
+// Section jump-nav. On wide screens the panels sit side by side and need no
+// navigation; on narrow screens they stack into one tall column, so this sticky
+// bar (narrow-only) lets operators jump straight to a section.
+export function SectionNav() {
+  const go = (id: string) => document.getElementById(id)?.scrollIntoView({ block: "start" });
+  return (
+    <nav
+      aria-label="Jump to section"
+      className="sticky top-0 z-30 flex gap-2 overflow-x-auto border-b border-line bg-canvas px-4 py-2 xl:hidden"
+    >
+      {NAV_ITEMS.map((item) => {
+        const Icon = item.icon;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => go(item.id)}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--radius-control)] border border-line bg-surface px-2.5 py-1 text-[11px] font-medium text-fg-muted transition hover:bg-surface-2 hover:text-fg"
+          >
+            <Icon size={13} aria-hidden />
+            {item.label}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 

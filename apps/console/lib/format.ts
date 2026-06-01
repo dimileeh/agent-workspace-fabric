@@ -1,6 +1,7 @@
 import type {
   LlmUsageSummary,
   PricingMetadata,
+  ResourceSaturationSummary,
   WorkspaceLifecycleStage,
   WorkspaceStatus,
 } from "@/lib/types";
@@ -222,6 +223,67 @@ export function compactDuration(seconds: number | null | undefined): string {
   return `${remainingSeconds}s`;
 }
 
+// Single fleet-capacity headline: the worst utilization across every allocated
+// capacity dimension (CPU, memory, disk, DinD slots) and both concurrency lanes
+// (provision, execution), clamped to 0-100. Any dimension flagged saturated via
+// a *_SATURATED pressure reason counts as fully utilized, so the strip cannot
+// read healthy while a hard constraint the capacity panel already shows as
+// saturated has no headroom left. Returns null when no limit is comparable, so
+// the headline can show "unknown" rather than a misleading 0%.
+export function capacityUtilizationPct(saturation: ResourceSaturationSummary): number | null {
+  let pct = 0;
+  let known = false;
+  const allocated = saturation.allocated_capacity;
+  const dimensions = [
+    allocated.steady_cpu,
+    allocated.peak_cpu,
+    allocated.steady_memory_gb,
+    allocated.peak_memory_gb,
+    allocated.disk_mb,
+    allocated.dind_slots,
+  ];
+  for (const dimension of dimensions) {
+    if (dimension && dimension.limit && dimension.limit > 0) {
+      known = true;
+      pct = Math.max(pct, (dimension.reserved / dimension.limit) * 100);
+    }
+  }
+  for (const lane of [saturation.concurrency.provision, saturation.concurrency.execution]) {
+    if (lane && lane.limit > 0) {
+      known = true;
+      pct = Math.max(pct, (lane.in_use / lane.limit) * 100);
+    }
+  }
+  // Mirror the capacity panel: fall back to capacity.pressure_reasons when the
+  // allocated list is empty.
+  const pressureReasons =
+    allocated.pressure_reasons && allocated.pressure_reasons.length > 0
+      ? allocated.pressure_reasons
+      : (saturation.capacity?.pressure_reasons ?? []);
+  if (pressureReasons.some((reason) => reason.endsWith("_SATURATED"))) {
+    known = true;
+    pct = Math.max(pct, 100);
+  }
+  // The scheduler is actively refusing new work (disk threshold breached or
+  // admission blocked, e.g. INSUFFICIENT_DISK) → capacity is effectively
+  // exhausted regardless of how much workspace disk is reserved.
+  if (saturation.disk?.ok === false || saturation.admission?.ok === false) {
+    known = true;
+    pct = Math.max(pct, 100);
+  }
+  // Admission flagged saturated (not yet blocking) is a warning the capacity
+  // panel already surfaces; reflect it as at-least-warn pressure (>=75%) so the
+  // headline can't read healthy while admission is visibly saturated.
+  if (saturation.admission?.status === "saturated") {
+    known = true;
+    pct = Math.max(pct, 75);
+  }
+  if (!known) {
+    return null;
+  }
+  return Math.min(100, Math.max(0, Math.round(pct)));
+}
+
 export function bytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 B";
@@ -306,7 +368,9 @@ function formatLogStamp(value: string): string {
   }).format(date);
 }
 
-export function statusTone(status: string): "neutral" | "info" | "good" | "warn" | "bad" {
+export type StatusTone = "neutral" | "info" | "good" | "warn" | "bad";
+
+export function statusTone(status: string): StatusTone {
   if (status === "completed" || status === "succeeded" || status === "healthy") {
     return "good";
   }
@@ -324,32 +388,49 @@ export function statusTone(status: string): "neutral" | "info" | "good" | "warn"
   return "neutral";
 }
 
-export function toneClass(tone: ReturnType<typeof statusTone>): string {
-  switch (tone) {
-    case "good":
-      return "border-emerald-200 bg-emerald-50 text-emerald-800";
-    case "warn":
-      return "border-amber-200 bg-amber-50 text-amber-800";
-    case "bad":
-      return "border-red-200 bg-red-50 text-red-800";
-    case "info":
-      return "border-blue-200 bg-blue-50 text-blue-800";
-    default:
-      return "border-slate-200 bg-slate-50 text-slate-700";
-  }
+// Status colors are explicit CSS classes (see globals.css `.tone-*`), not
+// Tailwind utilities — Tailwind does not reliably scan class names composed in
+// this file, so utility strings here would silently fail to generate.
+export function toneClass(tone: StatusTone): string {
+  return `tone-${tone}`;
 }
 
-export function toneFillClass(tone: ReturnType<typeof statusTone>): string {
-  switch (tone) {
-    case "good":
-      return "bg-emerald-500";
-    case "warn":
-      return "bg-amber-500";
-    case "bad":
-      return "bg-red-500";
-    case "info":
-      return "bg-blue-500";
+export function toneFillClass(tone: StatusTone): string {
+  return `tone-fill-${tone}`;
+}
+
+export function toneTextClass(tone: StatusTone): string {
+  return `tone-text-${tone}`;
+}
+
+// Glyph paired with every status badge/dot so state is never conveyed by color
+// alone (ISA-101 / WCAG). Shape + label + color together.
+export function statusGlyph(status: string): string {
+  switch (status) {
+    case "completed":
+    case "succeeded":
+    case "healthy":
+      return "✓";
+    case "failed":
+    case "error":
+    case "dead":
+    case "destroyed":
+      return "✕";
+    case "cancelled":
+      return "⊘";
+    case "destroying":
+      return "◌";
+    case "monitoring_pr":
+      return "◆";
+    case "running":
+    case "validating":
+    case "pushing":
+      return "●";
+    case "requested":
+    case "provisioning":
+    case "ready":
+      return "◷";
     default:
-      return "bg-slate-400";
+      return "•";
   }
 }
