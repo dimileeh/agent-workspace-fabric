@@ -607,10 +607,15 @@ def select_credential_backend(
         # explicit request, so it stays silent here to avoid warning on every
         # default selection. The write-time path never double-logs: when this
         # fires, keyring is not selected, so ``store_provider_credential`` mints
-        # env_ref without re-entering its own degradation branch.
+        # env_ref without re-entering its own degradation branch. Use
+        # ``selected_backend`` (not ``requested_backend``) to keep the
+        # ``host_setup.credential_backend_degraded`` event a single consistent schema
+        # across the select-time and write-time routes; here it only ever fires for
+        # the explicit ``preferred="keyring"`` request, but the shared field name
+        # avoids two divergent shapes for the same event.
         logger.warning(
             "host_setup.credential_backend_degraded",
-            requested_backend="keyring",
+            selected_backend="keyring",
             preferred=preferred,
             effective_backend="env_ref",
             reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
@@ -666,14 +671,18 @@ def store_provider_credential(
         # proved unusable only at write time, so the credential degrades to the
         # env-ref offer. That degradation is otherwise observable to callers only as
         # a changed ``CredentialRef.backend``; emit a structured, secret-free warning
-        # so a caller who explicitly requested keyring (``preferred="keyring"``) can
-        # tell the stored ref now points at an env var rather than the OS keychain.
-        # ``provider`` is already validated by ``create_ref`` before any
-        # backend-unavailable signal, but redact it defensively in case it carried a
-        # token-shaped value.
+        # so a caller can tell the stored ref now points at an env var rather than
+        # the OS keychain. Log the chosen backend as ``selected_backend`` rather than
+        # ``requested_backend``: this path also fires for the ``preferred=None``
+        # auto-select, where keyring was *selected* but never explicitly *requested*,
+        # so a ``requested_backend`` label would imply a user preference that does not
+        # exist on that path. ``preferred`` separately carries what (if anything) was
+        # explicitly asked for. ``provider`` is already validated by ``create_ref``
+        # before any backend-unavailable signal, but redact it defensively in case it
+        # carried a token-shaped value.
         logger.warning(
             "host_setup.credential_backend_degraded",
-            requested_backend="keyring",
+            selected_backend="keyring",
             preferred=preferred,
             effective_backend="env_ref",
             reason_code=exc.reason_code,

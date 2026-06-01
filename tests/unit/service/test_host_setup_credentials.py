@@ -207,7 +207,7 @@ def test_store_logs_keyring_degradation_to_env_ref(preferred: str | None) -> Non
     assert len(degraded) == 1
     entry = degraded[0]
     assert entry["log_level"] == "warning"
-    assert entry["requested_backend"] == "keyring"
+    assert entry["selected_backend"] == "keyring"
     assert entry["effective_backend"] == "env_ref"
     assert entry["preferred"] == preferred
     assert entry["reason_code"] == CREDENTIAL_BACKEND_UNAVAILABLE
@@ -257,7 +257,7 @@ def test_select_logs_keyring_degradation_only_for_explicit_request(
     if expected_logs:
         entry = degraded[0]
         assert entry["log_level"] == "warning"
-        assert entry["requested_backend"] == "keyring"
+        assert entry["selected_backend"] == "keyring"
         assert entry["effective_backend"] == "env_ref"
         assert entry["preferred"] == preferred
         assert entry["reason_code"] == CREDENTIAL_BACKEND_UNAVAILABLE
