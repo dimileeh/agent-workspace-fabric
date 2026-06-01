@@ -306,33 +306,42 @@ async def retry_workspace_row(
         or (source_reservation.node_id if source_reservation else None)
         or "local"
     )
-    # Phase 1 single-node assumption: when source_effective_node_id is None
-    # (legacy row with no node_id and no ResourceReservation), it is treated
-    # as a wildcard that matches any target_node_id.  This is safe when AWF
-    # runs a single worker node — the source's containers must be on that
-    # node — but in a multi-node deployment it could over-block retries on
-    # sibling nodes whose ports are not actually held by the source.  When
-    # Phase 2 introduces multi-node, this branch should require a resolved
-    # node_id or be replaced by a per-node runtime-release query.
-    # Stale-read window: _source_runtime_not_yet_released reads the DB
-    # *before* acquire_host_port_admission_lock below. If the cleanup worker
-    # emits terminal_runtime_released for the source in the gap between this
-    # check and the lock acquisition, the caller receives a 409
-    # SOURCE_RUNTIME_NOT_RELEASED even though the ports were actually freed
-    # and the retry could have proceeded. This is harmless — the caller
-    # retries and the next attempt sees the released event — but it is an
-    # extra round-trip. Do not "fix" this by moving the check inside the
-    # lock; the advisory lock must be acquired before find_host_port_conflicts
-    # to prevent a TOCTOU window on port admission.
-    if (
-        not ignore_source_runtime_check
-        and await _source_runtime_not_yet_released(session, source)
-        and (source_effective_node_id is None or source_effective_node_id == target_node_id)
-    ):
-        raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
-            source_workspace_id=source.id,
-        )
     if host_ports:
+        # The runtime-release gate is only meaningful when the source
+        # workspace holds host ports that could conflict with the retry.
+        # For zero-port workspaces (host_ports empty), the source's
+        # compose project is workspace-ID-scoped (awf_<id>) and cannot
+        # cause host-port conflicts, so the check is skipped.
+        # Phase 1 single-node assumption: when source_effective_node_id
+        # is None (legacy row with no node_id and no
+        # ResourceReservation), it is treated as a wildcard that matches
+        # any target_node_id.  This is safe when AWF runs a single
+        # worker node — the source's containers must be on that node —
+        # but in a multi-node deployment it could over-block retries on
+        # sibling nodes whose ports are not actually held by the
+        # source.  When Phase 2 introduces multi-node, this branch
+        # should require a resolved node_id or be replaced by a
+        # per-node runtime-release query.
+        # Stale-read window: _source_runtime_not_yet_released reads the
+        # DB *before* acquire_host_port_admission_lock below. If the
+        # cleanup worker emits terminal_runtime_released for the source
+        # in the gap between this check and the lock acquisition, the
+        # caller receives a 409 SOURCE_RUNTIME_NOT_RELEASED even though
+        # the ports were actually freed and the retry could have
+        # proceeded. This is harmless — the caller retries and the next
+        # attempt sees the released event — but it is an extra
+        # round-trip. Do not "fix" this by moving the check inside the
+        # lock; the advisory lock must be acquired before
+        # find_host_port_conflicts to prevent a TOCTOU window on port
+        # admission.
+        if (
+            not ignore_source_runtime_check
+            and await _source_runtime_not_yet_released(session, source)
+            and (source_effective_node_id is None or source_effective_node_id == target_node_id)
+        ):
+            raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
+                source_workspace_id=source.id,
+            )
         await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
