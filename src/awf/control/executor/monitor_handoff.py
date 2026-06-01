@@ -24,7 +24,7 @@ from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode, ScalarNode
 
 from awf.adapters.base import get_adapter
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
@@ -906,6 +906,58 @@ async def _mark_failed_from_monitor_handoff_setup_failure(
     except Exception:
         _log.exception(
             "executor.monitor_handoff_setup_failure_mark_failed_failed",
+            workspace_id=workspace_id,
+            setup_failure_reason_code=setup_failure.reason_code,
+        )
+        if getattr(self, "_session_factory", None) is not None:
+            await _persist_monitor_handoff_setup_failure_directly(
+                self,
+                workspace_id=workspace_id,
+                setup_failure=setup_failure,
+            )
+
+
+async def _persist_monitor_handoff_setup_failure_directly(
+    self: Any,
+    *,
+    workspace_id: str,
+    setup_failure: _MonitorHandoffSetupFailureError,
+) -> None:
+    """Last-resort terminal transition when the executor failure wrapper raises."""
+    session_factory = getattr(self, "_session_factory", None)
+    if session_factory is None:
+        return
+    final_reason_code = setup_failure.reason_code or setup_failure.failure_reason.value.upper()
+    safe_message = redact_audit_text(setup_failure.message, limit=2000)
+    payload: dict[str, Any] = {
+        "failure_reason": setup_failure.failure_reason.value,
+        "reason_code": final_reason_code,
+        "message": safe_message,
+    }
+    if setup_failure.details is not None:
+        payload["details"] = cast(
+            dict[str, Any],
+            redact_audit_value(dict(setup_failure.details)),
+        )
+    try:
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.running,
+                to=WorkspaceStatus.failed,
+                reason_code=final_reason_code,
+                payload=payload,
+            )
+            if ws is None:
+                await session.commit()
+                return
+            ws.failure_reason = setup_failure.failure_reason.value
+            ws.failure_message = safe_message
+            await session.commit()
+    except Exception:
+        _log.exception(
+            "executor.monitor_handoff_setup_failure_terminal_fallback_failed",
             workspace_id=workspace_id,
             setup_failure_reason_code=setup_failure.reason_code,
         )
