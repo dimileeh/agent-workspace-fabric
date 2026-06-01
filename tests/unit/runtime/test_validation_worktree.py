@@ -30,7 +30,7 @@ _VALIDATION_IGNORED_LS_FILES_ARGS = (
     "--exclude-standard",
     "-z",
 )
-_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-fdx", "--")
+_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffdx", "--")
 _VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
 
 
@@ -841,6 +841,73 @@ async def test_cleanup_validation_worktree_cleans_generated_ignored_metachar_pat
     assert preserved_baseline.exists()
     assert not generated_artifact.exists()
     assert _VALIDATION_CLEAN_ARGS + (".venv/foo[1]",) in commands
+
+
+@pytest.mark.unit
+async def test_cleanup_validation_worktree_force_cleans_nested_repo_under_ignored_root(
+    tmp_path: Path,
+) -> None:
+    """Nested repos created below preserved ignored roots must not survive cleanup."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (worktree / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    _run_real_git(worktree, "add", ".gitignore")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "init",
+    )
+    restore_ref = _run_real_git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    ignored_root = worktree / ".venv"
+    nested_repo = ignored_root / "tool"
+    ignored_root.mkdir()
+    preserved_baseline = ignored_root / "existing-artifact.log"
+    preserved_baseline.write_text("baseline\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", str(nested_repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (nested_repo / "generated.py").write_text("print('generated')\n", encoding="utf-8")
+
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        commands.append(tuple(args))
+        result = subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return _CommandResultLike(result.returncode, result.stdout, result.stderr)
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert preserved_baseline.exists()
+    assert not nested_repo.exists()
+    assert _VALIDATION_CLEAN_ARGS + (".venv/tool",) in commands
 
 
 @pytest.mark.unit

@@ -59,6 +59,28 @@ def _normalize_porcelain_path(path: str) -> str:
     return path[:-1] if path.endswith("/") else path
 
 
+def _collapse_descendant_cleanup_paths(paths: list[str]) -> list[str]:
+    """Drop cleanup paths already covered by an ancestor cleanup path."""
+    collapsed: list[tuple[str, str]] = []
+    for path in paths:
+        normalized_path = _normalize_porcelain_path(path)
+        if not normalized_path:
+            continue
+        if any(
+            normalized_path == existing_normalized_path
+            or normalized_path.startswith(f"{existing_normalized_path}/")
+            for _existing_path, existing_normalized_path in collapsed
+        ):
+            continue
+        collapsed = [
+            (existing_path, existing_normalized_path)
+            for existing_path, existing_normalized_path in collapsed
+            if not existing_normalized_path.startswith(f"{normalized_path}/")
+        ]
+        collapsed.append((path, normalized_path))
+    return [path for path, _normalized_path in collapsed]
+
+
 def _resolve_head_sha(result: CommandResult, *, ref: str) -> tuple[str | None, str]:
     """Extract a resolved revision SHA from a git rev-parse output."""
     sha = _first_output_line(result.stdout)
@@ -986,7 +1008,7 @@ async def cleanup_validation_worktree_side_effects(
             and _normalize_porcelain_path(path) not in ignored_snapshot_normalized_set
         )
 
-    cleanup_untracked_paths = list(dict.fromkeys(cleanup_untracked_paths))
+    cleanup_untracked_paths = _collapse_descendant_cleanup_paths(cleanup_untracked_paths)
     if restore_ref is None and cleanup_untracked_paths:
         return ValidationWorktreeCleanup(
             cleaned=False,
@@ -999,8 +1021,9 @@ async def cleanup_validation_worktree_side_effects(
             ),
         )
     if cleanup_untracked_paths:
+        # Git requires a second force flag to remove nested repositories created by validation.
         clean = await run_git(
-            ["--literal-pathspecs", "clean", "-fdx", "--", *cleanup_untracked_paths]
+            ["--literal-pathspecs", "clean", "-ffdx", "--", *cleanup_untracked_paths]
         )
         if not clean.ok:
             return await _return_after_head_verification(
