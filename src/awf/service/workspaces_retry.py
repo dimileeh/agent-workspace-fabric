@@ -359,15 +359,12 @@ async def retry_workspace_row(
         # (_source_runtime_not_yet_released) has already confirmed the
         # source's containers are down when ignore_source_runtime_check is
         # False. When ignore_source_runtime_check is True (planning-scope
-        # auto-retry), the provisioner's
-        # _check_auto_resolved_profile_host_ports re-checks *auto-resolved
-        # profile service ports* at provision time, but companion ports are
-        # NOT re-checked there. If a planning-scope auto-retry fires while
-        # the source's containers are still running, a companion port
-        # conflict between the retry and the still-live source will surface
-        # as INFRASTRUCTURE_FAILURE at docker compose up — the same failure
-        # mode as pre-PR behaviour for this path. Reordering these two
-        # guards without updating this exclusion could break the invariant.
+        # auto-retry), the provisioner re-checks companion ports and
+        # auto-resolved profile service ports before Docker Compose launch.
+        # If the source stack still owns one of those ports, the retry
+        # workspace fails before compose-up rather than surfacing as a Docker
+        # bind error. Reordering these two guards without updating the
+        # provisioner checks could break the invariant.
 
     retried = await repo.create(
         repo_url=source.repo_url,

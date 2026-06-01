@@ -273,6 +273,44 @@ class Provisioner:
                     docker_mode=profile.docker.mode,
                 )
                 companion_graph_prevalidated = True
+                try:
+                    await self._check_companion_host_ports(
+                        task_policy=ws.task_policy,
+                        excluding_workspace_id=workspace_id,
+                    )
+                except (
+                    WorkspaceCreateHostPortConflictError,
+                    WorkspaceCreateDuplicateHostPortError,
+                ) as exc:
+                    _log.error(
+                        "provisioner.companion_host_port_conflict",
+                        workspace_id=workspace_id,
+                        host_port=exc.host_port,
+                        conflicting_workspace_id=getattr(exc, "conflicting_workspace_id", None),
+                        reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                    )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message=str(exc)[:2000],
+                        from_status=WorkspaceStatus.provisioning,
+                        reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                    )
+                    return
+                except Exception:
+                    _log.warning(
+                        "provisioner.companion_host_port_check_failed",
+                        workspace_id=workspace_id,
+                        reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                    )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message="companion host-port check failed; compose not started",
+                        from_status=WorkspaceStatus.provisioning,
+                        reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
+                    )
+                    return
                 materialized_companions = await self._materialize_companions(
                     workspace_id=workspace_id,
                     companions=companion_specs,
@@ -1073,6 +1111,44 @@ class Provisioner:
                 and ws.status == WorkspaceStatus.provisioning.value
             ):
                 ws.resolved_profile = resolved_profile_dict
+            await session.commit()
+
+    async def _check_companion_host_ports(
+        self,
+        *,
+        task_policy: Mapping[str, Any] | None = None,
+        excluding_workspace_id: str | None = None,
+    ) -> None:
+        """Check companion host ports for conflicts before provisioning starts Compose.
+
+        Create and retry admission check companion ports before a workspace row
+        is written, but planning-scope auto-retry intentionally excludes the
+        source workspace from the retry-time conflict scan.  This provisioner
+        check closes that remaining gap: if the source stack still owns a
+        companion host port, provisioning fails before companion worktree
+        materialization and before Docker Compose can attempt to bind the port.
+        """
+        companion_host_ports = host_ports_from_task_policy_companions(task_policy)
+        if not companion_host_ports:
+            return
+        seen: set[int] = set()
+        for hp in companion_host_ports:
+            if hp in seen:
+                raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
+            seen.add(hp)
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            await repo.acquire_host_port_admission_lock(host_ports=companion_host_ports)
+            conflicts = await repo.find_host_port_conflicts(
+                host_ports=companion_host_ports,
+                excluding_workspace_id=excluding_workspace_id,
+                node_id=self._config.node_id,
+            )
+            if conflicts:
+                raise WorkspaceCreateHostPortConflictError(
+                    host_port=conflicts[0].host_port,
+                    conflicting_workspace_id=conflicts[0].workspace_id,
+                )
             await session.commit()
 
     async def _recheck_before_launch(self, workspace_id: str) -> bool:

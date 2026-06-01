@@ -13,6 +13,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.companions import companion_worktree_id
 from awf.common.redaction import REDACTION_MARKER
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
@@ -78,6 +79,87 @@ def provisioner(
 
 
 class TestFailureHandling:
+    @pytest.mark.unit
+    async def test_companion_host_port_conflict_fails_before_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        companion_policy = {
+            "companions": [
+                {
+                    "name": "sidecar",
+                    "repo_url": str(origin_repo),
+                    "base_branch": "development",
+                    "ports": [[5432, 5434]],
+                }
+            ]
+        }
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            source = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="source",
+                task_prompt="p",
+                agent="codex",
+                task_policy=companion_policy,
+                test_commands=[],
+            )
+            source.node_id = "test-node-01"
+            source.compose_project_name = f"awf_{source.id}"
+            await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            await repo.transition(source, to=WorkspaceStatus.failed, reason_code="SEED")
+            target = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="retry",
+                task_prompt="p",
+                agent="codex",
+                task_policy=companion_policy,
+                test_commands=[],
+            )
+            await s.commit()
+            target_id = target.id
+
+        await provisioner.provision(target_id)
+
+        assert launcher.requests == []
+        companion_worktree = (
+            git_manager.work_dir / "worktrees" / companion_worktree_id(target_id, "sidecar")
+        )
+        assert not companion_worktree.exists()
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(target_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message is not None
+            assert "Host port 5434 is already in use by workspace" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
+            assert any(
+                event.reason_code == "COMPANION_HOST_PORT_CHECK_FATAL" for event in reloaded.events
+            )
+
     @pytest.mark.unit
     async def test_invalid_inline_profile_marks_workspace_failed_as_profile_resolution(
         self,
