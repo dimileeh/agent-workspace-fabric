@@ -94,6 +94,7 @@ exclude = [
 include = [
     "/.env.example",
     "/README.md",
+    "/RELEASING.md",
     "/alembic.ini",
     "/docs",
     "/docker/agent-runtime.Dockerfile",
@@ -102,7 +103,9 @@ include = [
     "/docker/control-plane.Dockerfile",
     "/migrations",
     "/openapi.json",
+    "/packaging/install.sh",
     "/pyproject.toml",
+    "/scripts/generate_install_manifest.py",
     "/src",
     "/uv.lock",
 ]

@@ -348,6 +348,41 @@ def test_stale_source_checkout_metadata_fails_without_package_fallback(tmp_path:
 
 
 @pytest.mark.unit
+def test_stale_source_metadata_not_masked_by_available_packaged_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stale source metadata fails loudly even when a valid packaged root is resolvable.
+
+    The no-mask invariant must hold by construction: ``verified_source_from_metadata``
+    never substitutes packaged assets. This pins that behavior even when a fully
+    valid packaged bootstrap root IS available to the process, so a future change
+    that wired in a silent package fallback would fail here.
+    """
+    import awf.service.bootstrap as bootstrap
+
+    packaged_root = _write_valid_source_checkout(tmp_path / "packaged").resolve()
+    monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: (packaged_root,))
+    # Precondition: a valid packaged/bootstrap asset root really is resolvable now.
+    assert bootstrap.get_bootstrap_asset_root() == packaged_root
+
+    checkout = _write_valid_source_checkout(tmp_path / "checkout")
+    metadata = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW).to_metadata()
+    (checkout / "docker/control-plane.Dockerfile").unlink()
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        verified_source_from_metadata(metadata, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_ASSETS_STALE"
+    assert error.root == checkout.resolve()
+    assert error.missing_markers == ("docker/control-plane.Dockerfile",)
+    assert error.details["fallback_used"] is False
+    # The stale path reports the source root, never the available packaged root.
+    assert str(packaged_root) not in str(error.root)
+
+
+@pytest.mark.unit
 def test_stale_source_checkout_metadata_reports_contract_drift(tmp_path: Path) -> None:
     """Verify stale source metadata reports marker and asset contract drift."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
