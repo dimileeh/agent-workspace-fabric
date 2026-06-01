@@ -16,6 +16,7 @@ re-raised so the caller can log/alert.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     has_terminal_runtime_released_event,
     host_ports_from_resolved_profile,
+    host_ports_from_task_policy_companions,
 )
 from awf.node.companion_services import (
     MaterializedCompanionService,
@@ -282,6 +284,7 @@ class Provisioner:
                         profile=profile,
                         profile_resolution=profile_resolution,
                         excluding_workspace_id=workspace_id,
+                        task_policy=ws.task_policy,
                     )
                 try:
                     async with self._session_factory() as pre_launch_session:
@@ -886,6 +889,7 @@ class Provisioner:
         profile: WorkspaceProfile,
         profile_resolution: ProfileResolution | None = None,
         excluding_workspace_id: str | None = None,
+        task_policy: Mapping[str, Any] | None = None,
     ) -> None:
         """Check auto-resolved profile service ports for admission after provision-time resolution.
 
@@ -894,6 +898,13 @@ class Provisioner:
         the repo-local profile) is not available until provisioning.  This method
         closes that gap by re-checking host ports after the profile has been
         resolved inside the provisioner.
+
+        Before the cross-workspace DB conflict check, this method also detects
+        intra-workspace duplicates — the same host port claimed by both a
+        companion and an auto-resolved profile service within the same workspace.
+        This case is invisible to ``find_host_port_conflicts`` when
+        ``excluding_workspace_id`` is set to the current workspace, so it is
+        caught here with an in-memory check instead.
 
         To close the TOCTOU window between the conflict check and the later
         pre-launch commit, this method publishes the workspace's
@@ -904,20 +915,26 @@ class Provisioner:
         ``compose_project_name`` is intentionally **not** set here.  Setting
         it before ``_recheck_before_launch`` records its
         ``provisioning_launching`` guard creates a race: a
-        ``stop_stack=False`` cancel that wins between this method and
-        the recheck would leave the workspace in a terminal state with a
+        ``stop_stack=False`` cancel that wins between this method and the
+        recheck would leave the workspace in a terminal state with a
         non-null ``compose_project_name`` but no
         ``workspace.terminal_runtime_released`` event, causing
         ``find_host_port_conflicts`` to treat the profile ports as
         permanently occupied (a false ``HOST_PORT_CONFLICT``).
 
-        Raises :class:`WorkspaceCreateHostPortConflictError` on conflict so the
-        caller can mark the workspace as failed.
+        Raises :class:`WorkspaceCreateDuplicateHostPortError` for intra-workspace
+        duplicates or :class:`WorkspaceCreateHostPortConflictError` for
+        cross-workspace conflicts so the caller can mark the workspace as
+        failed.
         """
         resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
         auto_profile_host_ports = host_ports_from_resolved_profile(resolved_profile_dict)
         if not auto_profile_host_ports:
             return
+        companion_host_ports = host_ports_from_task_policy_companions(task_policy)
+        for hp in auto_profile_host_ports:
+            if hp in companion_host_ports:
+                raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             await repo.acquire_host_port_admission_lock(host_ports=auto_profile_host_ports)
