@@ -283,6 +283,7 @@ async def test_pre_push_validation_records_target_head_before_push(
 async def test_pre_push_validation_failure_does_not_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A validation failure should block raw push and expose a validation reason."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -300,6 +301,16 @@ async def test_pre_push_validation_failure_does_not_push(
         pre_push_validation_fix_passes=0,
     )
     runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
+
+    async def _unexpected_validation_commands(_self: Any, **_kwargs: object) -> tuple[str, ...]:
+        """Fail loudly if disabled fix passes still load fix-prompt command context."""
+        pytest.fail("validation commands must not load when fix passes are disabled")
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_commands",
+        _unexpected_validation_commands,
+    )
 
     result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
@@ -436,7 +447,16 @@ async def test_pre_push_validation_toolchain_missing_bypasses_fix_pass(
         """Fail loudly if a toolchain-missing failure reaches the fix-pass commit step."""
         pytest.fail("toolchain-missing validation must not run a fix pass")
 
+    async def _unexpected_validation_commands(_self: Any, **_kwargs: object) -> tuple[str, ...]:
+        """Fail loudly if terminal validation still loads fix-prompt command context."""
+        pytest.fail("toolchain-missing validation must not load fix-pass commands")
+
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit)
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_commands",
+        _unexpected_validation_commands,
+    )
 
     result = await runner._validated_git_push_result(
         workspace_id=workspace_id,

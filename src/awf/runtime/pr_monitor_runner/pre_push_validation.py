@@ -268,12 +268,8 @@ async def _run_pre_push_validation_with_fix_passes(
 ) -> _PrePushValidationResult:
     """Execute pre-push validation plus optional fix/retry attempts."""
     max_fix_passes = max(0, self._runner_config.pre_push_validation_fix_passes)
-    validation_commands = await _pre_push_validation_commands(
-        self,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-    )
     pass_index = 0
+    validation_commands: tuple[str, ...] | None = None
     while True:
         validation_result = await _run_pre_push_validation(
             self,
@@ -293,6 +289,12 @@ async def _run_pre_push_validation_with_fix_passes(
             return validation_result
         if pass_index >= max_fix_passes:
             return validation_result
+        if validation_commands is None:
+            validation_commands = await _pre_push_validation_commands(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+            )
         committed = await _run_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
