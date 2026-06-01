@@ -660,11 +660,7 @@ async def handle_merge_action(
                                             "error_message": str(exc),
                                         },
                                     )
-                                    if (
-                                        rejected_method == merge_method
-                                        and attempt_index == 0
-                                        and len(effective_methods[:2]) > 1
-                                    ):
+                                    if attempt_index == 0 and len(effective_methods[:2]) > 1:
                                         continue
                                     if rejected_method == merge_method:
                                         merge_method_notification_reason = (
