@@ -144,6 +144,22 @@ class HostPortConflict:
     workspace_id: str
 
 
+def _extract_host_ports(port_entries: builtins.list[Any]) -> builtins.list[int]:
+    """Extract host-side port numbers from a flat list of port-mapping entries.
+
+    Each entry may be a list/tuple of form ``[container_port, host_port, ...]``.
+    Invalid or malformed entries are silently skipped.
+    """
+    host_ports: builtins.list[int] = []
+    for port_mapping in port_entries:
+        if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+            try:
+                host_ports.append(int(port_mapping[1]))
+            except (ValueError, TypeError):
+                continue
+    return host_ports
+
+
 def host_ports_from_resolved_profile(
     resolved_profile: Mapping[str, Any] | None,
 ) -> builtins.list[int]:
@@ -164,12 +180,7 @@ def host_ports_from_resolved_profile(
         svc_ports = service.get("ports")
         if not svc_ports or not isinstance(svc_ports, list):
             continue
-        for port_mapping in svc_ports:
-            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
-                try:
-                    host_ports.append(int(port_mapping[1]))
-                except (ValueError, TypeError):
-                    continue
+        host_ports.extend(_extract_host_ports(svc_ports))
     return host_ports
 
 
@@ -193,12 +204,7 @@ def host_ports_from_task_policy_companions(
         ports = companion.get("ports")
         if not ports or not isinstance(ports, list):
             continue
-        for port_mapping in ports:
-            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
-                try:
-                    host_ports.append(int(port_mapping[1]))
-                except (ValueError, TypeError):
-                    continue
+        host_ports.extend(_extract_host_ports(ports))
     return host_ports
 
 
