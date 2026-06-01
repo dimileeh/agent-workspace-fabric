@@ -1383,4 +1383,4 @@ class TestHappyPathPart002:
         assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls)
         assert not any("push" in call.args for call in fake.calls)
         assert not any(call.args[-1] == "pytest -q" for call in fake.calls)
-        assert retry_calls == [(ws_id, {})]
+        assert retry_calls == [(ws_id, {"ignore_source_runtime_check": True})]

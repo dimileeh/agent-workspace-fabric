@@ -580,7 +580,7 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
 
     _WorkspaceRepo.workspace = SimpleNamespace(id="ws_retry", task_policy={})
 
-    async def _retry_failed(_session: object, _workspace_id: str) -> object:
+    async def _retry_failed(_session: object, _workspace_id: str, **_kwargs: object) -> object:
         raise executor_planning_ops.WorkspaceRetryError(
             "cannot retry",
             detail={"reason": "busy"},
@@ -598,7 +598,7 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
 
     _WorkspaceRepo.workspace = SimpleNamespace(id="ws_retry", task_policy={})
 
-    async def _retry_dup_port(_session: object, _workspace_id: str) -> object:
+    async def _retry_dup_port(_session: object, _workspace_id: str, **_kwargs: object) -> object:
         raise executor_planning_ops.WorkspaceCreateDuplicateHostPortError(host_port=8080)
 
     monkeypatch.setattr(executor_planning_ops, "retry_workspace_row", _retry_dup_port)
@@ -610,7 +610,9 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
     assert events[-1][0] == "workspace.planning_scope_auto_retry_failed"
     assert events[-1][2]["detail"] == {"host_port": 8080}
 
-    async def _retry_port_conflict(_session: object, _workspace_id: str) -> object:
+    async def _retry_port_conflict(
+        _session: object, _workspace_id: str, **_kwargs: object
+    ) -> object:
         raise executor_planning_ops.WorkspaceCreateHostPortConflictError(
             host_port=9090,
             conflicting_workspace_id="ws_other",
