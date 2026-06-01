@@ -1,4 +1,13 @@
 import type { Metadata, Viewport } from "next";
+// Self-hosted IBM Plex (vendored via @fontsource) so builds never depend on
+// reaching Google Fonts — important for egress-restricted/offline environments.
+import "@fontsource/ibm-plex-sans/400.css";
+import "@fontsource/ibm-plex-sans/500.css";
+import "@fontsource/ibm-plex-sans/600.css";
+import "@fontsource/ibm-plex-sans/700.css";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
+import "@fontsource/ibm-plex-mono/600.css";
 import {
   DEFAULT_OPERATOR_PREFERENCES,
   OPERATOR_PREFERENCES_STORAGE_KEY,

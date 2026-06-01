@@ -12,7 +12,7 @@ useTransition,
 } from "react";
 import { WorkspaceInspector } from "./workspace-inspector";
 
-import { fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
+import { capacityUtilizationPct,compactDuration,fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
 DEFAULT_OPERATOR_PREFERENCES,
@@ -52,7 +52,7 @@ RuntimePanel,
 terminalLifecycleSourceStage,
 } from "./console-dashboard-capacity";
 import { LogsPanel,MultiWorkspaceLogsFullscreen } from "./console-dashboard-logs";
-import { TaskDetailsModal,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar,WorkspaceSummary } from "./console-dashboard-overview";
+import { type FleetKpi,FleetHealthStrip,SectionNav,TaskDetailsModal,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar,WorkspaceSummary } from "./console-dashboard-overview";
 import { FailureAnalysisPanel,SecretsLeasesPanel,SecurityEgressPanel } from "./console-dashboard-security";
 import {
 type DetailState,
@@ -794,6 +794,103 @@ const searchParams = useSearchParams();
     [overview, taskDetailsWorkspaceId],
   );
 
+  // Per-source stale flags: each feed polls on its own timer, so staleness is
+  // keyed off that feed's OWN refresh error (showing a cached snapshot), not the
+  // shared /health check (which is surfaced separately via the API pill). This
+  // keeps freshly-refreshed values bright even if /health blips, and a real
+  // outage still fails each feed's poll and sets its own error.
+  const saturationStale = resourceError != null && resourceSaturation != null;
+  const summaryStale = workspaceSummaryError != null && workspaceSummary != null;
+
+  const fleetKpis = useMemo<FleetKpi[]>(() => {
+    const counts = resourceSaturation?.workspace_counts ?? null;
+    const capacity = resourceSaturation ? capacityUtilizationPct(resourceSaturation) : null;
+    const queued = resourceSaturation?.capacity_queue.queued_workspace_count ?? null;
+    const oldestWait = resourceSaturation?.capacity_queue.oldest_wait_seconds ?? null;
+    // Windowed reliability counts (default 24h) — actionable, unlike the
+    // ever-growing cumulative failed total. Only meaningful once the summary
+    // has loaded, so the window hint is omitted while the value is unknown.
+    const windowHint = workspaceSummary ? `last ${workspaceSummary.since_hours}h` : undefined;
+    const completed = workspaceSummary?.completed_count;
+    const cancelled = workspaceSummary?.cancelled_count;
+    const failed = workspaceSummary?.failed_count;
+    const dash = "—";
+    return [
+      { id: "active", label: "Active", value: counts ? counts.active_total : dash, stale: saturationStale },
+      {
+        id: "running",
+        label: "Running",
+        value: counts ? counts.running : dash,
+        tone: counts?.running ? "info" : undefined,
+        stale: saturationStale,
+      },
+      {
+        id: "monitoring_pr",
+        label: "Monitoring PR",
+        value: counts ? counts.monitoring_pr : dash,
+        tone: counts?.monitoring_pr ? "info" : undefined,
+        stale: saturationStale,
+      },
+      {
+        id: "queued",
+        label: "Queued",
+        value: queued ?? dash,
+        tone: queued ? "warn" : undefined,
+        hint:
+          queued && queued > 0
+            ? oldestWait != null
+              ? `oldest ${compactDuration(oldestWait)}`
+              : "awaiting capacity"
+            : undefined,
+        stale: saturationStale,
+      },
+      {
+        id: "completed",
+        label: "Completed",
+        value: completed ?? dash,
+        tone: completed ? "good" : undefined,
+        hint: completed != null ? windowHint : undefined,
+        stale: summaryStale,
+      },
+      {
+        id: "cancelled",
+        label: "Cancelled",
+        value: cancelled ?? dash,
+        tone: cancelled ? "warn" : undefined,
+        hint: cancelled != null ? windowHint : undefined,
+        stale: summaryStale,
+      },
+      {
+        id: "failed",
+        label: "Failed",
+        value: failed ?? dash,
+        tone: failed ? "bad" : undefined,
+        hint: failed != null ? windowHint : undefined,
+        stale: summaryStale,
+      },
+      {
+        id: "capacity",
+        label: "Capacity",
+        value: capacity ?? dash,
+        suffix: capacity != null ? "%" : undefined,
+        // Only flag pressure (warn/bad). Low/idle utilization stays neutral so a
+        // value below the warn threshold is not styled like an active signal.
+        tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : undefined) : undefined,
+        stale: saturationStale,
+      },
+    ];
+  }, [resourceSaturation, workspaceSummary, saturationStale, summaryStale]);
+
+  // Panel-level stale dimming: a panel dims only when it is actually showing a
+  // previously-loaded snapshot AND its feed errored. On first-load failures
+  // there is no cached snapshot, so the panel shows its loading/error state
+  // instead of a misleading "last snapshot" badge.
+  const mergeErrored = mergeQueueError != null || mergeQueueStatus === "error";
+  const failureErrored = failureSummaryStatus === "error";
+  const capacityStale = saturationStale;
+  const mergeStale = mergeErrored && mergeQueue.length > 0;
+  const failureStale = failureErrored && failureSummary != null;
+
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
@@ -814,8 +911,14 @@ const searchParams = useSearchParams();
         isPending={isPending}
       />
 
-      <div className="grid min-h-[calc(100vh-57px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
-        <aside className="min-w-0 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0">
+      <FleetHealthStrip kpis={fleetKpis} />
+      <SectionNav />
+
+      <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
+        <aside
+          id="awf-workspaces"
+          className="min-w-0 scroll-mt-14 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0"
+        >
           <WorkspaceFilters
             statusFilters={statusFilters}
             agentFilters={agentFilters}
@@ -856,23 +959,36 @@ const searchParams = useSearchParams();
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            <ResourceCapacityPanel
-              saturation={resourceSaturation}
-              error={resourceError}
-              workspaceSummary={workspaceSummary}
-              workspaceSummaryError={workspaceSummaryError}
-            />
-            <MergeQueuePanel
-              items={mergeQueue}
-              hasMore={mergeQueueHasMore}
-              status={mergeQueueStatus}
-              error={mergeQueueError}
-            />
-            <div className="2xl:col-span-2">
+            <div id="awf-capacity" className="min-w-0 scroll-mt-14">
+              <ResourceCapacityPanel
+                saturation={resourceSaturation}
+                error={resourceError}
+                stale={capacityStale}
+                summaryStale={summaryStale}
+                workspaceSummary={workspaceSummary}
+                workspaceSummaryError={workspaceSummaryError}
+              />
+            </div>
+            {/* 2xl: the panel overlays the cell (absolute) so the long merge
+                list never drives the row height — Capacity sets the height and
+                the list scrolls to fill it. Below 2xl it is normal flow. */}
+            <div id="awf-merge-queue" className="min-w-0 scroll-mt-14 2xl:relative">
+              <div className="2xl:absolute 2xl:inset-0">
+                <MergeQueuePanel
+                  items={mergeQueue}
+                  hasMore={mergeQueueHasMore}
+                  status={mergeQueueStatus}
+                  error={mergeQueueError}
+                  stale={mergeStale}
+                />
+              </div>
+            </div>
+            <div id="awf-failures" className="scroll-mt-14 2xl:col-span-2">
               <FailureAnalysisPanel
                 summary={failureSummary}
                 status={failureSummaryStatus}
                 error={failureSummaryError}
+                stale={failureStale}
               />
             </div>
           </div>
