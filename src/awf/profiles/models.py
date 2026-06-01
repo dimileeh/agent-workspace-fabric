@@ -722,7 +722,14 @@ class ProfilePricing(BaseModel):
 
 
 class WorkspaceProfile(BaseModel):
-    """Resolved project profile stored on each workspace."""
+    """Workspace profile shape, used both as create/adoption **input** and as the
+    resolved profile persisted on a workspace.
+
+    As submitted (the inline ``profile`` on a workspace-create or PR-adoption
+    request) some fields may still be unresolved — notably ``forge`` may be the
+    ``"auto"`` sentinel. At provision time the resolver stamps concrete values
+    (``forge`` becomes ``github``/``bitbucket``) and that snapshot is what gets
+    stored on the workspace, so a *resolved* profile never carries ``"auto"``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -731,10 +738,16 @@ class WorkspaceProfile(BaseModel):
     description: str | None = Field(default=None, max_length=1024)
     source: str = Field(default="inline", max_length=256)
     confidence: Literal["low", "medium", "high"] = "high"
-    forge: ForgeKind | Literal["auto"] = "auto"
-    """Code forge the workspace repo lives on (issue #345). ``"auto"`` defers to
-    URL-host detection at resolve time; the resolver persists the concrete
-    ``github``/``bitbucket`` value (explicit ``forge:`` > URL host > github)."""
+    forge: ForgeKind | Literal["auto"] = Field(
+        default="auto",
+        description=(
+            'Code forge the workspace repo lives on (issue #345). "auto" is the '
+            "unresolved input sentinel: it defers to URL-host detection at resolve "
+            "time. The resolver always persists a concrete github/bitbucket value "
+            "(precedence: explicit forge > URL host > github), so a resolved "
+            'profile never carries "auto".'
+        ),
+    )
     runtime: ProfileRuntime = Field(default_factory=ProfileRuntime)
     docker: ProfileDocker = Field(default_factory=ProfileDocker)
     services: list[ProfileService] = Field(default_factory=list)
