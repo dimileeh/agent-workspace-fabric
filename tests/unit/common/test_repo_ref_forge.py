@@ -80,6 +80,35 @@ class TestRepoRefForgeDetection:
         with pytest.raises(ValueError):
             RepoRef.from_url(url)
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/only_owner",
+            "ssh://git@github.com/only_owner",
+        ],
+    )
+    def test_github_cannot_parse_message_is_byte_for_byte_unchanged(self, url: str) -> None:
+        # The github-cannot-parse path must keep its original message verbatim so
+        # downstream log/alert matching on "Cannot parse GitHub" keeps working
+        # (plan contract; thread PRRT_kwDOSJAM6s6GQy8X).
+        with pytest.raises(ValueError, match=r"^Cannot parse GitHub repo from URL: "):
+            RepoRef.from_url(url)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://bitbucket.org/workspace",
+            "git@gitlab.com:org/repo.git",
+        ],
+    )
+    def test_non_github_parse_failures_avoid_github_label(self, url: str) -> None:
+        # Recognized non-github hosts name their host; unknown hosts stay
+        # forge-agnostic (thread PRRT_kwDOSJAM6s6GQcgc) — neither says "GitHub".
+        with pytest.raises(ValueError, match=r"^Cannot parse (?!GitHub repo)"):
+            RepoRef.from_url(url)
+
 
 class TestRepoRefHostAwareBuilders:
     @pytest.mark.unit

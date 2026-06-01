@@ -393,7 +393,10 @@ class RepoRef:
                 name = parts[1][:-4] if parts[1].endswith(".git") else parts[1]
                 if name:
                     return cls(owner=parts[0], name=name, forge=url_forge)
-            raise ValueError(f"Cannot parse {_FORGE_HOSTS[url_forge]} repo from URL: {repo_url!r}")
+            # Preserve the original byte-for-byte message on the github-cannot-parse
+            # path (plan contract); other forges name their host for a clear error.
+            label = "GitHub" if url_forge == "github" else _FORGE_HOSTS[url_forge]
+            raise ValueError(f"Cannot parse {label} repo from URL: {repo_url!r}")
 
         raise ValueError(f"Cannot parse repo from URL: {repo_url!r}")
 
