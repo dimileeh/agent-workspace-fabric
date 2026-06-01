@@ -72,6 +72,20 @@ class _MergeAttemptResult:
     blocker: GitHubClientError | None = None
     notification_reason: str | None = None
 
+    def __post_init__(self) -> None:
+        """Enforce the state value required to suppress repeat merge attempts."""
+        if self.outcome is _MergeAttemptOutcome.METHOD_BLOCKER and not self.notification_reason:
+            raise ValueError("method-blocker merge attempt result requires a notification reason")
+
+    @property
+    def method_blocker_notification_reason(self) -> str:
+        """Return the non-empty reason required for METHOD_BLOCKER outcomes."""
+        if self.outcome is not _MergeAttemptOutcome.METHOD_BLOCKER:
+            raise RuntimeError("merge attempt result is not a method blocker")
+        if not self.notification_reason:  # pragma: no cover
+            raise RuntimeError("method-blocker merge attempt result has no reason")
+        return self.notification_reason
+
 
 def _effective_merge_methods(
     *,
@@ -784,7 +798,7 @@ async def handle_merge_action(
                                         continue
                                     if merge_attempt.outcome is _MergeAttemptOutcome.METHOD_BLOCKER:
                                         merge_method_notification_reason = (
-                                            merge_attempt.notification_reason
+                                            merge_attempt.method_blocker_notification_reason
                                         )
                                         break
                                     merge_blocker = merge_attempt.blocker

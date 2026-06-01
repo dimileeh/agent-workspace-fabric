@@ -25,6 +25,8 @@ from awf.runtime.pr_monitor_runner.merge_loop import (
     _effective_merge_methods,
     _merge_error_supports_method_alternative,
     _merge_method_rejection_method,
+    _MergeAttemptOutcome,
+    _MergeAttemptResult,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -136,6 +138,29 @@ def test_merge_method_rejection_classifier_is_specific() -> None:
         )
         is False
     )
+
+
+@pytest.mark.unit
+def test_method_blocker_attempt_result_requires_notification_reason() -> None:
+    """Method blockers must carry the state value that suppresses repeat merges."""
+    with pytest.raises(ValueError, match="requires a notification reason"):
+        _MergeAttemptResult(_MergeAttemptOutcome.METHOD_BLOCKER)
+
+    with pytest.raises(ValueError, match="requires a notification reason"):
+        _MergeAttemptResult(_MergeAttemptOutcome.METHOD_BLOCKER, notification_reason="")
+
+    blocker = _MergeAttemptResult(
+        _MergeAttemptOutcome.METHOD_BLOCKER,
+        notification_reason="MERGE_METHOD_MISMATCH: no allowed method succeeded",
+    )
+
+    assert (
+        blocker.method_blocker_notification_reason
+        == "MERGE_METHOD_MISMATCH: no allowed method succeeded"
+    )
+    assert _MergeAttemptResult(_MergeAttemptOutcome.SUCCESS).notification_reason is None
+    assert _MergeAttemptResult(_MergeAttemptOutcome.RETRY_NEXT_METHOD).notification_reason is None
+    assert _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER).notification_reason is None
 
 
 class _MergeMethodClient:
