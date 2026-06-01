@@ -251,6 +251,7 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
+                has_known_non_plan_output=has_known_non_plan_output,
             )
         if validation_workspace_head_sha is None:
             return await _fail_validation_worktree_guard(
@@ -260,6 +261,7 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 message="could not capture workspace HEAD before AWF validation",
+                has_known_non_plan_output=has_known_non_plan_output,
             )
         if setup_ignored_paths_snapshot is None:
             setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
@@ -300,6 +302,7 @@ async def run_validation_and_fix_cycle(
                     validation_tier=validation_tier,
                     reason_code=reason_code,
                     message=message,
+                    has_known_non_plan_output=has_known_non_plan_output,
                 )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
@@ -1335,6 +1338,7 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
+                has_known_non_plan_output=has_known_non_plan_output,
             )
 
         # Loop back to re-validate.

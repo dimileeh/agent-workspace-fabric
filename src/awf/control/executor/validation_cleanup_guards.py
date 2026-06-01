@@ -44,6 +44,7 @@ async def fail_validation_worktree_guard(
     validation_tier: int,
     reason_code: str,
     message: str,
+    has_known_non_plan_output: bool,
 ) -> ExecutionValidationResult:
     """Record and surface a fatal validation-worktree guard failure."""
     failure_message = f"{reason_code}: {message}"
@@ -72,7 +73,7 @@ async def fail_validation_worktree_guard(
         stop=True,
         successful_validation_run_id=None,
         successful_validation_workspace_head_sha=None,
-        has_known_non_plan_output=False,
+        has_known_non_plan_output=has_known_non_plan_output,
     )
 
 
@@ -235,4 +236,5 @@ async def handle_validation_cleanup_guard(
         validation_tier=validation_tier,
         reason_code=reason_code,
         message=cleanup_message,
+        has_known_non_plan_output=has_known_non_plan_output,
     )

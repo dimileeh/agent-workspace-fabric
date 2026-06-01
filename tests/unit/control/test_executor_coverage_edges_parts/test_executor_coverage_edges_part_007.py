@@ -550,12 +550,13 @@ async def test_execution_validation_fails_cleanup_when_callback_becomes_stale_af
         planning_validation_handoff=None,
         recovery=None,
         rebase_recovery_result=None,
-        has_known_non_plan_output=False,
+        has_known_non_plan_output=True,
         git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
 
     assert result.stop
     assert result.successful_validation_run_id is None
+    assert result.has_known_non_plan_output is True
     assert executor._finish_validation_callback_if_terminal.await_count == expected_callback_checks
     executor._finish_validation_run.assert_not_awaited()
     finish_pending_kwargs = executor._finish_pending_validate_operations.await_args.kwargs

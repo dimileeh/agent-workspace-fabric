@@ -965,13 +965,13 @@ async def test_execution_validation_fails_when_worktree_is_dirty_before_starting
         planning_validation_handoff=None,
         recovery=None,
         rebase_recovery_result=None,
-        has_known_non_plan_output=False,
+        has_known_non_plan_output=True,
         git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
 
     assert result.stop
     assert result.successful_validation_run_id is None
-    assert result.has_known_non_plan_output is False
+    assert result.has_known_non_plan_output is True
     executor._start_validation_run.assert_awaited_once_with(
         workspace_id="ws_dirty_validation",
         profile=profile,
