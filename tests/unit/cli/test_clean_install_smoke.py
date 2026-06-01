@@ -5,9 +5,11 @@ commands in a subprocess whose import path puts the extracted wheel first and
 drops the editable repo ``src`` — proving the packaged ``awf`` runs from outside
 the checkout without repo-relative files. It works offline (runtime deps resolve
 from the current interpreter). A second, best-effort test performs a real
-``python -m venv`` + ``pip install`` of the wheel and skips when dependencies
-cannot be installed offline; CI (with network) runs it fully. The exhaustive
-install-lane matrix is owned by T14.
+``python -m venv`` + ``pip install`` of the wheel: it skips only when its
+dependencies cannot be fetched offline, but fails on a real wheel-artifact
+regression (invalid metadata, incompatible Requires-Python, malformed archive);
+CI (with network) runs it fully. The exhaustive install-lane matrix is owned by
+T14.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from tests.packaging_build import (
     PackageBuildUnavailableError,
     build_distributions,
     extract_wheel,
+    install_failure_is_environmental,
 )
 
 pytestmark = [pytest.mark.slow, pytest.mark.timeout(600)]
@@ -115,9 +118,10 @@ def test_extracted_wheel_help_runs_outside_checkout(
 def test_clean_venv_install_help(built: BuiltDistributions, tmp_path: Path) -> None:
     """A real venv install of the wheel exposes a working ``awf --help`` (CI lane).
 
-    Skips when ``python -m venv`` or an (offline) ``pip install`` of the wheel's
-    dependencies is unavailable, keeping the unit suite robust; CI with network
-    runs the full install.
+    Skips when ``python -m venv`` is unavailable or when the wheel's dependencies
+    cannot be fetched offline, keeping the unit suite robust; but a non-environmental
+    install failure (a regression in the wheel artifact itself) fails the test so
+    the package guard is preserved. CI with network runs the full install.
     """
     venv_dir = tmp_path / "venv"
     try:
@@ -148,8 +152,19 @@ def test_clean_venv_install_help(built: BuiltDistributions, tmp_path: Path) -> N
         )
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - network dependent
         pytest.skip(f"wheel install could not run (no network/pip): {exc}")
-    if install.returncode != 0:  # pragma: no cover - offline dependency resolution
-        pytest.skip(f"wheel install with dependencies unavailable offline: {install.stderr[-300:]}")
+    if install.returncode != 0:  # pragma: no cover - depends on offline vs regression outcome
+        combined = "\n".join(part for part in (install.stderr, install.stdout) if part)
+        if install_failure_is_environmental(combined):
+            pytest.skip(
+                "wheel install with dependencies unavailable offline: "
+                + (install.stderr[-300:] or install.stdout[-300:])
+            )
+        # pip processed the local wheel but the install failed for a
+        # non-environmental reason — invalid wheel metadata, an incompatible
+        # Requires-Python, or a malformed archive. Fail loudly so the
+        # package-artifact guard catches the regression instead of reporting
+        # skipped (PRRT_kwDOSJAM6s6F-8ys).
+        pytest.fail(f"wheel install failed for a non-environmental reason:\n{combined[-1000:]}")
 
     outside = tmp_path / "outside"
     outside.mkdir()

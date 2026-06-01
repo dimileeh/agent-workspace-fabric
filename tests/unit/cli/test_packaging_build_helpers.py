@@ -1,11 +1,19 @@
-"""Unit tests for the build-failure classification in ``tests.packaging_build``.
+"""Unit tests for the build- and install-failure classification in
+``tests.packaging_build``.
 
-These pin the behavior the PR #344 review thread (PRRT_kwDOSJAM6s6F-3j5) asked
-for: a ``uv build`` that cannot set up its environment (no ``uv``, offline,
-backend unfetchable) is *unavailable* and skips, but a build that runs against
-this checkout and fails to produce artifacts is a real packaging regression that
-fails loudly instead of skipping. They stub ``subprocess.run``/``shutil.which``
-so no actual build (or network) is exercised.
+These pin the behavior two PR #344 review threads asked for:
+
+* ``PRRT_kwDOSJAM6s6F-3j5`` — a ``uv build`` that cannot set up its environment
+  (no ``uv``, offline, backend unfetchable) is *unavailable* and skips, but a
+  build that runs against this checkout and fails to produce artifacts is a real
+  packaging regression that fails loudly instead of skipping.
+* ``PRRT_kwDOSJAM6s6F-8ys`` — a ``pip install <wheel>`` that fails because
+  dependencies cannot be fetched offline is environmental and skips, but a
+  failure with the local wheel artifact itself (invalid metadata, incompatible
+  Requires-Python, malformed archive) is a real regression that fails loudly.
+
+They stub ``subprocess.run``/``shutil.which`` so no actual build (or network) is
+exercised.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ from tests.packaging_build import (
     PackageBuildUnavailableError,
     _build_failure_is_environmental,
     build_distributions,
+    install_failure_is_environmental,
 )
 
 pytestmark = pytest.mark.unit
@@ -70,6 +79,42 @@ def test_environmental_failures_are_classified_unavailable(output: str) -> None:
 )
 def test_real_regressions_are_not_classified_unavailable(output: str) -> None:
     assert _build_failure_is_environmental(output) is False
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        # Offline dependency resolution: pip cannot reach an index to fetch the
+        # wheel's runtime dependencies, so it reports no candidate found.
+        "Could not find a version that satisfies the requirement structlog (from versions: none)",
+        "ERROR: No matching distribution found for fastapi",
+        "WARNING: Retrying ... after connection broken by 'NewConnectionError(...)'",
+        "Temporary failure in name resolution",
+        "Failed to establish a new connection: [Errno -3]",
+        "Could not connect to pypi.org",
+        "Read timed out.",
+        "Max retries exceeded with url: /simple/anyio/",
+    ],
+)
+def test_install_offline_failures_are_classified_environmental(output: str) -> None:
+    assert install_failure_is_environmental(output) is True
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        # Real wheel-artifact regressions the package guard must catch even when
+        # venv + pip are available (PRRT_kwDOSJAM6s6F-8ys). None contain a
+        # network/offline marker, so they must classify as non-environmental.
+        "ERROR: awf-0.1.0-py3-none-any.whl is not a supported wheel on this platform.",
+        "ERROR: Package 'awf' requires a different Python: 3.11.9 not in '>=3.12'",
+        "ERROR: Invalid wheel filename (wrong number of parts): awf-bad.whl",
+        "error: invalid metadata: Metadata-Version is not declared",
+        "zipfile.BadZipFile: File is not a zip file",
+    ],
+)
+def test_install_real_regressions_are_not_classified_environmental(output: str) -> None:
+    assert install_failure_is_environmental(output) is False
 
 
 def test_missing_uv_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
