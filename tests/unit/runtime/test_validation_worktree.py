@@ -679,6 +679,36 @@ async def test_cleanup_validation_worktree_fails_when_ignored_snapshot_path_disa
 
 
 @pytest.mark.unit
+async def test_cleanup_validation_worktree_fails_when_empty_ignored_root_disappears(
+    tmp_path: Path,
+) -> None:
+    """Deleted setup-owned empty ignored roots should fail cleanup."""
+    worktree = _init_fake_worktree(tmp_path)
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a validation pass that deletes an empty ignored directory."""
+        commands.append(tuple(args))
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        if args == list(_VALIDATION_IGNORED_LS_FILES_ARGS + ("--", "build/")):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_ignored_paths=("build/",),
+        ignore_ignored_paths_snapshot=(),
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.message == "AWF validation removed pre-existing ignored roots: build/"
+    assert cleanup.cleanup_command is None
+    assert ("clean", "-fdx", "--", "build/") not in commands
+
+
+@pytest.mark.unit
 async def test_cleanup_validation_worktree_rolls_back_head_when_deleted_ignored_snapshot_fails(
     tmp_path: Path,
 ) -> None:

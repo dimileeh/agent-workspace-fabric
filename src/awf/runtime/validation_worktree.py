@@ -192,6 +192,25 @@ def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
     return False
 
 
+def _ignored_path_still_reported(
+    path: str,
+    *,
+    current_ignored_status_paths: tuple[str, ...],
+    current_ignored_snapshot_paths: set[str],
+) -> bool:
+    """Return whether a baseline ignored path is still visible after validation."""
+    normalized_path = _normalize_porcelain_path(path)
+    if any(
+        _normalize_porcelain_path(current_path) == normalized_path
+        for current_path in current_ignored_status_paths
+    ):
+        return True
+    return any(
+        _is_under_ignored_path(snapshot_path, {normalized_path})
+        for snapshot_path in current_ignored_snapshot_paths
+    )
+
+
 def _ignored_untracked_snapshot_from_ls_files(
     stdout: str | None,
 ) -> tuple[str, ...]:
@@ -643,6 +662,28 @@ async def cleanup_validation_worktree_side_effects(
                     message=(
                         "AWF validation removed pre-existing ignored files: "
                         f"{', '.join(deleted_ignored_paths)}"
+                    ),
+                ),
+            )
+        deleted_ignored_roots = [
+            path
+            for path in ignored_pathspecs
+            if not _ignored_path_still_reported(
+                path,
+                current_ignored_status_paths=check.ignored_paths,
+                current_ignored_snapshot_paths=current_ignored_set,
+            )
+        ]
+        if deleted_ignored_roots:
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation removed pre-existing ignored roots: "
+                        f"{', '.join(deleted_ignored_roots)}"
                     ),
                 ),
             )
