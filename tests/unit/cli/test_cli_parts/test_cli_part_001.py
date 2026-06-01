@@ -60,6 +60,7 @@ def _assert_control_headers(
 
 @pytest.mark.unit
 def test_handle_response_uses_response_request_without_global_context() -> None:
+    """Handle responses without relying on a global call context."""
     response = _mock_response(status_code=200, payload={"ok": True})
     response.request = httpx.Request("GET", "http://localhost:8000/v1/workspaces")
 
@@ -92,8 +93,11 @@ def test_root_version_option_falls_back_when_package_metadata_is_missing() -> No
 
 
 class TestWorkspaceCreate:
+    """Workspace create command tests."""
+
     @pytest.mark.unit
     def test_emits_json_body_to_post(self) -> None:
+        """Send the expected workspace-create request body."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_abc"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -133,6 +137,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_workspace_create_accepts_grok_agent(self) -> None:
+        """Allow workspace create to select the Grok agent runtime."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_grok"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -160,6 +165,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_companion_json_can_include_compose_up_timeout(self) -> None:
+        """Preserve companion compose-up timeout values in create payloads."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_companion"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -247,6 +253,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_monitor_policy_flags_are_sent(self) -> None:
+        """Send explicit monitor policy flags in create requests."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_manual"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -274,6 +281,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_initial_review_grace_period_rejects_values_above_one_day(self) -> None:
+        """Reject initial review grace periods longer than one day."""
         with patch("awf.cli.main.httpx.request") as mock:
             result = _runner.invoke(
                 app,
@@ -296,6 +304,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_emits_new_v2_flags_to_post(self) -> None:
+        """Serialize v2 workspace create fields into the request body."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_abc"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -360,6 +369,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_emits_json_policy_flags_to_post(self) -> None:
+        """Serialize JSON policy flags into structured create payload fields."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_policy"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -408,6 +418,7 @@ class TestWorkspaceCreate:
         flag: str,
         value: str,
     ) -> None:
+        """Reject invalid JSON policy flag values before issuing a request."""
         with patch("awf.cli.main.httpx.request") as mock:
             result = _runner.invoke(
                 app,
@@ -432,6 +443,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_idempotency_key_forwarded_as_header(self) -> None:
+        """Forward explicit idempotency keys as request headers."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_idem"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -459,6 +471,7 @@ class TestWorkspaceCreate:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Forward environment API tokens without leaking them to output."""
         monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_auth"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
@@ -488,6 +501,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_api_token_option_overrides_env_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Prefer explicit API token options over environment tokens."""
         monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_auth"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
@@ -514,6 +528,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_provider_readiness_override_flag_is_sent(self) -> None:
+        """Send provider readiness override fields when requested."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_override"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -542,6 +557,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_non_2xx_returns_nonzero_exit(self) -> None:
+        """Return a non-zero CLI exit for non-success API responses."""
         response = _mock_response(
             status_code=422,
             payload={"detail": "invalid"},
@@ -565,8 +581,11 @@ class TestWorkspaceCreate:
 
 
 class TestWorkspaceShow:
+    """Workspace show command tests."""
+
     @pytest.mark.unit
     def test_fetches_by_id_and_prints(self) -> None:
+        """Fetch a workspace by id and print the response."""
         response = _mock_response(
             status_code=200,
             payload={"id": "ws_xyz", "status": "ready", "version": 3},
@@ -583,6 +602,7 @@ class TestWorkspaceShow:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Use environment API tokens for show without printing secrets."""
         monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
         response = _mock_response(
             status_code=200,
@@ -598,6 +618,7 @@ class TestWorkspaceShow:
 
     @pytest.mark.unit
     def test_api_token_option_overrides_env_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Prefer explicit API token options for show requests."""
         monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
         response = _mock_response(
             status_code=200,
@@ -616,6 +637,7 @@ class TestWorkspaceShow:
 
     @pytest.mark.unit
     def test_pretty_format_emits_sorted_keys(self) -> None:
+        """Emit deterministic key ordering in pretty output."""
         response = _mock_response(
             status_code=200,
             payload={"status": "ready", "id": "ws_xyz"},
@@ -645,6 +667,7 @@ class TestWorkspaceShow:
         base_url: str,
         expected_url: str,
     ) -> None:
+        """Normalize reverse-proxy base URLs before show requests."""
         response = _mock_response(status_code=200, payload={"id": "ws_xyz", "status": "ready"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(
@@ -657,8 +680,11 @@ class TestWorkspaceShow:
 
 
 class TestWorkspaceRetry:
+    """Workspace retry command tests."""
+
     @pytest.mark.unit
     def test_posts_retry_request_and_prints_new_workspace(self) -> None:
+        """Post a retry request and print the replacement workspace id."""
         response = _mock_response(
             status_code=202,
             payload={
@@ -681,6 +707,7 @@ class TestWorkspaceRetry:
 
     @pytest.mark.unit
     def test_retry_provider_readiness_override_flag_is_sent(self) -> None:
+        """Send provider readiness override query parameters on retry."""
         response = _mock_response(
             status_code=202,
             payload={
@@ -712,6 +739,7 @@ class TestWorkspaceRetry:
 
     @pytest.mark.unit
     def test_retry_blocked_provider_readiness_prints_structured_error(self) -> None:
+        """Print structured provider readiness errors from retry responses."""
         response = _mock_response(
             status_code=409,
             payload={
@@ -736,11 +764,14 @@ class TestWorkspaceRetry:
 
 
 class TestWorkspaceRemonitor:
+    """Workspace remonitor command tests."""
+
     @pytest.mark.unit
     def test_posts_remonitor_request_with_sensitive_control_headers(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Post remonitor requests with sensitive control headers."""
         monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
         response = _mock_response(
             status_code=200,
@@ -784,6 +815,7 @@ class TestWorkspaceRemonitor:
 
     @pytest.mark.unit
     def test_remonitor_cli_generates_idempotency_key_before_http_call(self) -> None:
+        """Generate remonitor idempotency keys before issuing requests."""
         response = _mock_response(status_code=202, payload={"ok": True})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(app, ["workspace", "remonitor", "ws_monitor"])
@@ -795,8 +827,11 @@ class TestWorkspaceRemonitor:
 
 
 class TestWorkspaceControlCommandsPresence:
+    """Workspace control command discovery tests."""
+
     @pytest.mark.unit
     def test_workspace_help_lists_control_commands(self) -> None:
+        """List all workspace control commands in workspace help."""
         result = _runner.invoke(app, ["workspace", "--help"])
 
         assert result.exit_code == 0
@@ -820,6 +855,7 @@ def test_workspace_control_commands_generate_idempotency_key_when_omitted(
     command: str,
     args: list[str],
 ) -> None:
+    """Generate idempotency keys for control commands when omitted."""
     response = _mock_response(status_code=202, payload={"ok": True})
     with patch("awf.cli.main.httpx.request", return_value=response) as mock:
         result = _runner.invoke(app, ["workspace", command, *args])
@@ -832,6 +868,7 @@ def test_workspace_control_commands_generate_idempotency_key_when_omitted(
 
 @pytest.mark.unit
 def test_workspace_control_generated_idempotency_key_survives_request_failure() -> None:
+    """Report generated idempotency keys even when requests fail."""
     with patch(
         "awf.cli.main.httpx.request",
         side_effect=httpx.ReadTimeout("response dropped"),
@@ -887,6 +924,7 @@ def test_workspace_control_commands_emit_structured_api_error(
     command: str,
     args: list[str],
 ) -> None:
+    """Print structured API errors for workspace control commands."""
     response = _mock_response(
         status_code=409,
         payload={
@@ -973,6 +1011,7 @@ def test_workspace_control_commands_surface_invalid_if_match_api_error(
     command: str,
     args: list[str],
 ) -> None:
+    """Surface invalid If-Match API errors for control commands."""
     response = _mock_response(
         status_code=400,
         payload={
@@ -1022,6 +1061,7 @@ def test_workspace_control_commands_forward_etag_if_match_syntax(
     args: list[str],
     if_match: str,
 ) -> None:
+    """Forward strong and weak ETag If-Match header syntax."""
     response = _mock_response(status_code=202, payload={"ok": True})
     with patch("awf.cli.main.httpx.request", return_value=response) as mock:
         result = _runner.invoke(app, ["workspace", command, *args, "--if-match", if_match])
@@ -1031,12 +1071,15 @@ def test_workspace_control_commands_forward_etag_if_match_syntax(
 
 
 class TestWorkspaceCancel:
+    """Workspace cancel command tests."""
+
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("stop_stack",),
         [("true",), ("false",)],
     )
     def test_posts_cancel_request_with_control_shape(self, stop_stack: str) -> None:
+        """Post cancel requests with the expected control payload."""
         response = _mock_response(
             status_code=200,
             payload={
@@ -1082,8 +1125,11 @@ class TestWorkspaceCancel:
 
 
 class TestWorkspaceStop:
+    """Workspace stop command tests."""
+
     @pytest.mark.unit
     def test_posts_stop_request_and_output_shape(self) -> None:
+        """Post stop requests with the expected control payload."""
         response = _mock_response(
             status_code=200,
             payload={
@@ -1125,8 +1171,11 @@ class TestWorkspaceStop:
 
 
 class TestWorkspaceDestroy:
+    """Workspace destroy command tests."""
+
     @pytest.mark.unit
     def test_posts_destroy_request_with_query_shape(self) -> None:
+        """Send destroy options as query parameters."""
         response = _mock_response(
             status_code=200,
             payload={
@@ -1173,8 +1222,11 @@ class TestWorkspaceDestroy:
 
 
 class TestWorkspaceRefresh:
+    """Workspace refresh command tests."""
+
     @pytest.mark.unit
     def test_posts_refresh_request_with_reason_and_version_headers(self) -> None:
+        """Post refresh requests with reason and version control headers."""
         response = _mock_response(
             status_code=202,
             payload={
@@ -1216,8 +1268,11 @@ class TestWorkspaceRefresh:
 
 
 class TestWorkspaceValidate:
+    """Workspace validate command tests."""
+
     @pytest.mark.unit
     def test_posts_validate_request_with_requested_tier(self) -> None:
+        """Post validation requests with the requested tier."""
         response = _mock_response(
             status_code=202,
             payload={
@@ -1264,8 +1319,11 @@ class TestWorkspaceValidate:
 
 
 class TestWorkspaceRebase:
+    """Workspace rebase command tests."""
+
     @pytest.mark.unit
     def test_posts_rebase_request_with_reason(self) -> None:
+        """Post rebase requests with the requested reason."""
         response = _mock_response(
             status_code=202,
             payload={
