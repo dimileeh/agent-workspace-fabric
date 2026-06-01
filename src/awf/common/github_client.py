@@ -1269,6 +1269,8 @@ class GitHubClient:
                 break
             normalized = {method for method in allowed if method in {"merge", "squash", "rebase"}}
             if not normalized:
+                # The rule lists only unknown/future method values. AWF cannot enforce them;
+                # treat the rule as non-constraining rather than blocking every method.
                 continue
             constrained = (
                 normalized if constrained is None else constrained.intersection(normalized)

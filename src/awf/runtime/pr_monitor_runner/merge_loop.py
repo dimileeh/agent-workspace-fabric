@@ -110,7 +110,11 @@ async def _resolve_effective_merge_methods(
     repo: RepoRef,
     base_branch: str,
 ) -> tuple[str, ...]:
-    """Fetch repository and base-branch policy before selecting merge methods."""
+    """Fetch repository and base-branch policy before selecting merge methods.
+
+    ``self`` is the ``PullRequestMonitorRunner`` instance; this follows the
+    extract-to-module-function pattern used throughout this module.
+    """
     repo_methods = await self._deps.gh.fetch_repo_merge_methods(repo=repo)
     branch_methods = await self._deps.gh.fetch_branch_pull_request_allowed_merge_methods(
         repo=repo,
