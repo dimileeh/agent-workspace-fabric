@@ -264,6 +264,18 @@ async def find_host_port_conflicts(
             Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES),
             and_(
                 Workspace.status.in_(HOST_PORT_TERMINAL_RELEASE_STATUSES),
+                # INVARIANT: ``compose_project_name`` is NULL iff the workspace
+                # never launched a compose stack, so it holds no host ports and
+                # must NOT block reuse.  The provisioner guarantees this: it
+                # persists ``compose_project_name`` under a row lock
+                # (``get_for_update``) *before* launching containers (see the
+                # pre-launch block in ``provisioner.py``) and never persists it
+                # for pre-launch failures.  So a terminal workspace with live
+                # containers always has a non-NULL ``compose_project_name``, and
+                # excluding NULL rows here cannot miss a real port holder.
+                # Do NOT widen this to also match ``compose_project_name IS
+                # NULL`` terminal rows: that would falsely flag never-launched
+                # workspaces (which bound no ports) as conflicts.
                 Workspace.compose_project_name.isnot(None),
                 ~terminal_runtime_effectively_released,
             ),

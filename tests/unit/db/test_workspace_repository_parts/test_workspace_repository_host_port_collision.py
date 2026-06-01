@@ -1253,6 +1253,62 @@ class TestCrossNodeAndEdgeCases:
         assert conflicts == []
 
     @pytest.mark.asyncio
+    async def test_compose_project_name_null_invariant_distinguishes_port_holders(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """``compose_project_name IS NULL`` is the sole discriminator for a terminal
+        workspace that never bound a host port versus one that did.
+
+        This pins the invariant that the ``Workspace.compose_project_name.isnot(None)``
+        guard in ``find_host_port_conflicts`` relies on: the provisioner persists
+        ``compose_project_name`` under a row lock *before* launching the compose
+        stack (see the pre-launch block in ``node/provisioner.py``) and never
+        persists it for pre-launch failures.  Therefore, among terminal workspaces
+        with no ``terminal_runtime_released`` event, NULL ⟺ no containers ⟺ no ports
+        held, and non-NULL ⟺ a stack was launched and may still hold ports.
+
+        REGRESSION GUARD: widening the guard to also match ``compose_project_name
+        IS NULL`` terminal rows — as a naive reading of the query might suggest —
+        would make the never-launched workspace below start blocking port reuse.
+        Both halves are asserted together here so that change fails loudly.
+        """
+        repo = WorkspaceRepository(session)
+        companions = {
+            "companions": [
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "ports": [[80, 8080]],
+                }
+            ]
+        }
+        # Never launched a stack: compose_project_name stays NULL -> not a holder.
+        await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy=companions,
+        )
+        # Launched a stack, no release event -> still a holder.
+        holder = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy=companions,
+            compose_project_name="awf_invariant_holder",
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1, (
+            "only the workspace that actually launched a stack must hold the port"
+        )
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == holder.id
+
+    @pytest.mark.asyncio
     async def test_legacy_terminal_null_node_id_with_released_reservation_blocks_same_node(
         self,
         session: AsyncSession,
