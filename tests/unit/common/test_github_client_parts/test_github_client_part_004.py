@@ -1120,6 +1120,27 @@ class TestMutations:
         assert methods is None
 
     @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_unknown_only_unconstrained(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                '[{"type":"pull_request","parameters":'
+                '{"allowed_merge_methods":["fast_forward","manual"]}}]'
+            ),
+        )
+        client = GitHubClient(fake)
+
+        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"),
+            branch="main",
+        )
+
+        assert methods is None
+
+    @pytest.mark.unit
     async def test_fetch_branch_pull_request_allowed_merge_methods_normalizes_values(
         self,
     ) -> None:

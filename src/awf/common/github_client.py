@@ -1209,8 +1209,8 @@ class GitHubClient:
         """Return base-branch pull-request ruleset merge methods.
 
         ``None`` means the effective branch rules do not constrain merge
-        method choice; an empty tuple means a pull_request rule explicitly
-        resolved to no known allowed methods.
+        method choice. An empty tuple means recognized pull_request rules
+        conflict and no known method satisfies all of them.
         """
         encoded_branch = quote(branch, safe="")
         payload = await self._gh_json(
@@ -1237,6 +1237,8 @@ class GitHubClient:
             if not isinstance(allowed, list):
                 continue
             normalized = {method for method in allowed if method in {"merge", "squash", "rebase"}}
+            if not normalized:
+                continue
             constrained = (
                 normalized if constrained is None else constrained.intersection(normalized)
             )
