@@ -130,6 +130,27 @@ def _ignored_cleanup_dirs(path: str, ignored_paths: set[str]) -> tuple[str, ...]
     return (normalized_path, *_ignored_cleanup_parent_dirs(normalized_path, ignored_paths))
 
 
+def _untracked_cleanup_parent_dirs(path: str, ignored_paths: set[str]) -> tuple[str, ...]:
+    """Return non-ignored parent dirs that may be empty after cleanup."""
+    normalized_path = _normalize_porcelain_path(path)
+    if not normalized_path or _is_under_ignored_path(normalized_path, ignored_paths):
+        return ()
+
+    cleanup_dirs: list[str] = []
+    parent = (
+        PurePosixPath(normalized_path)
+        if path.endswith("/")
+        else PurePosixPath(normalized_path).parent
+    )
+    while True:
+        parent_text = parent.as_posix()
+        if parent_text in {"", "."}:
+            break
+        cleanup_dirs.append(parent_text)
+        parent = parent.parent
+    return tuple(cleanup_dirs)
+
+
 def _is_directory(path: Path) -> bool:
     """Return whether a path is a real directory without following symlinks."""
     try:
@@ -247,6 +268,47 @@ def _cleanup_empty_ignored_dirs(
             continue
         directory = worktree_path / cleanup_dir
         if not directory.exists() or not directory.is_dir():
+            continue
+        try:
+            next(directory.iterdir())
+        except StopIteration:
+            pass
+        except OSError:
+            failed_dirs.append(cleanup_dir)
+            continue
+        else:
+            continue
+
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            failed_dirs.append(cleanup_dir)
+    return tuple(dict.fromkeys(failed_dirs))
+
+
+def _cleanup_empty_untracked_parent_dirs(
+    *,
+    worktree_path: Path,
+    cleanup_paths: tuple[str, ...],
+    ignored_paths: set[str],
+) -> tuple[str, ...]:
+    """Remove empty generated parent directories left after file cleanup."""
+    candidate_dirs = {
+        cleanup_dir
+        for cleanup_path in cleanup_paths
+        for cleanup_dir in _untracked_cleanup_parent_dirs(cleanup_path, ignored_paths)
+    }
+    ordered_dirs = sorted(
+        candidate_dirs,
+        key=lambda cleanup_dir: len(PurePosixPath(cleanup_dir).parts),
+        reverse=True,
+    )
+    failed_dirs: list[str] = []
+    for cleanup_dir in ordered_dirs:
+        directory = worktree_path / cleanup_dir
+        if not directory.exists() or not _is_directory(directory):
             continue
         try:
             next(directory.iterdir())
@@ -935,6 +997,25 @@ async def cleanup_validation_worktree_side_effects(
                     ),
                     cleanup_command="git clean",
                     cleanup_stderr=(clean.stderr or "")[:1000],
+                )
+            )
+        failed_empty_untracked_dirs = _cleanup_empty_untracked_parent_dirs(
+            worktree_path=worktree_path,
+            cleanup_paths=tuple(cleanup_untracked_paths),
+            ignored_paths=ignored_paths,
+        )
+        if failed_empty_untracked_dirs:
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    message=(
+                        "AWF validation left empty untracked directories and cleanup could not "
+                        f"remove them: {', '.join(failed_empty_untracked_dirs)}"
+                    ),
+                    cleanup_command="rmdir",
                 )
             )
         failed_empty_ignored_dirs = _cleanup_empty_ignored_dirs(
