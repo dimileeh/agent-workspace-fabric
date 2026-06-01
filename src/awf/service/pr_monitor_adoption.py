@@ -798,6 +798,18 @@ def _raise_if_repo_identity_conflicts(
     canonical_repo: RepoRef,
     request: PullRequestMonitorAdoptionRequest,
 ) -> None:
+    """Reject supplied repo identities that disagree with the canonical ref.
+
+    Repo identity is ``(forge, owner, name)`` — not the ``owner/repo`` slug
+    alone. Forge detection (issue #345) makes ``RepoRef.from_url`` parse a
+    ``bitbucket.org`` ``repo_url`` as ``RepoRef(forge="bitbucket")`` with the
+    *same* slug as a GitHub ``pr_url``. Comparing slug only would accept that
+    inconsistent input; ``_adoption_repo_url`` would then persist the Bitbucket
+    URL and the executor forge gate would fail the workspace too late. Compare
+    the forge as well so a same-slug/different-forge identity is rejected up
+    front, alongside :func:`_raise_if_forge_unsupported` which gates the
+    canonical ref.
+    """
     for field_name, repo_value in (
         ("repo_url", request.repo_url),
         ("repo_slug", request.repo_slug),
@@ -813,7 +825,10 @@ def _raise_if_repo_identity_conflicts(
                 status_code=422,
                 detail={"repo": repo_value, "field": field_name},
             ) from exc
-        if requested_repo.slug().lower() != canonical_repo.slug().lower():
+        if (
+            requested_repo.forge != canonical_repo.forge
+            or requested_repo.slug().lower() != canonical_repo.slug().lower()
+        ):
             raise PRMonitorAdoptionError(
                 error_code="PR_ADOPTION_INPUT_REQUIRED",
                 message="PR adoption repository identities refer to different repositories.",
@@ -821,6 +836,8 @@ def _raise_if_repo_identity_conflicts(
                 detail={
                     "expected_repo_slug": canonical_repo.slug(),
                     "actual_repo_slug": requested_repo.slug(),
+                    "expected_forge": canonical_repo.forge,
+                    "actual_forge": requested_repo.forge,
                     "field": field_name,
                 },
             )

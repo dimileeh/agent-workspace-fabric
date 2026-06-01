@@ -1042,6 +1042,41 @@ class TestPullRequestMonitorAdoptionServicePart002:
         assert fetcher.calls == []
 
     @pytest.mark.unit
+    async def test_github_pr_url_with_same_slug_bitbucket_repo_url_rejected(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Regression: a GitHub ``pr_url`` paired with a ``bitbucket.org``
+        # ``repo_url`` of the SAME owner/repo slug must be rejected up front.
+        # The canonical ref parsed from the PR URL is GitHub (supported), so the
+        # canonical-only forge gate passes; identity-conflict detection must also
+        # compare forge or the Bitbucket URL is persisted and the executor forge
+        # gate fails the workspace too late (before any metadata fetch).
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                        repo_url="https://bitbucket.org/dimileeh/aira-web",
+                    )
+                )
+
+            assert await _count(session, Workspace) == 0
+
+        assert excinfo.value.error_code == "PR_ADOPTION_INPUT_REQUIRED"
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail == {
+            "expected_repo_slug": "dimileeh/aira-web",
+            "actual_repo_slug": "dimileeh/aira-web",
+            "expected_forge": "github",
+            "actual_forge": "bitbucket",
+            "field": "repo_url",
+        }
+        assert fetcher.calls == []
+
+    @pytest.mark.unit
     async def test_replay_with_changed_review_grace_conflicts(
         self,
         factory: async_sessionmaker[AsyncSession],

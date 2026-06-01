@@ -796,6 +796,36 @@ def test_adoption_rejects_unparseable_request_repo_identity() -> None:
 
 
 @pytest.mark.unit
+def test_adoption_rejects_same_slug_repo_url_on_conflicting_forge() -> None:
+    # Repo identity is (forge, owner, name), not slug alone. Forge detection
+    # (#345) parses a ``bitbucket.org`` ``repo_url`` as RepoRef(forge="bitbucket")
+    # with the SAME ``owner/repo`` slug as a GitHub ``pr_url``. Comparing slug
+    # only would accept that inconsistent input; the forge must be compared too
+    # so it is rejected up front rather than persisted and failed late at the
+    # executor forge gate.
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/owner/repo/pull/7",
+        repo_url="https://bitbucket.org/owner/repo",
+    )
+
+    with pytest.raises(PRMonitorAdoptionError) as exc_info:
+        _raise_if_repo_identity_conflicts(
+            canonical_repo=RepoRef(owner="owner", name="repo", forge="github"),
+            request=request,
+        )
+
+    assert exc_info.value.error_code == "PR_ADOPTION_INPUT_REQUIRED"
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == {
+        "expected_repo_slug": "owner/repo",
+        "actual_repo_slug": "owner/repo",
+        "expected_forge": "github",
+        "actual_forge": "bitbucket",
+        "field": "repo_url",
+    }
+
+
+@pytest.mark.unit
 def test_inline_profile_name_requires_mapping_with_string_name() -> None:
     assert _inline_profile_name(None) is None
     assert _inline_profile_name({"name": 42}) is None
