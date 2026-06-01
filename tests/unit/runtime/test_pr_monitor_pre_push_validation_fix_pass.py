@@ -743,7 +743,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert any("clean -fdx" in call for call in joined_calls)
+    assert any("clean -ffdx" in call for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -841,7 +841,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert any("clean -fdx" in call for call in joined_calls)
+    assert any("clean -ffdx" in call for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -886,8 +886,8 @@ async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
     assert rollback_failure_reason is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {restore_ref}" in call for call in joined_calls)
-    assert any("clean -fdx -- generated.tmp" in call for call in joined_calls)
-    assert all(not ("clean -fdx" in call and ".venv" in call) for call in joined_calls)
+    assert any("clean -ffdx -- generated.tmp" in call for call in joined_calls)
+    assert all(not ("clean -ffdx" in call and ".venv" in call) for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -1042,7 +1042,7 @@ async def test_pre_push_validation_fix_pass_rollback_does_not_clean_when_reset_f
     assert rollback_failure_reason == "PRE_PUSH_VALIDATION_ROLLBACK_FAILED"
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {restore_ref}" in call for call in joined_calls)
-    assert not any("clean -fdx" in call for call in joined_calls)
+    assert not any("clean -ffdx" in call for call in joined_calls)
 
 
 @pytest.mark.unit
