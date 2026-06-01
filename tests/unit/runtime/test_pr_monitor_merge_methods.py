@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import redact_audit_text
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import OperationStatus
@@ -148,6 +149,19 @@ def test_merge_method_rejection_classifier_is_specific() -> None:
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_redaction_preserves_merge_method_policy_phrases() -> None:
+    """Classifier policy phrases must survive GitHubClientError stderr redaction."""
+    phrases = (
+        "Squash merges are not allowed",
+        "Merge commits are not allowed",
+        "Rebase merges are not allowed",
+    )
+
+    for phrase in phrases:
+        assert phrase.lower() in redact_audit_text(f"GraphQL: {phrase}.").lower()
 
 
 @pytest.mark.unit

@@ -1234,7 +1234,11 @@ class GitHubClient:
             operation="gh api branch rules",
         )
         if payload is None:
-            return None
+            raise GitHubClientError(
+                operation="gh api branch rules",
+                returncode=0,
+                stderr="GitHub branch rules empty response despite --paginate --slurp",
+            )
         if not isinstance(payload, list):
             raise GitHubClientError(
                 operation="gh api branch rules",

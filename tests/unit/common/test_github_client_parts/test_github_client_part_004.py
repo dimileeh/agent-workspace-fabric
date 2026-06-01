@@ -1121,6 +1121,25 @@ class TestMutations:
         ]
 
     @pytest.mark.unit
+    async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_empty_slurp_stdout(
+        self,
+    ) -> None:
+        """Empty stdout from a slurped branch-rules response is an API anomaly."""
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=" \n")
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError, match="empty response") as exc:
+            await client.fetch_branch_pull_request_allowed_merge_methods(
+                repo=RepoRef(owner="o", name="r"),
+                branch="feature/dev",
+            )
+
+        assert "--paginate" in fake.calls[0].args
+        assert "--slurp" in fake.calls[0].args
+        assert "branch rules" in exc.value.operation
+
+    @pytest.mark.unit
     async def test_fetch_branch_pull_request_allowed_merge_methods_reads_later_pages(
         self,
     ) -> None:
