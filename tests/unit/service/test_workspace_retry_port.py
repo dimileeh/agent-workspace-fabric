@@ -738,15 +738,16 @@ async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
 
 
 @pytest.mark.unit
-async def test_retry_auto_retry_bypasses_runtime_not_released(
+async def test_retry_auto_retry_detects_source_port_conflict(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
     """When ignore_source_runtime_check=True (auto-retry path), the
-    runtime-not-released gate must be skipped even when the source
-    compose stack is still live.  This unblocks the automated
-    planning-scope recovery path that was previously collapsed into a
-    permanent manual-retry requirement."""
+    runtime-not-released gate is skipped, but the source workspace
+    must NOT be excluded from port conflict scanning.  If the
+    source's compose stack is still holding a host port, retry must
+    raise WorkspaceCreateHostPortConflictError rather than silently
+    create a workspace that will collide during compose launch."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
     companion_req = {
@@ -771,12 +772,91 @@ async def test_retry_auto_retry_bypasses_runtime_not_released(
     await _mark_failed(factory, source.id, release_runtime=False)
 
     async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="auto-retry port conflict",
+                provider_environ={},
+                ignore_source_runtime_check=True,
+            )
+
+
+@pytest.mark.unit
+async def test_retry_auto_retry_succeeds_when_source_runtime_released(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When ignore_source_runtime_check=True AND the source runtime has been
+    released, the auto-retry can proceed because the source's host ports
+    are no longer held and there is no conflict."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
         retry = await retry_workspace_row(
             session,
             source.id,
             settings=settings,
             provider_readiness_override=True,
-            provider_readiness_override_reason="auto-retry bypasses runtime check",
+            provider_readiness_override_reason="auto-retry source released",
+            provider_environ={},
+            ignore_source_runtime_check=True,
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_auto_retry_succeeds_no_host_ports_runtime_not_released(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When ignore_source_runtime_check=True and there are no host-port
+    claims, the auto-retry must succeed even when the source compose
+    stack has not been released — there are no ports to collide on."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="auto-retry no ports",
             provider_environ={},
             ignore_source_runtime_check=True,
         )
