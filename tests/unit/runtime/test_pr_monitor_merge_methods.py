@@ -243,6 +243,7 @@ async def _execute_merge(
         state=state,
         base_branch=base_branch,
         remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         monitor_log=None,

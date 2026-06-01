@@ -4,11 +4,12 @@ Plan reference: `ADDRESS_REVIEW_4590903660_PLAN.md`
 
 ## Requirement Status
 
-- Use `str(GitHubClientError)` as the single source of truth for
-  merge-method rejection text inspection: Complete.
-- Make the empty effective-methods branch explicitly avoid merge attempts:
+- Pass a concrete `remote_push_url` through the merge-method test helper:
   Complete.
-- Preserve existing merge-method behavior and blocker lifecycle: Complete.
+- Preserve existing merge-method rejection behavior and regression assertions:
+  Complete.
+- Clarify why the generic GitHub method text is classified as method-related:
+  Complete.
 - Run focused validation only; AWF/GitHub owns broad validation after agent
   completion: Complete.
 
@@ -17,6 +18,7 @@ Plan reference: `ADDRESS_REVIEW_4590903660_PLAN.md`
 Files changed:
 
 - `src/awf/runtime/pr_monitor_runner/merge_loop.py`
+- `tests/unit/runtime/test_pr_monitor_merge_methods.py`
 - `plans/ADDRESS_REVIEW_4590903660_PLAN.md`
 - `plans/ADDRESS_REVIEW_4590903660_VALIDATION.md`
 

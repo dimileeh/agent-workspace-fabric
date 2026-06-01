@@ -121,6 +121,8 @@ def _merge_error_supports_method_alternative(exc: GitHubClientError) -> bool:
     text = str(exc).lower()
     return (
         _merge_method_rejection_method(exc) is not None
+        # GitHub's generic wording does not name the rejected method, but it is
+        # the only stable signal available for trying the next allowed method.
         or "could not be merged with this method" in text
     )
 
