@@ -135,6 +135,25 @@ class CompanionImageBuilder:
         self._compose = compose
         self._builds: dict[tuple[str, float], asyncio.Task[str | None]] = {}
 
+    async def companion_image_exists(self, tag: str) -> bool:
+        """Return whether ``tag`` still exists, preserving genuine probe errors.
+
+        This launch-time check distinguishes a confirmed missing image from a
+        Docker probe failure. The cache path's cheaper existence helper treats
+        inspect failures as "not present" so it can build; point-of-use
+        revalidation must not hide daemon errors behind an inline-build fallback.
+        """
+        try:
+            return await self._compose.companion_image_inspect(tag)
+        except ComposeOperationError as exc:
+            _log.warning(
+                "companion_image.revalidate_failed",
+                tag=tag,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            raise
+
     async def ensure(
         self,
         *,
