@@ -193,6 +193,28 @@ def concrete_forge(forge: object) -> ForgeKind:
     return cast("ForgeKind", forge)
 
 
+def concrete_forge_for_repo(forge: object, repo_url: str | None) -> ForgeKind:
+    """Resolve a gate forge: persisted concrete value > repo-URL host > github.
+
+    Like :func:`concrete_forge`, but when the persisted value is *non-concrete* —
+    ``None`` from a **missing** ``resolved_profile`` snapshot, or ``"auto"`` from a
+    **legacy** snapshot that predates the ``forge`` field — it detects the forge
+    from ``repo_url`` before falling back to github. This mirrors the profile
+    resolver's precedence (explicit forge > URL host > github), so the executor
+    forge gate trips ``FORGE_NOT_SUPPORTED`` for a BitBucket repo whose snapshot
+    omits a concrete forge, instead of silently defaulting to github and
+    mis-routing into the ``gh`` path the snapshot-less executor resolves later.
+    A concrete persisted value always wins (the resolver already decided it at
+    provision time) and undetectable URLs fall through to github via
+    :func:`concrete_forge`, so detection stays best-effort.
+    """
+    if forge in (None, "", "auto"):
+        detected = detect_forge_from_url(repo_url) if repo_url else None
+        if detected is not None:
+            return detected
+    return concrete_forge(forge)
+
+
 def make_forge_client(forge: ForgeKind, runner: AsyncCommandRunner) -> ForgeClient:
     """Return the concrete forge client for ``forge``.
 

@@ -15,6 +15,8 @@ from awf.common.forge import (
     FORGE_NOT_SUPPORTED_REASON_CODE,
     ForgeClient,
     ForgeNotSupportedError,
+    concrete_forge,
+    concrete_forge_for_repo,
     detect_forge_from_url,
     ensure_forge_supported,
     make_forge_client,
@@ -114,6 +116,47 @@ def test_detect_forge_from_url_recognized_hosts(url: str, expected: str) -> None
 )
 def test_detect_forge_from_url_unknown_or_malformed_returns_none(url: str) -> None:
     assert detect_forge_from_url(url) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("forge", [None, "", "auto"])
+def test_concrete_forge_maps_non_concrete_to_github(forge: object) -> None:
+    assert concrete_forge(forge) == "github"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("forge", ["github", "bitbucket", "gitlab"])
+def test_concrete_forge_passes_concrete_values_through(forge: object) -> None:
+    assert concrete_forge(forge) == forge
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("forge", [None, "", "auto"])
+def test_concrete_forge_for_repo_detects_bitbucket_when_forge_absent(forge: object) -> None:
+    """A missing/legacy snapshot forge must be detected from the repo URL."""
+    assert concrete_forge_for_repo(forge, "git@bitbucket.org:ws/repo.git") == "bitbucket"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("forge", [None, "", "auto"])
+def test_concrete_forge_for_repo_detects_github_when_forge_absent(forge: object) -> None:
+    assert concrete_forge_for_repo(forge, "https://github.com/o/r.git") == "github"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("repo_url", [None, "", "not a url", "git@gitlab.com:o/r.git"])
+def test_concrete_forge_for_repo_defaults_to_github_when_url_undetected(
+    repo_url: str | None,
+) -> None:
+    """Absent forge + undetectable URL falls back to github, like the resolver."""
+    assert concrete_forge_for_repo(None, repo_url) == "github"
+
+
+@pytest.mark.unit
+def test_concrete_forge_for_repo_trusts_concrete_snapshot_over_url() -> None:
+    """An explicitly persisted concrete forge wins over URL detection (resolver precedence)."""
+    assert concrete_forge_for_repo("github", "git@bitbucket.org:ws/repo.git") == "github"
+    assert concrete_forge_for_repo("bitbucket", "https://github.com/o/r.git") == "bitbucket"
 
 
 @pytest.mark.unit

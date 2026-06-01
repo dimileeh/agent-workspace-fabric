@@ -71,11 +71,27 @@ def _bitbucket_resolved_profile() -> dict:
     ).model_dump(mode="json", by_alias=True)
 
 
+def _legacy_auto_resolved_profile() -> dict:
+    """A legacy snapshot that predates the ``forge`` field reconstructs as ``auto``."""
+    return WorkspaceProfile.model_validate({"name": "p", "docker": {"mode": "none"}}).model_dump(
+        mode="json", by_alias=True
+    )
+
+
+_DEFAULT_RESOLVED_PROFILE = object()
+
+
 async def _seed_ready_bitbucket_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
     task_kind: str = "feature_branch_pr",
+    resolved_profile: object = _DEFAULT_RESOLVED_PROFILE,
 ) -> str:
+    snapshot = (
+        _bitbucket_resolved_profile()
+        if resolved_profile is _DEFAULT_RESOLVED_PROFILE
+        else resolved_profile
+    )
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
@@ -85,7 +101,7 @@ async def _seed_ready_bitbucket_workspace(
             task_prompt="Add a docstring.",
             agent="codex",
             test_commands=["pytest -q"],
-            resolved_profile=_bitbucket_resolved_profile(),
+            resolved_profile=snapshot,  # type: ignore[arg-type]
             task_policy={},
             task_kind=task_kind,
         )
@@ -129,6 +145,48 @@ async def test_bitbucket_workspace_fails_fast_with_forge_not_supported(
         assert failed_event.reason_code == "FORGE_NOT_SUPPORTED"
 
     # Crash/mis-route is explicitly not allowed: no GitHub PR creation runs.
+    assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls), (
+        "BitBucket workspace must fail before any gh pr create"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "resolved_profile",
+    [
+        pytest.param(None, id="missing-snapshot"),
+        pytest.param(_legacy_auto_resolved_profile(), id="legacy-auto-snapshot"),
+    ],
+)
+async def test_bitbucket_repo_url_fails_fast_when_snapshot_omits_concrete_forge(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    fake: FakeCommandRunner,
+    resolved_profile: dict | None,
+) -> None:
+    # A ready workspace whose ``resolved_profile`` snapshot is missing (None) or
+    # legacy (forge reconstructs as ``auto``) still resolves+persists a profile
+    # from ``repo_url`` before running. The gate must detect the BitBucket forge
+    # from the repo URL rather than default the absent forge to GitHub — otherwise
+    # the workspace slips past the fail-fast point into the agent/push path.
+    ws_id = await _seed_ready_bitbucket_workspace(factory, resolved_profile=resolved_profile)
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "BitBucket forge support is not yet implemented" in (ws.failure_message or "")
+        failed_event = next(
+            event
+            for event in reversed(ws.events)
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        )
+        assert failed_event.reason_code == "FORGE_NOT_SUPPORTED"
+
     assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls), (
         "BitBucket workspace must fail before any gh pr create"
     )

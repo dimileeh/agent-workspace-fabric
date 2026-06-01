@@ -27,7 +27,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.forge import (
     ForgeNotSupportedError,
-    concrete_forge,
+    concrete_forge_for_repo,
     ensure_forge_supported,
 )
 from awf.common.git_identity import (
@@ -183,12 +183,18 @@ async def execute(
     # sync_feature_pr build ``gh`` in monitor handoff), the agent run, push, and
     # ``gh pr create``. A detected-but-unimplemented forge (e.g. bitbucket) must
     # fail fast here with FORGE_NOT_SUPPORTED rather than strand the workspace on
-    # an uncaught error deeper in a handoff. Read from the persisted
-    # ``resolved_profile`` (reconstructed, never re-resolved); ``concrete_forge``
-    # maps a missing/legacy ``auto`` value to github so pre-existing GitHub
-    # workspaces never trip the gate.
+    # an uncaught error deeper in a handoff. Prefer the persisted ``resolved_profile``
+    # (reconstructed, never re-resolved); but when the snapshot is *missing* (None)
+    # or *legacy* (forge reconstructs as ``auto``) — a path this executor still
+    # supports, since it resolves+persists a profile from ``ws.repo_url`` before
+    # running — detect the forge from the repo URL so a BitBucket repo trips the
+    # gate instead of defaulting to github and slipping into the gh path. A
+    # concrete persisted forge always wins; undetectable URLs fall back to github
+    # so pre-existing GitHub workspaces never trip the gate.
     try:
-        ensure_forge_supported(concrete_forge((ws.resolved_profile or {}).get("forge")))
+        ensure_forge_supported(
+            concrete_forge_for_repo((ws.resolved_profile or {}).get("forge"), ws.repo_url)
+        )
     except ForgeNotSupportedError as exc:
         await self._mark_failed(
             workspace_id=workspace_id,
