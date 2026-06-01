@@ -256,7 +256,13 @@ class Settings(BaseSettings):
     # API
     api_host: str = Field(default="0.0.0.0")  # noqa: S104 (intentional in containers)
     api_port: int = Field(default=8000, ge=1, le=65535)
-    api_base_url: str = Field(default="http://localhost:8000")
+    api_base_url: str = Field(
+        default="http://localhost:8000",
+        description=(
+            "API self-reference URL for service-side doctor, smoke, and status "
+            "checks. For host CLI calls, use AWF_BASE_URL or --base-url."
+        ),
+    )
     console_url: str | None = Field(
         default=None,
         description="Optional console UI URL shown in smoke reports and operator views.",
