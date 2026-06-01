@@ -336,6 +336,70 @@ async def test_has_terminal_runtime_released_event_revoked(
     )
 
 
+@pytest.mark.asyncio
+async def test_has_terminal_runtime_released_event_tied_timestamp_uses_event_order(
+    session: AsyncSession,
+) -> None:
+    """When release and revocation share the same occurred_at, event_order breaks the tie."""
+    from datetime import UTC, datetime
+
+    import sqlalchemy as sa
+
+    from awf.db.models import WorkspaceEvent
+    from awf.db.repositories.base import (
+        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        has_terminal_runtime_released_event,
+    )
+
+    repo = WorkspaceRepository(session)
+    ws = await _make_workspace(
+        session,
+        repo,
+        status=WorkspaceStatus.destroyed,
+        task_policy={},
+        compose_project_name="awf_test_tied_ts",
+    )
+
+    tied_ts = datetime(2026, 5, 31, 12, 0, 0, tzinfo=UTC)
+
+    await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    )
+    revoked_ev = (
+        await session.execute(
+            sa.select(WorkspaceEvent)
+            .where(WorkspaceEvent.workspace_id == ws.id)
+            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+        )
+    ).scalar_one()
+    revoked_ev.occurred_at = tied_ts
+    await session.flush()
+
+    await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    )
+    released_ev = (
+        await session.execute(
+            sa.select(WorkspaceEvent)
+            .where(WorkspaceEvent.workspace_id == ws.id)
+            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        )
+    ).scalar_one()
+    released_ev.occurred_at = tied_ts
+    await session.commit()
+
+    assert await has_terminal_runtime_released_event(session, ws.id) is True, (
+        "release with higher event_order than revocation at same timestamp must return True"
+    )
+
+
 class TestCrossNodeAndEdgeCases:
     """Cross-node filtering, terminal release statuses, profile service ports,
     and pre-runtime terminal workspace tests for host-port conflict detection.

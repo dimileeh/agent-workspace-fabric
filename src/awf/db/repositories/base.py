@@ -635,26 +635,56 @@ async def has_terminal_runtime_released_event(
     session: AsyncSession,
     workspace_id: str,
 ) -> bool:
-    """Return True if a ``terminal_runtime_released`` event exists for *workspace_id* and has not been revoked."""
-    released_sub = (
+    """Return True if a ``terminal_runtime_released`` event exists for *workspace_id* and has not been revoked.
+
+    When the latest release and revocation share the same ``occurred_at``
+    (e.g. backfilled or low-resolution timestamps), ``event_order`` is used
+    as a deterministic tie-breaker — the event with the higher
+    ``event_order`` is considered later.
+    """
+    released_at_sub = (
         select(func.max(WorkspaceEvent.occurred_at))
         .where(WorkspaceEvent.workspace_id == workspace_id)
         .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
         .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
         .scalar_subquery()
     )
-    revoked_sub = (
+    released_order_sub = (
+        select(func.max(WorkspaceEvent.event_order))
+        .where(WorkspaceEvent.workspace_id == workspace_id)
+        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
+        .scalar_subquery()
+    )
+    revoked_at_sub = (
         select(func.max(WorkspaceEvent.occurred_at))
         .where(WorkspaceEvent.workspace_id == workspace_id)
         .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
         .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
         .scalar_subquery()
     )
-    row = (await session.execute(select(released_sub, revoked_sub))).one()
-    released_at, revoked_at = row
+    revoked_order_sub = (
+        select(func.max(WorkspaceEvent.event_order))
+        .where(WorkspaceEvent.workspace_id == workspace_id)
+        .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+        .where(WorkspaceEvent.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE)
+        .scalar_subquery()
+    )
+    row = (
+        await session.execute(
+            select(released_at_sub, released_order_sub, revoked_at_sub, revoked_order_sub)
+        )
+    ).one()
+    released_at, released_order, revoked_at, revoked_order = row
     if released_at is None:
         return False
-    return revoked_at is None or released_at > revoked_at
+    if revoked_at is None:
+        return True
+    if released_at > revoked_at:
+        return True
+    if released_at < revoked_at:
+        return False
+    return (released_order or 0) > (revoked_order or 0)
 
 
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
