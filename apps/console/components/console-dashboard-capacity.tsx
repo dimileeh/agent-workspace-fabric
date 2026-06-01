@@ -122,7 +122,12 @@ export function ResourceCapacityPanel({
     : "";
 
   return (
-    <Panel title="Resource / Runtime Capacity" icon={<Server size={16} aria-hidden />} stale={stale}>
+    <Panel
+      title="Resource / Runtime Capacity"
+      icon={<Server size={16} aria-hidden />}
+      stale={stale || summaryStale}
+      dimBody={false}
+    >
       {!saturation ? (
         <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
       ) : (
@@ -137,6 +142,23 @@ export function ResourceCapacityPanel({
               Unable to load workspace reliability metrics: {workspaceSummaryError}
             </div>
           ) : null}
+          {/* Reliability-summary facts dim with the summary feed only — kept out
+              of the saturation region so a stale saturation snapshot can't fade
+              freshly-refreshed Stuck / Reason coverage. */}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <Fact
+              label="Stuck"
+              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
+              stale={summaryStale}
+            />
+            <Fact
+              label="Reason Coverage"
+              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
+              stale={summaryStale}
+            />
+          </div>
+          {/* Saturation-driven content dims with the saturation feed. */}
+          <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
           <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-950">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold">Scheduler capacity source</span>
@@ -148,16 +170,6 @@ export function ResourceCapacityPanel({
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Fact label="Active" value={`${saturation.workspace_counts.active_total} workspaces`} />
-            <Fact
-              label="Stuck"
-              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
-              stale={summaryStale}
-            />
-            <Fact
-              label="Reason Coverage"
-              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
-              stale={summaryStale}
-            />
             <Fact
               label="Reserved runtime CPU"
               value={`${formatScalar(saturation.reserved_resources.steady_cpu)} steady / ${formatScalar(
@@ -262,6 +274,7 @@ export function ResourceCapacityPanel({
           </div>
           <div className="text-[11px] text-slate-500">
             generated {relativeTime(saturation.generated_at)}
+          </div>
           </div>
         </div>
       )}

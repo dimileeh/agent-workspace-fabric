@@ -276,6 +276,7 @@ export function Panel({
   stale = false,
   staleLabel = "stale",
   fill = false,
+  dimBody = true,
   className = "",
   children,
 }: {
@@ -287,6 +288,9 @@ export function Panel({
   // When true the panel is a flex column so a scrollable child can grow to
   // fill the panel height (used where a grid column is stretched to a sibling).
   fill?: boolean;
+  // When false the body is not dimmed on stale (the header badge still shows);
+  // used by panels that dim their content regions individually per data source.
+  dimBody?: boolean;
   className?: string;
   children: React.ReactNode;
 }) {
@@ -320,9 +324,10 @@ export function Panel({
         </div>
       </div>
       {/* Only the body dims when stale (data-awf-stale) so the header's stale
-          warning badge keeps full opacity. */}
+          warning badge keeps full opacity. Panels that mix data sources set
+          dimBody={false} and dim their content regions individually instead. */}
       <div
-        data-awf-stale={stale ? "true" : undefined}
+        data-awf-stale={stale && dimBody ? "true" : undefined}
         className={`min-w-0 ${fill ? "flex min-h-0 flex-1 flex-col " : ""}${isGhost ? "py-3" : "p-3"}`}
       >
         {children}
