@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from awf.node.companion_services import MaterializedCompanionService, WorkspaceCompanionSpec
-from awf.node.compose_manager import ComposeProjectPaths, WorkspaceComposeSpec
+from awf.node.compose_manager import CompanionService, ComposeProjectPaths, WorkspaceComposeSpec
 from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import WorkspaceProfile
@@ -241,6 +241,65 @@ async def test_companion_prebuilds_run_concurrently(tmp_path: Path) -> None:
     assert both_entered.is_set()
     assert [service.name for service in services] == ["backend", "frontend"]
     assert sorted(builder.calls) == ["backend", "frontend"]
+
+
+@pytest.mark.unit
+async def test_companion_image_revalidation_runs_concurrently(tmp_path: Path) -> None:
+    """Multiple launch-time companion image probes run concurrently."""
+    both_entered = asyncio.Event()
+    entered = 0
+
+    class _BarrierBuilder:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def companion_image_exists(self, tag: str) -> bool:
+            nonlocal entered
+            self.calls.append(tag)
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await both_entered.wait()
+            return tag != "missing:tag"
+
+    builder = _BarrierBuilder()
+    launcher = ComposeStackLauncher(
+        compose=_StubCompose(),  # type: ignore[arg-type]
+        agent_runtime_image="awf-agent-runtime:latest",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+    spec = WorkspaceComposeSpec(
+        workspace_id="ws_launcher",
+        worktree_host_path=tmp_path,
+        companions=(
+            CompanionService(
+                name="backend",
+                build_context=str(tmp_path / "backend"),
+                image="keep:tag",
+            ),
+            CompanionService(
+                name="worker",
+                build_context=str(tmp_path / "worker"),
+                image="missing:tag",
+            ),
+            CompanionService(
+                name="source",
+                build_context=str(tmp_path / "source"),
+                image=None,
+            ),
+        ),
+    )
+
+    revalidated = await asyncio.wait_for(
+        launcher._revalidate_prebuilt_companion_images(spec),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    assert both_entered.is_set()
+    assert sorted(builder.calls) == ["keep:tag", "missing:tag"]
+    assert revalidated.companions[0].image == "keep:tag"
+    assert revalidated.companions[1].image is None
+    assert revalidated.companions[2] == spec.companions[2]
 
 
 @pytest.mark.unit

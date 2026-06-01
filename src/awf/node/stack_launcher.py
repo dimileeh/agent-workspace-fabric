@@ -270,20 +270,21 @@ class ComposeStackLauncher:
         """Clear vanished pre-built companion images so compose builds inline."""
         if self._companion_image_builder is None:
             return spec
-        companions: list[CompanionService] = []
-        changed = False
-        for companion in spec.companions:
+        builder = self._companion_image_builder
+
+        async def _revalidate_single(companion: CompanionService) -> CompanionService:
             if companion.image is None:
-                companions.append(companion)
-                continue
-            if await self._companion_image_builder.companion_image_exists(companion.image):
-                companions.append(companion)
-                continue
-            companions.append(replace(companion, image=None))
-            changed = True
-        if not changed:
+                return companion
+            if await builder.companion_image_exists(companion.image):
+                return companion
+            return replace(companion, image=None)
+
+        companions = tuple(
+            await asyncio.gather(*(_revalidate_single(companion) for companion in spec.companions))
+        )
+        if companions == spec.companions:
             return spec
-        return replace(spec, companions=tuple(companions))
+        return replace(spec, companions=companions)
 
 
 def _stack_secret_metadata(
