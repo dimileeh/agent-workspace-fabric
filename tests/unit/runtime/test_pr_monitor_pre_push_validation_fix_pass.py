@@ -29,6 +29,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     ValidationWorktreeCheck,
+    ValidationWorktreeCleanup,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -363,6 +364,173 @@ async def test_pre_push_validation_fix_pass_rejects_new_ignored_paths_on_retry(
     assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert len(validation_calls) == 2
     assert len(fix_pass_calls) == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_cleans_ignored_artifacts_after_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed fix pass should clean new ignored artifacts before retrying validation."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed tests\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fix_start_head = "1" * 40
+    committed_head = "2" * 40
+    rev_parse_results = [fix_start_head, committed_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return True
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        cleanup_calls.append(cast(dict[str, object], kwargs))
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+        )
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
+        ignore_ignored_paths_snapshot_signatures=((".venv/existing-artifact.log", "sig-existing"),),
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    assert cleanup_calls == [
+        {
+            "worktree_path": worktree,
+            "restore_ref": committed_head,
+            "ignore_ignored_paths": (".venv/",),
+            "ignore_ignored_paths_snapshot": (".venv/existing-artifact.log",),
+            "ignore_ignored_paths_snapshot_signatures": (
+                (".venv/existing-artifact.log", "sig-existing"),
+            ),
+        }
+    ]
+    assert rev_parse_results == []
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_cleanup_failure_stops_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup failure after a committed fix must surface terminally instead of retrying."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = "workspace_fix_commit_cleanup_failed"
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True, exist_ok=True)
+    validation_calls = 0
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr1",
+        workspace_head_sha="a" * 40,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="attempt 1 failed",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+        ignore_ignored_paths=(".venv/",),
+        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
+    )
+
+    async def _run_pre_push_validation(
+        _self: Any,
+        **_kwargs: object,
+    ) -> pre_push_validation._PrePushValidationResult:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls > 1:
+            raise AssertionError("cleanup failure should stop before retry validation")
+        return validation_result
+
+    async def _run_fix_pass(_runner: object, **_kwargs: object) -> tuple[bool, str | None]:
+        return True, VALIDATION_WORKTREE_CLEANUP_FAILED
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation",
+        _run_pre_push_validation,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation_fix_pass",
+        _run_fix_pass,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation_with_fix_passes(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+        remote_url=None,
+        state=None,
+    )
+
+    assert validation_calls == 1
+    assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert "fix pass cleanup failed" in result.message
 
 
 @pytest.mark.unit
@@ -905,6 +1073,7 @@ async def test_pre_push_validation_fix_pass_revalidates_before_push(
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed validation\n")
@@ -959,6 +1128,7 @@ async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
     fixed_head = "e" * 40
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()
@@ -1017,6 +1187,7 @@ async def test_pre_push_validation_fix_pass_commits_agent_failure_evidence(
     fixed_head = "1" * 40
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()

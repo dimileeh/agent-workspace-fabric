@@ -389,7 +389,7 @@ async def _run_pre_push_validation_with_fix_passes(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
             )
-        committed, rollback_failure_reason = await _run_pre_push_validation_fix_pass(
+        committed, fix_pass_failure_reason = await _run_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -405,22 +405,26 @@ async def _run_pre_push_validation_with_fix_passes(
             total_passes=max_fix_passes,
             validation_commands=validation_commands,
         )
-        if not committed:
-            if rollback_failure_reason is not None:
-                failure_label = (
+        if fix_pass_failure_reason is not None:
+            failure_label = (
+                "cleanup failed"
+                if committed
+                else (
                     "rollback failed"
-                    if rollback_failure_reason == PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+                    if fix_pass_failure_reason == PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
                     else "rollback cleanup failed"
                 )
-                return replace(
-                    validation_result,
-                    reason_code=rollback_failure_reason,
-                    message=(
-                        f"PR monitor pre-push validation fix pass {failure_label} "
-                        f"after {pass_index + 1}/{max_fix_passes} attempts: "
-                        f"{validation_result.message}"
-                    ),
-                )
+            )
+            return replace(
+                validation_result,
+                reason_code=fix_pass_failure_reason,
+                message=(
+                    f"PR monitor pre-push validation fix pass {failure_label} "
+                    f"after {pass_index + 1}/{max_fix_passes} attempts: "
+                    f"{validation_result.message}"
+                ),
+            )
+        if not committed:
             return replace(
                 validation_result,
                 reason_code=PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
@@ -598,7 +602,7 @@ async def _run_pre_push_validation_fix_pass(
     total_passes: int,
     validation_commands: tuple[str, ...],
 ) -> tuple[bool, str | None]:
-    """Attempt a validation fix pass using the failure context and evidence."""
+    """Attempt a validation fix pass and return commit status plus terminal failure reason."""
     first_fail = validation_result.first_failure
     if first_fail is None:
         return False, None
@@ -760,6 +764,35 @@ async def _run_pre_push_validation_fix_pass(
         )
         if rollback_failure_reason is not None:
             return False, rollback_failure_reason
+    if committed:
+        committed_head = await self._rev_parse_head(worktree_path)
+        if committed_head is None:
+            _log.warning(
+                "monitor.pre_push_validation_fix_commit_head_unavailable",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+            )
+            return True, VALIDATION_WORKTREE_CLEANUP_FAILED
+        cleanup = await _pre_push_validation_cleanup(
+            self,
+            worktree_path=worktree_path,
+            restore_ref=committed_head,
+            ignore_ignored_paths=ignore_ignored_paths,
+            ignore_ignored_paths_snapshot=ignore_ignored_paths_snapshot,
+            ignore_ignored_paths_snapshot_signatures=ignore_ignored_paths_snapshot_signatures,
+        )
+        ok = bool(cleanup.ok)
+        log = _log.info if ok else _log.warning
+        log(
+            "monitor.pre_push_validation_fix_commit_cleanup",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            restore_ref=committed_head,
+            reason_code=None if ok else cleanup.reason_code,
+            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
+        )
+        if not ok:
+            return True, cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
     return committed, None
 
 
