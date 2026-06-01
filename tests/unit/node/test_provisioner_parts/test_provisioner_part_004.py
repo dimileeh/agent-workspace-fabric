@@ -221,3 +221,52 @@ class TestComposeFailureTerminalCleanupRace:
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.failed.value
             assert reloaded.failure_reason == "service_startup_failure"
+
+    @pytest.mark.asyncio
+    async def test_compose_failure_marks_failed_when_terminal_cleanup_check_raises(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="cleanup-check-raises-test",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        async def _raise_launch_lost_cleanup(wid: str) -> bool:
+            assert wid == ws_id
+            raise RuntimeError("terminal cleanup check lost its DB session")
+
+        monkeypatch.setattr(
+            provisioner,
+            "_launch_lost_to_terminal_cleanup",
+            _raise_launch_lost_cleanup,
+        )
+
+        with pytest.raises(ComposeOperationError) as raised:
+            await provisioner.provision(ws_id)
+
+        assert raised.value.reason_code == "COMPOSE_COMMAND_FAILED"
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "service_startup_failure"
+            assert reloaded.compose_project_name == f"awf_{ws_id}"

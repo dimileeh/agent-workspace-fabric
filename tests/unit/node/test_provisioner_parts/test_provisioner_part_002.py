@@ -1266,6 +1266,60 @@ class TestFailureHandlingEdges:
             assert "workspace.base.yml.j2" in reloaded.failure_message
 
     @pytest.mark.unit
+    async def test_unexpected_launch_failure_marks_failed_when_terminal_cleanup_check_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _ExplodingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise RuntimeError("template workspace.base.yml.j2 was not found")
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_ExplodingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        async def _raise_launch_lost_cleanup(wid: str) -> bool:
+            assert wid == ws_id
+            raise RuntimeError("terminal cleanup check lost its DB session")
+
+        monkeypatch.setattr(
+            provisioner,
+            "_launch_lost_to_terminal_cleanup",
+            _raise_launch_lost_cleanup,
+        )
+
+        with pytest.raises(RuntimeError, match="workspace.base.yml.j2"):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message is not None
+            assert "unexpected provisioning failure" in reloaded.failure_message
+            assert "workspace.base.yml.j2" in reloaded.failure_message
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+
+    @pytest.mark.unit
     async def test_pre_launch_unexpected_failure_does_not_claim_runtime_ports(
         self,
         session_factory: async_sessionmaker[AsyncSession],

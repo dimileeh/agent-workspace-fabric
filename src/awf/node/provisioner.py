@@ -503,7 +503,10 @@ class Provisioner:
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
             )
-            if await self._launch_lost_to_terminal_cleanup(workspace_id):
+            if await self._launch_lost_to_terminal_cleanup_best_effort(
+                workspace_id,
+                failure_context="stack_startup_failed",
+            ):
                 return
             try:
                 async with self._session_factory() as compose_fail_session:
@@ -594,7 +597,10 @@ class Provisioner:
                 workspace_id=workspace_id,
                 error=str(exc),
             )
-            if await self._launch_lost_to_terminal_cleanup(workspace_id):
+            if await self._launch_lost_to_terminal_cleanup_best_effort(
+                workspace_id,
+                failure_context="unexpected_failed",
+            ):
                 return
             await self._mark_failed(
                 workspace_id=workspace_id,
@@ -805,6 +811,30 @@ class Provisioner:
                     }
                 ),
             )
+
+    async def _launch_lost_to_terminal_cleanup_best_effort(
+        self,
+        workspace_id: str,
+        *,
+        failure_context: str,
+    ) -> bool:
+        """Run the launch-cleanup race check without masking failure handling.
+
+        This wrapper is only for exception handlers. The normal post-launch
+        success path should keep calling `_launch_lost_to_terminal_cleanup`
+        directly so an indeterminate cleanup check cannot incorrectly proceed
+        to `ready`.
+        """
+        try:
+            return await self._launch_lost_to_terminal_cleanup(workspace_id)
+        except Exception:
+            _log.exception(
+                "provisioner.launch_lost_to_terminal_cleanup_check_failed",
+                workspace_id=workspace_id,
+                failure_context=failure_context,
+                reason_code="TERMINAL_CLEANUP_CHECK_FAILED",
+            )
+            return False
 
     async def _mark_failed(
         self,
