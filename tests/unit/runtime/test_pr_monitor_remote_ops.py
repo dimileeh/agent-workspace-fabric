@@ -5,15 +5,31 @@ from __future__ import annotations
 import pytest
 
 from awf.common.commands import CommandResult
+from awf.runtime.pr_monitor_runner import pre_push_validation
+from awf.runtime.pr_monitor_runner.remote_ops import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED as REMOTE_OPS_VALIDATION_WORKTREE_CLEANUP_FAILED,
+)
+from awf.runtime.pr_monitor_runner.remote_ops import (
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY as REMOTE_OPS_VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+)
+from awf.runtime.pr_monitor_runner.remote_ops import (
+    VALIDATION_WORKTREE_STATUS_FAILED as REMOTE_OPS_VALIDATION_WORKTREE_STATUS_FAILED,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _append_git_recovery_failure,
     _git_failure_message,
     _git_push_failure_outcome,
     _GitPushResult,
 )
+from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    VALIDATION_WORKTREE_STATUS_FAILED,
+)
 
 
 def _make_push_result(reason_code: str) -> _GitPushResult:
+    """Build a failure push-result payload for push-outcome mapping tests."""
     return _GitPushResult(
         pushed=False,
         failed=True,
@@ -28,10 +44,12 @@ def _make_push_result(reason_code: str) -> _GitPushResult:
         "PRE_PUSH_VALIDATION_FAILED",
         "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED",
         "PRE_PUSH_VALIDATION_FIX_FAILED",
+        "PRE_PUSH_VALIDATION_ROLLBACK_FAILED",
     ],
 )
 @pytest.mark.unit
 def test_git_push_failure_outcome_maps_pre_push_validation_reasons(reason_code: str) -> None:
+    """Pre-push validation reason codes should map to the monitor failure outcome."""
     assert _git_push_failure_outcome(_make_push_result(reason_code)) == "pre_push_validation_failed"
 
 
@@ -44,12 +62,40 @@ def test_git_push_failure_outcome_maps_toolchain_missing_separately() -> None:
 
 
 @pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() -> None:
+    """Roll-back failure on pre-push validation should remain terminal."""
+    assert _make_push_result("PRE_PUSH_VALIDATION_ROLLBACK_FAILED").terminal_monitor_failure is True
+
+
+@pytest.mark.unit
 def test_git_push_failure_outcome_defaults_to_git_push_failed() -> None:
+    """Unknown push failures should retain the default push-failed outcome."""
     assert _git_push_failure_outcome(_make_push_result("UNKNOWN_FAILURE")) == "git_push_failed"
 
 
 @pytest.mark.unit
+def test_remote_ops_worktree_constants_match_validation_worktree() -> None:
+    """Remote-op worktree reason codes should remain aligned with canonical constants."""
+    assert REMOTE_OPS_VALIDATION_WORKTREE_CLEANUP_FAILED == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert (
+        REMOTE_OPS_VALIDATION_WORKTREE_PRE_EXISTING_DIRTY == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    )
+    assert REMOTE_OPS_VALIDATION_WORKTREE_STATUS_FAILED == VALIDATION_WORKTREE_STATUS_FAILED
+    assert (
+        pre_push_validation.VALIDATION_WORKTREE_CLEANUP_FAILED == VALIDATION_WORKTREE_CLEANUP_FAILED
+    )
+    assert (
+        pre_push_validation.VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+        == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    )
+    assert (
+        pre_push_validation.VALIDATION_WORKTREE_STATUS_FAILED == VALIDATION_WORKTREE_STATUS_FAILED
+    )
+
+
+@pytest.mark.unit
 def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> None:
+    """Monitor push-repair and workflow-scope outcomes map to their specific buckets."""
     assert (
         _git_push_failure_outcome(
             _GitPushResult(
@@ -79,6 +125,7 @@ def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> N
 
 @pytest.mark.unit
 def test_git_failure_message_prefers_stderr_then_stdout() -> None:
+    """Failure messages should prefer stderr over stdout when formatting command output."""
     assert (
         _git_failure_message(
             "git push",
@@ -104,6 +151,7 @@ def test_git_failure_message_prefers_stderr_then_stdout() -> None:
 
 @pytest.mark.unit
 def test_append_git_recovery_failure_includes_available_context() -> None:
+    """Recovery failure messages should include upstream and fallback operation context."""
     assert _append_git_recovery_failure(
         push_stderr="push rejected",
         recovery_stderr="fetch failed",

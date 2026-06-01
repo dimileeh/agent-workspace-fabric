@@ -47,9 +47,6 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
-from awf.runtime.pr_monitor_runner.comments import (
-    _git_worktree_command,
-)
 from awf.runtime.pr_monitor_runner.commit_autofix import (
     _retry_monitor_precommit_autofix_commit_once,
 )
@@ -61,6 +58,9 @@ from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_START_HEAD_UNAVAILABLE_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+)
+from awf.runtime.pr_monitor_runner.git_utils import (
+    git_worktree_command,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_name_only_z,
@@ -98,7 +98,7 @@ async def _pre_existing_dirty_repair_worktree_result(
     if not worktree_path.exists():
         return None
     status = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain")
     )
     if not status.ok:
         stderr = status.stderr[:400]
@@ -171,7 +171,7 @@ async def _repair_operation_start_head_result(
                 source=source,
             )
             return fallback_head, None
-    result = await self._deps.runner.run(_git_worktree_command(worktree_path, "rev-parse", "HEAD"))
+    result = await self._deps.runner.run(git_worktree_command(worktree_path, "rev-parse", "HEAD"))
     head_sha = result.stdout.strip()
     if result.ok and head_sha:
         return head_sha, None
@@ -237,7 +237,7 @@ async def _commit_dirty_worktree(
     if not worktree_path.exists():
         return False
     status = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain")
     )
     if not status.ok:
         _log.warning(
@@ -285,7 +285,7 @@ async def _commit_dirty_worktree(
         status = repaired_status
         changed_paths = tuple(_changed_paths_from_porcelain(status.stdout))
 
-    add = await self._deps.runner.run(_git_worktree_command(worktree_path, "add", "-A"))
+    add = await self._deps.runner.run(git_worktree_command(worktree_path, "add", "-A"))
     if not add.ok:
         _log.warning(
             "monitor.dirty_add_failed",
@@ -295,13 +295,13 @@ async def _commit_dirty_worktree(
         return False
 
     cached = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "diff", "--cached", "--quiet")
+        git_worktree_command(worktree_path, "diff", "--cached", "--quiet")
     )
     if cached.returncode == 0:
         return False
 
     commit = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "commit", "-m", message)
+        git_worktree_command(worktree_path, "commit", "-m", message)
     )
     if not commit.ok:
         if not await repair_agent_runtime_ownership(
@@ -538,12 +538,12 @@ async def _rollback_protected_scope_repair_delta_before_push(
     reverted_paths = list(delta_evidence.reverted_paths)
     cleanup_paths = list(delta_evidence.cleanup_paths)
     reset_result = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "reset", "--hard", operation_start_head)
+        git_worktree_command(worktree_path, "reset", "--hard", operation_start_head)
     )
     clean_result: CommandResult | None = None
     if reset_result.ok and cleanup_paths:
         clean_result = await self._deps.runner.run(
-            _git_worktree_command(
+            git_worktree_command(
                 worktree_path,
                 "--literal-pathspecs",
                 "clean",
@@ -678,7 +678,7 @@ async def _protected_scope_repair_delta_paths(
     cleanup_paths: set[str] = set()
     collection_errors: list[dict[str, object]] = []
     committed = await self._deps.runner.run(
-        _git_worktree_command(
+        git_worktree_command(
             worktree_path,
             "diff",
             "--name-status",
@@ -696,7 +696,7 @@ async def _protected_scope_repair_delta_paths(
                 error=str(exc),
             )
             fallback = await self._deps.runner.run(
-                _git_worktree_command(
+                git_worktree_command(
                     worktree_path,
                     "diff",
                     "--name-only",
@@ -749,7 +749,7 @@ async def _protected_scope_repair_delta_paths(
             }
         )
     status = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "status", "--porcelain", "-z")
+        git_worktree_command(worktree_path, "status", "--porcelain", "-z")
     )
     if status.ok:
         paths.update(_changed_paths_from_porcelain_z(status.stdout))
@@ -880,7 +880,7 @@ async def _repair_protected_scope_changes_before_commit(
 
     worktree_path = self._worktrees_root / workspace_id
     repaired_status = await self._deps.runner.run(
-        _git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain")
     )
     if not repaired_status.ok:
         return None

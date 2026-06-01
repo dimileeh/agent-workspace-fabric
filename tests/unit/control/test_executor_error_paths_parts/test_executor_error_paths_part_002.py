@@ -1279,7 +1279,12 @@ class TestValidationInfrastructureError:
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="1\n")
         fake.queue_result(returncode=0)
-        fake.queue_result(returncode=128, stderr="fatal: not a git repository")
+        validation_head = "c" * 40
+        fake.queue_result(returncode=0, stdout=f"{validation_head}\n")
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout=f"{validation_head}\n")
+        fake.queue_result(returncode=0, stdout=f"{validation_head}\n")
 
         executor = _make_executor(fake, factory, tmp_path, validation=validation)
         await executor.execute(ws_id)
@@ -1296,7 +1301,7 @@ class TestValidationInfrastructureError:
             run = runs[0]
             assert run.status == "failed"
             assert run.reason_code == "VALIDATION_INFRASTRUCTURE_ERROR"
-            assert run.workspace_head_sha is None
+            assert run.workspace_head_sha == validation_head
             assert run.finished_at is not None
 
         assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
