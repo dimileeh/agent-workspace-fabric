@@ -537,15 +537,6 @@ async def cleanup_validation_worktree_side_effects(
     if check.skipped:
         return ValidationWorktreeCleanup(cleaned=True, check=check, restore_ref=restore_ref)
 
-    if check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
-        return ValidationWorktreeCleanup(
-            cleaned=False,
-            check=check,
-            restore_ref=restore_ref,
-            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
-            message=check.message,
-        )
-
     async def _return_after_head_verification(
         failure: ValidationWorktreeCleanup,
     ) -> ValidationWorktreeCleanup:
@@ -553,6 +544,17 @@ async def cleanup_validation_worktree_side_effects(
         if head_check is not None:
             return head_check
         return failure
+
+    if check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return await _return_after_head_verification(
+            ValidationWorktreeCleanup(
+                cleaned=False,
+                check=check,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                message=check.message,
+            )
+        )
 
     tracked_paths = check.tracked_paths
     if restore_ref is None and tracked_paths:
@@ -724,14 +726,16 @@ async def cleanup_validation_worktree_side_effects(
             if head_check is not None:
                 return head_check
         if verify.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
-            return ValidationWorktreeCleanup(
-                cleaned=False,
-                check=check,
-                restore_ref=restore_ref,
-                reason_code=verify.reason_code,
-                message=verify.message,
-                cleanup_command=None,
-                verify_check=verify,
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=verify.reason_code,
+                    message=verify.message,
+                    cleanup_command=None,
+                    verify_check=verify,
+                )
             )
         return ValidationWorktreeCleanup(
             cleaned=False,
