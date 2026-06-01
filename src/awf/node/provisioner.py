@@ -347,7 +347,22 @@ class Provisioner:
                         reason_code="PRE_LAUNCH_COMMIT_FATAL",
                     )
                     return
-                if not await self._recheck_before_launch(workspace_id):
+                try:
+                    if not await self._recheck_before_launch(workspace_id):
+                        return
+                except Exception:
+                    _log.warning(
+                        "provisioner.recheck_before_launch_failed",
+                        workspace_id=workspace_id,
+                        reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
+                    )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message="recheck-before-launch failed; compose not started",
+                        from_status=WorkspaceStatus.provisioning,
+                        reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
+                    )
                     return
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
