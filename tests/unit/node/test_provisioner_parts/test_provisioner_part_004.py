@@ -270,3 +270,82 @@ class TestComposeFailureTerminalCleanupRace:
             assert reloaded.status == WorkspaceStatus.failed.value
             assert reloaded.failure_reason == "service_startup_failure"
             assert reloaded.compose_project_name == f"awf_{ws_id}"
+
+
+class TestRecheckBeforeLaunchFailure:
+    """Regression: a pre-launch recheck failure must not leave a port blocker."""
+
+    @pytest.mark.asyncio
+    async def test_recheck_exception_clears_prepublished_compose_project(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        from awf.db.repositories.base import has_terminal_runtime_released_event
+
+        class _LaunchShouldNotRun:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                raise AssertionError("recheck failure should abort before launch")
+
+        class _RecheckFailingProvisioner(Provisioner):
+            async def _recheck_before_launch(self, workspace_id: str) -> bool:
+                async with self._session_factory() as s:
+                    ws = await WorkspaceRepository(s).get(workspace_id)
+                    assert ws is not None
+                    assert ws.status == WorkspaceStatus.provisioning.value
+                    assert ws.compose_project_name == f"awf_{workspace_id}"
+                raise RuntimeError("terminal launch guard recheck lost its DB session")
+
+        launcher = _LaunchShouldNotRun()
+        provisioner = _RecheckFailingProvisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="recheck-before-launch failure",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "recheck-before-launch-profile",
+                    "services": [
+                        {
+                            "name": "db",
+                            "image": "postgres:16",
+                            "ports": [[80, 19080]],
+                        }
+                    ],
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            reloaded = await repo.get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.compose_project_name is None
+            assert await has_terminal_runtime_released_event(s, ws_id) is False
+            conflicts = await repo.find_host_port_conflicts(
+                host_ports=[19080],
+                excluding_workspace_id=None,
+                node_id="test-node-01",
+            )
+            assert conflicts == []

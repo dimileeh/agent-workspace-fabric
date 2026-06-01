@@ -434,6 +434,7 @@ class Provisioner:
                         message="recheck-before-launch failed; compose not started",
                         from_status=WorkspaceStatus.provisioning,
                         reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
+                        clear_unlaunched_compose_project=True,
                     )
                     return
                 # Keep this assignment immediately adjacent to launch(): the
@@ -845,6 +846,7 @@ class Provisioner:
         reason_code: str | None = None,
         event_payload: dict[str, Any] | None = None,
         compose_launched: bool = False,
+        clear_unlaunched_compose_project: bool = False,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -861,6 +863,12 @@ class Provisioner:
         ``compose_project_name`` NULL — these workspaces never bound a host
         port and must not block port admission (see ``find_host_port_conflicts``
         docstring).
+
+        ``clear_unlaunched_compose_project`` handles the narrow path where
+        pre-launch metadata was committed, then the final launch recheck failed
+        before Compose I/O began.  Clearing the pre-published project preserves
+        the terminal host-port invariant without recording a runtime release for
+        containers that never started.
         """
         try:
             async with self._session_factory() as session:
@@ -894,6 +902,12 @@ class Provisioner:
                 # could finalize cleanup against the wrong Docker daemon.
                 if ws.node_id is None:
                     ws.node_id = self._config.node_id
+                if (
+                    clear_unlaunched_compose_project
+                    and not compose_launched
+                    and from_status == WorkspaceStatus.provisioning
+                ):
+                    ws.compose_project_name = None
                 # Only persist compose_project_name for failures that occurred
                 # after Docker Compose was (or may have been) started. Pre-launch
                 # failures (port conflicts, git errors, profile errors) never
