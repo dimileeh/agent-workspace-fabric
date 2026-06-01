@@ -10,7 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    QueueDecisionRepository,
+    ResourceReservationRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.service.workspaces import (
     WorkspaceCreateHostPortConflictError,
@@ -579,8 +583,13 @@ async def test_retry_persist_reservation_when_source_has_none(
         retried_reservations = await ResourceReservationRepository(
             session,
         ).list_for_workspace(retry.new_workspace.id)
+        retry_decisions = await QueueDecisionRepository(session).list_for_workspace(
+            retry.new_workspace.id,
+        )
         assert len(retried_reservations) == 1
         assert retried_reservations[0].node_id == "node-1"
+        assert len(retry_decisions) == 1
+        assert retry_decisions[0].resource_summary == {}
 
 
 @pytest.mark.unit

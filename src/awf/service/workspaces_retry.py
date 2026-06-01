@@ -461,7 +461,8 @@ async def retry_workspace_row(
         dind_slots=retry_reservation.dind_slots,
         phase=retry_reservation.phase,
     )
-    retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
+    if source_reservation is not None:
+        retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     retry_score = scheduler_score_from_workspace(retried, now=retried.created_at)
     await QueueDecisionRepository(session).create(
         workspace_id=retried.id,

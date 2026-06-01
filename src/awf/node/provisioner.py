@@ -437,6 +437,9 @@ class Provisioner:
                         reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
                     )
                     return
+                # Keep this assignment immediately adjacent to launch(): the
+                # unexpected-failure handler treats True as evidence that compose
+                # may have started and must stamp compose_project_name for cleanup.
                 stack_launch_started = True
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
