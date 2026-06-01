@@ -59,6 +59,8 @@ def test_git_push_failure_outcome_maps_toolchain_missing_separately() -> None:
         _git_push_failure_outcome(_make_push_result("PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING"))
         == "pre_push_validation_toolchain_missing"
     )
+
+
 @pytest.mark.unit
 def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() -> None:
     """Roll-back failure on pre-push validation should remain terminal."""
