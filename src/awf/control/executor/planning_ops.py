@@ -550,7 +550,11 @@ async def _auto_retry_planning_scope_failure(
             await session.commit()
             return
         try:
-            result = await retry_workspace_row(session, workspace_id)
+            result = await retry_workspace_row(
+                session,
+                workspace_id,
+                ignore_source_runtime_check=True,
+            )
         except (
             WorkspaceCreateDuplicateHostPortError,
             WorkspaceCreateHostPortConflictError,

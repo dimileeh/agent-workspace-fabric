@@ -117,6 +117,7 @@ async def retry_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
+    ignore_source_runtime_check: bool = False,
 ) -> Any:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
     workspaces = _workspace_service()
@@ -313,8 +314,10 @@ async def retry_workspace_row(
     # sibling nodes whose ports are not actually held by the source.  When
     # Phase 2 introduces multi-node, this branch should require a resolved
     # node_id or be replaced by a per-node runtime-release query.
-    if await _source_runtime_not_yet_released(session, source) and (
-        source_effective_node_id is None or source_effective_node_id == target_node_id
+    if (
+        not ignore_source_runtime_check
+        and await _source_runtime_not_yet_released(session, source)
+        and (source_effective_node_id is None or source_effective_node_id == target_node_id)
     ):
         raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
             source_workspace_id=source.id,

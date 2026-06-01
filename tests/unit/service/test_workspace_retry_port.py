@@ -735,3 +735,49 @@ async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
                 provider_readiness_override_reason="no-node conflict scan test",
                 provider_environ={},
             )
+
+
+@pytest.mark.unit
+async def test_retry_auto_retry_bypasses_runtime_not_released(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When ignore_source_runtime_check=True (auto-retry path), the
+    runtime-not-released gate must be skipped even when the source
+    compose stack is still live.  This unblocks the automated
+    planning-scope recovery path that was previously collapsed into a
+    permanent manual-retry requirement."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="auto-retry bypasses runtime check",
+            provider_environ={},
+            ignore_source_runtime_check=True,
+        )
+        assert retry.new_workspace.id != source.id
