@@ -1012,6 +1012,36 @@ class TestPullRequestMonitorAdoptionServicePart002:
         assert excinfo.value.detail == {"repo": "https://example.com/not/github"}
 
     @pytest.mark.unit
+    async def test_bitbucket_repo_url_rejected_before_metadata_fetch(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Regression: forge detection (issue #345) makes ``RepoRef.from_url``
+        # accept a ``bitbucket.org`` URL as ``RepoRef(forge="bitbucket")``.
+        # Adoption must fail fast on the unsupported forge BEFORE fetching
+        # metadata — otherwise the GitHub-only ``gh pr view --repo owner/repo``
+        # path silently queries GitHub for the same slug and can adopt the wrong
+        # PR (the executor forge gate runs too late, after this metadata fetch).
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_url="https://bitbucket.org/workspace/repo",
+                        pr_number=277,
+                    )
+                )
+
+            assert await _count(session, Workspace) == 0
+
+        assert excinfo.value.error_code == "FORGE_NOT_SUPPORTED"
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail == {"repo_slug": "workspace/repo", "forge": "bitbucket"}
+        assert "BitBucket forge support is not yet implemented" in excinfo.value.message
+        assert fetcher.calls == []
+
+    @pytest.mark.unit
     async def test_replay_with_changed_review_grace_conflicts(
         self,
         factory: async_sessionmaker[AsyncSession],

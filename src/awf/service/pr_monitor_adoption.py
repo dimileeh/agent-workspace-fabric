@@ -17,6 +17,7 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
+from awf.common.forge import ForgeNotSupportedError, ensure_forge_supported
 from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     PullRequestMetadataError,
@@ -65,6 +66,7 @@ _LIVE_ADOPTION_STATUSES = frozenset(
 _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_ADOPTION_INPUT_REQUIRED"},
     {"error_code": "INVALID_GITHUB_REPO"},
+    {"error_code": "FORGE_NOT_SUPPORTED"},
     {"error_code": "PR_NOT_FOUND"},
     {"error_code": "PR_ALREADY_CLOSED"},
     {"error_code": "PR_ALREADY_MERGED"},
@@ -744,6 +746,7 @@ def _normalize_request_identity(
                 status_code=422,
             )
         _raise_if_repo_identity_conflicts(canonical_repo=repo, request=request)
+        _raise_if_forge_unsupported(repo)
         return repo, pr_number
 
     repo_value = request.repo_slug or request.repo_url
@@ -763,7 +766,31 @@ def _normalize_request_identity(
             detail={"repo": repo_value},
         ) from exc
     _raise_if_repo_identity_conflicts(canonical_repo=repo, request=request)
+    _raise_if_forge_unsupported(repo)
     return repo, request.pr_number
+
+
+def _raise_if_forge_unsupported(repo: RepoRef) -> None:
+    """Reject a canonical ref on a forge AWF cannot adopt yet.
+
+    Forge detection (issue #345) makes ``RepoRef.from_url`` accept non-GitHub
+    hosts (e.g. ``bitbucket.org``) as ``RepoRef(forge="bitbucket")``. Adoption
+    fetches PR metadata via the GitHub-only ``gh pr view --repo owner/repo``
+    path, which silently targets GitHub for the same slug — so a non-GitHub ref
+    must fail fast HERE, before any metadata fetch, rather than mis-route to
+    GitHub (and the executor forge gate runs too late to catch it). Routes
+    through :func:`ensure_forge_supported` so the supported-forge set stays a
+    single source of truth.
+    """
+    try:
+        ensure_forge_supported(repo.forge)
+    except ForgeNotSupportedError as exc:
+        raise PRMonitorAdoptionError(
+            error_code=exc.reason_code,
+            message=exc.message,
+            status_code=422,
+            detail={"repo_slug": repo.slug(), "forge": repo.forge},
+        ) from exc
 
 
 def _raise_if_repo_identity_conflicts(
