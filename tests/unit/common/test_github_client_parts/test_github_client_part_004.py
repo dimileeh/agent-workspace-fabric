@@ -1082,6 +1082,23 @@ class TestMutations:
         assert "allow_rebase_merge" in exc.value.stderr
 
     @pytest.mark.unit
+    async def test_fetch_repo_merge_methods_rejects_partial_repo_flags(self) -> None:
+        """Partially omitted merge flags are anomalous API payloads."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout='{"allow_merge_commit":true,"allow_squash_merge":true}',
+        )
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError, match="omitted merge method flags") as exc:
+            await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
+
+        assert "allow_rebase_merge" in exc.value.stderr
+        assert "allow_merge_commit" not in exc.value.stderr
+        assert "allow_squash_merge" not in exc.value.stderr
+
+    @pytest.mark.unit
     async def test_fetch_repo_merge_methods_all_false_is_empty_policy(self) -> None:
         """Explicit false repo merge flags still represent a real empty repository policy."""
         fake = FakeCommandRunner()

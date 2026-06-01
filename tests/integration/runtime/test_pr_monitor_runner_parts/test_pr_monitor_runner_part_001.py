@@ -37,7 +37,7 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
 from tests.postgres import postgres_test_engine
-from tests.unit.runtime._monitor_runner_fixtures import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
 
 @dataclass

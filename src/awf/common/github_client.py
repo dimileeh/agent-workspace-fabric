@@ -1197,8 +1197,9 @@ class GitHubClient:
             ("allow_squash_merge", "squash"),
             ("allow_rebase_merge", "rebase"),
         )
-        if not any(flag in payload for flag, _method in merge_flags):
-            missing = ", ".join(flag for flag, _method in merge_flags)
+        missing_flags = [flag for flag, _method in merge_flags if flag not in payload]
+        if missing_flags:
+            missing = ", ".join(missing_flags)
             raise GitHubClientError(
                 operation="gh api repo",
                 returncode=0,

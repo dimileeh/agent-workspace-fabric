@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -37,6 +36,7 @@ from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
 
 @dataclass
@@ -131,25 +131,6 @@ class RecordedSleep:
     async def __call__(self, seconds: float) -> None:
         """Record the requested sleep duration without delaying."""
         self.calls.append(seconds)
-
-
-class DefaultMergeMethodGitHubClient(GitHubClient):
-    """GitHub client test double that keeps legacy merge queues stable."""
-
-    async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
-        """Return all legacy repository merge methods for older runner tests."""
-        del repo
-        return ("merge", "squash", "rebase")
-
-    async def fetch_branch_pull_request_allowed_merge_methods(
-        self,
-        *,
-        repo: RepoRef,
-        branch: str,
-    ) -> tuple[str, ...] | None:
-        """Return no branch-level merge-method constraint for older tests."""
-        del repo, branch
-        return None
 
 
 def pr_payload(

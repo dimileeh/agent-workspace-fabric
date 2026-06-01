@@ -39,7 +39,7 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner.helpers import _initial_review_grace_started_key
 from tests.postgres import postgres_test_engine
-from tests.unit.runtime._monitor_runner_fixtures import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
 
 @dataclass
