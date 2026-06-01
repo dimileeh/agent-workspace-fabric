@@ -472,10 +472,10 @@ async def test_cleanup_validation_worktree_cleans_new_ignored_files_using_snapsh
 
 
 @pytest.mark.unit
-async def test_cleanup_validation_worktree_cleans_modified_ignored_file_using_snapshot_signature(
+async def test_cleanup_validation_worktree_fails_modified_ignored_file_using_snapshot_signature(
     tmp_path: Path,
 ) -> None:
-    """Modified ignored files under baseline ignored roots are still cleaned."""
+    """Modified pre-existing ignored files should fail cleanup for safety."""
     worktree = _init_fake_worktree(tmp_path)
     restore_ref = "a" * 40
     ignored_artifact = worktree / ".venv" / "existing-artifact.log"
@@ -513,9 +513,13 @@ async def test_cleanup_validation_worktree_cleans_modified_ignored_file_using_sn
         ),
     )
 
-    assert cleanup.reason_code is None
-    assert cleanup.cleaned is True
-    assert ("clean", "-fdx", "--", ".venv/existing-artifact.log") in commands
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert cleanup.message == (
+        "AWF validation modified pre-existing ignored files and they "
+        "cannot be safely restored: .venv/existing-artifact.log"
+    )
+    assert cleanup.cleanup_command is None
+    assert ("clean", "-fdx", "--", ".venv/existing-artifact.log") not in commands
 
 
 @pytest.mark.unit

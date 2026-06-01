@@ -629,18 +629,30 @@ async def cleanup_validation_worktree_side_effects(
                     f"{', '.join(deleted_ignored_paths)}"
                 ),
             )
-        cleanup_untracked_paths.extend(
+        modified_snapshot_paths = [
             path
             for path in current_ignored_paths
             if _is_under_ignored_path(path, ignored_paths)
-            and (
-                path not in ignored_snapshot_set
-                or (
-                    ignore_ignored_paths_snapshot_signatures is not None
-                    and current_ignored_signature_lookup.get(path)
-                    != ignore_ignored_paths_snapshot_lookup.get(path, "")
-                )
+            and path in ignored_snapshot_set
+            and ignore_ignored_paths_snapshot_signatures is not None
+            and current_ignored_signature_lookup.get(path)
+            != ignore_ignored_paths_snapshot_lookup.get(path, "")
+        ]
+        if modified_snapshot_paths:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=check,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=(
+                    "AWF validation modified pre-existing ignored files and they "
+                    f"cannot be safely restored: {', '.join(modified_snapshot_paths)}"
+                ),
             )
+        cleanup_untracked_paths.extend(
+            path
+            for path in current_ignored_paths
+            if _is_under_ignored_path(path, ignored_paths) and path not in ignored_snapshot_set
         )
 
     cleanup_untracked_paths = list(dict.fromkeys(cleanup_untracked_paths))
