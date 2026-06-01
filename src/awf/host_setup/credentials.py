@@ -776,7 +776,28 @@ def _is_noop_keyring_backend(backend: object) -> bool:
 def _pull_secret(request: CredentialRequest) -> str:
     """Pull the secret from the request; missing input fails non-interactively."""
     source = request.secret_source
-    secret = source() if source is not None else None
+    if source is not None:
+        try:
+            secret = source()
+        except Exception as exc:  # noqa: BLE001 - a caller secret_source may raise anything
+            # ``secret_source`` is a caller-provided callable, so a misbehaving one
+            # can raise anything (an ``OSError`` reading a file, a ``ValueError``
+            # from a custom validator). Without this guard it would propagate raw out
+            # of ``KeyringCredentialBackend``/``PlainFileCredentialBackend``'s
+            # ``create_ref``, breaking their documented "only raises
+            # ``CredentialError``" contract and surprising callers that catch only
+            # ``CredentialError``. Translate it to the same non-interactive
+            # missing-input signal an absent source yields, recording only the
+            # exception *type* — never its message, which a custom validator could
+            # have populated with the secret. ``from None`` suppresses the cause so a
+            # secret-bearing exception string can never surface through a chained
+            # traceback; ``BaseException`` (KeyboardInterrupt, SystemExit,
+            # CancelledError) still propagates.
+            raise _interactive_input_required(
+                request, missing="secret_source_error", error_type=type(exc).__name__
+            ) from None
+    else:
+        secret = None
     # A whitespace-only value is truthy but unusable for authentication; treat it
     # as missing input rather than writing it to the keychain/plain file. Strip
     # surrounding whitespace from the stored value too, so a padded secret (a
@@ -806,6 +827,10 @@ _MISSING_INPUT_MESSAGES: Mapping[str, str] = {
         "The supplied credential secret was only whitespace; a non-empty value is "
         "required in a non-interactive run."
     ),
+    "secret_source_error": (
+        "The credential secret source raised an error and could not be read in a "
+        "non-interactive run."
+    ),
 }
 
 
@@ -813,25 +838,32 @@ def _interactive_input_required(
     request: CredentialRequest,
     *,
     missing: str,
+    error_type: str | None = None,
 ) -> CredentialError:
     """Build the non-interactive missing-input error with secret-free details."""
+    details: dict[str, object] = {
+        # ``provider`` reaches this builder unvalidated on the env_ref path:
+        # ``EnvRefCredentialBackend`` raises here for a missing env var name
+        # before (and instead of) routing ``provider`` through
+        # ``_require_safe_identifier``, since env_ref never interpolates it.
+        # Redact token-shaped substrings so a provider accidentally populated
+        # with a raw secret never surfaces in these diagnostics or ``to_dict``.
+        "provider": _redact_token_shaped(request.provider),
+        "missing": missing,
+        "non_interactive": request.non_interactive,
+    }
+    if error_type is not None:
+        # Only the ``secret_source``-raised path supplies this: it is the failing
+        # exception's *type name* (never its message, which a custom validator could
+        # have populated with the secret), so it is a safe, actionable diagnostic.
+        details["error_type"] = error_type
     return CredentialError(
         reason_code=INTERACTIVE_INPUT_REQUIRED,
         message=_MISSING_INPUT_MESSAGES.get(
             missing,
             "A required credential input is unavailable in a non-interactive run.",
         ),
-        details={
-            # ``provider`` reaches this builder unvalidated on the env_ref path:
-            # ``EnvRefCredentialBackend`` raises here for a missing env var name
-            # before (and instead of) routing ``provider`` through
-            # ``_require_safe_identifier``, since env_ref never interpolates it.
-            # Redact token-shaped substrings so a provider accidentally populated
-            # with a raw secret never surfaces in these diagnostics or ``to_dict``.
-            "provider": _redact_token_shaped(request.provider),
-            "missing": missing,
-            "non_interactive": request.non_interactive,
-        },
+        details=details,
     )
 
 

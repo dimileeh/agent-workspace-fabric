@@ -160,6 +160,66 @@ def test_plain_file_missing_secret_is_interactive_input_required(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_keyring_secret_source_error_is_interactive_input_required() -> None:
+    """Verify a raising ``secret_source`` is translated to a ``CredentialError``.
+
+    ``secret_source`` is caller-provided and can raise anything (a file-read
+    ``OSError``, a custom validator's ``ValueError``). The keyring backend
+    documents it raises only ``CredentialError``, so such a failure must be
+    translated to the non-interactive missing-input signal — recording the
+    exception *type* but never its (potentially secret-bearing) message — rather
+    than propagating raw and breaking callers that catch only ``CredentialError``.
+    """
+    fake_keyring = FakeKeyringModule()
+    backend = KeyringCredentialBackend(keyring_module=fake_keyring)
+
+    def _raise() -> str:
+        raise ValueError(f"boom {_FAKE_GH_TOKEN}")
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="github", secret_source=_raise))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "secret_source_error"
+    assert error.details["error_type"] == "ValueError"
+    # The raising source never reached the keychain...
+    assert fake_keyring.set_calls == []
+    # ...and a secret embedded in the raised exception must never leak.
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_plain_file_secret_source_error_is_interactive_input_required(tmp_path: Path) -> None:
+    """Verify a raising ``secret_source`` fails closed without writing a file.
+
+    Mirrors the keyring path for ``PlainFileCredentialBackend``: a misbehaving
+    ``secret_source`` is translated to ``INTERACTIVE_INPUT_REQUIRED`` (honouring
+    the "only raises ``CredentialError``" contract) and no secret file — nor even
+    the secrets directory — is created on the failure path.
+    """
+    secrets_dir = tmp_path / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+
+    def _raise() -> str:
+        raise OSError("cannot read secret source")
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_raise))
+
+    error = exc_info.value
+    assert error.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert error.details["missing"] == "secret_source_error"
+    assert error.details["error_type"] == "OSError"
+    assert not secrets_dir.exists()
+
+
+@pytest.mark.unit
 def test_env_ref_missing_variable_is_interactive_input_required() -> None:
     """Verify env refs without a variable name fail non-interactively."""
     with pytest.raises(CredentialError) as exc_info:
