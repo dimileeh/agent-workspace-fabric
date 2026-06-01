@@ -386,7 +386,14 @@ async def _snapshot_ignored_paths(
     pathspecs: tuple[str, ...] = (),
 ) -> tuple[tuple[str, ...], str]:
     """Snapshot ignored untracked paths with a null-delimited command."""
-    args = ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]
+    args = [
+        "--literal-pathspecs",
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+    ]
     if pathspecs:
         args.extend(["--", *pathspecs])
     result = await run_git(args)

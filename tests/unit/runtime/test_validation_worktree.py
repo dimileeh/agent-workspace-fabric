@@ -24,6 +24,7 @@ _VALIDATION_STATUS_ARGS = (
     "--ignored=matching",
 )
 _VALIDATION_IGNORED_LS_FILES_ARGS = (
+    "--literal-pathspecs",
     "ls-files",
     "--others",
     "--ignored",
@@ -216,6 +217,68 @@ async def test_check_validation_worktree_clean_can_snapshot_ignored_tree_with_ig
 
     assert check.clean is True
     assert check.ignored_paths_snapshot == (".venv/a.py", ".venv/b.py")
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_snapshots_pathspec_magic_ignored_root_literally(
+    tmp_path: Path,
+) -> None:
+    """Ignored roots that look like pathspec magic must be snapshotted literally."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (worktree / ".gitignore").write_text(":(glob)cache/\n", encoding="utf-8")
+    _run_real_git(worktree, "add", ".gitignore")
+    _run_real_git(
+        worktree,
+        "-c",
+        "user.email=awf@example.test",
+        "-c",
+        "user.name=AWF Test",
+        "commit",
+        "-m",
+        "init",
+    )
+    ignored_root = worktree / ":(glob)cache"
+    ignored_root.mkdir()
+    (ignored_root / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        commands.append(tuple(args))
+        result = subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return _CommandResultLike(result.returncode, result.stdout, result.stderr)
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_ignored_paths=(":(glob)cache/",),
+        capture_ignored_paths_snapshot=True,
+    )
+
+    assert check.clean is True
+    assert check.ignored_paths == (":(glob)cache/",)
+    assert check.ignored_paths_snapshot == (":(glob)cache/baseline.txt",)
+    assert (
+        "--literal-pathspecs",
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ":(glob)cache/",
+    ) in commands
 
 
 @pytest.mark.unit
