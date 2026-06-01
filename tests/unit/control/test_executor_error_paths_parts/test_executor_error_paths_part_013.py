@@ -1255,19 +1255,28 @@ class TestExecutorMonitorHandoffSetup:
                 setup_failure=setup_failure,
             )
 
+        expected_mark_failed_call = {
+            "workspace_id": "ws-final-fail",
+            "from_status": WorkspaceStatus.running,
+            "failure_reason": FailureReason.service_startup_failure,
+            "message": "profile setup failed: uv sync --extra dev",
+            "reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
+            "details": {"phase": "setup"},
+        }
         assert mark_failed_calls == [
-            {
-                "workspace_id": "ws-final-fail",
-                "from_status": WorkspaceStatus.running,
-                "failure_reason": FailureReason.service_startup_failure,
-                "message": "profile setup failed: uv sync --extra dev",
-                "reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
-                "details": {"phase": "setup"},
-            }
+            expected_mark_failed_call,
+            expected_mark_failed_call,
         ]
         assert log_events == [
             (
                 "executor.monitor_handoff_setup_failure_mark_failed_failed",
+                {
+                    "workspace_id": "ws-final-fail",
+                    "setup_failure_reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
+                },
+            ),
+            (
+                "executor.monitor_handoff_setup_failure_final_mark_failed_failed",
                 {
                     "workspace_id": "ws-final-fail",
                     "setup_failure_reason_code": PR_MONITOR_SETUP_FAILED_REASON_CODE,
