@@ -82,7 +82,7 @@ async def acquire_host_port_admission_lock(
     # SHA-256-derived advisory-lock key collides with an already-acquired one
     # (birthday collision guard — extremely rare but correct to handle).
     seen_keys: set[int] = set()
-    for hp in dict.fromkeys(host_ports):
+    for hp in sorted(dict.fromkeys(host_ports)):
         lock_key = lock_key_fn(hp)
         if lock_key in seen_keys:
             continue
