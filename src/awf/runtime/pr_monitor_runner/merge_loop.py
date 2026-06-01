@@ -172,13 +172,13 @@ def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
 
 def _merge_completion_marker(
     *,
-    merge_method: str,
     merge_sha: str | None,
     head_sha: str,
-) -> str | None:
+) -> str:
     """Return the non-empty marker used to record a completed PR merge."""
-    if merge_sha or merge_method != "rebase":
-        return merge_sha
+    normalized_merge_sha = merge_sha.strip() if merge_sha else None
+    if normalized_merge_sha:
+        return normalized_merge_sha
     return head_sha
 
 
@@ -347,7 +347,6 @@ async def _attempt_merge_method(
         return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
 
     merge_marker = _merge_completion_marker(
-        merge_method=merge_method,
         merge_sha=merge_sha,
         head_sha=merge_status.head_sha,
     )

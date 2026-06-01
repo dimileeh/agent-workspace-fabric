@@ -740,6 +740,40 @@ async def test_rebase_merge_with_empty_merge_commit_records_head_marker(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("merge_method", ("squash", "merge"))
+async def test_non_rebase_merge_with_empty_merge_commit_records_head_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    merge_method: str,
+) -> None:
+    """Blank GitHub merge SHAs still leave a completion marker for merged PRs."""
+    expected_head_sha = _mergeable_status().head_sha
+    gh = _MergeMethodClient(
+        repo_methods=(merge_method,),
+        branch_methods=(merge_method,),
+        merge_results=[""],
+    )
+
+    terminal, state, _sleep, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+
+    assert terminal is True
+    assert gh.merge_calls == [merge_method]
+    assert gh.comments == []
+    assert workspace is not None
+    assert workspace.pr_merge_sha == expected_head_sha
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
