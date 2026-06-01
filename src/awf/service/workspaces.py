@@ -292,6 +292,7 @@ class WorkspaceCreateDuplicateHostPortError(Exception):
     error_code = "DUPLICATE_HOST_PORT"
 
     def __init__(self, *, host_port: int) -> None:
+        """Initialize with the duplicated host port."""
         self.host_port = host_port
         self.message = (
             f"Host port {host_port} is claimed by more than one service"
