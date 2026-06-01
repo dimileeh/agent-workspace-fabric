@@ -35,7 +35,18 @@ DEFAULT_INSTALL_CHANNEL = "stable"
 DEFAULT_API_HOST_PORT = 8000
 DEFAULT_HOST_SETUP_WORK_DIR = "~/.awf/service"
 
-_SAFE_CREDENTIAL_REF_PREFIXES = ("keyring://", "env://", "plain-file://")
+# Maps each known credential backend kind (recorded as non-secret provider
+# metadata) to the ``credential_ref`` scheme it produces. Kept in lockstep with
+# ``awf.host_setup.credentials._BACKEND_REF_PREFIXES`` / ``CREDENTIAL_BACKENDS``
+# (config must not import that module to avoid an import cycle; a test guards the
+# two against drift).
+_BACKEND_REF_PREFIXES: dict[str, str] = {
+    "keyring": "keyring://",
+    "env_ref": "env://",
+    "plain_file": "plain-file://",
+}
+_CREDENTIAL_BACKEND_KINDS = tuple(_BACKEND_REF_PREFIXES)
+_SAFE_CREDENTIAL_REF_PREFIXES = tuple(_BACKEND_REF_PREFIXES.values())
 _SECRET_VALUE_PREFIXES = (
     "ghp_",
     "gho_",
@@ -241,6 +252,7 @@ class ProviderConfig(_HostSetupBaseModel):
     """Provider setup state with a credential reference, never a credential value."""
 
     credential_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    backend: str | None = Field(default=None, min_length=1, max_length=32)
     source: str | None = Field(default=None, min_length=1, max_length=128)
     status: str = Field(default="missing", min_length=1, max_length=128)
 
@@ -257,6 +269,37 @@ class ProviderConfig(_HostSetupBaseModel):
                 "credential_ref must use keyring://, env://, or plain-file:// references"
             )
         return value
+
+    @field_validator("backend")
+    @classmethod
+    def _validate_backend(cls, value: str | None) -> str | None:
+        """Record only known credential backend kinds as provider metadata."""
+        if value is None:
+            return None
+        if value not in _CREDENTIAL_BACKEND_KINDS:
+            raise ValueError("backend must be one of: " + ", ".join(_CREDENTIAL_BACKEND_KINDS))
+        return value
+
+    @model_validator(mode="after")
+    def _validate_backend_ref_consistency(self) -> ProviderConfig:
+        """Require backend kind and credential_ref scheme to agree when both set.
+
+        Each field validates independently, so a hand-edited config (or a future
+        direct ``ProviderConfig(...)`` call) could pair ``backend="keyring"`` with
+        an ``env://`` ref. AWF's own writers always emit a consistent pair via
+        ``CredentialRef.to_provider_config_fields``; this guard rejects a mismatch
+        at load time rather than letting it surface only at credential resolution.
+        The message names the backend and expected scheme only, never the ref.
+        """
+        if self.backend is None or self.credential_ref is None:
+            return self
+        expected_prefix = _BACKEND_REF_PREFIXES[self.backend]
+        if not self.credential_ref.startswith(expected_prefix):
+            raise ValueError(
+                f"credential_ref scheme does not match backend {self.backend!r}; "
+                f"expected prefix {expected_prefix!r}"
+            )
+        return self
 
 
 class ClientIntegrationConfig(_HostSetupBaseModel):
