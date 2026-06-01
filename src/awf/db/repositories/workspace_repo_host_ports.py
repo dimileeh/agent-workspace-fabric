@@ -85,7 +85,7 @@ async def acquire_host_port_admission_lock(
         lock_key = lock_key_fn(hp)
         if lock_key in seen_keys:
             _log.warning(
-                "host_port_admission_lock.birthday_collision: port=%s lock_key=%s — advisory lock key collision skipped, concurrent admission for this port is not serialized",
+                "host_port_admission_lock.birthday_collision: port=%s lock_key=%s — advisory lock key collision detected; serialization is provided by the already-held key, but the two ports share one lock slot",
                 hp,
                 lock_key,
             )
