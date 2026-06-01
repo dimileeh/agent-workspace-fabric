@@ -1136,6 +1136,25 @@ class WorkspaceControlService:
                     reason_code=failed_reason_code,
                     payload=secondary_failure_recorded_payload,
                 )
+            if (
+                workspace.compose_project_name is not None
+                and not await has_terminal_runtime_released_event(self._session, workspace.id)
+                and any(
+                    step.name == "compose_down" and step.ok
+                    for step in cleanup_result.completed_steps
+                )
+            ):
+                await repo.add_event(
+                    workspace,
+                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    payload={
+                        "compose_project_name": workspace.compose_project_name,
+                        "workspace_status": workspace.status,
+                        "cleanup": cleanup_payload,
+                        "partial_release": True,
+                    },
+                )
             result_payload: dict[str, Any] = {
                 "status": workspace.status,
                 "cleanup": cleanup_payload,

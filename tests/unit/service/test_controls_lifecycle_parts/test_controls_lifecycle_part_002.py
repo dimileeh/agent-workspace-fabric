@@ -23,6 +23,12 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import has_terminal_runtime_released_event
+from awf.node.cleanup import (
+    COMPOSE_DOWN_SUCCEEDED,
+    WorkspaceCleanupResult,
+    WorkspaceCleanupStepResult,
+)
 from awf.service.controls import (
     _OPERATION_ERROR_MESSAGE_MAX_LENGTH,
     ActiveWorkspaceDestroyError,
@@ -161,6 +167,38 @@ class StaleCallbackCleaner(RecordingCleaner):
         )
         await self.session.flush()
         return result
+
+
+@dataclass
+class StructuredCleaner:
+    result: WorkspaceCleanupResult
+    calls: list[CleanupCall] = field(default_factory=list)
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> WorkspaceCleanupResult:
+        self.calls.append(
+            CleanupCall(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                companion_worktrees=companion_worktrees,
+                compose_project_name=compose_project_name,
+                compose_file_path=compose_file_path,
+                worktree_host_path=worktree_host_path,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+        )
+        return self.result
 
 
 async def _workspace(
@@ -1002,6 +1040,46 @@ async def test_destroy_cleanup_failure_message_is_bounded(
     expected = cleanup_failure[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
     assert workspace.failure_message == expected
     assert operations[0].error_message == expected
+
+
+@pytest.mark.unit
+async def test_destroy_partial_cleanup_records_runtime_released_when_compose_down_succeeded(
+    session: AsyncSession,
+) -> None:
+    partial_result = WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose_down",
+                status="succeeded",
+                reason_code=COMPOSE_DOWN_SUCCEEDED,
+            ),
+            WorkspaceCleanupStepResult(
+                name="worktree_remove",
+                status="failed",
+                reason_code="CLEANUP_STEP_FAILED",
+                error="worktree removal failed",
+            ),
+        ]
+    )
+    cleaner = StructuredCleaner(result=partial_result)
+    service = WorkspaceControlService(
+        session,
+        project_stopper=RecordingStopper(),
+        cleaner_factory=lambda: cleaner,
+    )
+
+    workspace = await _workspace(session, status=WorkspaceStatus.destroying)
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+
+    assert response.status == WorkspaceStatus.failed
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert await has_terminal_runtime_released_event(session, workspace.id) is True
 
 
 @pytest.mark.unit
