@@ -324,6 +324,39 @@ async def test_transient_merge_method_preflight_error_retries_without_blocker(
 
 
 @pytest.mark.unit
+async def test_non_transient_merge_method_preflight_error_notifies_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Persistent preflight failures notify humans without failing the workspace."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 403 Resource not accessible by integration",
+        )
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == []
+    assert len(gh.comments) == 1
+    assert "merge-method preflight" in gh.comments[0]
+    assert "HTTP 403" in gh.comments[0]
+    assert sleep_fn.calls == [60]
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 async def test_method_rejection_without_alternative_notifies_human_without_transient_retry(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

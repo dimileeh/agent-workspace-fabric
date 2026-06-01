@@ -145,6 +145,14 @@ def _merge_method_mismatch_message(
     )[:2000]
 
 
+def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
+    """Build an operator-facing reason for merge-method policy preflight failures."""
+    detail = " ".join(_redact_and_truncate_github_error(exc.stderr).split())[:240]
+    if detail:
+        return f"GitHub rejected merge-method preflight: {detail}"
+    return "GitHub rejected merge-method preflight"
+
+
 async def _attempt_merge_method(
     self: Any,
     *,
@@ -960,14 +968,24 @@ async def handle_merge_action(
                 monitor_log=monitor_log,
             ):
                 return False
-            await self._terminate_failed(
-                workspace_id,
-                message=(
-                    "monitor: github error during merge-method preflight: "
-                    f"{merge_method_preflight_error}"
-                )[:2000],
+            _log.warning(
+                "monitor.merge_method_preflight_falling_back_to_notify",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                base_branch=base_branch,
+                stderr=_redact_and_truncate_github_error(merge_method_preflight_error.stderr),
             )
-            return True
+            await self._post_human_notification_once(
+                repo=repo,
+                pr_number=pr_number,
+                status=merge_status,
+                state=state,
+                blocker_reason=_merge_method_preflight_rejection_reason(
+                    merge_method_preflight_error
+                ),
+            )
+            await self._deps.sleep(self._config.poll_interval_seconds)
+            return False
 
         if merge_method_notification_reason is not None:
             _log.warning(
