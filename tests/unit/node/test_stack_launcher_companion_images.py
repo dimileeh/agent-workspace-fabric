@@ -386,12 +386,23 @@ async def test_launch_does_not_retry_missing_non_companion_image(tmp_path: Path)
 
 
 @pytest.mark.unit
-def test_missing_image_detector_accepts_not_found_near_companion_tag() -> None:
-    """A plain not-found daemon message near the tag still reports a missing image."""
+def test_missing_image_detector_rejects_plain_not_found_near_companion_tag() -> None:
+    """Plain not-found text near the tag does not confirm a missing image."""
+    tag = "awf-companion-backend:abc123def456"
+
+    assert not _compose_up_reports_missing_image(
+        _compose_error(f"pulling {tag}: image not found"),
+        tag,
+    )
+
+
+@pytest.mark.unit
+def test_missing_image_detector_accepts_no_such_image_for_companion_tag() -> None:
+    """Docker's no-such-image message confirms the companion tag is absent."""
     tag = "awf-companion-backend:abc123def456"
 
     assert _compose_up_reports_missing_image(
-        _compose_error(f"pulling {tag}: image not found"),
+        _compose_error(f"No such image: {tag}"),
         tag,
     )
 

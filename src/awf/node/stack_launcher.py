@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -339,15 +338,8 @@ def _compose_up_reports_missing_image(exc: ComposeOperationError, image: str) ->
     image_lower = image.lower()
     if image_lower not in detail:
         return False
-    image_pattern = re.escape(image_lower)
-    image_near_not_found = re.search(
-        rf"(?:{image_pattern}.{{0,50}}not found|not found.{{0,50}}{image_pattern})",
-        detail,
-        flags=re.DOTALL,
-    )
     return (
         "no such image" in detail
-        or image_near_not_found is not None
         or "pull access denied" in detail
         or "repository does not exist" in detail
     )
