@@ -61,6 +61,11 @@ def test_environmental_failures_are_classified_unavailable(output: str) -> None:
         "error: Failed to parse `pyproject.toml`: missing field `name`",
         "ValueError: hatchling: no files found for the wheel target",
         "Traceback (most recent call last): KeyError: 'version'",
+        # Regression guard (PRRT_kwDOSJAM6s6F-8ou): a real packaging failure whose
+        # text merely contains the word "offline" must NOT be treated as an
+        # unavailable environment, otherwise the artifact guard skips instead of
+        # failing. A bare "offline" substring previously masked exactly this.
+        "error: Failed to parse `pyproject.toml`: unknown extra `offline`",
     ],
 )
 def test_real_regressions_are_not_classified_unavailable(output: str) -> None:

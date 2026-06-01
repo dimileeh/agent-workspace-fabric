@@ -63,7 +63,13 @@ class PackageBuildFailedError(AssertionError):
 # regression is never masked as "unavailable".
 _BUILD_ENV_UNAVAILABLE_SIGNATURES = (
     "network connectivity is disabled",
-    "offline",
+    # Match the specific "offline mode" phrase uv emits for ``--offline`` rather
+    # than a bare "offline" substring: the bare substring would also mask a real
+    # packaging regression whose error text merely mentions the word "offline"
+    # (e.g. an extra/dependency named that), skipping instead of failing the
+    # artifact guard. uv's genuine offline cache miss is already covered above by
+    # "network connectivity is disabled".
+    "offline mode",
     "failed to fetch",
     "failed to download",
     "error sending request",
