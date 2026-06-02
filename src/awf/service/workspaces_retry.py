@@ -26,7 +26,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.repositories.base import (
-    HOST_PORT_TERMINAL_RELEASE_STATUSES,
+    HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES,
     has_terminal_runtime_released_event,
 )
 from awf.runtime.planning import (
@@ -95,13 +95,13 @@ async def _source_runtime_not_yet_released(
     Only ``failed`` and ``cancelled`` workspaces reach this function — the
     ``RETRYABLE_WORKSPACE_STATUSES`` guard in ``retry_workspace_row`` rejects
     all other statuses (including ``destroying``) before this point.  The
-    ``HOST_PORT_TERMINAL_RELEASE_STATUSES`` check below therefore only
+    ``HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES`` check below therefore only
     matches ``failed`` / ``cancelled`` in practice; ``completed`` and
     ``destroyed`` are listed in that constant for its shared semantics, not
     because they flow through here.
     """
     source_status = WorkspaceStatus(source.status)
-    if source_status in HOST_PORT_TERMINAL_RELEASE_STATUSES:
+    if source_status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES:
         if await has_terminal_runtime_released_event(session, source.id):
             return False
         if source.compose_project_name is not None or source.compose_file_path is not None:

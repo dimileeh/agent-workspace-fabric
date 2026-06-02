@@ -59,13 +59,17 @@ HOST_PORT_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.destroying.value,
 )
 """Workspace statuses whose host ports should be checked for collision."""
-HOST_PORT_TERMINAL_RELEASE_STATUSES: Final[tuple[str, ...]] = (
-    WorkspaceStatus.failed.value,
-    WorkspaceStatus.cancelled.value,
-    WorkspaceStatus.completed.value,
-    WorkspaceStatus.destroyed.value,
+HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES: Final[tuple[WorkspaceStatus, ...]] = (
+    WorkspaceStatus.failed,
+    WorkspaceStatus.cancelled,
+    WorkspaceStatus.completed,
+    WorkspaceStatus.destroyed,
 )
-"""Terminal statuses that indicate a workspace's host ports are released."""
+"""Terminal status enum members that indicate a workspace's host ports are released."""
+HOST_PORT_TERMINAL_RELEASE_STATUSES: Final[tuple[str, ...]] = tuple(
+    status.value for status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES
+)
+"""Persisted terminal status values used in SQL/string status comparisons."""
 ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = ACTIVE_OWNED_PATH_OVERLAP_STATUSES
 ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.completed.value,

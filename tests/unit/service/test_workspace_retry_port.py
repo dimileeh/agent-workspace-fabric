@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,6 +17,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import workspaces_retry
 from awf.service.workspaces import (
     WorkspaceCreateHostPortConflictError,
     WorkspaceRetrySourceRuntimeNotReleasedError,
@@ -119,6 +121,35 @@ async def _mark_failed(
             )
         await session.commit()
         return frozen_profile
+
+
+@pytest.mark.unit
+async def test_source_runtime_release_gate_uses_enum_terminal_statuses(monkeypatch) -> None:
+    """The retry release gate must not depend on StrEnum string equality."""
+
+    async def runtime_not_released(_session: object, _workspace_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspaces_retry, "HOST_PORT_TERMINAL_RELEASE_STATUSES", (), raising=False)
+    monkeypatch.setattr(
+        workspaces_retry,
+        "HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES",
+        (WorkspaceStatus.failed,),
+    )
+    monkeypatch.setattr(
+        workspaces_retry,
+        "has_terminal_runtime_released_event",
+        runtime_not_released,
+    )
+    source = SimpleNamespace(
+        id="ws_enum_terminal_release",
+        status=WorkspaceStatus.failed.value,
+        compose_project_name="awf_ws_enum_terminal_release",
+        compose_file_path=None,
+        node_id=None,
+    )
+
+    assert await workspaces_retry._source_runtime_not_yet_released(object(), source) is True
 
 
 @pytest.mark.unit
