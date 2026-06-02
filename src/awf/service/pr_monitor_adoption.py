@@ -754,6 +754,14 @@ def _normalize_request_identity(
                 message="PR URL and pr_number refer to different pull requests.",
                 status_code=422,
             )
+        # Precedence: identity conflict > forge gate. A GitHub ``pr_url`` paired
+        # with a BitBucket ``repo_url`` of the same slug surfaces
+        # PR_ADOPTION_INPUT_REQUIRED (the conflict fires first), not
+        # FORGE_NOT_SUPPORTED — see
+        # ``test_github_pr_url_with_same_slug_bitbucket_repo_url_rejected``. The
+        # forge gate below is then defense-in-depth: a canonical ref parsed from a
+        # ``github.com`` PR URL is always ``"github"``, so it never raises on this
+        # path today.
         _raise_if_repo_identity_conflicts(canonical_repo=repo, request=request)
         _raise_if_forge_unsupported(repo)
         return repo, pr_number
