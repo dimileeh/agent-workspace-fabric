@@ -21,7 +21,6 @@ from awf.db.repositories import (
     resolve_session_dialect_name,
     scheduler_order_expressions,
 )
-from awf.service.config import DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
 from awf.service.disk import DiskCheck
 from awf.service.metrics_resources import (
     _active_latest_totals_for_workspace_scope,
@@ -42,6 +41,7 @@ from awf.service.metrics_types import (
     _CapacityQueueCandidate,
     _CapacityQueueWorkspace,
 )
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_recovery import (
     provider_cooldown_not_before,
     provider_for_agent_model,
@@ -561,8 +561,7 @@ def _float_or_default(value: Any, default: float) -> float:
 
 
 def _local_capacity_node_id(settings: Settings) -> str:
-    configured = settings.worker_node_id.strip() if settings.worker_node_id else ""
-    return configured or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
+    return effective_worker_node_id(settings)
 
 
 def _workspace_node_scope_filter(node_id: str) -> Any:

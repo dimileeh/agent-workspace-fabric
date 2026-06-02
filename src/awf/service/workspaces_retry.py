@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
@@ -16,6 +17,7 @@ from awf.db.models import (
     Task,
     TaskAttempt,
     Workspace,
+    WorkspaceEvent,
 )
 from awf.db.repositories import (
     OperationRepository,
@@ -24,6 +26,11 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceRepository,
+)
+from awf.db.repositories.base import (
+    HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES,
+    PRE_LAUNCH_FAILURE_EVENT_TYPE,
+    has_terminal_runtime_released_event,
 )
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -42,6 +49,7 @@ from awf.service.coordination import (
     owned_path_overlap_coordination_warnings,
     task_policy_with_coordination_warnings,
 )
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_readiness import (
     HttpGet,
     SubprocessRun,
@@ -81,6 +89,95 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     return _payload(workspace)
 
 
+async def _source_runtime_not_yet_released(
+    session: AsyncSession,
+    source: Workspace,
+) -> bool:
+    """Return True if the source workspace's compose runtime has not been released yet.
+
+    Only ``failed`` and ``cancelled`` workspaces reach this function — the
+    ``RETRYABLE_WORKSPACE_STATUSES`` guard in ``retry_workspace_row`` rejects
+    all other statuses (including ``destroying``) before this point.  The
+    ``HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES`` check below therefore only
+    matches ``failed`` / ``cancelled`` in practice; ``completed`` and
+    ``destroyed`` are listed in that constant for its shared semantics, not
+    because they flow through here.
+
+    Callers must verify that ``host_ports`` is non-empty before calling this
+    function. Zero-port workspaces cannot cause host-port conflicts, and the
+    outer ``retry_workspace_row`` call site gates this check on ``if host_ports:``.
+    """
+    source_status = WorkspaceStatus(source.status)
+    if source_status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES:
+        if await has_terminal_runtime_released_event(session, source.id):
+            return False
+        if source.compose_project_name is not None or source.compose_file_path is not None:
+            return True
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+            limit=1,
+        )
+        if (
+            source_status == WorkspaceStatus.cancelled
+            and source.node_id is None
+            and not reservations
+            and await _source_cancelled_before_provisioning(session, source.id)
+        ):
+            # Cancelled before provisioning placement: no compose metadata, no
+            # node, and no reservation history means there is no runtime
+            # evidence for cleanup to release. Cancelled rows that reached
+            # provisioning fall through to the same explicit pre-launch
+            # provenance gate as failed null-runtime rows.
+            return False
+        # A reservation only proves placement, not that Compose never launched.
+        # Upgraded legacy launch failures can have a ResourceReservation while
+        # compose_project_name/compose_file_path are null after containers were
+        # created. An explicit pre-launch marker is required to admit the retry;
+        # otherwise keep the source ports blocked until cleanup records
+        # terminal_runtime_released.
+        return not await _source_has_pre_launch_failure_event(session, source.id)
+    return False
+
+
+async def _source_cancelled_before_provisioning(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    """Return True when the latest cancellation transition came from requested."""
+    stmt = (
+        select(WorkspaceEvent.old_state)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == "workspace.state_changed",
+            WorkspaceEvent.new_state == WorkspaceStatus.cancelled.value,
+        )
+        .order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.event_order.desc().nullslast(),
+            WorkspaceEvent.id.desc(),
+        )
+        .limit(1)
+    )
+    old_state = (await session.execute(stmt)).scalar_one_or_none()
+    return old_state == WorkspaceStatus.requested.value
+
+
+async def _source_has_pre_launch_failure_event(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    """Return True when durable evidence says provisioning failed before launch."""
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
 async def retry_workspace_row(
     session: AsyncSession,
     workspace_id: str,
@@ -91,8 +188,16 @@ async def retry_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
+    ignore_source_runtime_check: bool = False,
 ) -> Any:
-    """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
+    """Create a fresh requested workspace cloned from a failed/cancelled attempt.
+
+    ``ignore_source_runtime_check=True`` is a narrow internal escape hatch:
+    callers may use it only after durable evidence shows the source runtime's
+    host ports were released, or when an equivalent pre-launch safety gate will
+    reject still-live source ports before compose launch. It does not bypass
+    host-port admission locks or conflicts with other workspaces.
+    """
     workspaces = _workspace_service()
     workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()
@@ -242,6 +347,102 @@ async def retry_workspace_row(
         "provider_readiness_preflight": preflight,
     }
 
+    host_ports: list[int] = []
+    host_ports.extend(
+        workspaces.host_ports_from_task_policy_companions(
+            retried_task_policy,
+        )
+    )
+    # TOCTOU note: source.resolved_profile reflects the profile resolved
+    # when the source workspace was originally provisioned.  Legacy rows may
+    # still have an inline requested_profile but no resolved_profile snapshot,
+    # so fall back to that requested profile for admission-time source runtime
+    # and conflict checks.  If the repository's auto-resolved profile changed
+    # between the source run and this retry (e.g. .awf.yml was updated), the
+    # ports checked here may not match what the provisioner will actually use.
+    # The provisioner's _check_auto_resolved_profile_host_ports serves as the
+    # definitive gate, so a conflict missed here surfaces as an
+    # INFRASTRUCTURE_FAILURE inside the provisioner rather than a 409 at
+    # dispatch.  This is an inherent limitation of auto-resolved profiles at
+    # dispatch time.
+    source_profile_for_port_admission = (
+        source.resolved_profile if source.resolved_profile is not None else source.requested_profile
+    )
+    host_ports.extend(
+        workspaces.host_ports_from_resolved_profile(source_profile_for_port_admission),
+    )
+    _seen: set[int] = set()
+    for _hp in host_ports:
+        if _hp in _seen:
+            raise workspaces.WorkspaceCreateDuplicateHostPortError(host_port=_hp)
+        _seen.add(_hp)
+    latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
+        source.id, limit=1
+    )
+    source_reservation = latest_source_reservation[0] if latest_source_reservation else None
+    source_effective_node_id = source.node_id or (
+        source_reservation.node_id if source_reservation else None
+    )
+    target_node_id = effective_worker_node_id(resolved_settings)
+    if not (resolved_settings.worker_node_id or "").strip() and source_effective_node_id:
+        # Local service installs now default workers/provisioners to "local";
+        # older failed rows may still carry a container hostname. Normalize
+        # that legacy source node so retries stay claimable by local workers
+        # while the runtime-release gate still compares against the same host.
+        source_effective_node_id = target_node_id
+    if host_ports:
+        # The runtime-release gate is only meaningful when the source
+        # workspace holds host ports that could conflict with the retry.
+        # For zero-port workspaces (host_ports empty), the source's
+        # compose project is workspace-ID-scoped (awf_<id>) and cannot
+        # cause host-port conflicts, so the check is skipped.
+        # Phase 1 single-node assumption: when source_effective_node_id
+        # is None (legacy row with no node_id and no
+        # ResourceReservation), it is treated as a wildcard that matches
+        # any target_node_id.  This is safe when AWF runs a single
+        # worker node — the source's containers must be on that node —
+        # but in a multi-node deployment it could over-block retries on
+        # sibling nodes whose ports are not actually held by the
+        # source.  When Phase 2 introduces multi-node, this branch
+        # should require a resolved node_id or be replaced by a
+        # per-node runtime-release query.
+        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
+        # Read the source runtime-release state after acquiring the
+        # per-port admission lock, just before the third-party conflict
+        # SELECT, so a release committed during lock acquisition is not
+        # converted into an avoidable SOURCE_RUNTIME_NOT_RELEASED block.
+        if (
+            not ignore_source_runtime_check
+            and await _source_runtime_not_yet_released(session, source)
+            and (source_effective_node_id is None or source_effective_node_id == target_node_id)
+        ):
+            raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
+                source_workspace_id=source.id,
+            )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=host_ports,
+            excluding_workspace_id=source.id,
+            node_id=target_node_id,
+        )
+        if conflicts:
+            raise workspaces.WorkspaceCreateHostPortConflictError(
+                host_port=conflicts[0].host_port,
+                conflicting_workspace_id=conflicts[0].workspace_id,
+            )
+        # Safety note: source.id is unconditionally excluded from
+        # find_host_port_conflicts above (excluding_workspace_id=source.id).
+        # This is valid because the runtime-release gate
+        # (_source_runtime_not_yet_released) has already confirmed either that
+        # the source's containers are down or that provisioning definitively
+        # failed before Compose launch when ignore_source_runtime_check is
+        # False. If a specialized caller sets ignore_source_runtime_check=True,
+        # the provisioner still re-checks companion ports and auto-resolved
+        # profile service ports before Docker Compose launch. If the source
+        # stack still owns one of those ports, the retry fails with
+        # COMPANION_HOST_PORT_CHECK_FATAL before compose-up rather than
+        # surfacing as a Docker bind error. Reordering these two guards without
+        # updating the provisioner checks could break the invariant.
+
     retried = await repo.create(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
@@ -287,14 +488,19 @@ async def retry_workspace_row(
     retry_scheduler_policy["retry_attempt_number"] = max(0, attempt.attempt_number - 1)
     retry_policy[SCHEDULER_POLICY_KEY] = retry_scheduler_policy
     retried.task_policy = retry_policy
-    latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
-        source.id, limit=1
-    )
-    retry_resource_summary: dict[str, Any] = {}
-    if latest_source_reservation:
-        source_reservation = latest_source_reservation[0]
+    # A ResourceReservation is always created on retry, even when the source
+    # workspace had no prior reservation (e.g. it failed during early
+    # provisioning steps before a reservation was created). The retry
+    # workspace needs a node_id for host-port admission scoping, and the
+    # reservation row is the canonical source of that assignment. Without it,
+    # the retried workspace would lack a node_id, breaking admission checks
+    # and scheduler scoring. When source_reservation is None, disk defaults to
+    # no reservation cost, but DinD demand must still come from the stored
+    # profile snapshots because worker capacity checks treat an existing
+    # ResourceReservation as authoritative.
+    if source_reservation is not None:
         retry_reservation = workspaces.ResourceReservationPlan(
-            node_id=resolved_settings.worker_node_id or source_reservation.node_id,
+            node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
             steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
             peak_cpu=resolved_settings.workspace_peak_cpu,
@@ -304,19 +510,36 @@ async def retry_workspace_row(
             dind_mode="dind" if source_reservation.dind_slots else "none",
             phase=source_reservation.phase,
         )
-        await ResourceReservationRepository(session).create(
-            workspace_id=retried.id,
-            attempt_id=attempt.id,
-            node_id=retry_reservation.node_id,
-            steady_cpu=retry_reservation.steady_cpu,
-            steady_memory_gb=retry_reservation.steady_memory_gb,
-            peak_cpu=retry_reservation.peak_cpu,
-            peak_memory_gb=retry_reservation.peak_memory_gb,
-            disk_mb=retry_reservation.disk_mb,
-            dind_slots=retry_reservation.dind_slots,
-            phase=retry_reservation.phase,
+    else:
+        dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
+        if dind_mode == "unknown":
+            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.requested_profile)
+        if dind_mode == "unknown":
+            dind_mode = "none"
+        retry_reservation = workspaces.ResourceReservationPlan(
+            node_id=target_node_id,
+            steady_cpu=resolved_settings.workspace_steady_cpu,
+            steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
+            peak_cpu=resolved_settings.workspace_peak_cpu,
+            peak_memory_gb=resolved_settings.workspace_peak_memory_gb,
+            disk_mb=None,
+            dind_slots=1 if dind_mode == "dind" else 0,
+            dind_mode=dind_mode,
+            phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
         )
-        retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
+    retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
+    await ResourceReservationRepository(session).create(
+        workspace_id=retried.id,
+        attempt_id=attempt.id,
+        node_id=retry_reservation.node_id,
+        steady_cpu=retry_reservation.steady_cpu,
+        steady_memory_gb=retry_reservation.steady_memory_gb,
+        peak_cpu=retry_reservation.peak_cpu,
+        peak_memory_gb=retry_reservation.peak_memory_gb,
+        disk_mb=retry_reservation.disk_mb,
+        dind_slots=retry_reservation.dind_slots,
+        phase=retry_reservation.phase,
+    )
     retry_score = scheduler_score_from_workspace(retried, now=retried.created_at)
     await QueueDecisionRepository(session).create(
         workspace_id=retried.id,

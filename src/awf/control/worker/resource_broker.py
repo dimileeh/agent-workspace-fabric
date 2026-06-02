@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     from awf.control.worker.scheduling import _CapacityQueueDecisionContext
 from awf.common.logging import get_logger
-from awf.control.worker.config import WorkerConfig
+from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.db.models import QueueDecision, ResourceReservation, Workspace
 from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
@@ -344,7 +344,7 @@ async def _allocated_totals_for_capacity_gate(
     reservation_repo: ResourceReservationRepository,
     config: WorkerConfig,
 ) -> _AllocatedReservationTotals:
-    node_id = config.node_id or "local"
+    node_id = effective_worker_config_node_id(config)
     allocated = _allocated_totals_from_repository(
         await reservation_repo.active_latest_totals_for_scheduler_allocation_scope(
             statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,

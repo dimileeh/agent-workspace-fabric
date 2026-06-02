@@ -6,6 +6,7 @@ point is the integration between state transitions and filesystem operations.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -16,19 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
-    EgressAuditRepository,
     SecretLeaseRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
-from awf.node.egress_policy import LocalEgressPolicyError
-from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
+from awf.node.git_manager import GitManager, WorktreeLayout
 from awf.node.provisioner import (
     Provisioner,
     ProvisionerConfig,
 )
-from awf.profiles.models import EgressMode, ProfileSecret, WorkspaceProfile
+from awf.profiles.models import ProfileSecret, WorkspaceProfile
 from tests.postgres import postgres_test_engine
 
 
@@ -83,6 +82,24 @@ async def _force_destroy_provisioning_workspace(
         await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="TEST_DESTROY")
         await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="TEST_DESTROY")
         await s.commit()
+
+
+async def _force_cancel_provisioning_workspace(
+    session_factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> None:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.provisioning.value
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
+        await s.commit()
+
+
+async def _signal_compose_up_started(request: Any) -> None:
+    on_started = getattr(request, "on_compose_up_started", None)
+    if on_started is not None:
+        await on_started()
 
 
 def _secret_profile() -> WorkspaceProfile:
@@ -274,6 +291,7 @@ class TestOperatorControlRaces:
     ) -> None:
         class _DestroyingFailingStackLauncher:
             async def launch(self, request: Any) -> object:
+                await _signal_compose_up_started(request)
                 await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
                 raise ComposeOperationError(
                     operation="up",
@@ -460,6 +478,709 @@ class TestOperatorControlRaces:
                 "actual_status": WorkspaceStatus.destroyed.value,
             }
 
+    @pytest.mark.unit
+    async def test_cancel_after_pre_launch_identity_commit_skips_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingGit:
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "d" * 40
+
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        class _CancellingBetweenRecheckAndLaunchProvisioner(Provisioner):
+            _recheck_call_count: int = 0
+
+            async def _recheck_status(
+                self,
+                workspace_id: str,
+                *,
+                expected: WorkspaceStatus,
+                action: str,
+                reason_code: str,
+            ) -> bool:
+                result = await super()._recheck_status(
+                    workspace_id,
+                    expected=expected,
+                    action=action,
+                    reason_code=reason_code,
+                )
+                self._recheck_call_count += 1
+                if self._recheck_call_count == 4 and result and action == "provision":
+                    await _force_destroy_provisioning_workspace(session_factory, workspace_id)
+                return result
+
+        launcher = _RecordingStackLauncher()
+        provisioner = _CancellingBetweenRecheckAndLaunchProvisioner(
+            session_factory=session_factory,
+            git=_RecordingGit(),  # type: ignore[arg-type]
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=_secret_profile().model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            assert reloaded.compose_project_name is None
+
+    @pytest.mark.unit
+    async def test_cancel_after_launch_guard_skips_terminal_runtime_released(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        from awf.db.repositories.base import (
+            PROVISIONING_LAUNCHING_EVENT_TYPE,
+            PROVISIONING_LAUNCHING_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+
+        cancelled_between_guard_and_launch = False
+
+        class _RecordingGit:
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "e" * 40
+
+        class _DelayedStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                nonlocal cancelled_between_guard_and_launch
+                self.requests.append(request)
+                assert cancelled_between_guard_and_launch, (
+                    "cancel must happen before launch starts for this test to be meaningful"
+                )
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_delayed"),
+                    compose_file=Path("/tmp/awf-compose/ws_delayed/compose.yml"),
+                )
+
+        class _CancellingAfterLaunchGuardProvisioner(Provisioner):
+            async def _recheck_before_launch(self, workspace_id: str) -> bool:
+                result = await super()._recheck_before_launch(workspace_id)
+                if result:
+                    await _force_cancel_provisioning_workspace(session_factory, workspace_id)
+                    nonlocal cancelled_between_guard_and_launch
+                    cancelled_between_guard_and_launch = True
+                return result
+
+        launcher = _DelayedStackLauncher()
+        provisioner = _CancellingAfterLaunchGuardProvisioner(
+            session_factory=session_factory,
+            git=_RecordingGit(),
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=_secret_profile().model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert len(launcher.requests) == 1
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.cancelled.value
+            launching_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == PROVISIONING_LAUNCHING_EVENT_TYPE
+                and e.reason_code == PROVISIONING_LAUNCHING_REASON_CODE
+            ]
+            assert len(launching_events) == 1
+            terminal_release_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE
+                and e.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE
+            ]
+            assert len(terminal_release_events) == 0, (
+                "terminal_runtime_released must not be recorded when "
+                "provisioning_launching guard already committed"
+            )
+
+    @pytest.mark.unit
+    async def test_force_destroy_after_launch_guard_stops_orphan_containers(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.db.repositories.base import (
+            PROVISIONING_LAUNCHING_EVENT_TYPE,
+            PROVISIONING_LAUNCHING_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+
+        force_destroyed_between_guard_and_launch = False
+        stopped_projects: list[str] = []
+
+        class _RecordingGit:
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "e" * 40
+
+        class _DelayedStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                nonlocal force_destroyed_between_guard_and_launch
+                self.requests.append(request)
+                assert force_destroyed_between_guard_and_launch, (
+                    "force-destroy must happen before launch starts for this test"
+                )
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_force_destroy"),
+                    compose_file=Path("/tmp/awf-compose/ws_force_destroy/compose.yml"),
+                )
+
+        async def _force_destroy_after_guard(
+            sf: async_sessionmaker[AsyncSession], workspace_id: str
+        ) -> None:
+            async with sf() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(workspace_id)
+                assert ws is not None
+                assert ws.status == WorkspaceStatus.provisioning.value
+                assert ws.compose_project_name is not None
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.cancelled,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.destroying,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.destroyed,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.add_event(
+                    ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    payload={
+                        "compose_project_name": ws.compose_project_name,
+                        "workspace_status": WorkspaceStatus.destroyed.value,
+                        "cleanup": {
+                            "stack_stopped": False,
+                            "source": "force_destroy_workspace",
+                        },
+                    },
+                )
+                await s.commit()
+
+        class _ForceDestroyAfterLaunchGuardProvisioner(Provisioner):
+            async def _recheck_status(
+                self,
+                workspace_id: str,
+                *,
+                expected: WorkspaceStatus,
+                action: str,
+                reason_code: str,
+            ) -> bool:
+                return await super()._recheck_status(
+                    workspace_id,
+                    expected=expected,
+                    action=action,
+                    reason_code=reason_code,
+                )
+
+            async def _recheck_before_launch(self, workspace_id: str) -> bool:
+                result = await super()._recheck_before_launch(workspace_id)
+                if result:
+                    await _force_destroy_after_guard(session_factory, workspace_id)
+                    nonlocal force_destroyed_between_guard_and_launch
+                    force_destroyed_between_guard_and_launch = True
+                return result
+
+        async def _mock_stop_project_containers(compose_project_name: str) -> None:
+            if compose_project_name:
+                stopped_projects.append(compose_project_name)
+
+        launcher = _DelayedStackLauncher()
+        provisioner = _ForceDestroyAfterLaunchGuardProvisioner(
+            session_factory=session_factory,
+            git=_RecordingGit(),
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=_secret_profile().model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with patch(
+            "awf.node.provisioner.stop_project_containers",
+            new=_mock_stop_project_containers,
+        ):
+            await provisioner.provision(ws_id)
+
+        assert len(launcher.requests) == 1, "stack should still have been launched"
+        assert stopped_projects == [f"awf_{ws_id}"], (
+            "orphan containers must be stopped after terminal cleanup won"
+        )
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value, (
+                "workspace must remain destroyed, not transition to ready"
+            )
+            launching_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == PROVISIONING_LAUNCHING_EVENT_TYPE
+                and e.reason_code == PROVISIONING_LAUNCHING_REASON_CODE
+            ]
+            assert len(launching_events) == 1
+            stale_skip_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.stale_action_skipped"
+                and e.reason_code == "TERMINAL_CLEANUP_WON_DURING_LAUNCH"
+            ]
+            assert len(stale_skip_events) == 1, (
+                "provisioner must record stale-action-skip when terminal cleanup won"
+            )
+            assert stale_skip_events[0].payload["orphan_containers_stopped"] is True
+
+    @pytest.mark.unit
+    async def test_orphan_stop_failure_records_false_in_payload(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+
+        force_destroyed_between_guard_and_launch = False
+
+        class _RecordingGit:
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "e" * 40
+
+        class _DelayedStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                nonlocal force_destroyed_between_guard_and_launch
+                self.requests.append(request)
+                assert force_destroyed_between_guard_and_launch, (
+                    "force-destroy must happen before launch starts for this test"
+                )
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_orphan_fail"),
+                    compose_file=Path("/tmp/awf-compose/ws_orphan_fail/compose.yml"),
+                )
+
+        async def _force_destroy_after_guard(
+            sf: async_sessionmaker[AsyncSession], workspace_id: str
+        ) -> None:
+            async with sf() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(workspace_id)
+                assert ws is not None
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.cancelled,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.destroying,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.destroyed,
+                    reason_code="TEST_FORCE_DESTROY",
+                )
+                await repo.add_event(
+                    ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    payload={
+                        "compose_project_name": ws.compose_project_name,
+                        "workspace_status": WorkspaceStatus.destroyed.value,
+                        "cleanup": {
+                            "stack_stopped": False,
+                            "source": "force_destroy_workspace",
+                        },
+                    },
+                )
+                await s.commit()
+
+        class _ForceDestroyProvisioner(Provisioner):
+            async def _recheck_status(
+                self,
+                workspace_id: str,
+                *,
+                expected: WorkspaceStatus,
+                action: str,
+                reason_code: str,
+            ) -> bool:
+                return await super()._recheck_status(
+                    workspace_id,
+                    expected=expected,
+                    action=action,
+                    reason_code=reason_code,
+                )
+
+            async def _recheck_before_launch(self, workspace_id: str) -> bool:
+                result = await super()._recheck_before_launch(workspace_id)
+                if result:
+                    await _force_destroy_after_guard(session_factory, workspace_id)
+                    nonlocal force_destroyed_between_guard_and_launch
+                    force_destroyed_between_guard_and_launch = True
+                return result
+
+        async def _mock_stop_project_containers_fail(
+            compose_project_name: str,
+        ) -> None:
+            raise RuntimeError("docker stop failed")
+
+        launcher = _DelayedStackLauncher()
+        provisioner = _ForceDestroyProvisioner(
+            session_factory=session_factory,
+            git=_RecordingGit(),
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=_secret_profile().model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with patch(
+            "awf.node.provisioner.stop_project_containers",
+            new=_mock_stop_project_containers_fail,
+        ):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            stale_skip_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.stale_action_skipped"
+                and e.reason_code == "TERMINAL_CLEANUP_WON_DURING_LAUNCH"
+            ]
+            assert len(stale_skip_events) == 1
+            assert stale_skip_events[0].payload["orphan_containers_stopped"] is False
+            assert "orphan_stop_error" in stale_skip_events[0].payload
+            revoked_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.terminal_runtime_release_revoked"
+                and e.reason_code == "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_STOP_FAILED"
+            ]
+            assert len(revoked_events) == 1, (
+                "orphan stop failure must record a terminal_runtime_release_revoked event"
+            )
+
+    @pytest.mark.unit
+    async def test_orphan_stop_timeout_records_false_in_payload(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        )
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            ws.status = WorkspaceStatus.destroyed.value
+            await repo.add_event(
+                ws,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        stop_started = asyncio.Event()
+        never_finish = asyncio.Event()
+
+        async def _mock_stop_project_containers_hangs(
+            compose_project_name: str,
+        ) -> None:
+            assert compose_project_name == f"awf_{ws_id}"
+            stop_started.set()
+            await never_finish.wait()
+
+        monkeypatch.setattr(
+            "awf.node.provisioner._ORPHAN_STOP_TIMEOUT_SECONDS",
+            0.01,
+            raising=False,
+        )
+        with patch(
+            "awf.node.provisioner.stop_project_containers",
+            new=_mock_stop_project_containers_hangs,
+        ):
+            # The orphan-stop timeout under test is the 0.01s
+            # ``_ORPHAN_STOP_TIMEOUT_SECONDS`` patched above. This outer
+            # ``wait_for`` is only a "don't hang the test forever" guard; keep it
+            # well above the post-timeout DB work (recording the revoked +
+            # stale-skip events), whose asyncpg connect can exceed a fraction of
+            # a second under ``-n`` parallel load. A tight 0.5s here flaked CI by
+            # cancelling that connect mid-flight.
+            assert await asyncio.wait_for(
+                provisioner._launch_lost_to_terminal_cleanup(ws_id),  # noqa: SLF001
+                timeout=10.0,
+            )
+
+        assert stop_started.is_set()
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            stale_skip_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.stale_action_skipped"
+                and e.reason_code == "TERMINAL_CLEANUP_WON_DURING_LAUNCH"
+            ]
+            assert len(stale_skip_events) == 1
+            assert stale_skip_events[0].payload["orphan_containers_stopped"] is False
+            assert "timed out after 0.01s" in stale_skip_events[0].payload["orphan_stop_error"]
+            revoked_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE
+                and e.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE
+            ]
+            assert len(revoked_events) == 1, (
+                "orphan stop timeout must record a terminal_runtime_release_revoked event"
+            )
+
+    @pytest.mark.unit
+    async def test_orphan_stop_failure_over_cap_records_revoke_cap_escalation(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        )
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            ws.status = WorkspaceStatus.destroyed.value
+            for _ in range(4):
+                await repo.add_event(
+                    ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                )
+            await repo.add_event(
+                ws,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        async def _mock_stop_project_containers_fail(
+            compose_project_name: str,
+        ) -> None:
+            del compose_project_name
+            raise RuntimeError("docker stop failed")
+
+        with patch(
+            "awf.node.provisioner.stop_project_containers",
+            new=_mock_stop_project_containers_fail,
+        ):
+            assert await provisioner._launch_lost_to_terminal_cleanup(ws_id) is True  # noqa: SLF001
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            revoked_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE
+                and e.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE
+            ]
+            assert len(revoked_events) == 5, (
+                "the current orphan stop failure must still record a revoke event"
+            )
+            cap_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.stale_action_skipped"
+                and e.reason_code == "REVOKE_CAP_REACHED"
+            ]
+            assert len(cap_events) == 1, (
+                "over-cap revoke counts must still surface the operator escalation"
+            )
+            assert cap_events[0].payload["revoke_count"] == 5
+            assert "lifetime-total revoke events" in cap_events[0].payload["message"]
+            assert "consecutive revoke events" not in cap_events[0].payload["message"]
+            assert "docker stop failed" in cap_events[0].payload["orphan_stop_error"]
+
 
 class TestSecretLeaseIssueEdges:
     @pytest.mark.unit
@@ -541,162 +1262,3 @@ class TestSecretLeaseIssueEdges:
 
         with pytest.raises(RuntimeError, match="lease repository unavailable"):
             await provisioner._issue_secret_leases(ws_id, _secret_profile())
-
-
-class TestIdempotency:
-    @pytest.mark.unit
-    async def test_skips_already_provisioning_workspace(
-        self,
-        provisioner: Provisioner,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        # First provisioning drives it to ready.
-        await provisioner.provision(ws_id)
-
-        # Second call should be a no-op — status is already ready.
-        await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.ready.value
-
-
-class TestFailureHandlingEdges:
-    @pytest.mark.unit
-    async def test_local_egress_policy_error_marks_workspace_failed(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        class _EgressFailingLauncher:
-            async def launch(self, _request: Any) -> object:
-                raise LocalEgressPolicyError(
-                    reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
-                    mode=EgressMode.restricted,
-                    message="local backend cannot enforce this mode",
-                    details={"network_posture": "restricted"},
-                )
-
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=_EgressFailingLauncher(),  # type: ignore[arg-type]
-            config=ProvisionerConfig(node_id="test-node-01"),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-                resolved_profile={"name": "restricted-local"},
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        with pytest.raises(LocalEgressPolicyError):
-            await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.failed.value
-            assert reloaded.failure_reason == "policy_failure"
-            assert reloaded.failure_message is not None
-            assert "LOCAL_EGRESS_MODE_UNSUPPORTED" in reloaded.failure_message
-            assert audit is None
-            failed_events = [
-                event
-                for event in reloaded.events
-                if event.event_type == "workspace.state_changed"
-                and event.new_state == WorkspaceStatus.failed.value
-            ]
-            assert failed_events[-1].reason_code == "LOCAL_EGRESS_MODE_UNSUPPORTED"
-
-    @pytest.mark.unit
-    async def test_missing_base_branch_marks_workspace_failed(
-        self,
-        provisioner: Provisioner,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="nonexistent",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        with pytest.raises(GitOperationError):
-            await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.failed.value
-            assert reloaded.failure_reason == "infrastructure_failure"
-            assert reloaded.failure_message is not None
-
-    @pytest.mark.unit
-    async def test_unexpected_provisioning_failure_marks_workspace_failed(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        class _ExplodingStackLauncher:
-            async def launch(self, request: Any) -> object:
-                raise RuntimeError("template workspace.base.yml.j2 was not found")
-
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=_ExplodingStackLauncher(),
-            config=ProvisionerConfig(node_id="test-node-01"),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        with pytest.raises(RuntimeError, match="workspace.base.yml.j2"):
-            await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.failed.value
-            assert reloaded.failure_reason == "infrastructure_failure"
-            assert reloaded.failure_message is not None
-            assert "unexpected provisioning failure" in reloaded.failure_message
-            assert "workspace.base.yml.j2" in reloaded.failure_message

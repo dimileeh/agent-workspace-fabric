@@ -13,6 +13,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.companions import companion_worktree_id
 from awf.common.redaction import REDACTION_MARKER
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
@@ -29,7 +30,8 @@ from awf.node.compose_manager import (
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
-from awf.profiles.resolver import ProfileResolutionError
+from awf.profiles.models import ProfileService, WorkspaceProfile
+from awf.profiles.resolver import ProfileResolution, ProfileResolutionError
 from tests.postgres import postgres_test_engine
 
 _COMPOSE_TEMPLATE = (
@@ -76,7 +78,175 @@ def provisioner(
     )
 
 
+async def _signal_compose_up_started(request: Any) -> None:
+    on_started = getattr(request, "on_compose_up_started", None)
+    if on_started is not None:
+        await on_started()
+
+
 class TestFailureHandling:
+    @pytest.mark.unit
+    async def test_companion_host_port_conflict_fails_before_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        companion_policy = {
+            "companions": [
+                {
+                    "name": "sidecar",
+                    "repo_url": str(origin_repo),
+                    "base_branch": "development",
+                    "ports": [[5432, 5434]],
+                }
+            ]
+        }
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            source = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="source",
+                task_prompt="p",
+                agent="codex",
+                task_policy=companion_policy,
+                test_commands=[],
+            )
+            source.node_id = "test-node-01"
+            source.compose_project_name = f"awf_{source.id}"
+            await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            await repo.transition(source, to=WorkspaceStatus.failed, reason_code="SEED")
+            target = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="retry",
+                task_prompt="p",
+                agent="codex",
+                task_policy=companion_policy,
+                test_commands=[],
+            )
+            await s.commit()
+            target_id = target.id
+
+        await provisioner.provision(target_id)
+
+        assert launcher.requests == []
+        companion_worktree = (
+            git_manager.work_dir / "worktrees" / companion_worktree_id(target_id, "sidecar")
+        )
+        assert not companion_worktree.exists()
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(target_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message is not None
+            assert "Host port 5434 is already in use by workspace" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
+            assert any(
+                event.reason_code == "COMPANION_HOST_PORT_CHECK_FATAL" for event in reloaded.events
+            )
+
+    @pytest.mark.unit
+    async def test_stored_resolved_profile_host_port_conflict_fails_before_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        resolved_profile = WorkspaceProfile.model_validate(
+            {
+                "name": "stored-profile",
+                "docker": {"mode": "dind"},
+                "services": [
+                    {
+                        "name": "db",
+                        "image": "postgres:16",
+                        "ports": [[5432, 5434]],
+                    }
+                ],
+                "security": {"egress": {"mode": "restricted"}},
+            }
+        ).model_dump(mode="json", by_alias=True)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            source = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="source",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            source.node_id = "test-node-01"
+            source.resolved_profile = resolved_profile
+            source.compose_project_name = f"awf_{source.id}"
+            await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            target = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="target",
+                task_prompt="p",
+                agent="codex",
+                resolved_profile=resolved_profile,
+                test_commands=[],
+            )
+            await s.commit()
+            target_id = target.id
+
+        await provisioner.provision(target_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(target_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message is not None
+            assert "Host port 5434 is already in use by workspace" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
+            assert any(
+                event.reason_code == "AUTO_PROFILE_HOST_PORT_CHECK_FATAL"
+                for event in reloaded.events
+            )
+
     @pytest.mark.unit
     async def test_invalid_inline_profile_marks_workspace_failed_as_profile_resolution(
         self,
@@ -117,6 +287,7 @@ class TestFailureHandling:
     ) -> None:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -160,6 +331,83 @@ class TestFailureHandling:
             assert reloaded.node_id == "test-node-01"
 
     @pytest.mark.unit
+    async def test_compose_fail_backstop_commit_failure_records_terminal_failure_without_reraise(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        compose_failed = False
+        commit_failures = 0
+        original_commit = AsyncSession.commit
+
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                nonlocal compose_failed
+                await _signal_compose_up_started(request)
+                compose_failed = True
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="docker compose up failed after launch began",
+                    reason_code="COMPOSE_UP_FAILED",
+                )
+
+        async def _fail_first_post_compose_commit(self: AsyncSession) -> None:
+            nonlocal commit_failures
+            if compose_failed and commit_failures == 0:
+                commit_failures += 1
+                raise RuntimeError("compose-fail backstop commit unavailable")
+            await original_commit(self)
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST_CLAIMED")
+            await s.commit()
+            ws_id = ws.id
+
+        monkeypatch.setattr(AsyncSession, "commit", _fail_first_post_compose_commit)
+
+        await provisioner.provision_claimed(ws_id)
+
+        assert commit_failures == 1
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message == (
+                "compose-fail backstop commit failed; compose_project_name not persisted"
+            )
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+            assert reloaded.node_id == "test-node-01"
+            failed_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            ]
+            assert len(failed_events) == 1
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "COMPOSE_FAIL_COMMIT_FATAL"
+
+    @pytest.mark.unit
     async def test_stack_startup_failure_records_computed_egress_audit(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -168,7 +416,7 @@ class TestFailureHandling:
     ) -> None:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
-                del request
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -223,7 +471,7 @@ class TestFailureHandling:
     ) -> None:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
-                del request
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -287,6 +535,7 @@ class TestFailureHandling:
 
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -358,7 +607,15 @@ class TestFailureHandling:
             def __init__(self) -> None:
                 self.up_calls: list[Any] = []
 
-            async def up(self, spec: Any, *, wait: bool = True) -> object:
+            async def up(
+                self,
+                spec: Any,
+                *,
+                wait: bool = True,
+                on_compose_up_started: Any | None = None,
+            ) -> object:
+                if on_compose_up_started is not None:
+                    await on_compose_up_started()
                 self.up_calls.append((spec, wait))
                 return ComposeProjectPaths(
                     project_dir=Path("/tmp/awf-compose/ws_policy"),
@@ -421,7 +678,7 @@ class _FailingComposeLauncher:
     """Stack launcher that fails exactly like a companion healthcheck timeout."""
 
     async def launch(self, request: Any) -> object:
-        del request
+        await _signal_compose_up_started(request)
         raise ComposeOperationError(
             operation="up",
             returncode=1,
@@ -926,3 +1183,185 @@ class TestProvisionerConfigValidation:
     def test_non_positive_tail_lines_is_rejected(self, bad_value: int) -> None:
         with pytest.raises(ValueError, match="service_startup_log_tail_lines must be > 0"):
             ProvisionerConfig(node_id="test-node-01", service_startup_log_tail_lines=bad_value)
+
+
+class TestAutoProfileHostPortConflict:
+    """Regression: auto-resolved profile service ports checked at provision time.
+
+    When profile_ref="auto" (the default), the create-path admission gate
+    cannot check profile service host ports because the worktree is unavailable
+    and the profile is not yet resolved.  The provisioner resolves the profile
+    after cloning the worktree; this is the moment to catch conflicts that
+    slipped through the earlier admission check.
+    """
+
+    @pytest.mark.unit
+    async def test_auto_profile_port_conflict_marks_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        conflicting_port = 15432
+        _port_conflict_profile = ProfileResolution(
+            profile=WorkspaceProfile(
+                name="auto",
+                services=[
+                    ProfileService(
+                        name="postgres",
+                        image="postgres:16",
+                        ports=[(5432, conflicting_port)],
+                    )
+                ],
+            ),
+            network_posture="open",
+            reason="auto",
+        )
+
+        class _NeverReachedLauncher:
+            async def launch(self, request: Any) -> object:
+                raise AssertionError("launch should not be reached when port conflicts")
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_NeverReachedLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+
+        async with session_factory() as s:
+            existing_repo = WorkspaceRepository(s)
+            existing_ws = await existing_repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="existing",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "port-holder",
+                    "services": [
+                        {
+                            "name": "postgres",
+                            "image": "postgres:16",
+                            "ports": [[5432, conflicting_port]],
+                        }
+                    ],
+                },
+            )
+            existing_ws.compose_project_name = f"awf_{existing_ws.id}"
+            existing_ws.node_id = "test-node-01"
+            await s.commit()
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="new-ws",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        from unittest.mock import patch
+
+        with patch(
+            "awf.node.provisioner.resolve_workspace_profile", return_value=_port_conflict_profile
+        ):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+
+    @pytest.mark.unit
+    async def test_auto_profile_no_port_conflict_succeeds_to_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.node.compose_manager import ComposeProjectPaths
+
+        _no_conflict_profile = ProfileResolution(
+            profile=WorkspaceProfile(
+                name="auto",
+                services=[
+                    ProfileService(
+                        name="postgres",
+                        image="postgres:16",
+                        ports=[(5432, 15433)],
+                    )
+                ],
+            ),
+            network_posture="open",
+            reason="auto",
+        )
+
+        class _ImmediateLaunchLauncher:
+            async def launch(self, request: Any) -> ComposeProjectPaths:
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf_dummy"),
+                    compose_file=Path("/tmp/awf_dummy/docker-compose.yml"),
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_ImmediateLaunchLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+
+        async with session_factory() as s:
+            existing_repo = WorkspaceRepository(s)
+            existing_ws = await existing_repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="existing",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "port-holder",
+                    "services": [
+                        {
+                            "name": "postgres",
+                            "image": "postgres:16",
+                            "ports": [[5432, 15432]],
+                        }
+                    ],
+                },
+            )
+            existing_ws.compose_project_name = f"awf_{existing_ws.id}"
+            existing_ws.node_id = "test-node-01"
+            await s.commit()
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="new-ws",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with patch(
+            "awf.node.provisioner.resolve_workspace_profile", return_value=_no_conflict_profile
+        ):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value

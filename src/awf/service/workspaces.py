@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,7 +26,8 @@ from awf.api.schemas import (
     WorkspaceRuntimeHealthResponse,
     WorkspaceRuntimeResponse,
 )
-from awf.common.config import Settings
+from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
@@ -40,6 +41,12 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
+)
+from awf.db.repositories.base import (
+    HostPortConflict,
+    _extract_host_ports,
+    host_ports_from_resolved_profile,
+    host_ports_from_task_policy_companions,
 )
 from awf.profiles.models import ProfileAppEndpoint
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
@@ -55,6 +62,7 @@ from awf.service.controls import (
     stop_project_containers,
 )
 from awf.service.disk import DiskCheck
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.operations import decode_operation_list_cursor
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from awf.service.resource_capacity import (
@@ -275,7 +283,149 @@ class WorkspaceCreateInsufficientDiskError(Exception):
         super().__init__(self.message)
 
 
+class WorkspaceCreateDuplicateHostPortError(Exception):
+    """Raised when the same host port appears more than once within a single request.
+
+    This can happen when a companion and a profile service, or two profile
+    services, claim the same host-side port.  The database conflict check
+    cannot detect this because the new workspace is not persisted yet.
+    """
+
+    error_code = "DUPLICATE_HOST_PORT"
+
+    def __init__(self, *, host_port: int) -> None:
+        """Initialize with the duplicated host port."""
+        self.host_port = host_port
+        self.message = (
+            f"Host port {host_port} is claimed by more than one service"
+            f" or companion in the same request"
+        )
+        detail: dict[str, Any] | None = {"host_port": host_port}
+        self.detail = detail
+        super().__init__(self.message)
+
+
+class WorkspaceCreateHostPortConflictError(Exception):
+    """Raised when a companion host_port is already mapped by a non-terminal workspace.
+
+    This error can occur on both the create and retry admission paths, so it
+    does not inherit from ``WorkspaceRetryError``.  Route handlers and MCP
+    tools must catch it explicitly before any broader ``WorkspaceRetryError``
+    catch-all.
+
+    TOCTOU note: the check-and-create sequence for host-port admission is
+    serialized with a per-port PostgreSQL advisory transaction lock
+    (``pg_advisory_xact_lock``), closing the time-of-check/time-of-use
+    window for concurrent create/retry requests on the same host port.
+    """
+
+    error_code = "HOST_PORT_CONFLICT"
+
+    def __init__(
+        self,
+        *,
+        host_port: int,
+        conflicting_workspace_id: str,
+    ) -> None:
+        """Initialise with the conflicting host port and the workspace that holds it."""
+        self.host_port = host_port
+        self.conflicting_workspace_id = conflicting_workspace_id
+        self.message = (
+            f"Host port {host_port} is already in use by workspace {conflicting_workspace_id}"
+        )
+        detail: dict[str, Any] | None = {
+            "host_port": host_port,
+            "conflicting_workspace_id": conflicting_workspace_id,
+        }
+        self.detail = detail
+        super().__init__(self.message)
+
+
+class WorkspaceRetrySourceRuntimeNotReleasedError(WorkspaceRetryError):
+    """Raised when a retry is attempted but the source workspace's compose
+    runtime has not been released yet, meaning its host ports are still
+    claimed and a new workspace would collide at Docker Compose time."""
+
+    error_code = "SOURCE_RUNTIME_NOT_RELEASED"
+
+    def __init__(
+        self,
+        source_workspace_id: str,
+    ) -> None:
+        """Initialise when the source workspace runtime has not been released."""
+        self.source_workspace_id = source_workspace_id
+        self.message = (
+            f"Source workspace {source_workspace_id} runtime has not been "
+            f"released yet; host ports may still be in use"
+        )
+        detail: dict[str, Any] | None = {
+            "source_workspace_id": source_workspace_id,
+        }
+        self.detail = detail
+        super().__init__(self.message, detail=detail)
+
+
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
+
+
+async def check_host_port_conflicts(
+    repo: WorkspaceRepository,
+    companions: Sequence[WorkspaceCompanionRequest],
+    *,
+    resolved_profile: Mapping[str, Any] | None = None,
+    excluding_workspace_id: str | None = None,
+    node_id: str | None = None,
+) -> None:
+    """Check for host-port conflicts among companion and profile-service ports and raise if found.
+
+    Shared by the REST route handler and ``WorkspaceService.create`` so that
+    the conflict-detection logic stays in one place.  Callers that need to
+    translate the exception into an HTTP response should catch
+    ``WorkspaceCreateHostPortConflictError`` and
+    ``WorkspaceCreateDuplicateHostPortError``.
+
+    ``resolved_profile`` is the already-resolved profile snapshot of the
+    *incoming* workspace request.  Its ``services[].ports`` host-side entries
+    are included in the conflict check so that a profile-service port on the
+    new workspace is caught before Docker Compose provisioning starts.
+
+    Intra-request duplicates — the same host port claimed by more than one
+    companion and/or profile service within the same request — are rejected
+    before the database query, because the new workspace is not yet persisted
+    and ``find_host_port_conflicts`` would not see it.  Raises
+    ``WorkspaceCreateDuplicateHostPortError`` for this case.
+
+    When *node_id* is provided, only workspaces on that node (or with a null
+    ``node_id``) are checked.  Host ports are Docker host ports scoped to the
+    worker node, so cross-node conflicts are false positives.
+
+    A per-port PostgreSQL advisory lock is acquired before the conflict
+    SELECT so that two concurrent requests for the same host port cannot
+    both pass the check before either inserts.  The lock is transaction-
+    scoped (``pg_advisory_xact_lock``) and released automatically on commit
+    or rollback.
+    """
+    host_ports: list[int] = []
+    for companion in companions:
+        host_ports.extend(_extract_host_ports(companion.ports))
+    host_ports.extend(host_ports_from_resolved_profile(resolved_profile))
+    seen: set[int] = set()
+    for hp in host_ports:
+        if hp in seen:
+            raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
+        seen.add(hp)
+    if host_ports:
+        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=host_ports,
+            excluding_workspace_id=excluding_workspace_id,
+            node_id=node_id,
+        )
+        if conflicts:
+            raise WorkspaceCreateHostPortConflictError(
+                host_port=conflicts[0].host_port,
+                conflicting_workspace_id=conflicts[0].workspace_id,
+            )
 
 
 async def _resolve_disk_check_factory(factory: DiskCheckFactory) -> DiskCheck:
@@ -439,12 +589,24 @@ class WorkspaceService:
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
+            resolved_settings = self._settings or get_settings()
+            req_profile, resolved_profile = workspace_create_profile_snapshots(req)
+            node_id = effective_worker_node_id(resolved_settings)
+            await check_host_port_conflicts(
+                repo,
+                req.companions,
+                resolved_profile=resolved_profile,
+                node_id=node_id,
+            )
+
             ws = await create_workspace_row(
                 s,
                 req,
                 idempotency_key=idempotency_key,
-                settings=self._settings,
+                settings=resolved_settings,
                 disk_check=disk_check,
+                requested_profile=req_profile,
+                resolved_profile=resolved_profile,
             )
             await s.commit()
             return workspace_response(ws)
@@ -1036,82 +1198,103 @@ def retry_workspace_row(
     *args: Any,
     **kwargs: Any,
 ) -> Any:
+    """Proxy to ``workspaces_retry.retry_workspace_row`` (lazy-imported)."""
+
     return _workspaces_retry_call("retry_workspace_row", *args, **kwargs)
 
 
 def _retry_task_policy(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._retry_task_policy`` (lazy-imported)."""
     return _workspaces_retry_call("_retry_task_policy", *args, **kwargs)
 
 
 def _planning_scope_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._planning_scope_recovery_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_planning_scope_recovery_payload", *args, **kwargs)
 
 
 def _conformance_salvage_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._conformance_salvage_recovery_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_conformance_salvage_recovery_payload", *args, **kwargs)
 
 
 def _agent_timeout_salvage_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._agent_timeout_salvage_recovery_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_agent_timeout_salvage_recovery_payload", *args, **kwargs)
 
 
 def _retry_task_for_source(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._retry_task_for_source`` (lazy-imported)."""
     return _workspaces_retry_call("_retry_task_for_source", *args, **kwargs)
 
 
 def _latest_failed_state_event(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._latest_failed_state_event`` (lazy-imported)."""
     return _workspaces_retry_call("_latest_failed_state_event", *args, **kwargs)
 
 
 def _compact_conformance_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_conformance_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_conformance_payload", *args, **kwargs)
 
 
 def _compact_planning_scope_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_planning_scope_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_planning_scope_payload", *args, **kwargs)
 
 
 def _compact_string_list(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_string_list`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_string_list", *args, **kwargs)
 
 
 def _compact_fallback_model(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_fallback_model`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_fallback_model", *args, **kwargs)
 
 
 def _compact_salvage_payload(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._compact_salvage_payload`` (lazy-imported)."""
     return _workspaces_retry_call("_compact_salvage_payload", *args, **kwargs)
 
 
 def _payload_str(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._payload_str`` (lazy-imported)."""
     return _workspaces_retry_call("_payload_str", *args, **kwargs)
 
 
 def _is_plan_conformance_unsatisfied(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._is_plan_conformance_unsatisfied`` (lazy-imported)."""
     return _workspaces_retry_call("_is_plan_conformance_unsatisfied", *args, **kwargs)
 
 
 def _agent_timeout_retry_context(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._agent_timeout_retry_context`` (lazy-imported)."""
     return _workspaces_retry_call("_agent_timeout_retry_context", *args, **kwargs)
 
 
 def _conformance_retry_context(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._conformance_retry_context`` (lazy-imported)."""
     return _workspaces_retry_call("_conformance_retry_context", *args, **kwargs)
 
 
 def _retry_evidence_gaps(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._retry_evidence_gaps`` (lazy-imported)."""
     return _workspaces_retry_call("_retry_evidence_gaps", *args, **kwargs)
 
 
 def _optional_retry_evidence_str(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._optional_retry_evidence_str`` (lazy-imported)."""
     return _workspaces_retry_call("_optional_retry_evidence_str", *args, **kwargs)
 
 
 def _planning_scope_retry_context(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._planning_scope_retry_context`` (lazy-imported)."""
     return _workspaces_retry_call("_planning_scope_retry_context", *args, **kwargs)
 
 
 def _approved_planning_scope_fallback_model(*args: Any, **kwargs: Any) -> Any:
+    """Proxy to ``workspaces_retry._approved_planning_scope_fallback_model`` (lazy-imported)."""
     return _workspaces_retry_call(
         "_approved_planning_scope_fallback_model",
         *args,
@@ -1128,6 +1311,13 @@ __all__ = [
     "WorkspaceRetrySalvageUnavailableError",
     "WorkspaceProviderReadinessBlockedError",
     "WorkspaceCreateIdempotencyConflictError",
+    "HostPortConflict",
+    "WorkspaceCreateHostPortConflictError",
+    "WorkspaceCreateDuplicateHostPortError",
+    "WorkspaceRetrySourceRuntimeNotReleasedError",
+    "host_ports_from_task_policy_companions",
+    "host_ports_from_resolved_profile",
+    "check_host_port_conflicts",
     "WorkspaceCreateInsufficientDiskError",
     "WorkspaceRetryResult",
     "create_workspace_row",

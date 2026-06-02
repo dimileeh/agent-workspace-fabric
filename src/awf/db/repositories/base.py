@@ -2,33 +2,24 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
-import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final
 
 from sqlalchemy import (
-    DateTime,
-    Float,
-    Integer,
-    Numeric,
     and_,
-    bindparam,
-    case,
     func,
     literal,
     or_,
     select,
-    text,
 )
-from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -40,7 +31,6 @@ from awf.common.callback_events import (
 from awf.common.owned_paths import normalize_owned_path
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import (
-    FailureReason,
     OperationStatus,
     WorkspaceStatus,
 )
@@ -51,29 +41,9 @@ from awf.db.models import (
     ProviderModelCircuitBreaker,
     ResourceReservation,
     Workspace,
+    WorkspaceEvent,
     WorkspaceSecretLease,
 )
-from awf.service.scheduler import (
-    AGE_BOOST_INTERVAL_SECONDS,
-    AGE_BOOST_MAX,
-    HUMAN_BOOST_MAX,
-    POLICY_INT_TEXT_PATTERN,
-    RETRY_BONUS_INFRASTRUCTURE_FAILURE,
-    SCHEDULER_POLICY_KEY,
-    TASK_CLASS_BIASES,
-    TASK_CLASS_PRIORITIES,
-    SchedulerOrderCursor,
-)
-
-
-class _SchedulerAgeBoostExprBuilder(Protocol):
-    def __call__(
-        self,
-        *,
-        scoring_at: datetime,
-        workspace_entity: Any,
-    ) -> ColumnElement[Any]: ...
-
 
 ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
@@ -84,6 +54,22 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
 )
+HOST_PORT_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
+    *ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
+    WorkspaceStatus.destroying.value,
+)
+"""Workspace statuses whose host ports should be checked for collision."""
+HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES: Final[tuple[WorkspaceStatus, ...]] = (
+    WorkspaceStatus.failed,
+    WorkspaceStatus.cancelled,
+    WorkspaceStatus.completed,
+    WorkspaceStatus.destroyed,
+)
+"""Terminal status enum members that indicate a workspace's host ports are released."""
+HOST_PORT_TERMINAL_RELEASE_STATUSES: Final[tuple[str, ...]] = tuple(
+    status.value for status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES
+)
+"""Persisted terminal status values used in SQL/string status comparisons."""
 ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = ACTIVE_OWNED_PATH_OVERLAP_STATUSES
 ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.completed.value,
@@ -135,12 +121,12 @@ _PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "feedback_id",
     "feedback_body_hash",
 )
-_POSTGRES_INTEGER_MIN: Final = -(2**31)
-_POSTGRES_INTEGER_MAX: Final = 2**31 - 1
 
 
 @dataclass(frozen=True)
 class OwnedPathOverlap:
+    """Two owned paths that conflict because one contains the other."""
+
     workspace_id: str
     existing_path: str
     requested_path: str
@@ -148,13 +134,89 @@ class OwnedPathOverlap:
 
 @dataclass(frozen=True)
 class OwnedPathConflict:
+    """Alias kept for backwards-compat; prefer ``OwnedPathOverlap``."""
+
     workspace_id: str
     existing_path: str
     requested_path: str
 
 
 @dataclass(frozen=True)
+class HostPortConflict:
+    """A host-port already claimed by another active or staged workspace."""
+
+    host_port: int
+    workspace_id: str
+
+
+def _extract_host_ports(port_entries: builtins.list[Any]) -> builtins.list[int]:
+    """Extract host-side port numbers from a flat list of port-mapping entries.
+
+    Each entry may be a list/tuple of form ``[container_port, host_port, ...]``.
+    Invalid or malformed entries are silently skipped.
+    """
+    host_ports: builtins.list[int] = []
+    for port_mapping in port_entries:
+        if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+            try:
+                host_ports.append(int(port_mapping[1]))
+            except (ValueError, TypeError):
+                continue
+    return host_ports
+
+
+def host_ports_from_resolved_profile(
+    resolved_profile: Mapping[str, Any] | None,
+) -> builtins.list[int]:
+    """Extract host-side ports from a resolved profile's services block.
+
+    Shared by the service layer and the repository layer so that the
+    port-mapping data shape is parsed in exactly one place.
+    """
+    if not resolved_profile or not isinstance(resolved_profile, dict):
+        return []
+    services = resolved_profile.get("services")
+    if not services or not isinstance(services, list):
+        return []
+    host_ports: builtins.list[int] = []
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        svc_ports = service.get("ports")
+        if not svc_ports or not isinstance(svc_ports, list):
+            continue
+        host_ports.extend(_extract_host_ports(svc_ports))
+    return host_ports
+
+
+def host_ports_from_task_policy_companions(
+    task_policy: Mapping[str, Any] | None,
+) -> builtins.list[int]:
+    """Extract host-side ports from companions stored inside a workspace task_policy.
+
+    Shared by the service layer and the repository layer so that the
+    companion port-mapping data shape is parsed in exactly one place.
+    """
+    if not task_policy or not isinstance(task_policy, dict):
+        return []
+    companions = task_policy.get("companions")
+    if not companions or not isinstance(companions, list):
+        return []
+    host_ports: builtins.list[int] = []
+    for companion in companions:
+        if not isinstance(companion, dict):
+            continue
+        ports = companion.get("ports")
+        if not ports or not isinstance(ports, list):
+            continue
+        host_ports.extend(_extract_host_ports(ports))
+    return host_ports
+
+
+@dataclass(frozen=True)
 class OwnedPathOverlapMatch:
+    """Detailed overlap result with normalization context and match reason."""
+
     left_path: str
     right_path: str
     normalized_left_path: str
@@ -165,6 +227,8 @@ class OwnedPathOverlapMatch:
 
 @dataclass(frozen=True)
 class WorkspaceEventCreate:
+    """Payload for creating a workspace event via ``WorkspaceEventRepository``."""
+
     event_type: str
     reason_code: str | None = None
     payload: dict[str, Any] | None = None
@@ -172,12 +236,16 @@ class WorkspaceEventCreate:
 
 @dataclass(frozen=True)
 class _IssuedSecretLease:
+    """A secret lease that was issued and may require a workspace event."""
+
     lease: WorkspaceSecretLease
     issue_event_required: bool
 
 
 @dataclass(frozen=True)
 class QueueDecisionCreate:
+    """Payload for recording a scheduler queue-decision event."""
+
     workspace_id: str
     task_id: str
     attempt_id: str
@@ -216,6 +284,8 @@ class PolicyFindingCreate:
 
 @dataclass(frozen=True)
 class SecretLeaseIssue:
+    """A secret-lease that could not be issued during workspace provisioning."""
+
     secret_name: str
     kind: str
     target: str
@@ -241,6 +311,7 @@ def validation_command_set_hash(commands: list[dict[str, Any]]) -> str:
 
 
 def _validation_command_identity(command: Mapping[str, Any]) -> dict[str, Any]:
+    """Strip evidence keys from a command dict for identity hashing."""
     return {
         key: value
         for key, value in command.items()
@@ -249,6 +320,7 @@ def _validation_command_identity(command: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _coverage_metadata_has_pytest_failures(coverage: Mapping[str, Any]) -> bool:
+    """Return True if coverage metadata contains pytest failure details."""
     node_ids = coverage.get("failing_test_node_ids")
     evidence = coverage.get("failing_test_evidence")
     return bool(node_ids or evidence)
@@ -258,6 +330,8 @@ def resolve_session_dialect_name(
     session: AsyncSession,
     dialect_name: str | None,
 ) -> str | None:
+    """Return the SQLAlchemy dialect name, falling back to the session bind."""
+
     if dialect_name is not None:
         return dialect_name
 
@@ -274,6 +348,7 @@ def resolve_session_dialect_name(
 
 
 def _secret_lease_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    """Build a PostgreSQL INSERT-if-absent statement for secret leases."""
     if dialect_name == "postgresql":
         return (
             postgresql_insert(WorkspaceSecretLease)
@@ -284,6 +359,7 @@ def _secret_lease_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
 
 
 def _callback_subscription_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    """Build a PostgreSQL INSERT-if-absent statement for callback subscriptions."""
     if dialect_name == "postgresql":
         return (
             postgresql_insert(CallbackSubscription)
@@ -296,6 +372,7 @@ def _callback_subscription_insert_if_absent_stmt(dialect_name: str | None) -> An
 
 
 def _callback_delivery_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    """Build a PostgreSQL INSERT-if-absent statement for callback deliveries."""
     if dialect_name == "postgresql":
         return (
             postgresql_insert(CallbackDelivery)
@@ -308,6 +385,7 @@ def _callback_delivery_insert_if_absent_stmt(dialect_name: str | None) -> Any | 
 def _provider_model_circuit_breaker_insert_if_absent_stmt(
     dialect_name: str | None,
 ) -> Any | None:
+    """Build a PostgreSQL INSERT-if-absent statement for circuit-breaker records."""
     if dialect_name == "postgresql":
         return (
             postgresql_insert(ProviderModelCircuitBreaker)
@@ -318,6 +396,7 @@ def _provider_model_circuit_breaker_insert_if_absent_stmt(
 
 
 def _pr_feedback_resolution_upsert_stmt(dialect_name: str | None) -> Any | None:
+    """Build a PostgreSQL upsert statement for PR feedback resolutions."""
     if dialect_name != "postgresql":
         return None
     inserted = postgresql_insert(PRFeedbackResolution)
@@ -339,6 +418,7 @@ def _pr_feedback_resolution_upsert_stmt(dialect_name: str | None) -> Any | None:
 
 
 def _callback_subscription_event_type_candidates(event_type: str) -> tuple[str, ...]:
+    """Return the event type and its wildcard candidate for subscription matching."""
     if event_type not in PUBLIC_CALLBACK_EVENT_TYPES:
         return ()
 
@@ -354,6 +434,7 @@ def _callback_subscription_event_type_filter(
     event_type_candidates: tuple[str, ...],
     dialect_name: str | None,
 ) -> ColumnElement[bool]:
+    """Build an EXISTS filter for subscriptions that declare any of the candidate event types."""
     del dialect_name
     event_type_values = (
         func.jsonb_array_elements_text(CallbackSubscription.event_types.cast(JSONB))
@@ -375,10 +456,12 @@ def pr_feedback_body_hash(body: str | None) -> str:
 
 
 def _normalize_provider_key(value: str) -> str:
+    """Normalize a provider identifier for case-insensitive comparison."""
     return value.strip().lower()
 
 
 def _normalize_repository_key(value: str) -> str:
+    """Normalize a repository identifier for case-insensitive comparison."""
     return value.strip().lower()
 
 
@@ -386,6 +469,7 @@ def _circuit_breaker_expired(
     breaker: ProviderModelCircuitBreaker,
     now: datetime,
 ) -> bool:
+    """Return True if an open circuit breaker's cooldown has elapsed."""
     cooldown_until = breaker.cooldown_until
     if breaker.state != "open" or cooldown_until is None:
         return False
@@ -393,12 +477,15 @@ def _circuit_breaker_expired(
 
 
 def _as_utc_naive(value: datetime) -> datetime:
+    """Convert a datetime to a naive UTC datetime."""
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
 
 
 def empty_resource_reservation_totals() -> dict[str, float | int]:
+    """Return a zeroed-out resource-reservation summary dict."""
+
     return {
         "workspace_count": 0,
         "steady_cpu": 0.0,
@@ -413,6 +500,7 @@ def empty_resource_reservation_totals() -> dict[str, float | int]:
 def _active_resource_reservation_status_filter(
     statuses: Iterable[WorkspaceStatus | str] | None,
 ) -> ColumnElement[Any] | None:
+    """Build a WHERE-clause filter for resource-reservation-active workspace statuses."""
     if statuses is None:
         return ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES)
     status_values = tuple(
@@ -431,6 +519,7 @@ def _active_latest_resource_reservation_totals_stmt(
     scheduler_allocation_node_id: str | None = None,
     metrics_allocation_node_id: str | None = None,
 ) -> Select[tuple[Any, ...]] | None:
+    """Build a SELECT that sums the latest active resource-reservation totals."""
     status_filter = _active_resource_reservation_status_filter(statuses)
     if status_filter is None:
         return None
@@ -519,6 +608,7 @@ async def _fetch_resource_reservation_totals(
     session: AsyncSession,
     stmt: Select[tuple[Any, ...]],
 ) -> dict[str, float | int]:
+    """Execute a resource-reservation totals statement and return the summary dict."""
     row = (await session.execute(stmt)).one()
     return {
         "workspace_count": int(row[0] or 0),
@@ -529,6 +619,108 @@ async def _fetch_resource_reservation_totals(
         "disk_mb": int(row[5] or 0),
         "dind_slots": int(row[6] or 0),
     }
+
+
+PROVISIONING_LAUNCHING_EVENT_TYPE: Final = "workspace.provisioning_launching"
+"""Event type recorded when a workspace enters the launching phase of provisioning."""
+
+PROVISIONING_LAUNCHING_REASON_CODE: Final = "PROVISIONING_LAUNCHING"
+"""Reason code accompanying the ``workspace.provisioning_launching`` event."""
+
+PRE_LAUNCH_FAILURE_EVENT_TYPE: Final = "workspace.pre_launch_failed"
+"""Event type recorded when provisioning fails before Docker Compose launch starts."""
+
+PRE_LAUNCH_FAILURE_REASON_CODE: Final = "PRE_LAUNCH_FAILED"
+"""Fallback reason code for a pre-launch provisioning failure marker."""
+
+TERMINAL_RUNTIME_RELEASE_EVENT_TYPE: Final = "workspace.terminal_runtime_released"
+"""Event type recorded when a terminal-status workspace releases its runtime resources (containers, host ports)."""
+
+TERMINAL_RUNTIME_RELEASE_REASON_CODE: Final = "TERMINAL_RUNTIME_RELEASED"
+"""Reason code accompanying the ``workspace.terminal_runtime_released`` event."""
+
+TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE: Final = "workspace.terminal_runtime_release_revoked"
+"""Event type recorded when a terminal-runtime release is revoked because orphan containers could not be stopped."""
+
+TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE: Final = (
+    "TERMINAL_RUNTIME_RELEASE_REVOKED_ORPHAN_STOP_FAILED"
+)
+"""Reason code accompanying the ``workspace.terminal_runtime_release_revoked`` event."""
+
+
+def terminal_runtime_effectively_released_expr(
+    correlated_to: type[Workspace] | None = None,
+    workspace_id: str | None = None,
+) -> ColumnElement[bool]:
+    """Build a boolean SQL expression for "terminal runtime was effectively released".
+
+    A release is "effective" when the latest ``terminal_runtime_released``
+    event has not been superseded by a later ``terminal_runtime_release_revoked``
+    event.  The latest event is determined by ordering all release and revoke
+    events by ``(occurred_at DESC, event_order DESC, id DESC)`` and picking
+    the first row's ``event_type``.  This avoids comparing two independent ``MAX``
+    projections that can diverge when ``event_order`` is not globally
+    monotonic across event types.
+
+    Must pass exactly one of *correlated_to* or *workspace_id*:
+
+    - *correlated_to* (typically the ``Workspace`` ORM class): builds
+      subqueries that correlate to the outer ``Workspace`` row — for use
+      inside larger ``SELECT`` statements that iterate over ``Workspace``.
+    - *workspace_id*: builds subqueries that filter to a single workspace
+      — for use when checking one workspace at a time.
+    """
+    if (correlated_to is None) == (workspace_id is None):
+        raise ValueError("Pass exactly one of correlated_to or workspace_id")
+
+    both_types = [
+        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+    ]
+    both_reasons = [
+        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    ]
+
+    stmt = (
+        select(WorkspaceEvent.event_type)
+        .where(WorkspaceEvent.event_type.in_(both_types))
+        .where(WorkspaceEvent.reason_code.in_(both_reasons))
+        .order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.event_order.desc().nullslast(),
+            WorkspaceEvent.id.desc(),
+        )
+        .limit(1)
+    )
+    if correlated_to is not None:
+        stmt = stmt.where(WorkspaceEvent.workspace_id == correlated_to.id).correlate(correlated_to)
+    else:
+        stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+
+    latest_type = stmt.scalar_subquery()
+
+    return and_(
+        latest_type.isnot(None),
+        latest_type == literal(TERMINAL_RUNTIME_RELEASE_EVENT_TYPE),
+    )
+
+
+async def has_terminal_runtime_released_event(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    """Return True if a ``terminal_runtime_released`` event exists for *workspace_id* and has not been revoked.
+
+    The latest event among all release and revoke events is determined by
+    ordering on ``(occurred_at DESC, event_order DESC, id DESC)``; if the
+    latest event's type is ``terminal_runtime_released``, the runtime is
+    effectively released.
+    """
+    expr = terminal_runtime_effectively_released_expr(workspace_id=workspace_id)
+    stmt = select(expr)
+    row = (await session.execute(stmt)).one()
+    return bool(row[0])
 
 
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
@@ -549,6 +741,7 @@ _SECRET_LEASE_REVOCABLE_STATUSES: Final = (
 
 
 def _sanitize_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Redact sensitive values from a metadata mapping."""
     redacted = redact_audit_value(dict(metadata))
     return redacted if isinstance(redacted, dict) else {}
 
@@ -558,6 +751,7 @@ def _secret_lease_declaration_key(
     kind: str,
     target: str,
 ) -> tuple[str, str, str]:
+    """Return the composite key tuple for a secret-lease declaration."""
     return (secret_name, kind, target)
 
 
@@ -565,6 +759,7 @@ def _declared_lease_requires_reissue(
     lease: WorkspaceSecretLease,
     issue: SecretLeaseIssue,
 ) -> bool:
+    """Return True if an existing lease must be re-issued to match the declaration."""
     if lease.status not in _SECRET_LEASE_ACTIVE_STATUSES:
         return True
     return (
@@ -583,6 +778,7 @@ def _reissue_declared_lease(
     issue: SecretLeaseIssue,
     now: datetime,
 ) -> None:
+    """Mutate an existing lease in-place so it reflects a fresh issue."""
     lease.attempt_id = issue.attempt_id
     lease.mode = issue.mode
     lease.required = issue.required
@@ -605,6 +801,7 @@ def _lease_audit_payload(
     reason_code: str,
     occurred_at: datetime,
 ) -> dict[str, Any]:
+    """Build the JSON payload for a secret-lease audit event."""
     payload: dict[str, Any] = {
         "schema": SECRET_LEASE_AUDIT_SCHEMA,
         "lease_id": lease.id,
@@ -637,6 +834,7 @@ def _lease_audit_payload(
 def _group_leases_by_workspace(
     leases: Iterable[WorkspaceSecretLease],
 ) -> dict[str, list[WorkspaceSecretLease]]:
+    """Group secret leases into a dict keyed by workspace ID."""
     grouped: dict[str, list[WorkspaceSecretLease]] = {}
     for lease in leases:
         grouped.setdefault(lease.workspace_id, []).append(lease)
@@ -644,6 +842,7 @@ def _group_leases_by_workspace(
 
 
 def _workspace_status_value(status: WorkspaceStatus | str) -> str:
+    """Coerce a WorkspaceStatus enum or raw string into its string value."""
     return status.value if isinstance(status, WorkspaceStatus) else status
 
 
@@ -656,6 +855,7 @@ def _matches_pr_adoption_identity(
     repo_slug: str,
     pr_number: int,
 ) -> bool:
+    """Return True if the workspace matches a PR adoption identity."""
     if workspace.task_kind == task_kind and workspace.task_external_id == task_external_id:
         return True
 
@@ -681,12 +881,14 @@ def _matches_pr_adoption_identity(
 
 
 def _workspace_pr_adoption_policy(workspace: Workspace) -> Mapping[str, Any]:
+    """Extract the pr_adoption dict from a workspace's task_policy, if present."""
     policy = workspace.task_policy
     adoption = policy.get("pr_adoption") if isinstance(policy, dict) else None
     return adoption if isinstance(adoption, Mapping) else {}
 
 
 def _candidate_terminal_close_reason(status: WorkspaceStatus) -> str:
+    """Return a close-reason string corresponding to *status* for terminal cleanup."""
     if status == WorkspaceStatus.failed:
         return "WORKSPACE_FAILED"
     if status == WorkspaceStatus.cancelled:
@@ -695,6 +897,7 @@ def _candidate_terminal_close_reason(status: WorkspaceStatus) -> str:
 
 
 def _releases_resource_reservation(status: WorkspaceStatus) -> bool:
+    """Return True if a workspace in *status* releases its resource reservation."""
     return status in {
         WorkspaceStatus.completed,
         WorkspaceStatus.failed,
@@ -703,437 +906,13 @@ def _releases_resource_reservation(status: WorkspaceStatus) -> bool:
     }
 
 
-@dataclass(frozen=True)
-class SchedulerOrderExpressions:
-    class_priority: ColumnElement[Any]
-    effective_score: ColumnElement[Any]
-
-
-def _schedulable_workspace_ids_stmt(
-    *,
-    status: WorkspaceStatus,
-    limit: int | None,
-    exclude_ids: set[str] | None = None,
-    node_id: str | None = None,
-    after: SchedulerOrderCursor | None = None,
-    scoring_at: datetime,
-    dialect_name: str | None,
-    skip_locked: bool,
-    claim_cutoff: datetime | None = None,
-) -> Select[tuple[Workspace]]:
-    order_expressions = scheduler_order_expressions(
-        scoring_at=scoring_at,
-        dialect_name=dialect_name,
-    )
-    stmt = select(Workspace).where(Workspace.status == status.value)
-    if node_id is not None:
-        stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
-    if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
-        stmt = stmt.where(
-            or_(
-                Workspace.monitor_claim_expires_at.is_(None),
-                Workspace.monitor_claim_expires_at <= claim_cutoff,
-            )
-        )
-    if exclude_ids:
-        stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
-    if after is not None:
-        stmt = stmt.where(
-            _scheduler_after_cursor_condition(
-                order_expressions,
-                after,
-                dialect_name=dialect_name,
-            )
-        )
-    stmt = stmt.order_by(
-        order_expressions.class_priority.desc(),
-        order_expressions.effective_score.desc(),
-        Workspace.created_at.asc(),
-        Workspace.id.asc(),
-    )
-    if limit is not None:
-        stmt = stmt.limit(limit)
-    if skip_locked:
-        stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
-    return stmt
-
-
-def _scheduler_scoring_time(
-    *,
-    after: SchedulerOrderCursor | None,
-    scoring_at: datetime | None,
-) -> datetime:
-    if after is None:
-        return scoring_at or datetime.now(UTC)
-    if scoring_at is not None and scoring_at != after.scoring_at:
-        raise ValueError("scoring_at must match after.scoring_at for scheduler pagination")
-    return after.scoring_at
-
-
-def scheduler_order_expressions(
-    *,
-    scoring_at: datetime,
-    dialect_name: str | None,
-    workspace_entity: Any = Workspace,
-) -> SchedulerOrderExpressions:
-    class_priority = _task_class_case(TASK_CLASS_PRIORITIES, workspace_entity=workspace_entity)
-    class_bias = _task_class_case(TASK_CLASS_BIASES, workspace_entity=workspace_entity)
-    base_priority = _bounded_scheduler_int_expr(
-        func.coalesce(
-            _scheduler_json_int_expr(
-                (SCHEDULER_POLICY_KEY, "base_priority"),
-                dialect_name,
-                workspace_entity=workspace_entity,
-            ),
-            _scheduler_json_int_expr(
-                ("priority",),
-                dialect_name,
-                workspace_entity=workspace_entity,
-            ),
-            0,
-        ),
-        lower=0,
-        upper=100,
-    )
-    human_boost = _bounded_scheduler_int_expr(
-        func.coalesce(
-            _scheduler_json_int_expr(
-                (SCHEDULER_POLICY_KEY, "human_boost"),
-                dialect_name,
-                workspace_entity=workspace_entity,
-            ),
-            _scheduler_json_int_expr(
-                (SCHEDULER_POLICY_KEY, "human_escalation_boost"),
-                dialect_name,
-                workspace_entity=workspace_entity,
-            ),
-            _scheduler_json_int_expr(
-                ("human_boost",),
-                dialect_name,
-                workspace_entity=workspace_entity,
-            ),
-            0,
-        ),
-        lower=0,
-        upper=HUMAN_BOOST_MAX,
-    )
-    parent_failure_reason = func.coalesce(
-        _scheduler_json_string_expr(
-            (SCHEDULER_POLICY_KEY, "parent_failure_reason"),
-            dialect_name,
-            workspace_entity=workspace_entity,
-        ),
-        _scheduler_json_string_expr(
-            ("provider_recovery_state", "parent_failure_reason"),
-            dialect_name,
-            workspace_entity=workspace_entity,
-        ),
-    )
-    retry_bonus = case(
-        (
-            parent_failure_reason == FailureReason.infrastructure_failure.value,
-            RETRY_BONUS_INFRASTRUCTURE_FAILURE,
-        ),
-        else_=0,
-    )
-    age_boost = _scheduler_age_boost_expr(
-        scoring_at=scoring_at,
-        dialect_name=dialect_name,
-        workspace_entity=workspace_entity,
-    )
-    return SchedulerOrderExpressions(
-        class_priority=class_priority,
-        effective_score=base_priority + class_bias + age_boost + retry_bonus + human_boost,
-    )
-
-
-def _scheduler_cursor_order_expressions(
-    *,
-    after: SchedulerOrderCursor,
-    dialect_name: str | None,
-) -> SchedulerOrderExpressions:
-    cursor_workspace = aliased(Workspace, name="scheduler_cursor_workspace")
-    cursor_order = scheduler_order_expressions(
-        scoring_at=after.scoring_at,
-        dialect_name=dialect_name,
-        workspace_entity=cursor_workspace,
-    )
-    cursor_class_priority = func.coalesce(
-        select(cursor_order.class_priority)
-        .where(cursor_workspace.id == after.workspace_id)
-        .scalar_subquery(),
-        literal(after.class_priority),
-    ).label("class_priority")
-    cursor_effective_score = func.coalesce(
-        select(cursor_order.effective_score)
-        .where(cursor_workspace.id == after.workspace_id)
-        .scalar_subquery(),
-        literal(after.effective_score),
-    ).label("effective_score")
-    cursor_order_cte = select(
-        cursor_class_priority,
-        cursor_effective_score,
-    ).cte("scheduler_cursor_order")
-    return SchedulerOrderExpressions(
-        class_priority=cursor_order_cte.c.class_priority,
-        effective_score=cursor_order_cte.c.effective_score,
-    )
-
-
-def _task_class_case(
-    values: Mapping[str, int],
-    *,
-    workspace_entity: Any = Workspace,
-) -> ColumnElement[Any]:
-    return case(
-        *(
-            (workspace_entity.task_class == task_class, value)
-            for task_class, value in values.items()
-        ),
-        else_=0,
-    )
-
-
-def _scheduler_json_path_expr(
-    path: tuple[str, ...],
-    *,
-    workspace_entity: Any = Workspace,
-) -> ColumnElement[Any]:
-    expr: Any = workspace_entity.task_policy
-    for key in path:
-        expr = expr[key]
-    return cast("ColumnElement[Any]", expr)
-
-
-def _scheduler_json_string_expr(
-    path: tuple[str, ...],
-    dialect_name: str | None,
-    *,
-    workspace_entity: Any = Workspace,
-) -> ColumnElement[Any]:
-    del dialect_name
-    return func.nullif(
-        func.trim(_scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_string()),
-        "",
-    )
-
-
-def _scheduler_json_int_expr(
-    path: tuple[str, ...],
-    dialect_name: str | None,
-    *,
-    workspace_entity: Any = Workspace,
-) -> ColumnElement[Any]:
-    if dialect_name == "postgresql":
-        text_value = func.nullif(
-            func.trim(
-                _scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_string()
-            ),
-            "",
-        )
-        postgres_whole_text = func.replace(func.split_part(text_value, ".", 1), "-", "")
-        integer_text: ColumnElement[Any] = text_value.op("~")(POLICY_INT_TEXT_PATTERN)
-        max_str_digits = sys.get_int_max_str_digits()
-        if max_str_digits > 0:
-            integer_text = and_(integer_text, func.length(postgres_whole_text) <= max_str_digits)
-        numeric_value = case(
-            (
-                integer_text,
-                sql_cast(text_value, Numeric),
-            ),
-            else_=None,
-        )
-        clamped_value = _bounded_scheduler_int_expr(
-            numeric_value,
-            lower=_POSTGRES_INTEGER_MIN,
-            upper=_POSTGRES_INTEGER_MAX,
-        )
-        return sql_cast(clamped_value, Integer)
-    if dialect_name == "sqlite":
-        json_path = _sqlite_json_path(path)
-        json_type = func.json_type(workspace_entity.task_policy, json_path)
-        json_value = func.json_extract(workspace_entity.task_policy, json_path)
-        text_value = func.trim(json_value)
-        decimal_pos = func.instr(text_value, ".")
-        whole_text = case(
-            (decimal_pos > 0, func.substr(text_value, 1, decimal_pos - 1)),
-            else_=text_value,
-        )
-        fraction_text = func.substr(text_value, decimal_pos + 1)
-        unsigned_text_int = and_(
-            whole_text != "",
-            whole_text.op("GLOB")("[0-9]*"),
-            ~whole_text.op("GLOB")("*[^0-9]*"),
-        )
-        signed_text_int = and_(
-            whole_text.op("GLOB")("-[0-9]*"),
-            ~func.substr(whole_text, 2).op("GLOB")("*[^0-9]*"),
-        )
-        integer_valued_text = and_(
-            or_(unsigned_text_int, signed_text_int),
-            or_(
-                decimal_pos == 0,
-                and_(
-                    fraction_text != "",
-                    ~fraction_text.op("GLOB")("*[^0]*"),
-                ),
-            ),
-        )
-        max_str_digits = sys.get_int_max_str_digits()
-        if max_str_digits > 0:
-            sqlite_whole_digits = func.replace(whole_text, "-", "")
-            integer_valued_text = and_(
-                integer_valued_text,
-                func.length(sqlite_whole_digits) <= max_str_digits,
-            )
-        return case(
-            (json_type == "integer", sql_cast(json_value, Integer)),
-            (
-                and_(
-                    json_type == "real",
-                    json_value == sql_cast(sql_cast(json_value, Integer), Numeric),
-                ),
-                sql_cast(json_value, Integer),
-            ),
-            (
-                and_(json_type == "text", integer_valued_text),
-                sql_cast(json_value, Integer),
-            ),
-            else_=None,
-        )
-    return cast(
-        "ColumnElement[Any]",
-        _scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_integer(),
-    )
-
-
-def _sqlite_json_path(path: tuple[str, ...]) -> str:
-    return "$." + ".".join(path)
-
-
-def _bounded_scheduler_int_expr(
-    value: ColumnElement[Any],
-    *,
-    lower: int,
-    upper: int,
-) -> ColumnElement[Any]:
-    return case(
-        (value < lower, lower),
-        (value > upper, upper),
-        else_=value,
-    )
-
-
-def _scheduler_age_boost_expr(
-    *,
-    scoring_at: datetime,
-    dialect_name: str | None,
-    workspace_entity: Any = Workspace,
-) -> ColumnElement[Any]:
-    builder = _SCHEDULER_SQL_AGE_BOOST_EXPR_BUILDERS.get(dialect_name or "")
-    if builder is None:
-        return _scheduler_zero_age_boost_expr()
-    return builder(scoring_at=scoring_at, workspace_entity=workspace_entity)
-
-
-def _postgresql_scheduler_age_boost_expr(
-    *,
-    scoring_at: datetime,
-    workspace_entity: Any,
-) -> ColumnElement[Any]:
-    scoring_time = sql_cast(literal(scoring_at), DateTime(timezone=True))
-    return case(
-        *(
-            (
-                workspace_entity.created_at
-                <= scoring_time
-                - _postgresql_interval_seconds_expr(boost * AGE_BOOST_INTERVAL_SECONDS),
-                boost,
-            )
-            for boost in range(AGE_BOOST_MAX, 0, -1)
-        ),
-        else_=0,
-    )
-
-
-def _postgresql_interval_seconds_expr(seconds: int) -> ColumnElement[Any]:
-    return cast(
-        "ColumnElement[Any]",
-        text("make_interval(secs => :seconds)").bindparams(
-            bindparam("seconds", float(seconds), type_=Float, unique=True),
-        ),
-    )
-
-
-def _sqlite_scheduler_age_boost_expr(
-    *,
-    scoring_at: datetime,
-    workspace_entity: Any,
-) -> ColumnElement[Any]:
-    wait_seconds = sql_cast(func.strftime("%s", literal(scoring_at)), Integer) - sql_cast(
-        func.strftime("%s", workspace_entity.created_at),
-        Integer,
-    )
-    intervals = sql_cast(wait_seconds / AGE_BOOST_INTERVAL_SECONDS, Integer)
-    return _bounded_scheduler_int_expr(
-        func.coalesce(intervals, 0),
-        lower=0,
-        upper=AGE_BOOST_MAX,
-    )
-
-
-def _scheduler_zero_age_boost_expr() -> ColumnElement[Any]:
-    return _bounded_scheduler_int_expr(
-        func.coalesce(cast("ColumnElement[Any]", literal(0)), 0),
-        lower=0,
-        upper=AGE_BOOST_MAX,
-    )
-
-
-_SCHEDULER_SQL_AGE_BOOST_EXPR_BUILDERS: Final[Mapping[str, _SchedulerAgeBoostExprBuilder]] = {
-    "postgresql": _postgresql_scheduler_age_boost_expr,
-    "sqlite": _sqlite_scheduler_age_boost_expr,
-}
-SCHEDULER_SQL_AGE_BOOST_DIALECTS: Final[frozenset[str]] = frozenset(
-    _SCHEDULER_SQL_AGE_BOOST_EXPR_BUILDERS
-)
-
-
-def _scheduler_after_cursor_condition(
-    order_expressions: SchedulerOrderExpressions,
-    after: SchedulerOrderCursor,
-    *,
-    dialect_name: str | None,
-) -> ColumnElement[bool]:
-    cursor_order = _scheduler_cursor_order_expressions(
-        after=after,
-        dialect_name=dialect_name,
-    )
-    return or_(
-        order_expressions.class_priority < cursor_order.class_priority,
-        and_(
-            order_expressions.class_priority == cursor_order.class_priority,
-            order_expressions.effective_score < cursor_order.effective_score,
-        ),
-        and_(
-            order_expressions.class_priority == cursor_order.class_priority,
-            order_expressions.effective_score == cursor_order.effective_score,
-            Workspace.created_at > after.queued_at,
-        ),
-        and_(
-            order_expressions.class_priority == cursor_order.class_priority,
-            order_expressions.effective_score == cursor_order.effective_score,
-            Workspace.created_at == after.queued_at,
-            Workspace.id > after.workspace_id,
-        ),
-    )
-
-
 def _owned_paths_overlap(left: str, right: str) -> bool:
+    """Return True when two owned paths overlap (exact, ancestor, or wildcard)."""
     return _owned_path_overlap_match(left, right) is not None
 
 
 def _owned_path_overlap_match(left: str, right: str) -> OwnedPathOverlapMatch | None:
+    """Return a detailed overlap match between two owned paths, or None."""
     left_path = _normalize_owned_path(left)
     right_path = _normalize_owned_path(right)
     if left_path == "" or right_path == "":
@@ -1201,6 +980,7 @@ def _owned_path_match(
     match_reason_code: str,
     explanation: str,
 ) -> OwnedPathOverlapMatch:
+    """Construct an OwnedPathOverlapMatch from raw and normalized path data."""
     return OwnedPathOverlapMatch(
         left_path=left,
         right_path=right,
@@ -1218,6 +998,7 @@ def _wildcard_owned_path_match(
     normalized_left_path: str,
     normalized_right_path: str,
 ) -> OwnedPathOverlapMatch:
+    """Construct a wildcard-specific owned-path overlap match."""
     return _owned_path_match(
         left,
         right,
@@ -1229,6 +1010,7 @@ def _wildcard_owned_path_match(
 
 
 def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -> int:
+    """Return a stable int64 key for a PostgreSQL advisory lock scoped to an owned-path conflict."""
     digest = hashlib.sha256(
         f"awf:owned-path-conflicts\x00{repo_url}\x00{branch_base}".encode()
     ).digest()
@@ -1239,6 +1021,7 @@ def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -
 
 
 def _operation_idempotency_advisory_lock_key(key: str) -> int:
+    """Return a stable int64 key for a PostgreSQL advisory lock scoped to operation idempotency."""
     digest = hashlib.sha256(f"awf:operation-idempotency\x00{key}".encode()).digest()
     unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
     if unsigned >= 1 << 63:
@@ -1247,6 +1030,7 @@ def _operation_idempotency_advisory_lock_key(key: str) -> int:
 
 
 def _callback_subscription_idempotency_advisory_lock_key(key: str) -> int:
+    """Return a stable int64 key for a PostgreSQL advisory lock scoped to callback-subscription idempotency."""
     digest = hashlib.sha256(f"awf:callback-subscription-idempotency\x00{key}".encode()).digest()
     unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
     if unsigned >= 1 << 63:
@@ -1255,6 +1039,7 @@ def _callback_subscription_idempotency_advisory_lock_key(key: str) -> int:
 
 
 def _workspace_idempotency_advisory_lock_key(key: str) -> int:
+    """Return a stable int64 key for a PostgreSQL advisory lock scoped to workspace idempotency."""
     digest = hashlib.sha256(f"awf:workspace-idempotency\x00{key}".encode()).digest()
     unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
     if unsigned >= 1 << 63:
@@ -1262,11 +1047,24 @@ def _workspace_idempotency_advisory_lock_key(key: str) -> int:
     return unsigned
 
 
+def _host_port_admission_advisory_lock_key(host_port: int) -> int:
+    """Return a stable int64 key for a PostgreSQL advisory lock scoped to *host_port*."""
+    digest = hashlib.sha256(f"awf:host-port-admission\x00{host_port}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
+
+
 def owned_paths_overlap(left: str, right: str) -> bool:
+    """Return ``True`` when two repository owned paths overlap."""
+
     return _owned_paths_overlap(left, right)
 
 
 def owned_path_overlap_match(left: str, right: str) -> OwnedPathOverlapMatch | None:
+    """Return a detailed overlap match, or ``None`` if the paths do not overlap."""
+
     return _owned_path_overlap_match(left, right)
 
 
@@ -1276,14 +1074,17 @@ def _normalize_owned_path(path: str) -> str:
 
 
 def _literal_paths_overlap(left: str, right: str) -> bool:
+    """Return True if two literal (non-wildcard) owned paths overlap."""
     return left == right or _is_descendant(left, right) or _is_descendant(right, left)
 
 
 def _is_descendant(parent: str, child: str) -> bool:
+    """Return True if *child* is a subdirectory of *parent*."""
     return child.startswith(f"{parent.rstrip('/')}/")
 
 
 def _wildcard_prefix(path: str) -> str | None:
+    """Return the literal prefix before the first wildcard character, or None."""
     wildcard_indexes = [
         index for index in (path.find("*"), path.find("?"), path.find("[")) if index >= 0
     ]
@@ -1293,6 +1094,7 @@ def _wildcard_prefix(path: str) -> str | None:
 
 
 def _wildcard_prefix_overlaps(prefix: str, path: str) -> bool:
+    """Return True if a wildcard prefix could match a given literal path."""
     if prefix == "":
         return True
     if path.startswith(prefix):
@@ -1301,6 +1103,7 @@ def _wildcard_prefix_overlaps(prefix: str, path: str) -> bool:
 
 
 def _wildcard_prefixes_overlap(left: str, right: str) -> bool:
+    """Return True if two wildcard prefixes could match a common path."""
     if left == "" or right == "":
         return True
     if left.startswith(right) or right.startswith(left):
@@ -1313,6 +1116,7 @@ def _operation_result_with_log_stream_refs(
     *,
     log_stream_refs: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    """Merge log_stream_refs into an operation result dict."""
     if log_stream_refs is None:
         return result
     merged_result = dict(result or {})

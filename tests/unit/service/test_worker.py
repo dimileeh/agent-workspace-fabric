@@ -756,7 +756,6 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
     monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
     monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _AnyInit)
     monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
-    monkeypatch.setattr(worker_mod.socket, "gethostname", lambda: "container-7dbf")
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
     monkeypatch.setattr(
@@ -780,6 +779,81 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
     assert created["provisioner_config"].node_id == "local"
     assert created["worker_config"].node_id == "local"
     assert isinstance(created["worker_open_pr_resolver"], _AnyInit)
+
+
+@pytest.mark.unit
+def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: dict[str, Any] = {}
+
+    class _Engine:
+        pass
+
+    class _Runner:
+        pass
+
+    class _AnyInit:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class _Provisioner:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            git: object,
+            stack_launcher: object,
+            config: object,
+            service_diagnostics: object = None,
+        ) -> None:
+            created["provisioner_config"] = config
+
+    class _ControlWorker:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            provisioner: object,
+            executor: object,
+            runtime_cleaner: object,
+            open_pr_resolver: object,
+            config: object,
+        ) -> None:
+            created["worker_config"] = config
+
+    engine = _Engine()
+    session_factory = object()
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: engine)
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    monkeypatch.setattr(worker_mod, "AsyncioSubprocessRunner", _Runner)
+    monkeypatch.setattr(worker_mod, "LogStore", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
+    monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
+    monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _AnyInit)
+    monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _AnyInit)
+    monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
+    monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
+    monkeypatch.setattr(
+        worker_mod,
+        "_merge_coordinator_for_database_url",
+        _in_process_merge_coordinator,
+    )
+
+    settings = dataclasses.replace(_settings(tmp_path), node_id=None)
+
+    worker_mod.build_worker_runtime(settings)
+
+    assert created["provisioner_config"].node_id == "local"
+    assert created["worker_config"].node_id == "local"
 
 
 @pytest.mark.unit

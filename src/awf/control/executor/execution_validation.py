@@ -257,7 +257,12 @@ async def run_validation_and_fix_cycle(
     setup_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None
     setup_ignored_roots_snapshot: tuple[str, ...] | None = None
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
-    for pass_number in range(max_validation_attempts):
+    # The loop always exits via ``break`` (validation+conformance success) or a
+    # terminal ``return`` (budget exhausted / hard failure); the per-category
+    # budgets guarantee the final attempt hits one of those paths, so the
+    # ``range`` is never exhausted by natural fall-through to the trailing
+    # ``return`` below. The fall-through branch is kept as a defensive backstop.
+    for pass_number in range(max_validation_attempts):  # pragma: no branch
         # This loop covers the initial validation plus any validation or
         # post-validation conformance fix prompts. The per-category
         # counters below enforce their separate budgets.
@@ -527,7 +532,11 @@ async def run_validation_and_fix_cycle(
                 validation_run_id=validation_run_id,
                 requested_tier=validation_tier,
             )
-            if (
+            # ``_handle_validation_cleanup_guard`` only returns ``None`` when the
+            # cleanup result is OK; this call site is already inside
+            # ``if not cleanup_result.ok``, so the guard always returns a
+            # terminal result here and the ``is None`` fall-through cannot run.
+            if (  # pragma: no branch
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
                     self,
                     workspace_id=workspace_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -42,7 +43,15 @@ class _RecordingCompose:
         self.specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> ComposeProjectPaths:
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         self.specs.append(spec)
         self.waits.append(wait)
         return ComposeProjectPaths(

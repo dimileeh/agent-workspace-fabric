@@ -26,10 +26,6 @@ from awf.common.audit import build_audit_payload
 from awf.common.ids import (
     new_event_id,
 )
-from awf.common.owned_paths import (
-    internal_plan_artifact_owned_paths_from_profile,
-    interworkspace_owned_paths,
-)
 from awf.db.enums import (
     AgentRuntime,
     OperationType,
@@ -42,20 +38,19 @@ from awf.db.models import (
     Workspace,
     WorkspaceEvent,
 )
+from awf.db.repositories._scheduler import (
+    _schedulable_workspace_ids_stmt,
+    _scheduler_scoring_time,
+)
 from awf.db.repositories.base import (
-    ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
     WorkspaceEventCreate,
     _candidate_terminal_close_reason,
     _matches_pr_adoption_identity,
-    _normalize_owned_path,
-    _owned_path_conflict_advisory_lock_key,
-    _owned_paths_overlap,
     _releases_resource_reservation,
-    _schedulable_workspace_ids_stmt,
-    _scheduler_scoring_time,
     _workspace_idempotency_advisory_lock_key,
     _workspace_status_value,
     resolve_session_dialect_name,
@@ -67,6 +62,13 @@ from awf.db.repositories.quality_repo import (
 from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
     TaskRepository,
+)
+from awf.db.repositories.workspace_repo_host_ports import (
+    acquire_host_port_admission_lock,
+    acquire_owned_path_conflict_lock,
+    find_active_owned_path_conflicts,
+    find_active_owned_path_overlaps,
+    find_host_port_conflicts,
 )
 
 
@@ -408,20 +410,23 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> None:
-        """Serialize owned-path admission for one repo/base transaction on Postgres."""
-        if not any(_normalize_owned_path(path) != "" for path in owned_paths):
-            return
-
-        if self._dialect_name != "postgresql":
-            return
-
-        lock_key = _owned_path_conflict_advisory_lock_key(
+        """Acquire advisory locks for the given owned paths to serialize conflict checks."""
+        return await acquire_owned_path_conflict_lock(
+            self._session,
+            self._dialect_name,
             repo_url=repo_url,
             branch_base=branch_base,
+            owned_paths=owned_paths,
         )
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": lock_key},
+
+    async def acquire_host_port_admission_lock(
+        self,
+        *,
+        host_ports: list[int],
+    ) -> None:
+        """Acquire per-host-port advisory locks for workspace admission."""
+        return await acquire_host_port_admission_lock(
+            self._session, self._dialect_name, host_ports=host_ports
         )
 
     async def find_active_owned_path_conflicts(
@@ -433,22 +438,15 @@ class WorkspaceRepository:
         resolved_profile: Mapping[str, object] | None = None,
         workspace_id: str | None = None,
     ) -> list[OwnedPathConflict]:
-        """Return active owned-path overlaps in the legacy conflict shape."""
-        overlaps = await self.find_active_owned_path_overlaps(
+        """Find active workspaces whose owned paths conflict with the given set."""
+        return await find_active_owned_path_conflicts(
+            self._session,
             repo_url=repo_url,
             branch_base=branch_base,
             owned_paths=owned_paths,
             resolved_profile=resolved_profile,
             workspace_id=workspace_id,
         )
-        return [
-            OwnedPathConflict(
-                workspace_id=overlap.workspace_id,
-                existing_path=overlap.existing_path,
-                requested_path=overlap.requested_path,
-            )
-            for overlap in overlaps
-        ]
 
     async def find_active_owned_path_overlaps(
         self,
@@ -459,48 +457,30 @@ class WorkspaceRepository:
         resolved_profile: Mapping[str, object] | None = None,
         workspace_id: str | None = None,
     ) -> list[OwnedPathOverlap]:
-        """Return active inter-workspace owned-path overlaps for merge safety."""
-        requested_paths = list(
-            interworkspace_owned_paths(
-                owned_paths,
-                internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
-                    resolved_profile,
-                    workspace_id=workspace_id,
-                ),
-            )
+        """Find active workspaces whose owned paths overlap with the given set."""
+        return await find_active_owned_path_overlaps(
+            self._session,
+            repo_url=repo_url,
+            branch_base=branch_base,
+            owned_paths=owned_paths,
+            resolved_profile=resolved_profile,
+            workspace_id=workspace_id,
         )
-        if not requested_paths:
-            return []
 
-        stmt = (
-            select(Workspace)
-            .where(
-                Workspace.repo_url == repo_url,
-                Workspace.branch_base == branch_base,
-                Workspace.status.in_(ACTIVE_OWNED_PATH_OVERLAP_STATUSES),
-            )
-            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+    async def find_host_port_conflicts(
+        self,
+        *,
+        host_ports: builtins.list[int],
+        excluding_workspace_id: str | None = None,
+        node_id: str | None = None,
+    ) -> builtins.list[HostPortConflict]:
+        """Find active workspaces whose host ports conflict with the given set."""
+        return await find_host_port_conflicts(
+            self._session,
+            host_ports=host_ports,
+            excluding_workspace_id=excluding_workspace_id,
+            node_id=node_id,
         )
-        rows = list((await self._session.execute(stmt)).scalars())
-        overlaps: list[OwnedPathOverlap] = []
-        for workspace in rows:
-            for existing_path in interworkspace_owned_paths(
-                workspace.owned_paths,
-                internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
-                    workspace.resolved_profile,
-                    workspace_id=workspace.id,
-                ),
-            ):
-                for requested_path in requested_paths:
-                    if _owned_paths_overlap(existing_path, requested_path):
-                        overlaps.append(
-                            OwnedPathOverlap(
-                                workspace_id=workspace.id,
-                                existing_path=existing_path,
-                                requested_path=requested_path,
-                            )
-                        )
-        return overlaps
 
     async def list(
         self,

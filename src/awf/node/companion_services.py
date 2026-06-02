@@ -316,6 +316,7 @@ def _duplicate_companion_profile_host_ports(
     profile_services: tuple[ComposeService, ...],
     companions: tuple[CompanionGraphInput, ...],
 ) -> list[str]:
+    """Return human-readable strings for host ports claimed by more than one service across profile services and companions."""
     host_port_owners: dict[int, list[str]] = {}
     for service in profile_services:
         for _, host_port in service.ports:

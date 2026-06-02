@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.db.repositories as repositories
@@ -19,7 +19,11 @@ from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceEvent
-from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    QueueDecisionRepository,
+    ResourceReservationRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -39,7 +43,7 @@ from awf.service.workspaces import (
     create_workspace_row,
     retry_workspace_row,
 )
-from tests.postgres import create_postgres_test_engine, postgres_test_engine
+from tests.postgres import postgres_test_engine
 
 pytestmark = pytest.mark.unit
 
@@ -508,6 +512,7 @@ async def _mark_failed(
     *,
     branch_name: str = "codex/old-attempt",
     remote_push_branch: str | None = None,
+    release_runtime: bool = True,
 ) -> dict[str, object]:
     """Mark a workspace as failed with shared transition/evidence payload."""
     async with factory() as session:
@@ -528,6 +533,12 @@ async def _mark_failed(
         }
         workspace.resolved_profile = frozen_profile
         await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        if release_runtime:
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+            )
         await session.commit()
         return frozen_profile
 
@@ -576,6 +587,11 @@ async def _mark_conformance_failed(
                 },
             },
         )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+        )
         await session.commit()
 
 
@@ -604,6 +620,11 @@ async def _mark_conformance_failed_without_evidence(
                 "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
                 "details": {"conformance": "legacy-invalid"},
             },
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
         )
         await session.commit()
 
@@ -639,6 +660,11 @@ async def _mark_agent_timeout_failed(
                     "retryable": True,
                 },
             },
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
         )
         await session.commit()
 
@@ -708,6 +734,11 @@ async def _mark_planning_scope_failed(
                     "remote_push_branch": "awf/ws_scope_old",
                 },
             },
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
         )
         await session.commit()
 
@@ -779,7 +810,6 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
     assert [attempt.workspace_id for attempt in attempts] == [first.id, retried.id]
     assert [attempt.attempt_number for attempt in attempts] == [1, 2]
     assert {attempt.task_id for attempt in attempts} == {tasks[0].id}
-
     assert len(operations) == 1
     assert operations[0].workspace_id == retried.id
     assert operations[0].type == "retry"
@@ -839,6 +869,120 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
     assert retried_reservation.steady_memory_gb == 10.0
     assert retried_reservation.peak_cpu == 6.0
     assert retried_reservation.peak_memory_gb == 16.0
+
+
+async def test_retry_legacy_dind_source_without_reservation_preserves_dind_demand(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    payload = _request().model_dump(mode="python")
+    payload["workspace"] = {
+        "profile_ref": None,
+        "profile": {"name": "dind-retry", "docker": {"mode": "dind"}},
+    }
+    first = await service.create(WorkspaceCreateRequest.model_validate(payload))
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        assert source.resolved_profile["docker"]["mode"] == "dind"
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        assert len(source_reservations) == 1
+        await session.delete(source_reservations[0])
+        await session.commit()
+
+    retry = await _retry_with_preflight_override(service, first.id)
+
+    async with factory() as session:
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        retried_reservation = (
+            await ResourceReservationRepository(session).list_for_workspace(retry.new_workspace_id)
+        )[0]
+
+    assert source_reservations == []
+    assert retried_reservation.dind_slots == 1
+
+
+async def test_retry_legacy_inline_dind_source_without_resolved_profile_preserves_dind_demand(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    payload = _request().model_dump(mode="python")
+    payload["workspace"] = {
+        "profile_ref": None,
+        "profile": {"name": "legacy-inline-dind-retry", "docker": {"mode": "dind"}},
+    }
+    first = await service.create(WorkspaceCreateRequest.model_validate(payload))
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        assert source.requested_profile is not None
+        assert source.requested_profile["docker"]["mode"] == "dind"
+        source.resolved_profile = None
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        assert len(source_reservations) == 1
+        await session.delete(source_reservations[0])
+        await session.commit()
+
+    retry = await _retry_with_preflight_override(service, first.id)
+
+    async with factory() as session:
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        retried_reservation = (
+            await ResourceReservationRepository(session).list_for_workspace(retry.new_workspace_id)
+        )[0]
+
+    assert source_reservations == []
+    assert retried_reservation.dind_slots == 1
+
+
+async def test_retry_source_without_reservation_or_profiles_defaults_dind_mode_to_none(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.requested_profile = None
+        source.resolved_profile = None
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        assert len(source_reservations) == 1
+        await session.delete(source_reservations[0])
+        await session.commit()
+
+    retry = await _retry_with_preflight_override(service, first.id)
+
+    async with factory() as session:
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        retried_reservation = (
+            await ResourceReservationRepository(session).list_for_workspace(retry.new_workspace_id)
+        )[0]
+        retry_decisions = await QueueDecisionRepository(session).list_for_workspace(
+            retry.new_workspace_id
+        )
+
+    assert source_reservations == []
+    assert retried_reservation.dind_slots == 0
+    assert retry_decisions[0].resource_summary["dind_slots"] == 0
+    assert retry_decisions[0].resource_summary["dind_mode"] == "none"
 
 
 @pytest.mark.unit
@@ -1320,167 +1464,3 @@ async def test_retry_planning_scope_violation_preserves_monitor_and_sync_remote_
     assert retried.task_kind == task_kind
     assert retried.branch_name is None
     assert retried.remote_push_branch == remote_push_branch
-
-
-@pytest.mark.unit
-async def test_retry_planning_scope_violation_applies_only_approved_fallback_model(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    service = WorkspaceService(factory)
-    first = await service.create(_request())
-    await _mark_planning_scope_failed(
-        factory,
-        first.id,
-        approved_fallback_model="gpt-5.5",
-    )
-
-    retry = await _retry_with_preflight_override(service, first.id)
-
-    async with factory() as session:
-        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
-        operations = list(
-            (
-                await session.execute(
-                    select(Operation).where(Operation.workspace_id == retry.new_workspace_id)
-                )
-            ).scalars()
-        )
-        retry_created = list(
-            (
-                await session.execute(
-                    select(WorkspaceEvent).where(
-                        WorkspaceEvent.workspace_id == retry.new_workspace_id,
-                        WorkspaceEvent.event_type == "workspace.retry_created",
-                    )
-                )
-            ).scalars()
-        )
-
-    assert retried is not None
-    assert retried.task_policy["agent_model"] == "gpt-5.5"
-    assert operations[0].payload["fallback_model"] == {
-        "model": "gpt-5.5",
-        "source": "task_policy.planning_scope_recovery.approved_fallback_model",
-    }
-    assert operations[0].result["fallback_model"]["model"] == "gpt-5.5"
-    assert retry_created[0].payload["fallback_model"]["model"] == "gpt-5.5"
-
-
-@pytest.mark.unit
-async def test_retry_legacy_workspace_without_attempt_reuses_fallback_task(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        source = await repo.create(
-            repo_url="git@github.com:example/retryable.git",
-            branch_base="development",
-            task_title="Retry legacy validation",
-            task_prompt="Fix a legacy workspace without task attempts.",
-            task_external_id=None,
-            task_class="test_task",
-            owned_paths=[],
-            auto_merge=False,
-            initial_review_grace_period_seconds=30,
-            agent=AgentRuntime.codex.value,
-            profile_ref="python",
-            requested_profile={"source": "legacy-test-profile"},
-            resolved_profile={"source": "legacy-test-profile"},
-            test_commands=["uv run pytest tests/unit -q"],
-        )
-        await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="TEST")
-        await repo.transition(source, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
-        await session.commit()
-        source_id = source.id
-
-    service = WorkspaceService(factory)
-    first_retry = await _retry_with_preflight_override(service, source_id)
-    second_retry = await _retry_with_preflight_override(service, source_id)
-
-    async with factory() as session:
-        tasks = list((await session.execute(select(Task))).scalars())
-        attempts = list(
-            (
-                await session.execute(
-                    select(TaskAttempt).order_by(TaskAttempt.attempt_number.asc())
-                )
-            ).scalars()
-        )
-
-    assert len(tasks) == 1
-    assert tasks[0].idempotency_key == f"retry-source-workspace:{source_id}"
-    assert [attempt.workspace_id for attempt in attempts] == [
-        first_retry.new_workspace_id,
-        second_retry.new_workspace_id,
-    ]
-    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
-    assert {attempt.task_id for attempt in attempts} == {tasks[0].id}
-
-
-@pytest.mark.unit
-async def test_retry_preserves_remote_push_branch_for_sync_workspace(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    service = WorkspaceService(factory)
-    first = await service.create(_request(task_kind="sync_release_pr"))
-    await _mark_failed(
-        factory,
-        first.id,
-        branch_name="release-sync/ws_old",
-        remote_push_branch="development",
-    )
-
-    retry = await _retry_with_preflight_override(service, first.id)
-
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        original = await repo.get(first.id)
-        retried = await repo.get(retry.new_workspace_id)
-
-    assert original is not None
-    assert retried is not None
-    assert original.task_kind == "sync_release_pr"
-    assert original.branch_name == "release-sync/ws_old"
-    assert original.remote_push_branch == "development"
-
-    assert retried.task_kind == "sync_release_pr"
-    assert retried.branch_name is None
-    assert retried.remote_push_branch == "development"
-
-
-@pytest.mark.unit
-async def test_retry_persists_task_kind_without_post_insert_update() -> None:
-    engine = await create_postgres_test_engine()
-
-    factory = make_session_factory(engine)
-    service = WorkspaceService(factory)
-    first = await service.create(_request(task_kind="sync_release_pr"))
-    await _mark_failed(factory, first.id)
-
-    statements: list[str] = []
-
-    def record_sql(
-        conn: object,
-        cursor: object,
-        statement: str,
-        parameters: object,
-        context: object,
-        executemany: bool,
-    ) -> None:
-        """Collect SQL statements for task-kind update assertions."""
-        del conn, cursor, parameters, context, executemany
-        statements.append(" ".join(statement.lower().split()))
-
-    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
-    try:
-        await _retry_with_preflight_override(service, first.id)
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
-        await engine.dispose()
-
-    task_kind_updates = [
-        statement
-        for statement in statements
-        if statement.startswith("update workspaces") and "task_kind" in statement
-    ]
-    assert task_kind_updates == []

@@ -41,6 +41,7 @@ from awf.db.repositories import (
 )
 from awf.db.utils import escape_like_pattern as _escape_like_pattern
 from awf.profiles.models import normalize_inline_profile_snapshot
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
 
@@ -394,10 +395,11 @@ class PullRequestMonitorAdoptionService:
             task=task,
             workspace=workspace,
         )
+        node_id = effective_worker_node_id(self._settings)
         await ResourceReservationRepository(self._session).create(
             workspace_id=workspace.id,
             attempt_id=attempt.id,
-            node_id=self._settings.worker_node_id or "local",
+            node_id=node_id,
             steady_cpu=self._settings.workspace_steady_cpu,
             steady_memory_gb=self._settings.workspace_steady_memory_gb,
             peak_cpu=self._settings.workspace_peak_cpu,
@@ -418,7 +420,7 @@ class PullRequestMonitorAdoptionService:
             age_boost=scheduler_score.age_boost,
             retry_bonus=scheduler_score.retry_bonus,
             resource_summary={
-                "node_id": self._settings.worker_node_id or "local",
+                "node_id": node_id,
                 "steady_cpu": self._settings.workspace_steady_cpu,
                 "steady_memory_gb": self._settings.workspace_steady_memory_gb,
                 "peak_cpu": self._settings.workspace_peak_cpu,

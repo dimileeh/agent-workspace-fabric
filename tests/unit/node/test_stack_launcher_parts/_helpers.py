@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from awf.node.compose_manager import (
     AuthMount,
@@ -20,7 +21,15 @@ class _RecordingCompose:
         self.specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> ComposeProjectPaths:
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         self.specs.append(spec)
         self.waits.append(wait)
         return ComposeProjectPaths(
@@ -53,8 +62,16 @@ class _DockerUnavailableCompose:
         self.reason_code = reason_code
         self.specs: list[WorkspaceComposeSpec] = []
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> ComposeProjectPaths:
         del wait
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         self.specs.append(spec)
         raise ComposeOperationError(
             operation="up",

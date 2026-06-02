@@ -12765,6 +12765,7 @@
     },
     "/v1/workspaces": {
       "get": {
+        "description": "List workspaces with optional status, agent, and repo URL filters.",
         "operationId": "list_workspaces_v1_workspaces_get",
         "parameters": [
           {
@@ -12901,6 +12902,7 @@
         ]
       },
       "post": {
+        "description": "Create a new workspace, returning 202 on acceptance or 409 on host-port conflict.",
         "operationId": "create_workspace_v1_workspaces_post",
         "parameters": [
           {
@@ -13028,6 +13030,7 @@
     },
     "/v1/workspaces/adopt-pr": {
       "post": {
+        "description": "Adopt an existing PR into a workspace and begin PR monitoring.",
         "operationId": "adopt_pull_request_monitor_v1_workspaces_adopt_pr_post",
         "requestBody": {
           "content": {
@@ -13132,6 +13135,7 @@
     },
     "/v1/workspaces/overview": {
       "get": {
+        "description": "List workspace overview records with optional filtering and cursor pagination.",
         "operationId": "list_workspace_overview_v1_workspaces_overview_get",
         "parameters": [
           {
@@ -13412,6 +13416,7 @@
         ]
       },
       "get": {
+        "description": "Retrieve a single workspace by ID, including validation runs and egress audit.",
         "operationId": "get_workspace_v1_workspaces__workspace_id__get",
         "parameters": [
           {
@@ -13792,6 +13797,7 @@
     },
     "/v1/workspaces/{workspace_id}/events": {
       "get": {
+        "description": "List events for a workspace, optionally filtered by event type.",
         "operationId": "list_workspace_events_v1_workspaces__workspace_id__events_get",
         "parameters": [
           {
@@ -14566,6 +14572,7 @@
     },
     "/v1/workspaces/{workspace_id}/retry": {
       "post": {
+        "description": "Retry a failed workspace, returning 202 on acceptance or 409 on host-port conflict.",
         "operationId": "retry_workspace_v1_workspaces__workspace_id__retry_post",
         "parameters": [
           {
@@ -14770,6 +14777,7 @@
     },
     "/v1/workspaces/{workspace_id}/secret-leases": {
       "get": {
+        "description": "Retrieve secret lease statuses for a workspace.",
         "operationId": "get_workspace_secret_leases_v1_workspaces__workspace_id__secret_leases_get",
         "parameters": [
           {
@@ -14845,6 +14853,7 @@
     },
     "/v1/workspaces/{workspace_id}/stale-reasons": {
       "get": {
+        "description": "List stale reasons for a workspace with optional cursor pagination.",
         "operationId": "list_workspace_stale_reasons_v1_workspaces__workspace_id__stale_reasons_get",
         "parameters": [
           {

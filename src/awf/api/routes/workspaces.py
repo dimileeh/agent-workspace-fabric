@@ -18,7 +18,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Protocol, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -72,6 +72,7 @@ from awf.db.resilience import run_db_operation_with_retry
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.pr_monitor_adoption import (
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
@@ -92,15 +93,18 @@ from awf.service.workspace_observability import (
     list_workspace_stale_reasons_response,
 )
 from awf.service.workspaces import (
+    WorkspaceCreateDuplicateHostPortError,
+    WorkspaceCreateHostPortConflictError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
-    WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
     _egress_audit_response,
+    check_host_port_conflicts,
     create_workspace_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
     workspace_create_payload_matches,
+    workspace_create_profile_snapshots,
     workspace_provider_readiness_preflight,
     workspace_response,
     workspace_retry_response,
@@ -140,6 +144,8 @@ class _WorkspaceCreateIdempotencyConflictError(Exception):
 
 
 class _WorkspaceCreateIdempotencyReplayKeyCache:
+    """Thread-safe LRU cache for workspace-create idempotency replay keys."""
+
     def __init__(self, *, max_entries: int | None = None):
         if max_entries is not None and max_entries < 1:
             raise ValueError("max_entries must be greater than 0")
@@ -154,6 +160,7 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         idempotency_key: str,
         api_version: str,
     ) -> bool:
+        """Return True if the cached key matches the current payload hash."""
         payload_hash = _workspace_create_request_hash(
             payload,
             api_version=api_version,
@@ -177,18 +184,21 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         idempotency_key: str,
         api_version: str,
     ) -> None:
+        """Store the payload hash for the given idempotency key."""
         self.remember_hash(
             idempotency_key=idempotency_key,
             request_hash=_workspace_create_request_hash(payload, api_version=api_version),
         )
 
     def remember_hash(self, *, idempotency_key: str, request_hash: str | None) -> None:
+        """Store a pre-computed hash (or ``None`` conflict sentinel) for *idempotency_key*."""
         with self._lock:
             self._entries[idempotency_key] = request_hash
             self._entries.move_to_end(idempotency_key)
             self._trim()
 
     def _trim(self) -> None:
+        """Evict oldest entries beyond *max_entries*."""
         if self._max_entries is None:
             return
         while len(self._entries) > self._max_entries:
@@ -198,12 +208,14 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
 def _new_workspace_create_idempotency_replay_key_cache() -> (
     _WorkspaceCreateIdempotencyReplayKeyCache
 ):
+    """Factory for a new replay key cache with the configured max entries."""
     return _WorkspaceCreateIdempotencyReplayKeyCache(
         max_entries=_WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES
     )
 
 
 def _current_request(request: Request) -> Request:
+    """FastAPI dependency that returns the current request unchanged."""
     return request
 
 
@@ -224,6 +236,7 @@ async def create_workspace(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
+    """Create a new workspace, returning 202 on acceptance or 409 on host-port conflict."""
     repo = WorkspaceRepository(session)
     replay_key_cache = _workspace_create_idempotency_replay_key_cache(request)
     known_replay_key = False
@@ -308,14 +321,26 @@ async def create_workspace(
         return _insufficient_disk_response(disk_check)
 
     try:
+        _req_profile, _resolved_profile = workspace_create_profile_snapshots(payload)
+        await check_host_port_conflicts(
+            repo,
+            payload.companions,
+            resolved_profile=_resolved_profile,
+            excluding_workspace_id=None,
+            node_id=effective_worker_node_id(settings),
+        )
+
         ws = await create_workspace_row(
             session,
             payload,
             idempotency_key=idempotency_key,
             settings=settings,
             disk_check=disk_check,
+            requested_profile=_req_profile,
+            resolved_profile=_resolved_profile,
         )
     except ProfileResolutionError as exc:
+        await session.rollback()
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content=ErrorResponse(
@@ -338,7 +363,14 @@ async def create_workspace(
                 detail={"external_id": exc.external_id},
             ).model_dump(),
         )
+    except (
+        WorkspaceCreateHostPortConflictError,
+        WorkspaceCreateDuplicateHostPortError,
+    ) as exc:
+        await session.rollback()
+        return _workspace_conflict_error_response(exc)
     except WorkspaceProviderReadinessBlockedError as exc:
+        await session.rollback()
         return _provider_readiness_blocked_response(exc)
 
     if idempotency_key is not None:
@@ -364,6 +396,7 @@ async def _workspace_create_replay_response(
     idempotency_key: str,
     settings: Settings | None = None,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
+    """Attempt to replay a previously-accepted workspace creation from the DB."""
     await repo.acquire_idempotency_key_lock(idempotency_key)
     existing = await repo.get_by_idempotency_key(idempotency_key)
     if existing is None:
@@ -388,6 +421,7 @@ async def _workspace_create_durable_replay_response(
     idempotency_key: str,
     settings: Settings | None = None,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
+    """Replay from DB and update the in-memory cache, storing a conflict sentinel on mismatch."""
     replay = await _workspace_create_replay_response(
         repo,
         payload,
@@ -411,6 +445,7 @@ async def _workspace_admission_disk_check(
     request: Request | object | None,
     settings: Settings,
 ) -> DiskCheck:
+    """Run a pre-admission disk-space check using the app-state provider or defaults."""
     state = request_app_state(request)
     provider = cast(
         DiskCheckProvider | None,
@@ -428,6 +463,7 @@ async def _workspace_admission_disk_check(
 def _workspace_create_rate_limited_response(
     decision: RequestAdmissionDecision,
 ) -> JSONResponse:
+    """Build a 429 JSON response for workspace-create rate limiting."""
     retry_after = decision.metadata.get("retry_after_seconds", 1)
     return JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -441,6 +477,7 @@ def _workspace_create_rate_limited_response(
 
 
 def _workspace_create_idempotency_conflict_response() -> JSONResponse:
+    """Build a 409 JSON response for idempotency-key payload mismatch."""
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content=ErrorResponse(
@@ -454,6 +491,7 @@ def _workspace_create_idempotency_conflict_response() -> JSONResponse:
 
 
 def _workspace_create_idempotency_replay_unavailable_response() -> JSONResponse:
+    """Build a 409 JSON response when a replay key is recognized but the original record is gone."""
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content=ErrorResponse(
@@ -468,6 +506,7 @@ def _workspace_create_idempotency_replay_unavailable_response() -> JSONResponse:
 
 
 def _insufficient_disk_response(disk_check: DiskCheck) -> JSONResponse:
+    """Build a 503 JSON response for insufficient disk space."""
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content=ErrorResponse(
@@ -478,13 +517,20 @@ def _insufficient_disk_response(disk_check: DiskCheck) -> JSONResponse:
     )
 
 
-def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
-    if isinstance(exc, WorkspaceRetryNotFoundError):
-        status_code = status.HTTP_404_NOT_FOUND
-    elif isinstance(exc, WorkspaceRetryNotAllowedError):
-        status_code = status.HTTP_409_CONFLICT
-    else:  # pragma: no cover - future retry error subclasses
-        status_code = status.HTTP_409_CONFLICT
+class _StructuredRouteError(Protocol):
+    """Error shape used by route helpers for structured JSON errors."""
+
+    error_code: str
+    message: str
+    detail: dict[str, Any] | None
+
+
+def _structured_error_response(
+    exc: _StructuredRouteError,
+    *,
+    status_code: int,
+) -> JSONResponse:
+    """Build a structured JSON error response from a service-layer error."""
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(
@@ -495,17 +541,25 @@ def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
     )
 
 
+def _workspace_conflict_error_response(exc: _StructuredRouteError) -> JSONResponse:
+    """Build a 409 JSON response for workspace admission conflicts."""
+    return _structured_error_response(exc, status_code=status.HTTP_409_CONFLICT)
+
+
+def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
+    """Map a ``WorkspaceRetryError`` subclass to the appropriate HTTP error response."""
+    if isinstance(exc, WorkspaceRetryNotFoundError):
+        status_code = status.HTTP_404_NOT_FOUND
+    else:
+        status_code = status.HTTP_409_CONFLICT
+    return _structured_error_response(exc, status_code=status_code)
+
+
 def _provider_readiness_blocked_response(
     exc: WorkspaceProviderReadinessBlockedError,
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=status.HTTP_409_CONFLICT,
-        content=ErrorResponse(
-            error_code=exc.error_code,
-            message=exc.message,
-            detail=exc.detail,
-        ).model_dump(),
-    )
+    """Build a 409 JSON response for a provider-readiness blocked error."""
+    return _workspace_conflict_error_response(exc)
 
 
 @router.get("/overview", response_model=WorkspaceOverviewListResponse)
@@ -517,6 +571,7 @@ async def list_workspace_overview(
     cursor: Annotated[str | None, Query(max_length=128)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceOverviewListResponse:
+    """List workspace overview records with optional filtering and cursor pagination."""
     try:
         return await list_workspace_overview_response(
             session,
@@ -543,6 +598,7 @@ async def list_workspace_events(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceEventListResponse:
+    """List events for a workspace, optionally filtered by event type."""
     repo = WorkspaceRepository(session)
     if not await repo.exists(workspace_id):
         raise HTTPException(
@@ -583,6 +639,7 @@ async def list_workspace_stale_reasons(
     cursor: Annotated[str | None, Query(max_length=64)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> StaleReasonListResponse:
+    """List stale reasons for a workspace with optional cursor pagination."""
     try:
         response = await list_workspace_stale_reasons_response(
             session,
@@ -625,6 +682,7 @@ async def adopt_pull_request_monitor(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> PullRequestMonitorAdoptionResponse | JSONResponse:
+    """Adopt an existing PR into a workspace and begin PR monitoring."""
     fetcher = getattr(request.app.state, "pr_adoption_metadata_fetcher", None)
     try:
         return await PullRequestMonitorAdoptionService(
@@ -660,6 +718,7 @@ async def retry_workspace(
     provider_readiness_override_reason: Annotated[str | None, Query(max_length=512)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceRetryResponse | JSONResponse:
+    """Retry a failed workspace, returning 202 on acceptance or 409 on host-port conflict."""
     try:
         result = await retry_workspace_row(
             session,
@@ -667,7 +726,14 @@ async def retry_workspace(
             provider_readiness_override=provider_readiness_override,
             provider_readiness_override_reason=provider_readiness_override_reason,
         )
+    except (
+        WorkspaceCreateHostPortConflictError,
+        WorkspaceCreateDuplicateHostPortError,
+    ) as exc:
+        await session.rollback()
+        return _workspace_conflict_error_response(exc)
     except WorkspaceRetryError as exc:
+        await session.rollback()
         return _retry_error_response(exc)
 
     return workspace_retry_response(result)
@@ -678,6 +744,7 @@ async def get_workspace(
     workspace_id: str,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceResponse:
+    """Retrieve a single workspace by ID, including validation runs and egress audit."""
     response = await run_db_operation_with_retry(
         session_factory,
         lambda retry_session: _get_workspace_response(
@@ -696,6 +763,7 @@ async def _get_workspace_response(
     workspace_id: str,
     session: AsyncSession,
 ) -> WorkspaceResponse:
+    """Fetch a workspace by ID and build the API response, raising 404 if not found."""
     repo = WorkspaceRepository(session)
     ws = await repo.get_with_secret_leases(workspace_id)
     if ws is None:
@@ -719,6 +787,7 @@ def _workspace_response_with_egress_audit(
     response: WorkspaceResponse,
     egress_audit: dict[str, Any] | None,
 ) -> WorkspaceResponse:
+    """Attach a validated egress audit record to a workspace response, if present."""
     if egress_audit is None:
         return response
     try:
@@ -733,6 +802,8 @@ async def _retry_optional_egress_audit_lookup(
     workspace_id: str,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> dict[str, Any] | None:
+    """Retry egress-audit lookup up to two attempts, returning ``None`` on failure."""
+
     async def _lookup(session: AsyncSession) -> dict[str, Any] | None:
         audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
         return _egress_audit_response(audit_record) if audit_record is not None else None
@@ -757,6 +828,7 @@ async def get_workspace_secret_leases(
     workspace_id: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceSecretLeaseListResponse:
+    """Retrieve secret lease statuses for a workspace."""
     repo = WorkspaceRepository(session)
     if not await repo.exists(workspace_id):
         raise HTTPException(
@@ -778,6 +850,7 @@ async def list_workspaces(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> list[WorkspaceResponse]:
+    """List workspaces with optional status, agent, and repo URL filters."""
     return await run_db_operation_with_retry(
         session_factory,
         lambda retry_session: _list_workspace_responses(
@@ -798,6 +871,7 @@ async def _list_workspace_responses(
     repo_url: str | None = None,
     limit: int = 50,
 ) -> list[WorkspaceResponse]:
+    """List workspaces matching filters and return API response objects."""
     repo = WorkspaceRepository(session)
     rows = await repo.list(
         status=workspace_status,
@@ -817,6 +891,7 @@ def _accepted(
     warnings: list[WorkspaceWarningResponse] | None = None,
     provider_readiness_preflight: dict[str, object] | None = None,
 ) -> WorkspaceAcceptedResponse:
+    """Build the standard 202-accepted response for a newly created workspace."""
     return WorkspaceAcceptedResponse(
         workspace_id=ws_id,
         status=WorkspaceStatus(status_value),
@@ -849,6 +924,7 @@ def _workspace_create_request_hash(
     *,
     api_version: str,
 ) -> str:
+    """Deterministic SHA-256 hash of the serialized create request for idempotency comparison."""
     normalized = {
         "api_version": api_version,
         "payload": payload.model_dump(mode="json", by_alias=True),
@@ -865,6 +941,7 @@ def _workspace_create_request_hash(
 def _workspace_create_idempotency_replay_key_cache(
     request: Request | object | None,
 ) -> _WorkspaceCreateIdempotencyReplayKeyCache:
+    """Return the per-app replay-key cache, lazily creating and attaching it to ``app.state``."""
     state = request_app_state(request)
     if state is None:
         if isinstance(request, Request):
@@ -886,6 +963,7 @@ def _workspace_create_idempotency_replay_key_cache(
 def _direct_workspace_create_idempotency_replay_key_cache(
     request: Request | object | None,
 ) -> _WorkspaceCreateIdempotencyReplayKeyCache:
+    """Return a replay-key cache for direct (non-Starlette) callers or test objects."""
     if request is None:
         return _new_workspace_create_idempotency_replay_key_cache()
 

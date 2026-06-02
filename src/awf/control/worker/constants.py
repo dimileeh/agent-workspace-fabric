@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 
 from awf.db.enums import TaskKind, WorkspaceStatus
+from awf.db.repositories.base import (
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+)
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
@@ -34,6 +38,7 @@ _REQUESTED_ADMISSION_SLOT_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.pushing,
     WorkspaceStatus.monitoring_pr,
 )
+"""Workspace statuses where the workspace holds an admission slot (e.g. a host-port lock)."""
 
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 
@@ -229,13 +234,17 @@ _CAPACITY_BLOCKER_SIGNATURE_FIELDS: tuple[str, ...] = (
 
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 
-_TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = "workspace.terminal_runtime_released"
+_TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = TERMINAL_RUNTIME_RELEASE_EVENT_TYPE
+"""Module-local alias used by the worker to emit ``terminal_runtime_released`` events."""
 
-_TERMINAL_RUNTIME_RELEASE_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
+_TERMINAL_RUNTIME_RELEASE_REASON_CODE = TERMINAL_RUNTIME_RELEASE_REASON_CODE
+"""Module-local alias for the reason code paired with ``terminal_runtime_released`` events."""
 
 _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_release_failed"
+"""Event type recorded when a terminal-status workspace fails to release its runtime resources."""
 
 _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
+"""Reason code accompanying the ``terminal_runtime_release_failed`` event."""
 
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
@@ -243,6 +252,7 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.completed,
     WorkspaceStatus.destroyed,
 )
+"""Terminal workspace statuses that indicate runtime resources should be released."""
 
 _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL = 10
 

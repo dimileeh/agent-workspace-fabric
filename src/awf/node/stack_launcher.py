@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -47,6 +48,8 @@ class WorkspaceStackLaunchRequest:
     profile: WorkspaceProfile
     companions: tuple[MaterializedCompanionService, ...] = ()
     companion_graph_prevalidated: bool = False
+    on_compose_up_started: Callable[[], Awaitable[None]] | None = None
+    """Optional callback invoked when the first compose-up attempt starts."""
 
 
 class WorkspaceStackLauncher(Protocol):
@@ -196,9 +199,23 @@ class ComposeStackLauncher:
             _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
             raise
         missing_prebuilt_retry_budget = _prebuilt_companion_image_count(spec)
+        compose_up_started = False
+
+        async def _notify_compose_up_started() -> None:
+            nonlocal compose_up_started
+            if compose_up_started:
+                return
+            if request.on_compose_up_started is not None:
+                await request.on_compose_up_started()
+            compose_up_started = True
+
         while True:
             try:
-                paths = await self._compose.up(spec, wait=True)
+                paths = await self._compose.up(
+                    spec,
+                    wait=True,
+                    on_compose_up_started=_notify_compose_up_started,
+                )
                 break
             except ComposeOperationError as e:
                 retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)

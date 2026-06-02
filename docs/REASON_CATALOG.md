@@ -198,6 +198,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.docker.com/config/daemon/](https://docs.docker.com/config/daemon/)
 
+### DUPLICATE_HOST_PORT
+**Problem:** The same host port is claimed by more than one service or companion within a single workspace create request.
+**Likely Cause:** A companion and a profile service, or two profile services, bind the same Docker host port in the same request. The database conflict check cannot detect this because the new workspace is not persisted yet.
+**Operator Fix:** Change your profile or companion configuration so that each service binds a unique host port, then retry the create request.
+**Related Command:** `awf workspace list`
+**Docs Link:** [docs/REASON_CATALOG.md#duplicate_host_port](#duplicate_host_port)
+
 ### FORGE_NOT_SUPPORTED
 **Problem:** AWF detected a code forge it does not yet support. Only GitHub is implemented; BitBucket is detected but not yet available.
 **Likely Cause:** The workspace repository URL resolved to a non-GitHub forge (for example bitbucket.org), or the workspace profile set `forge: bitbucket`. Phase 1 of issue #345 adds forge detection without a BitBucket client, so the workspace fails fast instead of mis-routing to GitHub.
@@ -267,6 +274,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Rebuild the agent-runtime Docker image or ensure 'grok' is installed on the PATH.
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.x.ai/build/cli](https://docs.x.ai/build/cli)
+
+### HOST_PORT_CONFLICT
+**Problem:** AWF rejected a workspace create or retry because a host port needed by the new workspace is already in use by another active or unreleased workspace.
+**Likely Cause:** Another workspace's profile services or companions bind the same Docker host port and its compose stack is still running, or the workspace is terminal but has not yet released its runtime resources (no `workspace.terminal_runtime_released` event exists). For auto-resolved profiles, the conflict may also be detected at provision time by the provisioner's host-port re-check (``_check_auto_resolved_profile_host_ports``) rather than at dispatch, surfacing as an ``INFRASTRUCTURE_FAILURE`` instead of a 409.
+**Operator Fix:** Wait for the conflicting workspace to release its ports (destroy, complete, or have its runtime released), then retry. Use `awf workspace show <conflicting_workspace_id>` to check its status and events.
+**Related Command:** `awf workspace list`
+**Docs Link:** [docs/REASON_CATALOG.md#host_port_conflict](#host_port_conflict)
 
 ### HOST_SETUP_CONFIG_CORRUPT
 **Problem:** AWF could not read the host setup config.
@@ -568,6 +582,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Run from the AWF repository root or pass `--source-checkout` pointing at a complete checkout with pyproject, docs, migrations, and Docker assets.
 **Related Command:** `awf setup --source-checkout .`
 **Docs Link:** [docs/REASON_CATALOG.md#source_checkout_invalid](#source_checkout_invalid)
+
+### SOURCE_RUNTIME_NOT_RELEASED
+**Problem:** AWF rejected a workspace retry because the source workspace's compose runtime has not been released yet.
+**Likely Cause:** The source workspace is in a terminal status but its `compose_project_name` is not NULL and no `workspace.terminal_runtime_released` event exists, meaning its Docker Compose stack may still be running and its host ports are still claimed.
+**Operator Fix:** Wait for the source workspace's runtime to be released (automatic on destroy or manual runtime release), then retry. Use `awf workspace show <source_workspace_id>` to check for the `terminal_runtime_released` event.
+**Related Command:** `awf workspace list`
+**Docs Link:** [docs/REASON_CATALOG.md#source_runtime_not_released](#source_runtime_not_released)
 
 ### START_COMPOSE_ASSETS_MISSING
 **Problem:** AWF start could not locate the Compose or runtime assets needed to start local Core.

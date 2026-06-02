@@ -267,9 +267,13 @@ async def test_release_terminal_runtime_resources_propagates_single_candidate_er
     async def _release(_candidate: object) -> None:
         raise RuntimeError("cleanup failed")
 
+    async def _resume_pending(*, limit: int | None = None) -> None:
+        assert limit == 5
+
     worker = SimpleNamespace(
         _runtime_cleaner=object(),
         _config=SimpleNamespace(terminal_runtime_release_max_per_scan=5),
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume_pending,
         _list_terminal_runtime_candidates=_candidates,
         _release_terminal_runtime_for_candidate=_release,
     )
@@ -296,9 +300,13 @@ async def test_release_terminal_runtime_resources_groups_multiple_candidate_erro
     async def _release(candidate: object) -> None:
         raise RuntimeError(f"cleanup failed for {candidate.workspace_id}")  # type: ignore[attr-defined]
 
+    async def _resume_pending(*, limit: int | None = None) -> None:
+        assert limit == 10
+
     worker = SimpleNamespace(
         _runtime_cleaner=object(),
         _config=SimpleNamespace(terminal_runtime_release_max_per_scan=10),
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume_pending,
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=_release,
     )
@@ -322,6 +330,30 @@ async def test_release_terminal_runtime_candidate_handles_missing_cleaner() -> N
         worker,
         _terminal_candidate(),
     )
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_resources_skips_without_runtime_cleaner() -> None:
+    session_factory = _ExplodingSessionFactory()
+
+    async def _unexpected_list_candidates(*, limit: int | None = None) -> list[object]:
+        raise AssertionError(f"candidate list should not run for limit {limit}")
+
+    async def _unexpected_resume_pending(*, limit: int | None = None) -> None:
+        raise AssertionError(f"retry resume should not run for limit {limit}")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=None,
+        _config=SimpleNamespace(terminal_runtime_release_max_per_scan=5),
+        _session_factory=session_factory,
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_unexpected_resume_pending,
+        _list_terminal_runtime_candidates=_unexpected_list_candidates,
+        _release_terminal_runtime_for_candidate=lambda _candidate: None,
+    )
+
+    await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+
+    assert session_factory.calls == 0
 
 
 @pytest.mark.unit
@@ -565,6 +597,30 @@ async def test_terminal_runtime_release_groups_multiple_candidate_failures() -> 
         await worker._release_terminal_runtime_resources()  # noqa: SLF001
 
     assert len(exc_info.value.exceptions) == 2
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_resources_skips_empty_limit() -> None:
+    session_factory = _ExplodingSessionFactory()
+
+    async def _unexpected_list_candidates(*, limit: int | None = None) -> list[object]:
+        raise AssertionError(f"candidate list should not run for limit {limit}")
+
+    async def _unexpected_resume_pending(*, limit: int | None = None) -> None:
+        raise AssertionError(f"retry resume should not run for limit {limit}")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _config=SimpleNamespace(terminal_runtime_release_max_per_scan=0),
+        _session_factory=session_factory,
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_unexpected_resume_pending,
+        _list_terminal_runtime_candidates=_unexpected_list_candidates,
+        _release_terminal_runtime_for_candidate=lambda _candidate: None,
+    )
+
+    await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+
+    assert session_factory.calls == 0
 
 
 @pytest.mark.unit

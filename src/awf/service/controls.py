@@ -18,6 +18,12 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import (
+    HOST_PORT_TERMINAL_RELEASE_STATUSES,
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    has_terminal_runtime_released_event,
+)
 from awf.node.cleanup import (
     WorkspaceCleanupResult,
 )
@@ -119,6 +125,7 @@ _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
 
 def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> datetime:
+    """Return requested_at or raise if the operator remonitor timestamp was never set."""
     if requested_at is None:
         raise RuntimeError("operator remonitor requested_at was not initialized")
     return requested_at
@@ -129,6 +136,7 @@ def _remonitor_current_head_sha(
     candidate: MergeCandidate | None,
     monitor_state: dict[str, str],
 ) -> str | None:
+    """Determine the effective head SHA for a remonitor, preferring workspace if past settle."""
     candidate_head_sha = (
         candidate.head_sha if candidate is not None and candidate.head_sha else None
     )
@@ -160,6 +168,7 @@ class WorkspaceControlService:
         project_stopper: ProjectStopper,
         cleaner_factory: CleanerFactory,
     ) -> None:
+        """Initialize the workspace control service with session and cleanup dependencies."""
         self._session = session
         self._project_stopper = project_stopper
         self._cleaner_factory = cleaner_factory
@@ -173,6 +182,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Cancel a running workspace, optionally stopping its Docker stack."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         event_payload = _event_payload(
@@ -243,6 +254,34 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
                 payload=event_payload,
             )
+        _cancel_final_status = workspace.status
+        # ``stop_stack=False`` means this control path did not prove the
+        # runtime has stopped, so cleanup owns emitting terminal release. In the
+        # narrow pre-launch race where the provisioner has stamped
+        # compose_project_name but Docker has not started containers yet, this
+        # can conservatively block host-port reuse until cleanup performs the
+        # no-op compose down and records the release event. That bounded false
+        # positive is safer than declaring ports free while a stack may still
+        # exist.
+        if (
+            stop_stack
+            and workspace.compose_project_name is not None
+            and _cancel_final_status in HOST_PORT_TERMINAL_RELEASE_STATUSES
+            and not await has_terminal_runtime_released_event(self._session, workspace.id)
+        ):
+            await repo.add_event(
+                workspace,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                payload={
+                    "compose_project_name": workspace.compose_project_name,
+                    "workspace_status": _cancel_final_status,
+                    "cleanup": {
+                        "stack_stopped": stop_stack,
+                        "source": "cancel_workspace",
+                    },
+                },
+            )
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -274,6 +313,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Stop a workspace's Docker stack and transition it to cancelled."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         event_payload = _event_payload(
@@ -339,6 +380,21 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 payload=event_payload,
             )
+        if (
+            workspace.compose_project_name is not None
+            and workspace.status in HOST_PORT_TERMINAL_RELEASE_STATUSES
+            and not await has_terminal_runtime_released_event(self._session, workspace.id)
+        ):
+            await repo.add_event(
+                workspace,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                payload={
+                    "compose_project_name": workspace.compose_project_name,
+                    "workspace_status": workspace.status,
+                    "cleanup": {"stack_stopped": True, "source": "stop_workspace"},
+                },
+            )
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -367,6 +423,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Restart PR monitoring for a workspace that lost its monitor claim."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         workspace_for_payload = await self._require_workspace(repo, workspace_id)
@@ -615,6 +673,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Enqueue a validation recovery operation for the workspace."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         payload = _operator_operation_payload(
@@ -692,6 +752,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Enqueue a rebase recovery operation for the workspace."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         base_payload = _operator_operation_payload(
@@ -806,6 +868,8 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Destroy a workspace, releasing all resources and cleaning up artifacts."""
+
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         payload = _operator_operation_payload(
@@ -1011,6 +1075,10 @@ class WorkspaceControlService:
             },
             expected_version=None,
         )
+        runtime_cleanup_succeeded = cleanup_result.status == "succeeded"
+        compose_down_succeeded = any(
+            step.name == "compose_down" and step.ok for step in cleanup_result.completed_steps
+        )
         if not cleanup_result.ok:
             cleanup_message = _cleanup_failure_message(cleanup_result)
             bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
@@ -1080,6 +1148,21 @@ class WorkspaceControlService:
                     reason_code=failed_reason_code,
                     payload=secondary_failure_recorded_payload,
                 )
+            if compose_down_succeeded and not await has_terminal_runtime_released_event(
+                self._session, workspace.id
+            ):
+                await repo.add_event(
+                    workspace,
+                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    payload={
+                        "compose_project_name": workspace.compose_project_name,
+                        "compose_file_path": workspace.compose_file_path,
+                        "workspace_status": workspace.status,
+                        "cleanup": cleanup_payload,
+                        "partial_release": True,
+                    },
+                )
             result_payload: dict[str, Any] = {
                 "status": workspace.status,
                 "cleanup": cleanup_payload,
@@ -1131,6 +1214,20 @@ class WorkspaceControlService:
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
                 )
+            if runtime_cleanup_succeeded and not await has_terminal_runtime_released_event(
+                self._session, workspace.id
+            ):
+                await repo.add_event(
+                    workspace,
+                    event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    payload={
+                        "compose_project_name": workspace.compose_project_name,
+                        "compose_file_path": workspace.compose_file_path,
+                        "workspace_status": workspace.status,
+                        "cleanup": cleanup_payload,
+                    },
+                )
             operation_result = _with_secret_lease_result(
                 {"status": workspace.status, "cleanup": cleanup_payload},
                 secret_lease_summary,
@@ -1172,6 +1269,7 @@ class WorkspaceControlService:
         repo: WorkspaceRepository,
         workspace_id: str,
     ) -> Workspace:
+        """Fetch a workspace by ID or raise WorkspaceNotFoundError."""
         workspace = await repo.get(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(workspace_id)
@@ -1181,6 +1279,7 @@ class WorkspaceControlService:
         self,
         workspace: Workspace,
     ) -> dict[str, Any] | None:
+        """Revoke all secret leases for a workspace being destroyed."""
         revoked = await SecretLeaseService(self._session).revoke_workspace_secret_leases(
             workspace,
             now=datetime.now(UTC),
@@ -1198,6 +1297,7 @@ class WorkspaceControlService:
         repo: WorkspaceRepository,
         workspace_id: str,
     ) -> Workspace:
+        """Fetch a workspace with a row-level lock or raise WorkspaceNotFoundError."""
         workspace = await repo.get_for_update(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(workspace_id)
@@ -1217,6 +1317,7 @@ class WorkspaceControlService:
         idempotency_payload_identity: dict[str, object | None] | None = None,
         idempotency_identity_keys: frozenset[str] | None = None,
     ) -> _PreparedOperation:
+        """Resolve idempotency, version, and active-operation coalescing before creating an operation."""
         if idempotency_key is not None:
             idempotency_key = idempotency_key.strip() or None
         if idempotency_key is not None:
