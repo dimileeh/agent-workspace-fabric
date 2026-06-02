@@ -13,11 +13,16 @@ import yaml
 from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode, ScalarNode
 
-from awf.control.executor.quality_gates import _log
+from awf.common.logging import get_logger
 from awf.node.companion_services import (
     WorkspaceCompanionSpec,
     optional_env_secret_compose_placeholder,
 )
+
+# Own module logger so these moved helpers log under their actual module name
+# (per the get_logger(__name__) convention) rather than inheriting the
+# quality_gates logger name and confusing production log filtering.
+_log = get_logger(__name__)
 
 
 class _ComposeInterpolationPreservingDumper(yaml.SafeDumper):

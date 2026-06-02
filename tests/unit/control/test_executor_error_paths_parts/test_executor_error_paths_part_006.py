@@ -183,6 +183,26 @@ services:
 
 
 @pytest.mark.unit
+def test_companion_env_module_logs_under_its_own_module_name() -> None:
+    """Moved companion-env helpers log under their own module, not quality_gates.
+
+    The processor chain (``structlog.stdlib.add_logger_name``) renders the
+    ``get_logger`` name into the ``logger`` field, which production log filtering
+    keys off. After the resume-refresh helpers moved into this sibling module,
+    their logger must follow the ``get_logger(__name__)`` convention so events
+    are attributed to ``monitor_handoff_companion_env`` rather than inheriting
+    the ``quality_gates`` logger name.
+    """
+    from awf.control.executor import quality_gates
+
+    module_logger = monitor_handoff_companion_env._log
+    assert module_logger is not quality_gates._log
+    assert module_logger._logger_factory_args == (
+        "awf.control.executor.monitor_handoff_companion_env",
+    )
+
+
+@pytest.mark.unit
 def test_companion_env_secret_refresh_logs_warning_when_reformatting_compose_file(
     tmp_path: Path,
 ) -> None:
