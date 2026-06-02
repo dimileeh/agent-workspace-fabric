@@ -779,17 +779,6 @@ async def _has_pending_terminal_release_planning_scope_auto_retry(
     return _planning_scope_auto_retry_event_is_pending_terminal_release(event)
 
 
-async def _latest_planning_scope_auto_retry_is_retry_requested(
-    session: Any,
-    workspace_id: str,
-) -> bool:
-    event = await _latest_planning_scope_auto_retry_terminal_release_event(
-        session,
-        workspace_id,
-    )
-    return _planning_scope_auto_retry_event_is_retry_requested(event)
-
-
 def _planning_scope_auto_retry_event_is_retry_requested(event: Any | None) -> bool:
     if event is None:
         return False

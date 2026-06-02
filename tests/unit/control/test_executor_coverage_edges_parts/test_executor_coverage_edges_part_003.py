@@ -193,6 +193,14 @@ class _FakeExecutorSession:
     async def commit(self) -> None:
         self.commits += 1
 
+    async def execute(self, _stmt: object) -> object:
+        return _EmptyExecuteResult()
+
+
+class _EmptyExecuteResult:
+    def scalars(self) -> tuple[object, ...]:
+        return ()
+
 
 @pytest.mark.unit
 async def test_planning_required_prompts_include_coordination_warning(
@@ -616,14 +624,6 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
             conflicting_workspace_id="ws_other",
         )
 
-    async def _latest_retry_requested(_session: object, _workspace_id: str) -> bool:
-        return False
-
-    monkeypatch.setattr(
-        executor_planning_ops,
-        "_latest_planning_scope_auto_retry_is_retry_requested",
-        _latest_retry_requested,
-    )
     monkeypatch.setattr(executor_planning_ops, "retry_workspace_row", _retry_port_conflict)
     await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
         executor,
