@@ -219,7 +219,11 @@ def _exclude_agent_salvage_artifacts(self: Any, worktree_path: Path) -> None:
     if git_dir_file.is_file():
         content = git_dir_file.read_text(encoding="utf-8", errors="replace").strip()
         prefix = "gitdir:"
-        if content.startswith(prefix):
+        # A worktree ``.git`` file always carries a ``gitdir:`` pointer; the
+        # non-pointer else-arc is unreachable defensive code (and would leave
+        # ``exclude_path`` under a regular file, so the mkdir below could not
+        # succeed anyway).
+        if content.startswith(prefix):  # pragma: no branch
             git_dir = Path(content[len(prefix) :].strip())
             if not git_dir.is_absolute():
                 git_dir = (worktree_path / git_dir).resolve()
@@ -1228,9 +1232,12 @@ async def _run_agent_task_with_optional_planning(
                 ),
             )
 
-        if compare_error is not None:
-            # Not classified as a stall, but the conformance call failed —
-            # bubble up so the outer agent_failure handler captures it.
+        if compare_error is not None:  # pragma: no cover
+            # Defensive: ``compare_error`` is only ever set for AGENT_TIMEOUT /
+            # AGENT_IDLE_TIMEOUT, and ``classify_conformance_stall`` always
+            # returns evidence for those reason codes, so the stall branch above
+            # has already returned. Kept as a belt-and-braces bubble-up in case
+            # the stall classifier's timeout handling changes.
             raise compare_error
 
         assert report is not None

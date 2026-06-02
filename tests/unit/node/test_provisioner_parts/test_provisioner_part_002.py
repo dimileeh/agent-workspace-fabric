@@ -1067,9 +1067,16 @@ class TestOperatorControlRaces:
             "awf.node.provisioner.stop_project_containers",
             new=_mock_stop_project_containers_hangs,
         ):
+            # The orphan-stop timeout under test is the 0.01s
+            # ``_ORPHAN_STOP_TIMEOUT_SECONDS`` patched above. This outer
+            # ``wait_for`` is only a "don't hang the test forever" guard; keep it
+            # well above the post-timeout DB work (recording the revoked +
+            # stale-skip events), whose asyncpg connect can exceed a fraction of
+            # a second under ``-n`` parallel load. A tight 0.5s here flaked CI by
+            # cancelling that connect mid-flight.
             assert await asyncio.wait_for(
                 provisioner._launch_lost_to_terminal_cleanup(ws_id),  # noqa: SLF001
-                timeout=0.5,
+                timeout=10.0,
             )
 
         assert stop_started.is_set()

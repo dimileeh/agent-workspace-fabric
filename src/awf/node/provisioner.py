@@ -618,7 +618,12 @@ class Provisioner:
             diagnostics: dict[str, Any] | None = None
             try:
                 diagnostics = await self._capture_service_startup_diagnostics(workspace_id)
-                if (
+                # pragma: no cover - the egress triple is always populated at
+                # lines ~286-288 before the stack launcher (the only source of a
+                # ComposeOperationError) runs, so the None-skip branch here is
+                # unreachable defensive code. The True branch is exercised by
+                # the egress-audit-on-compose-fail tests.
+                if (  # pragma: no cover
                     egress_plan is not None
                     and egress_decision is not None
                     and destination_category is not None
