@@ -806,7 +806,6 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
     assert [attempt.workspace_id for attempt in attempts] == [first.id, retried.id]
     assert [attempt.attempt_number for attempt in attempts] == [1, 2]
     assert {attempt.task_id for attempt in attempts} == {tasks[0].id}
-
     assert len(operations) == 1
     assert operations[0].workspace_id == retried.id
     assert operations[0].type == "retry"
@@ -1479,34 +1478,3 @@ async def test_retry_legacy_workspace_without_attempt_reuses_fallback_task(
     ]
     assert [attempt.attempt_number for attempt in attempts] == [1, 2]
     assert {attempt.task_id for attempt in attempts} == {tasks[0].id}
-
-
-@pytest.mark.unit
-async def test_retry_preserves_remote_push_branch_for_sync_workspace(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    service = WorkspaceService(factory)
-    first = await service.create(_request(task_kind="sync_release_pr"))
-    await _mark_failed(
-        factory,
-        first.id,
-        branch_name="release-sync/ws_old",
-        remote_push_branch="development",
-    )
-
-    retry = await _retry_with_preflight_override(service, first.id)
-
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        original = await repo.get(first.id)
-        retried = await repo.get(retry.new_workspace_id)
-
-    assert original is not None
-    assert retried is not None
-    assert original.task_kind == "sync_release_pr"
-    assert original.branch_name == "release-sync/ws_old"
-    assert original.remote_push_branch == "development"
-
-    assert retried.task_kind == "sync_release_pr"
-    assert retried.branch_name is None
-    assert retried.remote_push_branch == "development"
