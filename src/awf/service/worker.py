@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import awf.adapters.registry  # noqa: F401 - populate adapter registry for service execution
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncioSubprocessRunner
-from awf.common.github_client import BranchOpenPullRequestResolver, GitHubClient
+from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
@@ -88,7 +89,6 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         log_store=log_store,
     )
     pr_creator = PullRequestCreator(runner)
-    gh = GitHubClient(runner)
     open_pr_resolver = BranchOpenPullRequestResolver(runner)
     target_branch_reconciler = TargetBranchReconcileMonitor(
         runner=runner,
@@ -171,6 +171,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             if workspace.auto_merge and not force_release_monitor
             else build_release_pr_monitor
         )
+        # Build the forge client from the persisted resolved forge (reconstructed,
+        # never re-resolved). github → GitHubClient (unchanged behavior); an
+        # unsupported forge (e.g. bitbucket) raises ForgeNotSupportedError so the
+        # monitor build fails fast rather than mis-routing to GitHub. Use
+        # concrete_forge_for_repo (not plain concrete_forge) to mirror the
+        # executor forge gate: a legacy/missing snapshot normalizes profile.forge
+        # to "auto", so fall back to the workspace repo_url's host. Without this,
+        # a monitor rebuild that runs before the executor gate on a pre-Phase-1
+        # BitBucket snapshot would silently construct a GitHubClient instead of
+        # failing fast.
+        gh = make_forge_client(concrete_forge_for_repo(profile.forge, workspace.repo_url), runner)
         grace_seconds = (
             workspace.initial_review_grace_period_seconds
             if workspace.initial_review_grace_period_seconds is not None

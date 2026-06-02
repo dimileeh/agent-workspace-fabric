@@ -1120,6 +1120,44 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         ]
 
     @pytest.mark.unit
+    async def test_preserved_active_branch_open_pr_lookup_rejects_unsupported_forge(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # A preserved-active BitBucket workspace must never reach the GitHub-only
+        # ``gh pr list`` path: dropping the forge would query bitbucket.org's
+        # owner/repo as a same-slug GitHub repo and could attach the wrong
+        # monitor. The lookup must fail fast with FORGE_NOT_SUPPORTED instead.
+        branch_name = "awf/ws_branch"
+        resolver = _RecordingBranchOpenPRResolver({branch_name: []})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            open_pr_resolver=resolver,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+            repo_url="https://bitbucket.org/example/repo.git",
+            branch_name=branch_name,
+            base_branch="development",
+        )
+
+        assert lookup is not None
+        assert lookup.state == "failed"
+        assert lookup.ambiguity_reason == "open_pr_lookup_forge_not_supported"
+        assert lookup.payload == {
+            "branch_name": branch_name,
+            "forge": "bitbucket",
+            "reason_code": "FORGE_NOT_SUPPORTED",
+            "failure": "forge_not_supported",
+            "source": "open_pr_resolver",
+        }
+        # The GitHub-only resolver must never be queried for a BitBucket repo.
+        assert resolver.calls == []
+
+    @pytest.mark.unit
     async def test_preserved_active_adopted_sync_feature_pr_fork_head_repo_attaches_monitor(
         self,
         session_factory: async_sessionmaker[AsyncSession],

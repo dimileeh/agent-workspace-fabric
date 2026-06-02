@@ -198,6 +198,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.docker.com/config/daemon/](https://docs.docker.com/config/daemon/)
 
+### FORGE_NOT_SUPPORTED
+**Problem:** AWF detected a code forge it does not yet support. Only GitHub is implemented; BitBucket is detected but not yet available.
+**Likely Cause:** The workspace repository URL resolved to a non-GitHub forge (for example bitbucket.org), or the workspace profile set `forge: bitbucket`. Phase 1 of issue #345 adds forge detection without a BitBucket client, so the workspace fails fast instead of mis-routing to GitHub.
+**Operator Fix:** Use a GitHub-hosted repository for now, or track BitBucket support in issue #345 (Phase 1 adds detection only). Recreate the workspace against a github.com remote.
+**Related Command:** `awf workspace create`
+**Docs Link:** [docs/REASON_CATALOG.md#forge_not_supported](#forge_not_supported)
+
 ### GEMINI_AUTH_MISSING
 **Problem:** No Gemini auth signal was visible.
 **Likely Cause:** Missing Gemini API credentials.

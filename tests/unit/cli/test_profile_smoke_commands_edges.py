@@ -55,6 +55,34 @@ def test_profile_preview_pretty_uses_pretty_renderer(
 
 
 @pytest.mark.unit
+def test_profile_preview_resolves_forge_from_checkout_remote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bitbucket ``origin`` on the checkout surfaces as ``forge: bitbucket`` in preview."""
+    payloads: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: "https://bitbucket.org/o/r.git",
+    )
+    monkeypatch.setattr(
+        profile_smoke_commands,
+        "_emit",
+        lambda payload, _fmt: payloads.append(payload),
+    )
+
+    profile_smoke_commands.profile_preview(
+        str(tmp_path),
+        profile_ref="auto",
+        validation_command=[],
+        fmt=OutputFormat.json,
+    )
+
+    assert payloads and payloads[0]["profile"]["forge"] == "bitbucket"
+
+
+@pytest.mark.unit
 def test_profile_init_write_adds_written_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

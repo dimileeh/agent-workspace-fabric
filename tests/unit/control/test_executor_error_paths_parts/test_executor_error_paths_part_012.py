@@ -11,6 +11,7 @@ import yaml
 from yaml.constructor import ConstructorError
 
 from awf.control.executor import monitor_handoff as executor_monitor_handoff
+from awf.control.executor import monitor_handoff_companion_env
 from awf.node import companion_services
 
 
@@ -209,7 +210,7 @@ services:
         """Fail if refresh tries to write an unchanged compose file."""
         raise AssertionError("refresh should not write unchanged compose payload")
 
-    monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _unexpected_write)
+    monkeypatch.setattr(monitor_handoff_companion_env, "_atomic_write_text", _unexpected_write)
 
     executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
         workspace_id="ws_noop_refresh",
@@ -243,7 +244,7 @@ services:
         """Simulate an atomic compose write failure."""
         raise OSError("disk full")
 
-    monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _raise_write)
+    monkeypatch.setattr(monitor_handoff_companion_env, "_atomic_write_text", _raise_write)
 
     with structlog.testing.capture_logs() as captured:
         executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(

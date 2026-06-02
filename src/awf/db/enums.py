@@ -11,6 +11,15 @@ schemas, the state machine, and tests without pulling in SQLAlchemy.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
+
+ForgeKind = Literal["github", "bitbucket"]
+"""Concrete code-forge vocabulary persisted on ``resolved_profile.forge``.
+
+Dependency-free literal (issue #345 Phase 1). ``"auto"`` is a resolution-input
+value only — it lives on the profile field type, never in ``ForgeKind`` itself,
+because the resolver always persists a concrete kind. ``"bitbucket"`` is detected
+but not yet implemented (Phase 1 fails fast with ``FORGE_NOT_SUPPORTED``)."""
 
 
 class WorkspaceStatus(StrEnum):

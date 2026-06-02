@@ -1,8 +1,9 @@
-"""Targeted coverage for ``awf.node.stack_launcher`` Protocol bodies and helpers.
+"""Unit tests for ``awf.node.stack_launcher`` pure timeout/metadata helpers.
 
-These tests exercise the two ``Protocol`` method bodies (the ``...`` statements
-that the type-checking seams declare) and the pure timeout/metadata helpers,
-without touching Docker, the database, the network, or sleeping.
+These exercise the pure timeout/metadata helpers without touching Docker, the
+database, the network, or sleeping. The ``Protocol`` ``...`` method bodies are
+type declarations verified by mypy and excluded from line coverage, so they are
+not exercised by throwaway subclasses.
 """
 
 from __future__ import annotations
@@ -11,62 +12,12 @@ import pytest
 
 from awf.node import stack_launcher
 from awf.node.stack_launcher import (
-    WorkspaceSecretLeaseResolver,
-    WorkspaceStackLauncher,
-    WorkspaceStackLaunchRequest,
     _companion_compose_up_timeout_seconds,
     _stack_secret_metadata,
     effective_compose_up_timeout_seconds,
 )
 
 pytestmark = pytest.mark.unit
-
-
-class _ConcreteStackLauncher(WorkspaceStackLauncher):
-    """Concrete subclass whose ``launch`` defers to the Protocol body.
-
-    Calling ``super().launch(...)`` executes the ``...`` statement in the
-    ``WorkspaceStackLauncher`` Protocol (stack_launcher.py line 56), which
-    evaluates to ``None``.
-    """
-
-    async def launch(self, request: WorkspaceStackLaunchRequest):  # type: ignore[override]
-        return await super().launch(request)
-
-
-class _ConcreteSecretLeaseResolver(WorkspaceSecretLeaseResolver):
-    """Concrete subclass whose ``resolve`` defers to the Protocol body.
-
-    Calling ``super().resolve(...)`` executes the ``...`` statement in the
-    ``WorkspaceSecretLeaseResolver`` Protocol (stack_launcher.py line 69),
-    which evaluates to ``None``.
-    """
-
-    def resolve(self, profile, *, workspace_id):  # type: ignore[override]
-        return super().resolve(profile, workspace_id=workspace_id)
-
-
-async def test_stack_launcher_protocol_body_returns_none() -> None:
-    """The ``WorkspaceStackLauncher.launch`` Protocol body (line 56) runs."""
-    launcher = _ConcreteStackLauncher()
-    request = WorkspaceStackLaunchRequest(
-        workspace_id="ws-protocol",
-        layout=object(),  # type: ignore[arg-type]
-        profile=object(),  # type: ignore[arg-type]
-    )
-
-    result = await launcher.launch(request)
-
-    assert result is None
-
-
-def test_secret_lease_resolver_protocol_body_returns_none() -> None:
-    """The ``WorkspaceSecretLeaseResolver.resolve`` Protocol body (line 69) runs."""
-    resolver = _ConcreteSecretLeaseResolver()
-
-    result = resolver.resolve(object(), workspace_id="ws-protocol")
-
-    assert result is None
 
 
 class _DockerConfig:

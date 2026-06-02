@@ -588,13 +588,17 @@ def _default_profile_preview(project: Path) -> Any:
 
 def _default_disk_profile_preview(project: Path) -> Any:
     """Resolve a workspace profile from disk and return a smoke preview object."""
+    from awf.common.git_remote import detect_repo_url_from_checkout
     from awf.profiles import resolve_workspace_profile
     from awf.profiles.onboarding import preview_workspace_profile
 
     if not _project_has_awf_profile(project):
         raise FileNotFoundError(f"no on-disk workspace profile marker file found in {project}")
 
-    resolution = resolve_workspace_profile(worktree_path=project)
+    resolution = resolve_workspace_profile(
+        worktree_path=project,
+        repo_url=detect_repo_url_from_checkout(project),
+    )
     return preview_workspace_profile(project, resolution)
 
 

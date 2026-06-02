@@ -17,12 +17,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-import yaml
-
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
+from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
 from awf.common.github_client import (
-    GitHubClient,
     GitHubClientError,
     PullRequestMetadataError,
     RepoRef,
@@ -42,6 +40,7 @@ from awf.control.executor.constants import (
     _SUPPORTED_TASK_KINDS,
     _UNSUPPORTED_TASK_KIND_REASON_CODE,
 )
+from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _call_pr_monitor_factory,
@@ -79,7 +78,6 @@ from awf.node.companion_services import (
     COMPANION_ENV_SECRET_SOURCE_MISSING,
     WorkspaceCompanionSpec,
     companion_specs_from_task_policy,
-    optional_env_secret_compose_placeholder,
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
@@ -102,6 +100,15 @@ _ComposeStringKeySafeLoader = _companion_env._ComposeStringKeySafeLoader
 _atomic_write_text = _companion_env._atomic_write_text
 _compose_environment_list_item_targets = _companion_env._compose_environment_list_item_targets
 _construct_compose_string_key_mapping = _companion_env._construct_compose_string_key_mapping
+_missing_optional_companion_env_secret_targets = (
+    _companion_env._missing_optional_companion_env_secret_targets
+)
+_present_optional_companion_env_secret_refs = (
+    _companion_env._present_optional_companion_env_secret_refs
+)
+_refresh_optional_companion_env_secrets_for_resume = (
+    _companion_env._refresh_optional_companion_env_secrets_for_resume
+)
 _remove_compose_environment_targets = _companion_env._remove_compose_environment_targets
 _represent_compose_interpolation_string = _companion_env._represent_compose_interpolation_string
 _restore_compose_environment_list_refs = _companion_env._restore_compose_environment_list_refs
@@ -316,6 +323,25 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                     )
                 ),
             )
+    except ForgeNotSupportedError as exc:
+        # This resume path bypasses the execute-time forge gate (execution_flow
+        # only runs it for ready -> execution), so an unsupported forge (e.g.
+        # BitBucket) first surfaces here when the factory builds its forge
+        # client. Preserve the stable FORGE_NOT_SUPPORTED reason code and its
+        # doctor guidance instead of flattening it into MONITOR_RECOVERY_FAILED.
+        _log.exception(
+            "executor.pr_monitor_resume_forge_not_supported",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+        )
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"monitor recovery: {exc.message}"[:2000],
+            reason_code=exc.reason_code,
+        )
+        return
     except Exception as exc:
         _log.exception("executor.pr_monitor_resume_build_failed", workspace_id=workspace_id)
         await self._mark_failed(
@@ -390,123 +416,6 @@ def _precheck_required_companion_env_secrets_for_resume(
         )
 
 
-def _refresh_optional_companion_env_secrets_for_resume(
-    *,
-    workspace_id: str,
-    compose_file: Path,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> None:
-    """Refresh optional companion env-secret targets before compose resume."""
-    missing_targets = _missing_optional_companion_env_secret_targets(
-        companion_specs=companion_specs,
-        environ=environ,
-    )
-    present_refs = _present_optional_companion_env_secret_refs(
-        companion_specs=companion_specs,
-        environ=environ,
-    )
-    if not missing_targets and not present_refs:
-        return
-
-    try:
-        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
-    except OSError:
-        _log.warning(
-            "executor.resume_companion_env_secret_refresh_read_failed",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-        )
-        return
-    except yaml.YAMLError:
-        _log.warning(
-            "executor.resume_companion_env_secret_refresh_parse_failed",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-        )
-        return
-
-    # This best-effort resume repair uses PyYAML, which preserves Compose
-    # interpolation via the custom dumper but not comments or block-scalar style.
-    removed_count = _remove_compose_environment_targets(payload, missing_targets)
-    restored_count = _restore_compose_environment_refs(payload, present_refs)
-    if removed_count == 0 and restored_count == 0:
-        return
-
-    try:
-        _atomic_write_text(
-            compose_file,
-            _safe_dump_compose_payload_for_resume(payload),
-            encoding="utf-8",
-        )
-    except OSError:
-        _log.warning(
-            "executor.resume_companion_env_secret_refresh_write_failed",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-        )
-        return
-    _log.warning(
-        "executor.resume_companion_env_secret_refresh_reformatted",
-        workspace_id=workspace_id,
-        compose_file=str(compose_file),
-        removed_count=removed_count,
-        restored_count=restored_count,
-        detail=(
-            "optional companion env-secret refresh rewrote the compose file; "
-            "comments, block-scalar style, and explicit null markers are not preserved"
-        ),
-    )
-    if removed_count:
-        _log.info(
-            "executor.resume_companion_optional_env_secrets_omitted",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-            omitted_count=removed_count,
-        )
-    if restored_count:
-        _log.info(
-            "executor.resume_companion_optional_env_secrets_restored",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-            restored_count=restored_count,
-        )
-
-
-def _missing_optional_companion_env_secret_targets(
-    *,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> dict[str, set[str]]:
-    missing_targets: dict[str, set[str]] = {}
-    for spec in companion_specs:
-        for secret in spec.environment_secrets:
-            if secret.required or secret.provider != "env" or secret.kind != "env":
-                continue
-            if secret.value_from in environ:
-                continue
-            missing_targets.setdefault(spec.name, set()).add(secret.target)
-    return missing_targets
-
-
-def _present_optional_companion_env_secret_refs(
-    *,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> dict[str, dict[str, str]]:
-    present_refs: dict[str, dict[str, str]] = {}
-    for spec in companion_specs:
-        for secret in spec.environment_secrets:
-            if secret.required or secret.provider != "env" or secret.kind != "env":
-                continue
-            if secret.value_from not in environ:
-                continue
-            present_refs.setdefault(spec.name, {})[secret.target] = (
-                optional_env_secret_compose_placeholder(secret.value_from)
-            )
-    return present_refs
-
-
 async def _reject_unsupported_task_kind(
     self: Any,
     *,
@@ -579,6 +488,65 @@ async def _reject_unsupported_task_kind(
         )
         return True
     return False
+
+
+async def _gate_sync_handoff_unsupported_forge(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Workspace,
+    worktree_path: Path,
+) -> bool:
+    """Re-gate the forge for a sync handoff after resolving the profile.
+
+    The execute-time pre-resolution gate only sees ``ws.repo_url`` when the
+    ``resolved_profile`` snapshot is missing, so an explicit ``forge: bitbucket``
+    carried only by the requested/repo-local profile (with a GitHub or
+    undetectable repo_url that detects as github) slips past it. The
+    post-resolution gate in :func:`execution_flow.execute` runs only on the
+    feature-agent path, which the sync dispatch returns *before* reaching.
+    Resolve+persist the snapshot here so the now-concrete forge is known, then
+    fail fast with ``FORGE_NOT_SUPPORTED`` — before profile setup, the
+    ``sync_release_pr`` no-op completion, and the forge-client construction —
+    instead of flattening a later ``ForgeNotSupportedError`` into
+    ``MONITOR_UNAVAILABLE`` (``sync_feature_pr``) or silently no-op completing
+    (``sync_release_pr`` with no commits ahead).
+
+    Returns ``True`` when the workspace was failed (the caller must stop). A
+    resolution failure here is deferred — the downstream handoff resolves again
+    and reports it through its own error handling — so this best-effort gate
+    returns ``False`` rather than masking the authoritative failure path.
+    """
+    try:
+        profile = _profile_for_workspace(
+            workspace,
+            worktree_path=worktree_path,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        await _sync_resolved_profile(
+            self,
+            ws=workspace,
+            workspace_id=workspace_id,
+            profile=profile,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+    except Exception:
+        _log.exception(
+            "executor.sync_handoff_forge_gate_resolution_failed",
+            workspace_id=workspace_id,
+        )
+        return False
+    forge_error = unsupported_forge_error(workspace)
+    if forge_error is None:
+        return False
+    await self._mark_failed(
+        workspace_id=workspace_id,
+        from_status=WorkspaceStatus.running,
+        failure_reason=FailureReason.infrastructure_failure,
+        message=forge_error.message,
+        reason_code=forge_error.reason_code,
+    )
+    return True
 
 
 async def _dispatch_non_feature_task_kind(
@@ -990,6 +958,18 @@ async def _handoff_sync_release_pr_monitor(
     ):
         return
 
+    # Re-gate the forge before the commits-ahead probe so an explicit
+    # ``forge: bitbucket`` (with a github-detecting repo_url and no snapshot)
+    # fails fast with FORGE_NOT_SUPPORTED instead of silently no-op completing
+    # when nothing is ahead, or reaching the forge client only on the ahead path.
+    if await _gate_sync_handoff_unsupported_forge(
+        self,
+        workspace_id=workspace_id,
+        workspace=workspace,
+        worktree_path=worktree_path,
+    ):
+        return
+
     source_branch = _release_sync_source_branch(workspace)
     target_branch = _release_sync_target_branch(workspace)
     try:
@@ -1089,7 +1069,16 @@ async def _handoff_sync_release_pr_monitor(
     try:
         metadata, created = await find_or_create_release_pr(
             runner=self._runner,
-            gh=GitHubClient(self._runner),
+            # Reconstructed forge (not re-resolved); unsupported forges fail fast.
+            # Use concrete_forge_for_repo (not plain concrete_forge) to mirror the
+            # worker PR-monitor factory and the execution_flow forge gate: a
+            # legacy/missing snapshot normalizes profile.forge to "auto", so fall
+            # back to the workspace repo_url's host. Without this, a BitBucket
+            # workspace whose snapshot predates the forge field would silently
+            # construct a GitHubClient here instead of failing fast.
+            gh=make_forge_client(
+                concrete_forge_for_repo(profile.forge, workspace.repo_url), self._runner
+            ),
             repo=repo,
             source_branch=source_branch,
             target_branch=target_branch,
@@ -1104,6 +1093,19 @@ async def _handoff_sync_release_pr_monitor(
             message=f"sync_release_pr failed: {exc.message}",
             reason_code=exc.reason_code,
             details=exc.detail,
+        )
+        return
+    except ForgeNotSupportedError as exc:
+        # Defense-in-depth: ``make_forge_client`` is constructed inside this
+        # try-block, so an unsupported forge that slips past the early
+        # execution_flow gate fails cleanly with FORGE_NOT_SUPPORTED instead of
+        # propagating uncaught and stranding the workspace in ``running``.
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
         )
         return
     except GitHubClientError as exc:
@@ -1304,6 +1306,18 @@ async def _handoff_sync_feature_pr_monitor(
         worktree_path=worktree_path,
         expected=WorkspaceStatus.running,
         action="sync_feature_pr_handoff",
+    ):
+        return
+
+    # Re-gate the forge before building the monitor so an explicit
+    # ``forge: bitbucket`` (with a github-detecting repo_url and no snapshot)
+    # fails fast with FORGE_NOT_SUPPORTED instead of being flattened into
+    # MONITOR_UNAVAILABLE when the factory's forge-client construction raises.
+    if await _gate_sync_handoff_unsupported_forge(
+        self,
+        workspace_id=workspace_id,
+        workspace=workspace,
+        worktree_path=worktree_path,
     ):
         return
 

@@ -9232,7 +9232,7 @@
       },
       "WorkspaceProfile": {
         "additionalProperties": false,
-        "description": "Resolved project profile stored on each workspace.",
+        "description": "Workspace profile shape, used both as create/adoption **input** and as the\nresolved profile persisted on a workspace.\n\nAs submitted (the inline ``profile`` on a workspace-create or PR-adoption\nrequest) some fields may still be unresolved \u2014 notably ``forge`` may be the\n``\"auto\"`` sentinel. At provision time the resolver stamps concrete values\n(``forge`` becomes ``github``/``bitbucket``) and that snapshot is what gets\nstored on the workspace, so a *resolved* profile never carries ``\"auto\"``.",
         "properties": {
           "app_endpoints": {
             "items": {
@@ -9268,6 +9268,24 @@
           },
           "docker": {
             "$ref": "#/components/schemas/ProfileDocker"
+          },
+          "forge": {
+            "anyOf": [
+              {
+                "enum": [
+                  "github",
+                  "bitbucket"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "auto",
+                "type": "string"
+              }
+            ],
+            "default": "auto",
+            "description": "Code forge the workspace repo lives on (issue #345). \"auto\" is the unresolved input sentinel: it defers to URL-host detection at resolve time. The resolver always persists a concrete github/bitbucket value (precedence: explicit forge > URL host > github), so a resolved profile never carries \"auto\".",
+            "title": "Forge"
           },
           "monitor": {
             "$ref": "#/components/schemas/ProfileMonitor"

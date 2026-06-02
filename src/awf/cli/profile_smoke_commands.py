@@ -29,12 +29,15 @@ def profile_preview(
     """Preview the resolved workspace profile for a local checkout."""
     from pathlib import Path
 
+    from awf.common.git_remote import detect_repo_url_from_checkout
     from awf.profiles.resolver import resolve_workspace_profile
 
+    resolved_path = Path(path).expanduser().resolve()
     resolution = resolve_workspace_profile(
-        worktree_path=Path(path).expanduser().resolve(),
+        worktree_path=resolved_path,
         profile_ref=profile_ref,
         validation_commands=validation_command,
+        repo_url=detect_repo_url_from_checkout(resolved_path),
     )
     payload = resolution.model_dump(mode="json", by_alias=True)
     if fmt == OutputFormat.pretty:

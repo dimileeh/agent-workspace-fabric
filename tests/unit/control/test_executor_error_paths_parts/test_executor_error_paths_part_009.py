@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge import ForgeNotSupportedError
 from awf.control.executor import monitor_handoff as executor_monitor_handoff
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
@@ -238,6 +239,51 @@ class TestExecutorCoverageEdgesPart003:
             assert ws.failure_reason == "infrastructure_failure"
             assert "failed to build PR monitor" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "MONITOR_RECOVERY_FAILED"
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_preserves_forge_not_supported_reason_code(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """An unsupported forge (e.g. BitBucket) detected while the monitor
+        factory builds its forge client must surface as ``FORGE_NOT_SUPPORTED``,
+        not the generic ``MONITOR_RECOVERY_FAILED``.
+
+        ``resume_pr_monitor`` is the worker-restart resume path, which bypasses
+        the execute-time forge gate in ``execution_flow`` (that gate only runs
+        for ``ready -> execution``). So a ``monitoring_pr`` row whose forge is
+        unsupported first trips here; the stable reason code and its doctor
+        guidance must be preserved end-to-end.
+        """
+        ws_id = await _seed_monitoring_pr(factory)
+
+        def _factory(*_args: Any) -> object:
+            raise ForgeNotSupportedError(
+                message=(
+                    "BitBucket forge support is not yet implemented "
+                    "(issue #345 Phase 1 adds detection only)."
+                )
+            )
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.events[-1].reason_code == "FORGE_NOT_SUPPORTED"
+            assert "monitor recovery" in (ws.failure_message or "")
+            assert "BitBucket forge support is not yet implemented" in (ws.failure_message or "")
+            # Must not be flattened into the generic build-failed reason/message.
+            assert "failed to build PR monitor" not in (ws.failure_message or "")
+            assert not [
+                event for event in ws.events if event.reason_code == "MONITOR_RECOVERY_FAILED"
+            ]
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_without_configured_monitor_fails_cleanly(
