@@ -560,6 +560,12 @@ async def _auto_retry_planning_scope_failure(
             WorkspaceCreateHostPortConflictError,
             WorkspaceRetryError,
         ) as exc:
+            rollback = getattr(session, "rollback", None)
+            if rollback is not None:
+                await rollback()
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
             await repo.add_event(
                 workspace,
                 event_type="workspace.planning_scope_auto_retry_failed",
