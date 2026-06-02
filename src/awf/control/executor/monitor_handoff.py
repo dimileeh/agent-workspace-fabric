@@ -21,7 +21,7 @@ import yaml
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
-from awf.common.forge import ForgeNotSupportedError, concrete_forge, make_forge_client
+from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
 from awf.common.github_client import (
     GitHubClientError,
     PullRequestMetadataError,
@@ -1090,7 +1090,15 @@ async def _handoff_sync_release_pr_monitor(
         metadata, created = await find_or_create_release_pr(
             runner=self._runner,
             # Reconstructed forge (not re-resolved); unsupported forges fail fast.
-            gh=make_forge_client(concrete_forge(profile.forge), self._runner),
+            # Use concrete_forge_for_repo (not plain concrete_forge) to mirror the
+            # worker PR-monitor factory and the execution_flow forge gate: a
+            # legacy/missing snapshot normalizes profile.forge to "auto", so fall
+            # back to the workspace repo_url's host. Without this, a BitBucket
+            # workspace whose snapshot predates the forge field would silently
+            # construct a GitHubClient here instead of failing fast.
+            gh=make_forge_client(
+                concrete_forge_for_repo(profile.forge, workspace.repo_url), self._runner
+            ),
             repo=repo,
             source_branch=source_branch,
             target_branch=target_branch,
