@@ -25,11 +25,6 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
-from awf.common.forge import (
-    ForgeNotSupportedError,
-    concrete_forge_for_repo,
-    ensure_forge_supported,
-)
 from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
@@ -42,6 +37,7 @@ from awf.control.executor.constants import (
     _PR_CREATE_FAILED_REASON_CODE,
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
 )
+from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.git_ops import (
     _git_error_indicates_missing_head_object,
     _git_name_lines,
@@ -178,30 +174,18 @@ async def execute(
     ):
         return
 
-    # Forge-support gate — the earliest point the resolved forge is known, and
-    # BEFORE every downstream gh path: the non-feature dispatch (sync_release_pr /
-    # sync_feature_pr build ``gh`` in monitor handoff), the agent run, push, and
-    # ``gh pr create``. A detected-but-unimplemented forge (e.g. bitbucket) must
-    # fail fast here with FORGE_NOT_SUPPORTED rather than strand the workspace on
-    # an uncaught error deeper in a handoff. Prefer the persisted ``resolved_profile``
-    # (reconstructed, never re-resolved); but when the snapshot is *missing* (None)
-    # or *legacy* (forge reconstructs as ``auto``) — a path this executor still
-    # supports, since it resolves+persists a profile from ``ws.repo_url`` before
-    # running — detect the forge from the repo URL so a BitBucket repo trips the
-    # gate instead of defaulting to github and slipping into the gh path. A
-    # concrete persisted forge always wins; undetectable URLs fall back to github
-    # so pre-existing GitHub workspaces never trip the gate.
-    try:
-        ensure_forge_supported(
-            concrete_forge_for_repo((ws.resolved_profile or {}).get("forge"), ws.repo_url)
-        )
-    except ForgeNotSupportedError as exc:
+    # Forge-support gate — fail fast on a detected-but-unimplemented forge
+    # (e.g. bitbucket) BEFORE every downstream gh path (non-feature dispatch,
+    # agent run, push, ``gh pr create``). See ``forge_gate`` for the
+    # resolved-vs-detected forge reasoning.
+    forge_error = unsupported_forge_error(ws)
+    if forge_error is not None:
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
-            message=exc.message,
-            reason_code=exc.reason_code,
+            message=forge_error.message,
+            reason_code=forge_error.reason_code,
         )
         return
 
