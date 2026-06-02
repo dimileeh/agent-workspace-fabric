@@ -65,7 +65,7 @@ _COVERAGE_FAILURE_GUIDANCE = (
     "coverage-theater (tests that only execute lines to move the number), never "
     "weakened assertions, and never `# pragma: no cover` on a live, reachable "
     "path. The gate is an exact threshold, so a near-miss still fails; prefer one "
-    "meaningful test over many shallow ones. "
+    "meaningful test over many shallow ones.\n"
 )
 
 
