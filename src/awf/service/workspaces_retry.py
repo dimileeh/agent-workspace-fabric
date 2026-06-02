@@ -106,23 +106,27 @@ async def _source_runtime_not_yet_released(
             return False
         if source.compose_project_name is not None or source.compose_file_path is not None:
             return True
-        if source.node_id is not None:
-            return False
         reservations = await ResourceReservationRepository(session).list_for_workspace(
             source.id,
             limit=1,
         )
-        if source_status == WorkspaceStatus.cancelled and not reservations:
+        if (
+            source_status == WorkspaceStatus.cancelled
+            and source.node_id is None
+            and not reservations
+        ):
             # Cancelled before scheduler/provisioner placement: no compose
             # metadata, no node, and no reservation means there is no runtime
             # evidence for cleanup to release. Failed null-runtime rows keep
             # blocking as legacy provenance is ambiguous.
             return False
         has_prelaunch_reservation_evidence = bool(reservations)
-        # Failed rows with null compose metadata but a reservation are modern
-        # pre-launch failures and can retry. Failed rows with no reservation
-        # are legacy-ambiguous, so they stay blocked until cleanup records the
-        # terminal runtime release event.
+        # Rows with null compose metadata but a reservation are modern
+        # pre-launch failures and can retry. Rows with no reservation are
+        # legacy-ambiguous even when node_id is stamped: older failure paths
+        # could create an awf_<workspace_id> stack before compose metadata was
+        # persisted, and node_id only identifies the cleanup target. They stay
+        # blocked until cleanup records the terminal runtime release event.
         return not has_prelaunch_reservation_evidence
     return False
 
