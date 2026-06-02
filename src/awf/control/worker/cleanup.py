@@ -184,6 +184,14 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
                         error=str(exc)[:240],
                     )
                 release_errors.append(exc)
+    try:
+        await self._resume_pending_planning_scope_auto_retries_after_terminal_release(limit=limit)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not release_errors:
+            raise
+        release_errors.append(exc)
     if len(release_errors) == 1:
         raise release_errors[0]
     if release_errors:
@@ -191,7 +199,6 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
             "terminal runtime release failed",
             release_errors,
         )
-    await self._resume_pending_planning_scope_auto_retries_after_terminal_release(limit=limit)
 
 
 async def _resume_pending_planning_scope_auto_retries_after_terminal_release(
