@@ -832,7 +832,6 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
     monkeypatch.setattr(worker_mod, "LogStore", _AnyInit)
     monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
-    monkeypatch.setattr(worker_mod, "GitHubClient", _AnyInit)
     monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _AnyInit)
     monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)

@@ -194,7 +194,12 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
     except Exception as exc:
         if not release_errors:
             raise
-        release_errors.append(exc)
+        _log.warning(
+            "worker.terminal_runtime_release_resume_scan_failed_after_release_error",
+            reason_code=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+            error_type=type(exc).__name__,
+            error=str(exc)[:240],
+        )
     if len(release_errors) == 1:
         raise release_errors[0]
     if release_errors:
