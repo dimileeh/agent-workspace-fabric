@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from awf.service.config import (
+    DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID as DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
+)
+
 
 @dataclass(frozen=True)
 class WorkerConfig:
@@ -25,3 +29,7 @@ class WorkerConfig:
     workspace_steady_memory_gb: float = 10.0
     workspace_peak_cpu: float = 6.0
     workspace_peak_memory_gb: float = 16.0
+
+
+def effective_worker_config_node_id(config: WorkerConfig) -> str:
+    return config.node_id or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID

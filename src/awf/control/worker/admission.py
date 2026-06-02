@@ -5,7 +5,11 @@ from __future__ import annotations
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.control.worker.config import WorkerConfig
+from awf.control.worker.config import (
+    DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
+    WorkerConfig,
+    effective_worker_config_node_id,
+)
 from awf.control.worker.constants import _REQUESTED_ADMISSION_SLOT_STATUSES
 from awf.control.worker.resource_broker import _postgres_advisory_lock_key
 from awf.db.models import Workspace
@@ -16,9 +20,9 @@ def _requested_admission_lock_node_ids(node_id: str | None) -> tuple[str, ...]:
     # null-node claimers before taking their own per-node admission lock. Stale
     # recovery scans the same null-node legacy scope so these rows cannot wedge
     # named-node admission indefinitely after an upgrade.
-    if node_id is None or node_id == "local":
-        return ("local",)
-    return ("local", node_id)
+    if node_id is None or node_id == DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID:
+        return (DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,)
+    return (DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID, node_id)
 
 
 async def _acquire_requested_admission_lock(
@@ -55,7 +59,7 @@ async def _requested_admission_row_slots(
         return 0
     status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
     stmt = select(func.count()).select_from(Workspace).where(Workspace.status.in_(status_values))
-    node_id = config.node_id or "local"
+    node_id = effective_worker_config_node_id(config)
     stmt = stmt.where(
         or_(
             Workspace.node_id == node_id,

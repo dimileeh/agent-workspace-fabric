@@ -22,6 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS,
     _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
@@ -206,7 +207,7 @@ async def _list_stale_active_execution_candidates(
     active_execution_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
     admission_slot_status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
     claim_cutoff = datetime.now(UTC)
-    worker_node_id = self._config.node_id or "local"
+    worker_node_id = effective_worker_config_node_id(self._config)
     stmt = (
         select(
             Workspace.id,

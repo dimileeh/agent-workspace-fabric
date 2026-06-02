@@ -28,7 +28,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker.admission import _requested_admission_row_slots
-from awf.control.worker.config import WorkerConfig
+from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
     ORDERED_MONITOR_RESUME_REASON,
     ORDERED_READY_EXECUTION_REASON,
@@ -310,7 +310,7 @@ class ControlWorker(WorkerDelegatesMixin):
         return await self._list_by_status(
             WorkspaceStatus.requested,
             limit=self._config.max_concurrent_provisions,
-            node_id=self._config.node_id or "local",
+            node_id=effective_worker_config_node_id(self._config),
         )
 
     async def _list_ready(

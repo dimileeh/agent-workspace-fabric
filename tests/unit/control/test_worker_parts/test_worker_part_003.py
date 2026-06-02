@@ -25,6 +25,7 @@ from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
+from awf.control.worker import config as worker_config
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import QueueDecision, Workspace
 from awf.db.repositories import (
@@ -35,6 +36,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories import _scheduler as scheduler_repository
 from awf.db.session import make_session_factory
 from awf.node.cleanup import (
     COMPOSE_DOWN_SUCCEEDED,
@@ -1093,6 +1095,54 @@ class TestRunOncePart003:
 
         assert await worker._list_requested() == []  # noqa: SLF001
         assert observed_limits == [1]
+
+    @pytest.mark.unit
+    async def test_default_local_requested_claim_uses_canonical_node_id_for_legacy_adoption(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        canonical_node_id = "canonical-local"
+        monkeypatch.setattr(
+            worker_config,
+            "DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID",
+            canonical_node_id,
+        )
+        monkeypatch.setattr(
+            scheduler_repository,
+            "DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID",
+            canonical_node_id,
+        )
+        legacy_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "non-capacity-default-canonical-legacy-local-reserved-request",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            legacy_id,
+            node_id="legacy-container-hostname",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id=None,
+            ),
+        )
+
+        assert await worker._list_requested() == [legacy_id]  # noqa: SLF001
+        assert await worker._claim_requested_ids([legacy_id]) == [legacy_id]  # noqa: SLF001
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(legacy_id)
+
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.provisioning.value
 
     @pytest.mark.unit
     async def test_non_capacity_requested_listing_honors_reservation_node(
