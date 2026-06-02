@@ -719,6 +719,54 @@ class TestOwnedPathOverlapLookup:
         assert reserved_for_node_b.id not in listed_ids
 
     @pytest.mark.unit
+    async def test_requested_scheduler_local_scope_adopts_legacy_reservation_hostname(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Local workers can recover requested rows reserved with old hostnames."""
+        repo = WorkspaceRepository(session)
+        legacy_reserved = await _create_policy_workspace(session, repo)
+        await _reserve_policy_workspace(
+            session,
+            legacy_reserved,
+            node_id="legacy-container-hostname",
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            node_id="local",
+            scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+        )
+
+        assert legacy_reserved.id in {workspace.id for workspace in listed}
+
+    @pytest.mark.unit
+    async def test_requested_scheduler_named_scope_ignores_legacy_reservation_hostname(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Named workers still ignore requested rows reserved for another node."""
+        repo = WorkspaceRepository(session)
+        legacy_reserved = await _create_policy_workspace(session, repo)
+        await _reserve_policy_workspace(
+            session,
+            legacy_reserved,
+            node_id="legacy-container-hostname",
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            node_id="worker-node-b",
+            scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+        )
+
+        assert legacy_reserved.id not in {workspace.id for workspace in listed}
+
+    @pytest.mark.unit
     async def test_list_schedulable_workspaces_returns_empty_for_non_positive_limit(self) -> None:
         """Verify non-positive scheduler limits avoid database execution."""
         session = _RecordingSchedulerSession("postgresql", values=[])

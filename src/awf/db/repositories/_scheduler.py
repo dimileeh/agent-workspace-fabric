@@ -30,6 +30,7 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.db.models import ResourceReservation, Workspace
+from awf.service.config import DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
 from awf.service.scheduler import (
     AGE_BOOST_INTERVAL_SECONDS,
     AGE_BOOST_MAX,
@@ -125,11 +126,22 @@ def _scheduler_node_scope_condition(
     if status != WorkspaceStatus.requested:
         return or_(Workspace.node_id == node_id, Workspace.node_id.is_(None))
 
+    latest_reservation_node_id = _latest_active_resource_reservation_node_id_expr()
     planned_node_id = func.coalesce(
         Workspace.node_id,
-        _latest_active_resource_reservation_node_id_expr(),
+        latest_reservation_node_id,
     )
-    return or_(planned_node_id == node_id, planned_node_id.is_(None))
+    scope_conditions = [planned_node_id == node_id, planned_node_id.is_(None)]
+    if node_id == DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID:
+        # Local service upgrades can leave requested reservations stamped with
+        # the old container hostname; current local workers must still adopt them.
+        scope_conditions.append(
+            and_(
+                Workspace.node_id.is_(None),
+                latest_reservation_node_id.is_not(None),
+            )
+        )
+    return or_(*scope_conditions)
 
 
 def _latest_active_resource_reservation_node_id_expr() -> ColumnElement[Any]:
