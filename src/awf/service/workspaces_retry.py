@@ -112,6 +112,12 @@ async def _source_runtime_not_yet_released(
             source.id,
             limit=1,
         )
+        if source_status == WorkspaceStatus.cancelled and not reservations:
+            # Cancelled before scheduler/provisioner placement: no compose
+            # metadata, no node, and no reservation means there is no runtime
+            # evidence for cleanup to release. Failed null-runtime rows keep
+            # blocking as legacy provenance is ambiguous.
+            return False
         return not reservations
     return False
 
