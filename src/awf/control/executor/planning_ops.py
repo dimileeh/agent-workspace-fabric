@@ -109,6 +109,9 @@ _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE = (
     "PLANNING_SCOPE_AUTO_RETRY_SOURCE_RUNTIME_NOT_RELEASED"
 )
 _PLANNING_SCOPE_AUTO_RETRY_FAILED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_FAILED"
+_PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT_REASON_CODE = (
+    "PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT"
+)
 _PLANNING_SCOPE_AUTO_RETRY_REQUESTED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_REQUESTED"
 _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED"
 _PLANNING_SCOPE_AUTO_RETRY_SKIPPED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_ALREADY_RETRIED"
@@ -664,28 +667,30 @@ async def _request_planning_scope_auto_retry(
         rollback = getattr(session, "rollback", None)
         if rollback is not None:
             await rollback()
-        # The rollback releases retry_workspace_row's row lock; re-lock before
-        # recording a blocked marker so a concurrent retry request can win cleanly.
-        workspace = await repo.get_for_update(workspace_id)
-        if workspace is None:
-            return
-        if await _latest_planning_scope_auto_retry_is_retry_requested(session, workspace_id):
-            return
-        await repo.add_event(
-            workspace,
-            event_type=_PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,
+        await _record_planning_scope_auto_retry_blocked_after_retry_rollback(
+            session,
+            repo,
+            workspace_id=workspace_id,
+            source_reason_code=source_reason_code,
             reason_code=_PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,
-            payload={
-                "source_reason_code": source_reason_code,
-                "detail": exc.detail,
-                "retry_after": _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER,
-            },
+            detail=exc.detail,
         )
-        await session.commit()
+        return
+    except WorkspaceCreateHostPortConflictError as exc:
+        rollback = getattr(session, "rollback", None)
+        if rollback is not None:
+            await rollback()
+        await _record_planning_scope_auto_retry_blocked_after_retry_rollback(
+            session,
+            repo,
+            workspace_id=workspace_id,
+            source_reason_code=source_reason_code,
+            reason_code=_PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT_REASON_CODE,
+            detail=getattr(exc, "detail", None),
+        )
         return
     except (
         WorkspaceCreateDuplicateHostPortError,
-        WorkspaceCreateHostPortConflictError,
         WorkspaceRetryError,
     ) as exc:
         rollback = getattr(session, "rollback", None)
@@ -713,6 +718,35 @@ async def _request_planning_scope_auto_retry(
         payload={
             "source_reason_code": source_reason_code,
             "new_workspace_id": result.new_workspace.id,
+        },
+    )
+    await session.commit()
+
+
+async def _record_planning_scope_auto_retry_blocked_after_retry_rollback(
+    session: Any,
+    repo: WorkspaceRepository,
+    *,
+    workspace_id: str,
+    source_reason_code: str,
+    reason_code: str,
+    detail: object,
+) -> None:
+    # The rollback releases retry_workspace_row's row lock; re-lock before
+    # recording a blocked marker so a concurrent retry request can win cleanly.
+    workspace = await repo.get_for_update(workspace_id)
+    if workspace is None:
+        return
+    if await _latest_planning_scope_auto_retry_is_retry_requested(session, workspace_id):
+        return
+    await repo.add_event(
+        workspace,
+        event_type=_PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,
+        reason_code=reason_code,
+        payload={
+            "source_reason_code": source_reason_code,
+            "detail": detail,
+            "retry_after": _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER,
         },
     )
     await session.commit()

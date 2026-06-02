@@ -548,6 +548,9 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
         async def get(self, _workspace_id: str) -> object | None:
             return self.workspace
 
+        async def get_for_update(self, workspace_id: str) -> object | None:
+            return await self.get(workspace_id)
+
         async def add_event(
             self,
             _workspace: object,
@@ -613,14 +616,24 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
             conflicting_workspace_id="ws_other",
         )
 
+    async def _latest_retry_requested(_session: object, _workspace_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        executor_planning_ops,
+        "_latest_planning_scope_auto_retry_is_retry_requested",
+        _latest_retry_requested,
+    )
     monkeypatch.setattr(executor_planning_ops, "retry_workspace_row", _retry_port_conflict)
     await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
         executor,
         workspace_id="ws_retry",
         failure=failure,
     )
-    assert events[-1][0] == "workspace.planning_scope_auto_retry_failed"
+    assert events[-1][0] == "workspace.planning_scope_auto_retry_blocked"
+    assert events[-1][1] == "PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT"
     assert events[-1][2]["detail"]["host_port"] == 9090
+    assert events[-1][2]["retry_after"] == "terminal_runtime_released"
 
 
 @pytest.mark.unit
