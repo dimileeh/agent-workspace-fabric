@@ -414,10 +414,23 @@ async def _record_terminal_runtime_released(
         compose_project_name=candidate.compose_project_name,
         reason_code=_TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     )
-    await _resume_blocked_planning_scope_auto_retry_after_runtime_release(
-        self,
-        workspace_id=candidate.workspace_id,
-    )
+    try:
+        await _resume_blocked_planning_scope_auto_retry_after_runtime_release(
+            self,
+            workspace_id=candidate.workspace_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _log.warning(
+            "worker.planning_scope_auto_retry_resume_after_runtime_release_failed",
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            reason_code="PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED",
+            error_type=type(exc).__name__,
+            error=str(exc)[:240],
+        )
 
 
 async def _record_terminal_runtime_release_failed(

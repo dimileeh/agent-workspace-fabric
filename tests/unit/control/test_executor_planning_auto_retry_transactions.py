@@ -384,3 +384,65 @@ async def test_terminal_runtime_release_event_triggers_blocked_planning_scope_re
     )
 
     assert resumed == ["ws_retry"]
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_ignores_blocked_planning_scope_resume_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class _WorkerLog:
+        def info(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def warning(self, event: str, **kwargs: object) -> None:
+            warnings.append((event, kwargs))
+
+    async def _run_db_operation_with_retry(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _resume(_self: object, *, workspace_id: str) -> None:
+        assert workspace_id == "ws_retry"
+        raise RuntimeError("retry resume database write failed")
+
+    monkeypatch.setattr(
+        worker_cleanup,
+        "run_db_operation_with_retry",
+        _run_db_operation_with_retry,
+    )
+    monkeypatch.setattr(
+        worker_cleanup,
+        "_resume_blocked_planning_scope_auto_retry_after_runtime_release",
+        _resume,
+    )
+    monkeypatch.setattr(worker_cleanup, "_log", _WorkerLog())
+    worker = SimpleNamespace(
+        _session_factory=lambda: object(),
+        _log_transient_db_retry=lambda _exc, _attempt: None,
+    )
+    candidate = SimpleNamespace(
+        workspace_id="ws_retry",
+        status=WorkspaceStatus.failed,
+        compose_project_name="awf_ws_retry",
+    )
+
+    await worker_cleanup._record_terminal_runtime_released(  # noqa: SLF001
+        worker,
+        candidate,
+        WorkspaceCleanupResult.skipped(),
+    )
+
+    assert warnings == [
+        (
+            "worker.planning_scope_auto_retry_resume_after_runtime_release_failed",
+            {
+                "workspace_id": "ws_retry",
+                "status": "failed",
+                "compose_project_name": "awf_ws_retry",
+                "reason_code": "PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED",
+                "error_type": "RuntimeError",
+                "error": "retry resume database write failed",
+            },
+        )
+    ]
