@@ -107,19 +107,23 @@ class TestSyncReleasePrHandoffForgeGate:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        # Regression for PR review thread PRRT_kwDOSJAM6s6GRxm-: the release
-        # handoff must build its forge client with the URL-aware resolver
-        # (``concrete_forge_for_repo``), mirroring the worker PR-monitor factory
-        # and the execution_flow forge gate. A *legacy* ``resolved_profile``
-        # snapshot predates the ``forge`` field, so the reconstructed
-        # ``profile.forge`` is the schema default ``"auto"``. Plain
+        # Regression for PR review threads PRRT_kwDOSJAM6s6GRxm- and
+        # PRRT_kwDOSJAM6s6GUN6M: the release handoff must resolve the forge with
+        # the URL-aware resolver (``concrete_forge_for_repo``), mirroring the
+        # worker PR-monitor factory and the execution_flow forge gate. A *legacy*
+        # ``resolved_profile`` snapshot predates the ``forge`` field, so the
+        # reconstructed ``profile.forge`` is the schema default ``"auto"``. Plain
         # ``concrete_forge("auto")`` normalizes to ``"github"`` and would silently
         # construct a GitHubClient for a BitBucket repo; the URL-aware resolver
         # detects bitbucket from ``workspace.repo_url`` and fails fast with
         # FORGE_NOT_SUPPORTED instead. The early execution_flow gate normally
-        # pre-empts this path, so this defense-in-depth case is exercised by
-        # invoking the handoff directly (the "slips past the early gate" scenario
-        # the handoff's own ForgeNotSupportedError catch exists to cover).
+        # pre-empts this path, but invoking the handoff directly (the "slips past
+        # the early gate" scenario) now trips the handoff's *own* post-resolution
+        # re-gate, which runs immediately after the profile resolves — before the
+        # commits-ahead probe and the deeper find_or_create forge client. It
+        # emits the raw forge message (consistent with the execution_flow gate),
+        # while the deeper "sync_release_pr failed:" defense-in-depth catch stays
+        # covered by ``test_pr_adoption_unsupported_forge_fails_cleanly_before_monitor``.
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
         fake.queue_result(returncode=0)  # post-setup git fetch
@@ -183,14 +187,17 @@ class TestSyncReleasePrHandoffForgeGate:
             worktree_path=worktree_path,
         )
 
-        # Fail-fast forge construction means no gh PR call is ever attempted.
+        # Fail-fast forge resolution means no gh PR call is ever attempted, and
+        # the post-resolution re-gate fires before the commits-ahead probe.
         assert all(c.args[:3] != ["gh", "pr", "create"] for c in fake.calls)
         assert all(c.args[:3] != ["gh", "pr", "list"] for c in fake.calls)
+        assert all(c.args[:2] != ["git", "rev-list"] for c in fake.calls)
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
             assert ws.events[-1].reason_code == "FORGE_NOT_SUPPORTED"
-            assert "sync_release_pr failed" in (ws.failure_message or "")
+            # The re-gate emits the raw forge message (matching execution_flow's
+            # gate), not the deeper catch's "sync_release_pr failed:" prefix.
             assert "BitBucket forge support is not yet implemented" in (ws.failure_message or "")

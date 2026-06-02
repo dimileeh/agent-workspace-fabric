@@ -40,6 +40,7 @@ from awf.control.executor.constants import (
     _SUPPORTED_TASK_KINDS,
     _UNSUPPORTED_TASK_KIND_REASON_CODE,
 )
+from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _call_pr_monitor_factory,
@@ -489,6 +490,65 @@ async def _reject_unsupported_task_kind(
     return False
 
 
+async def _gate_sync_handoff_unsupported_forge(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Workspace,
+    worktree_path: Path,
+) -> bool:
+    """Re-gate the forge for a sync handoff after resolving the profile.
+
+    The execute-time pre-resolution gate only sees ``ws.repo_url`` when the
+    ``resolved_profile`` snapshot is missing, so an explicit ``forge: bitbucket``
+    carried only by the requested/repo-local profile (with a GitHub or
+    undetectable repo_url that detects as github) slips past it. The
+    post-resolution gate in :func:`execution_flow.execute` runs only on the
+    feature-agent path, which the sync dispatch returns *before* reaching.
+    Resolve+persist the snapshot here so the now-concrete forge is known, then
+    fail fast with ``FORGE_NOT_SUPPORTED`` — before profile setup, the
+    ``sync_release_pr`` no-op completion, and the forge-client construction —
+    instead of flattening a later ``ForgeNotSupportedError`` into
+    ``MONITOR_UNAVAILABLE`` (``sync_feature_pr``) or silently no-op completing
+    (``sync_release_pr`` with no commits ahead).
+
+    Returns ``True`` when the workspace was failed (the caller must stop). A
+    resolution failure here is deferred — the downstream handoff resolves again
+    and reports it through its own error handling — so this best-effort gate
+    returns ``False`` rather than masking the authoritative failure path.
+    """
+    try:
+        profile = _profile_for_workspace(
+            workspace,
+            worktree_path=worktree_path,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        await _sync_resolved_profile(
+            self,
+            ws=workspace,
+            workspace_id=workspace_id,
+            profile=profile,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+    except Exception:
+        _log.exception(
+            "executor.sync_handoff_forge_gate_resolution_failed",
+            workspace_id=workspace_id,
+        )
+        return False
+    forge_error = unsupported_forge_error(workspace)
+    if forge_error is None:
+        return False
+    await self._mark_failed(
+        workspace_id=workspace_id,
+        from_status=WorkspaceStatus.running,
+        failure_reason=FailureReason.infrastructure_failure,
+        message=forge_error.message,
+        reason_code=forge_error.reason_code,
+    )
+    return True
+
+
 async def _dispatch_non_feature_task_kind(
     self: Any,
     *,
@@ -898,6 +958,18 @@ async def _handoff_sync_release_pr_monitor(
     ):
         return
 
+    # Re-gate the forge before the commits-ahead probe so an explicit
+    # ``forge: bitbucket`` (with a github-detecting repo_url and no snapshot)
+    # fails fast with FORGE_NOT_SUPPORTED instead of silently no-op completing
+    # when nothing is ahead, or reaching the forge client only on the ahead path.
+    if await _gate_sync_handoff_unsupported_forge(
+        self,
+        workspace_id=workspace_id,
+        workspace=workspace,
+        worktree_path=worktree_path,
+    ):
+        return
+
     source_branch = _release_sync_source_branch(workspace)
     target_branch = _release_sync_target_branch(workspace)
     try:
@@ -1234,6 +1306,18 @@ async def _handoff_sync_feature_pr_monitor(
         worktree_path=worktree_path,
         expected=WorkspaceStatus.running,
         action="sync_feature_pr_handoff",
+    ):
+        return
+
+    # Re-gate the forge before building the monitor so an explicit
+    # ``forge: bitbucket`` (with a github-detecting repo_url and no snapshot)
+    # fails fast with FORGE_NOT_SUPPORTED instead of being flattened into
+    # MONITOR_UNAVAILABLE when the factory's forge-client construction raises.
+    if await _gate_sync_handoff_unsupported_forge(
+        self,
+        workspace_id=workspace_id,
+        workspace=workspace,
+        worktree_path=worktree_path,
     ):
         return
 
