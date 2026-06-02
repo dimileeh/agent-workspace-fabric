@@ -17,7 +17,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm.attributes import flag_modified
@@ -207,6 +207,12 @@ async def _resume_pending_planning_scope_auto_retries_after_terminal_release(
     *,
     limit: int | None = None,
 ) -> None:
+    """Resume planning-scope auto-retries whose source runtime is released.
+
+    If a third-party workspace now holds the requested host port, the resume
+    attempt records a deduplicated host-port block and remains a candidate. The
+    next cleanup scans intentionally keep rechecking until the port is free.
+    """
     candidates = await self._list_terminal_released_pending_planning_scope_auto_retry_candidates(
         limit=limit,
     )
@@ -269,6 +275,12 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
     # planning-scope events still suppress resume via this guard, without
     # inflating the ranked candidate set on every cleanup scan.
     newer_planning_event = aliased(WorkspaceEvent)
+    same_planning_event_timestamp = (
+        newer_planning_event.occurred_at == latest_planning_event.c.occurred_at
+    )
+    # Event IDs are random UUID strings, so they are safe for identity checks
+    # but not as temporal tiebreakers. For same-tick non-pending legacy rows
+    # where both event_order values are missing, suppress conservatively.
     newer_planning_event_exists = (
         select(newer_planning_event.id)
         .where(newer_planning_event.workspace_id == latest_planning_event.c.workspace_id)
@@ -285,15 +297,28 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
             )
         )
         .where(
-            tuple_(
-                newer_planning_event.occurred_at,
-                func.coalesce(newer_planning_event.event_order, -1),
-                newer_planning_event.id,
-            )
-            > tuple_(
-                latest_planning_event.c.occurred_at,
-                func.coalesce(latest_planning_event.c.event_order, -1),
-                latest_planning_event.c.event_id,
+            or_(
+                newer_planning_event.occurred_at > latest_planning_event.c.occurred_at,
+                and_(
+                    same_planning_event_timestamp,
+                    newer_planning_event.event_order.is_not(None),
+                    latest_planning_event.c.event_order.is_(None),
+                ),
+                and_(
+                    same_planning_event_timestamp,
+                    newer_planning_event.event_order.is_not(None),
+                    latest_planning_event.c.event_order.is_not(None),
+                    newer_planning_event.event_order > latest_planning_event.c.event_order,
+                ),
+                and_(
+                    same_planning_event_timestamp,
+                    newer_planning_event.event_order.is_(None),
+                    latest_planning_event.c.event_order.is_(None),
+                    newer_planning_event.id != latest_planning_event.c.event_id,
+                    ~newer_planning_event.event_type.in_(
+                        tuple(_PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES)
+                    ),
+                ),
             )
         )
         .limit(1)

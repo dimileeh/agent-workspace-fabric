@@ -102,6 +102,10 @@ async def _source_runtime_not_yet_released(
     matches ``failed`` / ``cancelled`` in practice; ``completed`` and
     ``destroyed`` are listed in that constant for its shared semantics, not
     because they flow through here.
+
+    Callers must verify that ``host_ports`` is non-empty before calling this
+    function. Zero-port workspaces cannot cause host-port conflicts, and the
+    outer ``retry_workspace_row`` call site gates this check on ``if host_ports:``.
     """
     source_status = WorkspaceStatus(source.status)
     if source_status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES:

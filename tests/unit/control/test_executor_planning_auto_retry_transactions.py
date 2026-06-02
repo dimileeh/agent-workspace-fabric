@@ -843,6 +843,14 @@ async def test_planning_scope_auto_retry_resume_failure_records_recoverable_even
 ) -> None:
     sessions: list[_RecordingSession] = []
     events: list[tuple[str, str, dict[str, object]]] = []
+    pending_blocked = SimpleNamespace(
+        event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,  # noqa: SLF001
+        reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,  # noqa: SLF001
+        payload={
+            "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            "retry_after": "terminal_runtime_released",
+        },
+    )
 
     class _WorkspaceRepo:
         def __init__(self, session: object) -> None:
@@ -865,22 +873,11 @@ async def test_planning_scope_auto_retry_resume_failure_records_recoverable_even
             events.append((event_type, reason_code, payload))
 
     def _session_factory() -> _RecordingSession:
-        session = _RecordingSession()
+        session = _RecordingSession(terminal_events=[pending_blocked])
         sessions.append(session)
         return session
 
-    async def _has_pending_block(session: object, workspace_id: str) -> bool:
-        assert workspace_id == "ws_retry"
-        assert isinstance(session, _RecordingSession)
-        session.operations.append("pending-block-check")
-        return True
-
     monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
-    monkeypatch.setattr(
-        executor_planning_ops,
-        "_has_pending_terminal_release_planning_scope_auto_retry",
-        _has_pending_block,
-    )
     executor = SimpleNamespace(_session_factory=_session_factory)
 
     await (
@@ -892,7 +889,7 @@ async def test_planning_scope_auto_retry_resume_failure_records_recoverable_even
     )
 
     assert sessions[-1].operations == [
-        "pending-block-check",
+        "event-scan",
         "event:workspace.planning_scope_auto_retry_resume_failed",
         "commit",
     ]
@@ -908,6 +905,63 @@ async def test_planning_scope_auto_retry_resume_failure_records_recoverable_even
             },
         )
     ]
+
+
+@pytest.mark.unit
+async def test_planning_scope_auto_retry_resume_failure_dedups_latest_equivalent_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[_RecordingSession] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+    latest_resume_failed = SimpleNamespace(
+        event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_EVENT_TYPE,  # noqa: SLF001
+        reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,  # noqa: SLF001
+        payload={
+            "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            "retry_after": "terminal_runtime_released",
+            "error_type": "RuntimeError",
+            "error": "database write failed",
+        },
+    )
+
+    class _WorkspaceRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get_for_update(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_retry"
+            return SimpleNamespace(id=workspace_id)
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            assert isinstance(self._session, _RecordingSession)
+            self._session.operations.append(f"event:{event_type}")
+            events.append((event_type, reason_code, payload))
+
+    def _session_factory() -> _RecordingSession:
+        session = _RecordingSession(terminal_events=[latest_resume_failed])
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
+    executor = SimpleNamespace(_session_factory=_session_factory)
+
+    await (
+        executor_planning_ops._record_planning_scope_auto_retry_resume_failed_after_runtime_release(  # noqa: SLF001
+            executor,
+            workspace_id="ws_retry",
+            error=RuntimeError("database write failed"),
+        )
+    )
+
+    assert sessions[-1].operations == ["event-scan"]
+    assert events == []
 
 
 @pytest.mark.unit

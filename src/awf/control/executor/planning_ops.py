@@ -609,10 +609,13 @@ async def _record_planning_scope_auto_retry_resume_failed_after_runtime_release(
         workspace = await repo.get_for_update(workspace_id)
         if workspace is None:
             return
-        if not await _has_pending_terminal_release_planning_scope_auto_retry(
+        latest_event = await _latest_planning_scope_auto_retry_terminal_release_event(
             session,
             workspace_id,
-        ):
+        )
+        if not _planning_scope_auto_retry_event_is_pending_terminal_release(latest_event):
+            return
+        if _planning_scope_auto_retry_event_is_resume_failed(latest_event):
             return
         await repo.add_event(
             workspace,
@@ -769,14 +772,7 @@ async def _has_pending_terminal_release_planning_scope_auto_retry(
         session,
         workspace_id,
     )
-    if event is None:
-        return False
-    event_type = getattr(event, "event_type", None)
-    payload = _planning_scope_auto_retry_payload(event)
-    return bool(
-        event_type in _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES
-        and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
-    )
+    return _planning_scope_auto_retry_event_is_pending_terminal_release(event)
 
 
 async def _latest_planning_scope_auto_retry_is_retry_requested(
@@ -809,6 +805,30 @@ def _planning_scope_auto_retry_event_is_blocked_for_reason(
     return (
         getattr(event, "event_type", None) == _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE
         and getattr(event, "reason_code", None) == reason_code
+        and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
+    )
+
+
+def _planning_scope_auto_retry_event_is_resume_failed(event: Any | None) -> bool:
+    if event is None:
+        return False
+    payload = _planning_scope_auto_retry_payload(event)
+    return (
+        getattr(event, "event_type", None) == _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_EVENT_TYPE
+        and getattr(event, "reason_code", None)
+        == _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE
+        and payload.get("source_reason_code") == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+        and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
+    )
+
+
+def _planning_scope_auto_retry_event_is_pending_terminal_release(event: Any | None) -> bool:
+    if event is None:
+        return False
+    event_type = getattr(event, "event_type", None)
+    payload = _planning_scope_auto_retry_payload(event)
+    return bool(
+        event_type in _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES
         and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
     )
 

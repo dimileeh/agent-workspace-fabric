@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import subprocess
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,7 +32,7 @@ from awf.control.worker.types import (
     _TerminalRuntimeCandidate,
 )
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
@@ -1295,6 +1295,76 @@ class TestTerminalRuntimeReleasePart003:
             executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE  # noqa: SLF001
             in ranked_event_types
         )
+
+    @pytest.mark.unit
+    async def test_pending_planning_scope_retry_scan_suppresses_same_tick_null_order_manual_retry(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-null-order-manual-retry-wins",
+            WorkspaceStatus.failed,
+        )
+        same_tick = datetime(2026, 1, 1, tzinfo=UTC)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+                payload={"cleanup": WorkspaceCleanupResult.skipped().to_dict()},
+            )
+            s.add(
+                WorkspaceEvent(
+                    id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+                    workspace_id=workspace_id,
+                    event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,  # noqa: SLF001
+                    reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,  # noqa: SLF001
+                    payload={
+                        "source_reason_code": (
+                            executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION
+                        ),
+                        "retry_after": "terminal_runtime_released",
+                    },
+                    event_order=None,
+                    occurred_at=same_tick,
+                )
+            )
+            s.add(
+                WorkspaceEvent(
+                    id="00000000-0000-0000-0000-000000000001",
+                    workspace_id=workspace_id,
+                    event_type="workspace.retry_requested",
+                    reason_code="RETRY_REQUESTED",
+                    payload={
+                        "source_workspace_id": workspace_id,
+                        "new_workspace_id": "ws_retry_manual",
+                        "attempt_number": 2,
+                    },
+                    event_order=None,
+                    occurred_at=same_tick,
+                )
+            )
+            await s.commit()
+
+        worker = SimpleNamespace(
+            _config=WorkerConfig(),
+            _session_factory=session_factory,
+            _log_transient_db_retry=lambda *_args: None,
+        )
+
+        candidates = await (
+            worker_cleanup._list_terminal_released_pending_planning_scope_auto_retry_candidates(
+                worker,
+            )
+        )
+
+        assert candidates == []
 
     @pytest.mark.unit
     async def test_default_local_release_scan_resumes_pending_planning_scope_auto_retry_on_local_node(
