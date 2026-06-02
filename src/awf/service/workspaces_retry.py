@@ -463,6 +463,8 @@ async def retry_workspace_row(
         dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
         if dind_mode == "unknown":
             dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.requested_profile)
+        if dind_mode == "unknown":
+            dind_mode = "none"
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,

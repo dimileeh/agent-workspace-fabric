@@ -737,7 +737,16 @@ async def _record_planning_scope_auto_retry_blocked_after_retry_rollback(
     workspace = await repo.get_for_update(workspace_id)
     if workspace is None:
         return
-    if await _latest_planning_scope_auto_retry_is_retry_requested(session, workspace_id):
+    latest_event = await _latest_planning_scope_auto_retry_terminal_release_event(
+        session,
+        workspace_id,
+    )
+    if _planning_scope_auto_retry_event_is_retry_requested(latest_event):
+        return
+    if (
+        reason_code == _PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT_REASON_CODE
+        and _planning_scope_auto_retry_event_is_blocked_for_reason(latest_event, reason_code)
+    ):
         return
     await repo.add_event(
         workspace,
@@ -778,12 +787,30 @@ async def _latest_planning_scope_auto_retry_is_retry_requested(
         session,
         workspace_id,
     )
+    return _planning_scope_auto_retry_event_is_retry_requested(event)
+
+
+def _planning_scope_auto_retry_event_is_retry_requested(event: Any | None) -> bool:
     if event is None:
         return False
     return getattr(event, "event_type", None) in {
         _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
         _PLANNING_SCOPE_AUTO_RETRY_REQUESTED_EVENT_TYPE,
     }
+
+
+def _planning_scope_auto_retry_event_is_blocked_for_reason(
+    event: Any | None,
+    reason_code: str,
+) -> bool:
+    if event is None:
+        return False
+    payload = _planning_scope_auto_retry_payload(event)
+    return (
+        getattr(event, "event_type", None) == _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE
+        and getattr(event, "reason_code", None) == reason_code
+        and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
+    )
 
 
 async def _latest_planning_scope_auto_retry_terminal_release_event(

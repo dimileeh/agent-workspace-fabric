@@ -19,7 +19,11 @@ from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceEvent
-from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    QueueDecisionRepository,
+    ResourceReservationRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -941,6 +945,44 @@ async def test_retry_legacy_inline_dind_source_without_resolved_profile_preserve
 
     assert source_reservations == []
     assert retried_reservation.dind_slots == 1
+
+
+async def test_retry_source_without_reservation_or_profiles_defaults_dind_mode_to_none(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.requested_profile = None
+        source.resolved_profile = None
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        assert len(source_reservations) == 1
+        await session.delete(source_reservations[0])
+        await session.commit()
+
+    retry = await _retry_with_preflight_override(service, first.id)
+
+    async with factory() as session:
+        source_reservations = await ResourceReservationRepository(session).list_for_workspace(
+            first.id
+        )
+        retried_reservation = (
+            await ResourceReservationRepository(session).list_for_workspace(retry.new_workspace_id)
+        )[0]
+        retry_decisions = await QueueDecisionRepository(session).list_for_workspace(
+            retry.new_workspace_id
+        )
+
+    assert source_reservations == []
+    assert retried_reservation.dind_slots == 0
+    assert retry_decisions[0].resource_summary["dind_slots"] == 0
+    assert retry_decisions[0].resource_summary["dind_mode"] == "none"
 
 
 @pytest.mark.unit
