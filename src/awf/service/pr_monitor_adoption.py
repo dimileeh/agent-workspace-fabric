@@ -735,6 +735,14 @@ def _normalize_request_identity(
         try:
             repo, pr_number = parse_github_pull_request_url(request.pr_url)
         except ValueError as exc:
+            # ``parse_github_pull_request_url`` rejects ANY non-github.com host with
+            # a bare ValueError, so a well-formed BitBucket PR URL would surface the
+            # generic input error instead of the contract-documented
+            # FORGE_NOT_SUPPORTED. Re-parse the URL as a forge-aware ``RepoRef`` and
+            # route a recognized-but-unsupported forge through the same gate the
+            # ``repo_url``/``repo_slug`` path uses; a truly unparseable URL falls
+            # through to PR_ADOPTION_INPUT_REQUIRED below.
+            _raise_if_pr_url_forge_unsupported(request.pr_url)
             raise PRMonitorAdoptionError(
                 error_code="PR_ADOPTION_INPUT_REQUIRED",
                 message="Provide a valid GitHub PR URL or repo plus PR number.",
@@ -792,6 +800,25 @@ def _raise_if_forge_unsupported(repo: RepoRef) -> None:
             status_code=422,
             detail={"repo_slug": repo.slug(), "forge": repo.forge},
         ) from exc
+
+
+def _raise_if_pr_url_forge_unsupported(pr_url: str) -> None:
+    """Surface FORGE_NOT_SUPPORTED for a well-formed PR URL on an unsupported forge.
+
+    ``parse_github_pull_request_url`` only accepts ``github.com`` hosts; every
+    other host raises a bare ``ValueError`` that the caller reads as
+    PR_ADOPTION_INPUT_REQUIRED, so a BitBucket ``pr_url`` would never reach
+    :func:`_raise_if_forge_unsupported`. Re-parse the URL with the forge-aware
+    ``RepoRef.from_url`` (which accepts e.g. ``bitbucket.org``) and route through
+    the same gate, keeping FORGE_NOT_SUPPORTED reachable from the ``pr_url`` branch
+    as the contract documents. A URL that even ``RepoRef.from_url`` cannot parse is
+    genuinely malformed input — return so the caller raises PR_ADOPTION_INPUT_REQUIRED.
+    """
+    try:
+        repo = RepoRef.from_url(pr_url)
+    except ValueError:
+        return
+    _raise_if_forge_unsupported(repo)
 
 
 def _raise_if_repo_identity_conflicts(

@@ -1091,6 +1091,36 @@ class TestPullRequestMonitorAdoptionServicePart002:
         assert fetcher.calls == []
 
     @pytest.mark.unit
+    async def test_bitbucket_pr_url_rejected_with_forge_not_supported(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Regression: ``parse_github_pull_request_url`` rejects any non-github.com
+        # host with a bare ``ValueError`` (read as PR_ADOPTION_INPUT_REQUIRED), so a
+        # BitBucket ``pr_url`` would otherwise never reach the forge gate. The
+        # ``_PR_ADOPTION_ERROR_CODE_CONTRACT`` documents FORGE_NOT_SUPPORTED as
+        # reachable here, so a well-formed BitBucket PR URL must surface it (the
+        # same code as the ``repo_url``/``repo_slug`` path), not the generic input
+        # error — and never fetch metadata against the wrong forge.
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        pr_url="https://bitbucket.org/workspace/repo/pull-requests/42",
+                    )
+                )
+
+            assert await _count(session, Workspace) == 0
+
+        assert excinfo.value.error_code == "FORGE_NOT_SUPPORTED"
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail == {"repo_slug": "workspace/repo", "forge": "bitbucket"}
+        assert "BitBucket forge support is not yet implemented" in excinfo.value.message
+        assert fetcher.calls == []
+
+    @pytest.mark.unit
     async def test_github_pr_url_with_same_slug_bitbucket_repo_url_rejected(
         self,
         factory: async_sessionmaker[AsyncSession],
