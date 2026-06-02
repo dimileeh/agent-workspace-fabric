@@ -38,6 +38,7 @@ async def _make_workspace(
     *,
     status: WorkspaceStatus = WorkspaceStatus.requested,
     task_policy: dict | None = None,
+    requested_profile: dict | None = None,
     resolved_profile: dict | None = None,
     compose_project_name: str | None = None,
     node_id: str | None = None,
@@ -50,6 +51,7 @@ async def _make_workspace(
         agent="codex",
         test_commands=[],
         task_policy=task_policy or {},
+        requested_profile=requested_profile,
         resolved_profile=resolved_profile,
     )
     ws.status = status.value
@@ -1062,6 +1064,39 @@ class TestCrossNodeAndEdgeCases:
         )
         assert len(conflicts) == 1
         assert conflicts[0].host_port == 5432
+        assert conflicts[0].workspace_id == existing_ws.id
+
+    @pytest.mark.asyncio
+    async def test_requested_profile_service_port_conflict_before_resolution(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Requested profile service ports block while resolved_profile is absent."""
+        repo = WorkspaceRepository(session)
+        existing_ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.requested,
+            requested_profile={
+                "name": "legacy-inline-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 15432]],
+                    }
+                ],
+            },
+            resolved_profile=None,
+        )
+
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[15432],
+            excluding_workspace_id=None,
+        )
+
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 15432
         assert conflicts[0].workspace_id == existing_ws.id
 
     @pytest.mark.asyncio

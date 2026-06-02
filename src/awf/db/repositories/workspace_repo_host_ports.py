@@ -230,9 +230,10 @@ async def find_host_port_conflicts(
 
     SCALE CONSTRAINT: This method performs a full-table scan of all
     active and terminal-unreleased workspaces (including their
-    ``task_policy`` and ``resolved_profile`` JSON blobs), then parses
-    ports in Python.  There is no WHERE clause that prunes by port
-    value.  Additionally, for every terminal-unreleased candidate row,
+    ``task_policy``, ``requested_profile``, and ``resolved_profile``
+    JSON blobs), then parses ports in Python.  There is no WHERE clause
+    that prunes by port value.  Additionally, for every
+    terminal-unreleased candidate row,
     ``terminal_runtime_effectively_released_expr`` runs as a correlated
     subquery against ``WorkspaceEvent``, compounding per-row cost when
     many terminal workspaces lack a release event.  As workspace count
@@ -281,7 +282,12 @@ async def find_host_port_conflicts(
     )
 
     host_ports_set = set(host_ports)
-    stmt = select(Workspace.id, Workspace.task_policy, Workspace.resolved_profile).where(
+    stmt = select(
+        Workspace.id,
+        Workspace.task_policy,
+        Workspace.requested_profile,
+        Workspace.resolved_profile,
+    ).where(
         or_(
             Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES),
             and_(
@@ -339,8 +345,10 @@ async def find_host_port_conflicts(
                     seen.add(key)
                     conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
 
-        resolved_profile = row.resolved_profile
-        for hp in host_ports_from_resolved_profile(resolved_profile):
+        profile = row.resolved_profile
+        if profile is None:
+            profile = row.requested_profile
+        for hp in host_ports_from_resolved_profile(profile):
             if hp in host_ports_set:
                 key = (row.id, hp)
                 if key not in seen:
