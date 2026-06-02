@@ -333,6 +333,30 @@ async def test_release_terminal_runtime_candidate_handles_missing_cleaner() -> N
 
 
 @pytest.mark.unit
+async def test_release_terminal_runtime_resources_skips_without_runtime_cleaner() -> None:
+    session_factory = _ExplodingSessionFactory()
+
+    async def _unexpected_list_candidates(*, limit: int | None = None) -> list[object]:
+        raise AssertionError(f"candidate list should not run for limit {limit}")
+
+    async def _unexpected_resume_pending(*, limit: int | None = None) -> None:
+        raise AssertionError(f"retry resume should not run for limit {limit}")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=None,
+        _config=SimpleNamespace(terminal_runtime_release_max_per_scan=5),
+        _session_factory=session_factory,
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_unexpected_resume_pending,
+        _list_terminal_runtime_candidates=_unexpected_list_candidates,
+        _release_terminal_runtime_for_candidate=lambda _candidate: None,
+    )
+
+    await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+
+    assert session_factory.calls == 0
+
+
+@pytest.mark.unit
 async def test_release_terminal_runtime_candidate_records_cleanup_raise_and_swallows_record_error() -> (
     None
 ):

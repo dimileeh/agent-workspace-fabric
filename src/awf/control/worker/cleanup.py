@@ -155,37 +155,38 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
     limit = self._config.terminal_runtime_release_max_per_scan
     if limit is not None and limit <= 0:
         return
+    if self._runtime_cleaner is None:
+        return
 
     release_errors: list[Exception] = []
-    if self._runtime_cleaner is not None:
-        candidates = await self._list_terminal_runtime_candidates(limit=limit)
-        for candidate in candidates:
-            try:
-                await self._release_terminal_runtime_for_candidate(candidate)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if _worker_exception_is_transient_db_connection(exc):
-                    _log.warning(
-                        "worker.terminal_runtime_release_candidate_db_connection_closed",
-                        workspace_id=candidate.workspace_id,
-                        status=candidate.status.value,
-                        compose_project_name=candidate.compose_project_name,
-                        reason_code=DB_CONNECTION_CLOSED_REASON,
-                        error_type=type(exc).__name__,
-                        error=str(exc)[:240],
-                    )
-                else:
-                    _log.exception(
-                        "worker.terminal_runtime_release_candidate_failed",
-                        workspace_id=candidate.workspace_id,
-                        status=candidate.status.value,
-                        compose_project_name=candidate.compose_project_name,
-                        reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
-                        error_type=type(exc).__name__,
-                        error=str(exc)[:240],
-                    )
-                release_errors.append(exc)
+    candidates = await self._list_terminal_runtime_candidates(limit=limit)
+    for candidate in candidates:
+        try:
+            await self._release_terminal_runtime_for_candidate(candidate)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if _worker_exception_is_transient_db_connection(exc):
+                _log.warning(
+                    "worker.terminal_runtime_release_candidate_db_connection_closed",
+                    workspace_id=candidate.workspace_id,
+                    status=candidate.status.value,
+                    compose_project_name=candidate.compose_project_name,
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+            else:
+                _log.exception(
+                    "worker.terminal_runtime_release_candidate_failed",
+                    workspace_id=candidate.workspace_id,
+                    status=candidate.status.value,
+                    compose_project_name=candidate.compose_project_name,
+                    reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+            release_errors.append(exc)
     try:
         await self._resume_pending_planning_scope_auto_retries_after_terminal_release(limit=limit)
     except asyncio.CancelledError:
