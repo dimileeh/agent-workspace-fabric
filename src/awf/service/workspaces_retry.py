@@ -440,7 +440,7 @@ async def retry_workspace_row(
     # the retried workspace would lack a node_id, breaking admission checks
     # and scheduler scoring. When source_reservation is None, disk defaults to
     # no reservation cost, but DinD demand must still come from the stored
-    # resolved profile because worker capacity checks treat an existing
+    # profile snapshots because worker capacity checks treat an existing
     # ResourceReservation as authoritative.
     if source_reservation is not None:
         retry_reservation = workspaces.ResourceReservationPlan(
@@ -456,6 +456,8 @@ async def retry_workspace_row(
         )
     else:
         dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
+        if dind_mode == "unknown":
+            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.requested_profile)
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
