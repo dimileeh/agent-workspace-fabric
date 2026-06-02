@@ -13,11 +13,12 @@ from awf.common.owned_paths import (
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
 )
-from awf.db.models import ResourceReservation, Workspace
+from awf.db.models import ResourceReservation, Workspace, WorkspaceEvent
 from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     HOST_PORT_CONFLICT_STATUSES,
     HOST_PORT_TERMINAL_RELEASE_STATUSES,
+    PRE_LAUNCH_FAILURE_EVENT_TYPE,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
@@ -201,9 +202,12 @@ async def find_host_port_conflicts(
     conflict when their runtime metadata or legacy row shape means they
     may still own a Docker Compose project and their runtime has not
     been effectively released yet.  Modern workspaces that fail before
-    Compose launch keep null compose metadata but still carry node or
-    reservation attribution, so they do not block port reuse without a
-    release event.
+    Compose launch keep null compose metadata, but they need durable
+    ``workspace.pre_launch_failed`` evidence before the scan treats their
+    declared host ports as reusable.  A reservation or node assignment
+    alone does not prove Compose never launched; upgraded legacy launch
+    failures may have that attribution while still leaking the default
+    ``awf_<workspace_id>`` runtime.
 
     When *node_id* is provided, only workspaces on that node are
     considered.  For claimed workspaces, ``Workspace.node_id`` is used
@@ -249,13 +253,14 @@ async def find_host_port_conflicts(
     all (legacy rows created before the provisioner started stamping
     ``node_id`` and before the reservation system existed) are
     included via a fallback clause that treats such null-node rows as
-    potential conflicts on every node.  This prevents an upgraded
-    local install from missing a legacy Docker stack that still owns
-    a host port.  In a true multi-node deployment this may produce
-    false positives for legacy rows whose actual node cannot be
-    determined; a node-ownership claim field (e.g.  a
-    ``claimed_node_id`` column on the workspace) would allow
-    precise attribution.
+    potential conflicts on every node.  Reserved legacy null-runtime
+    rows use their latest reservation node instead.  This prevents an
+    upgraded local install from missing a legacy Docker stack that
+    still owns a host port.  In a true multi-node deployment the
+    no-reservation fallback may produce false positives for legacy rows
+    whose actual node cannot be determined; a node-ownership claim
+    field (e.g.  a ``claimed_node_id`` column on the workspace) would
+    allow precise attribution.
     """
     if not host_ports:
         return []
@@ -269,16 +274,29 @@ async def find_host_port_conflicts(
         .correlate(Workspace)
         .exists()
     )
-    legacy_null_runtime_metadata = and_(
+    pre_launch_failure_exists = (
+        select(WorkspaceEvent.id)
+        .where(WorkspaceEvent.workspace_id == Workspace.id)
+        .where(WorkspaceEvent.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE)
+        .correlate(Workspace)
+        .exists()
+    )
+    null_runtime_metadata = and_(
         Workspace.compose_project_name.is_(None),
         Workspace.compose_file_path.is_(None),
-        Workspace.node_id.is_(None),
-        ~resource_reservation_exists,
+    )
+    terminal_null_runtime_may_hold_ports = and_(
+        null_runtime_metadata,
+        ~pre_launch_failure_exists,
+        or_(
+            resource_reservation_exists,
+            Workspace.node_id.is_(None),
+        ),
     )
     terminal_runtime_may_hold_ports = or_(
         Workspace.compose_project_name.isnot(None),
         Workspace.compose_file_path.isnot(None),
-        legacy_null_runtime_metadata,
+        terminal_null_runtime_may_hold_ports,
     )
 
     host_ports_set = set(host_ports)

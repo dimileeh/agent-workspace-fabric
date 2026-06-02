@@ -20,6 +20,10 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import (
+    PRE_LAUNCH_FAILURE_EVENT_TYPE,
+    PRE_LAUNCH_FAILURE_REASON_CODE,
+)
 from tests.postgres import postgres_test_session
 
 _H2 = "git@github.com:example/hostport.git"
@@ -61,6 +65,44 @@ async def _make_workspace(
         ws.compose_project_name = compose_project_name
     await session.commit()
     return ws
+
+
+async def _reserve_workspace_node(
+    session: AsyncSession,
+    workspace: Workspace,
+    *,
+    node_id: str = "node-a",
+    release: bool = False,
+) -> None:
+    task = await TaskRepository(session).create_or_get(
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        title=workspace.task_title,
+        prompt=workspace.task_prompt,
+        external_id=None,
+        idempotency_key=f"hostport-reservation:{workspace.id}",
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=workspace,
+    )
+    reservations = ResourceReservationRepository(session)
+    await reservations.create(
+        workspace_id=workspace.id,
+        attempt_id=attempt.id,
+        node_id=node_id,
+        steady_cpu=1.0,
+        steady_memory_gb=1.0,
+        peak_cpu=2.0,
+        peak_memory_gb=2.0,
+        disk_mb=512,
+        phase="active",
+    )
+    if release:
+        await reservations.release_active_for_workspace(workspace.id)
+    await session.commit()
 
 
 class TestFindHostPortConflicts:
@@ -1411,6 +1453,103 @@ class TestCrossNodeAndEdgeCases:
             (8080, ws.id),
             (15432, ws.id),
         ]
+
+    @pytest.mark.asyncio
+    async def test_reserved_legacy_terminal_null_runtime_metadata_blocks_declared_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A reservation does not prove a null-compose terminal row never launched.
+
+        Upgraded legacy failures may have a resource reservation from the create
+        path while still leaking the default ``awf_<workspace_id>`` Compose
+        project after launch. Their declared host ports must block admission on
+        the reserved node until cleanup records terminal-runtime release.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            resolved_profile={
+                "name": "reserved-legacy-null-runtime-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 15432]],
+                    }
+                ],
+            },
+        )
+        ws.node_id = None
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await _reserve_workspace_node(session, ws, node_id="node-a", release=True)
+
+        conflicts_a = await repo.find_host_port_conflicts(
+            host_ports=[8080, 15432],
+            excluding_workspace_id=None,
+            node_id="node-a",
+        )
+        assert sorted((conflict.host_port, conflict.workspace_id) for conflict in conflicts_a) == [
+            (8080, ws.id),
+            (15432, ws.id),
+        ]
+
+        conflicts_b = await repo.find_host_port_conflicts(
+            host_ports=[8080, 15432],
+            excluding_workspace_id=None,
+            node_id="node-b",
+        )
+        assert conflicts_b == []
+
+    @pytest.mark.asyncio
+    async def test_pre_launch_reserved_null_runtime_metadata_does_not_block_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Explicit pre-launch evidence lets reserved null-compose rows reuse ports."""
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            node_id="node-a",
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.add_event(
+            ws,
+            event_type=PRE_LAUNCH_FAILURE_EVENT_TYPE,
+            reason_code=PRE_LAUNCH_FAILURE_REASON_CODE,
+        )
+        await _reserve_workspace_node(session, ws, node_id="node-a")
+
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+            node_id="node-a",
+        )
+        assert conflicts == []
 
     @pytest.mark.asyncio
     async def test_compose_project_name_null_invariant_distinguishes_port_holders(
