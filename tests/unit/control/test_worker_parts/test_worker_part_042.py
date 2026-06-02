@@ -22,10 +22,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.executor import planning_ops as executor_planning_ops
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
+from awf.control.worker import cleanup as worker_cleanup
 from awf.control.worker.types import (
     _TerminalRuntimeCandidate,
 )
@@ -1065,6 +1067,68 @@ class TestTerminalRuntimeReleasePart003:
                 event_type="workspace.terminal_runtime_released",
             )
         assert events == []
+
+    @pytest.mark.unit
+    async def test_release_scan_resumes_pending_planning_scope_auto_retry_after_recorded_release(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-resume-after-failure",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+                payload={"cleanup": WorkspaceCleanupResult.skipped().to_dict()},
+            )
+            await repo.add_event(
+                workspace,
+                event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,  # noqa: SLF001
+                reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,  # noqa: SLF001
+                payload={
+                    "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                    "retry_after": "terminal_runtime_released",
+                },
+            )
+            await s.commit()
+
+        resumed: list[str] = []
+
+        async def _resume(_self: object, *, workspace_id: str) -> None:
+            resumed.append(workspace_id)
+
+        monkeypatch.setattr(
+            worker_cleanup,
+            "_resume_blocked_planning_scope_auto_retry_after_runtime_release",
+            _resume,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert resumed == [workspace_id]
+        assert cleaner.calls == []
 
     @pytest.mark.unit
     async def test_release_bounds_work_per_scan_and_drains_backlog_across_scans(

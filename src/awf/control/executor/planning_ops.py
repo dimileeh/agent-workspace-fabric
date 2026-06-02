@@ -101,12 +101,16 @@ from awf.service.workspaces import (
 _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE = "workspace.planning_scope_auto_retry_blocked"
 _PLANNING_SCOPE_AUTO_RETRY_FAILED_EVENT_TYPE = "workspace.planning_scope_auto_retry_failed"
 _PLANNING_SCOPE_AUTO_RETRY_REQUESTED_EVENT_TYPE = "workspace.planning_scope_auto_retry_requested"
+_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_EVENT_TYPE = (
+    "workspace.planning_scope_auto_retry_resume_failed"
+)
 _PLANNING_SCOPE_AUTO_RETRY_SKIPPED_EVENT_TYPE = "workspace.planning_scope_auto_retry_skipped"
 _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE = (
     "PLANNING_SCOPE_AUTO_RETRY_SOURCE_RUNTIME_NOT_RELEASED"
 )
 _PLANNING_SCOPE_AUTO_RETRY_FAILED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_FAILED"
 _PLANNING_SCOPE_AUTO_RETRY_REQUESTED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_REQUESTED"
+_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED"
 _PLANNING_SCOPE_AUTO_RETRY_SKIPPED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_ALREADY_RETRIED"
 _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER = "terminal_runtime_released"
 _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE = "workspace.retry_requested"
@@ -115,8 +119,15 @@ _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS = frozenset(
         _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,
         _PLANNING_SCOPE_AUTO_RETRY_FAILED_EVENT_TYPE,
         _PLANNING_SCOPE_AUTO_RETRY_REQUESTED_EVENT_TYPE,
+        _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_EVENT_TYPE,
         _PLANNING_SCOPE_AUTO_RETRY_SKIPPED_EVENT_TYPE,
         _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
+    }
+)
+_PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES = frozenset(
+    {
+        _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,
+        _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_EVENT_TYPE,
     }
 )
 _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_SCAN_LIMIT = 100
@@ -583,6 +594,37 @@ async def _resume_blocked_planning_scope_auto_retry_after_runtime_release(
         )
 
 
+async def _record_planning_scope_auto_retry_resume_failed_after_runtime_release(
+    self: Any,
+    *,
+    workspace_id: str,
+    error: Exception,
+) -> None:
+    """Record durable evidence that runtime release happened but retry resume failed."""
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get_for_update(workspace_id)
+        if workspace is None:
+            return
+        if not await _has_pending_terminal_release_planning_scope_auto_retry(
+            session,
+            workspace_id,
+        ):
+            return
+        await repo.add_event(
+            workspace,
+            event_type=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_EVENT_TYPE,
+            reason_code=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+            payload={
+                "source_reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                "retry_after": _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER,
+                "error_type": type(error).__name__,
+                "error": str(error)[:2000],
+            },
+        )
+        await session.commit()
+
+
 async def _request_planning_scope_auto_retry(
     session: Any,
     *,
@@ -695,8 +737,9 @@ async def _has_pending_terminal_release_planning_scope_auto_retry(
             _planning_scope_auto_retry_payload_matches(payload)
         ):
             return False
-        if event_type == _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE and (
-            _planning_scope_auto_retry_payload_matches(payload)
+        if (
+            event_type in _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES
+            and _planning_scope_auto_retry_payload_matches(payload)
             and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
         ):
             return True

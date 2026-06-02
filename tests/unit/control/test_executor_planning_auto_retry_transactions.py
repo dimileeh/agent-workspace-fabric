@@ -346,6 +346,133 @@ async def test_planning_scope_auto_retry_pending_check_requires_latest_blocked_e
 
 
 @pytest.mark.unit
+async def test_planning_scope_auto_retry_pending_check_treats_resume_failed_as_unresolved() -> None:
+    source_reason = executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION
+
+    class _ExecuteResult:
+        def __init__(self, events: list[object]) -> None:
+            self._events = events
+
+        def scalars(self) -> _ExecuteResult:
+            return self
+
+        def __iter__(self) -> object:
+            return iter(self._events)
+
+    class _EventSession:
+        def __init__(self, events: list[object]) -> None:
+            self._events = events
+
+        async def execute(self, _stmt: object) -> _ExecuteResult:
+            return _ExecuteResult(self._events)
+
+    def _event(event_type: str, payload: dict[str, object]) -> object:
+        return SimpleNamespace(event_type=event_type, payload=payload)
+
+    resume_failed = _event(
+        executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_EVENT_TYPE,  # noqa: SLF001
+        {
+            "source_reason_code": source_reason,
+            "retry_after": "terminal_runtime_released",
+        },
+    )
+    requested = _event(
+        "workspace.planning_scope_auto_retry_requested",
+        {
+            "source_reason_code": source_reason,
+        },
+    )
+
+    assert (
+        await executor_planning_ops._has_pending_terminal_release_planning_scope_auto_retry(  # noqa: SLF001
+            _EventSession([resume_failed]),
+            "ws_retry",
+        )
+        is True
+    )
+    assert (
+        await executor_planning_ops._has_pending_terminal_release_planning_scope_auto_retry(  # noqa: SLF001
+            _EventSession([requested, resume_failed]),
+            "ws_retry",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_planning_scope_auto_retry_resume_failure_records_recoverable_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[_RecordingSession] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class _WorkspaceRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get_for_update(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_retry"
+            return SimpleNamespace(id=workspace_id)
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            assert isinstance(self._session, _RecordingSession)
+            self._session.operations.append(f"event:{event_type}")
+            events.append((event_type, reason_code, payload))
+
+    def _session_factory() -> _RecordingSession:
+        session = _RecordingSession()
+        sessions.append(session)
+        return session
+
+    async def _has_pending_block(session: object, workspace_id: str) -> bool:
+        assert workspace_id == "ws_retry"
+        assert isinstance(session, _RecordingSession)
+        session.operations.append("pending-block-check")
+        return True
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        executor_planning_ops,
+        "_has_pending_terminal_release_planning_scope_auto_retry",
+        _has_pending_block,
+    )
+    executor = SimpleNamespace(_session_factory=_session_factory)
+
+    await (
+        executor_planning_ops._record_planning_scope_auto_retry_resume_failed_after_runtime_release(  # noqa: SLF001
+            executor,
+            workspace_id="ws_retry",
+            error=RuntimeError("database write failed"),
+        )
+    )
+
+    assert sessions[-1].operations == [
+        "pending-block-check",
+        "event:workspace.planning_scope_auto_retry_resume_failed",
+        "commit",
+    ]
+    assert events == [
+        (
+            "workspace.planning_scope_auto_retry_resume_failed",
+            "PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED",
+            {
+                "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                "retry_after": "terminal_runtime_released",
+                "error_type": "RuntimeError",
+                "error": "database write failed",
+            },
+        )
+    ]
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_release_event_triggers_blocked_planning_scope_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -391,6 +518,7 @@ async def test_terminal_runtime_release_ignores_blocked_planning_scope_resume_fa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     warnings: list[tuple[str, dict[str, object]]] = []
+    recorded_failures: list[tuple[str, str]] = []
 
     class _WorkerLog:
         def info(self, *_args: object, **_kwargs: object) -> None:
@@ -406,6 +534,14 @@ async def test_terminal_runtime_release_ignores_blocked_planning_scope_resume_fa
         assert workspace_id == "ws_retry"
         raise RuntimeError("retry resume database write failed")
 
+    async def _record_resume_failed(
+        _self: object,
+        *,
+        workspace_id: str,
+        error: Exception,
+    ) -> None:
+        recorded_failures.append((workspace_id, str(error)))
+
     monkeypatch.setattr(
         worker_cleanup,
         "run_db_operation_with_retry",
@@ -415,6 +551,11 @@ async def test_terminal_runtime_release_ignores_blocked_planning_scope_resume_fa
         worker_cleanup,
         "_resume_blocked_planning_scope_auto_retry_after_runtime_release",
         _resume,
+    )
+    monkeypatch.setattr(
+        worker_cleanup,
+        "_record_planning_scope_auto_retry_resume_failed_after_runtime_release",
+        _record_resume_failed,
     )
     monkeypatch.setattr(worker_cleanup, "_log", _WorkerLog())
     worker = SimpleNamespace(
@@ -445,4 +586,7 @@ async def test_terminal_runtime_release_ignores_blocked_planning_scope_resume_fa
                 "error": "retry resume database write failed",
             },
         )
+    ]
+    assert recorded_failures == [
+        ("ws_retry", "retry resume database write failed"),
     ]

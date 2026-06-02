@@ -267,9 +267,13 @@ async def test_release_terminal_runtime_resources_propagates_single_candidate_er
     async def _release(_candidate: object) -> None:
         raise RuntimeError("cleanup failed")
 
+    async def _resume_pending(*, limit: int | None = None) -> None:
+        assert limit == 5
+
     worker = SimpleNamespace(
         _runtime_cleaner=object(),
         _config=SimpleNamespace(terminal_runtime_release_max_per_scan=5),
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume_pending,
         _list_terminal_runtime_candidates=_candidates,
         _release_terminal_runtime_for_candidate=_release,
     )
@@ -296,9 +300,13 @@ async def test_release_terminal_runtime_resources_groups_multiple_candidate_erro
     async def _release(candidate: object) -> None:
         raise RuntimeError(f"cleanup failed for {candidate.workspace_id}")  # type: ignore[attr-defined]
 
+    async def _resume_pending(*, limit: int | None = None) -> None:
+        assert limit == 10
+
     worker = SimpleNamespace(
         _runtime_cleaner=object(),
         _config=SimpleNamespace(terminal_runtime_release_max_per_scan=10),
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume_pending,
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=_release,
     )

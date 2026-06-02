@@ -22,6 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from awf.control.executor.planning_ops import (
+    _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES,
+    _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+    _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS,
+    _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER,
+    _record_planning_scope_auto_retry_resume_failed_after_runtime_release,
     _resume_blocked_planning_scope_auto_retry_after_runtime_release,
 )
 from awf.control.worker.constants import (
@@ -54,6 +59,7 @@ from awf.db.session import (
     session_scope,
 )
 from awf.node.cleanup import WorkspaceCleanupResult
+from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION
 from awf.service.failure_causality import (
     attach_primary_failure,
     load_primary_failure_snapshot,
@@ -140,6 +146,9 @@ async def _maybe_release_terminal_runtime(self: Any) -> None:
 
 async def _release_terminal_runtime_resources(self: Any) -> None:
     """Run the terminal-runtime cleaner for all eligible candidates, raising on first failure."""
+    await self._resume_pending_planning_scope_auto_retries_after_terminal_release(
+        limit=self._config.terminal_runtime_release_max_per_scan,
+    )
     if self._runtime_cleaner is None:
         return
     candidates = await self._list_terminal_runtime_candidates(
@@ -180,6 +189,123 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
             "terminal runtime release failed",
             release_errors,
         )
+
+
+async def _resume_pending_planning_scope_auto_retries_after_terminal_release(
+    self: Any,
+    *,
+    limit: int | None = None,
+) -> None:
+    candidates = await self._list_terminal_released_pending_planning_scope_auto_retry_candidates(
+        limit=limit,
+    )
+    for candidate in candidates:
+        try:
+            await _resume_blocked_planning_scope_auto_retry_after_runtime_release(
+                self,
+                workspace_id=candidate.workspace_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await _handle_planning_scope_auto_retry_resume_failure(
+                self,
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                compose_project_name=candidate.compose_project_name,
+                exc=exc,
+            )
+
+
+async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
+    self: Any,
+    *,
+    limit: int | None = None,
+) -> list[_TerminalRuntimeCandidate]:
+    if limit is not None and limit <= 0:
+        return []
+    latest_planning_event = (
+        select(
+            WorkspaceEvent.workspace_id.label("workspace_id"),
+            WorkspaceEvent.event_type.label("event_type"),
+            WorkspaceEvent.payload["retry_after"].as_string().label("retry_after"),
+            func.row_number()
+            .over(
+                partition_by=WorkspaceEvent.workspace_id,
+                order_by=(
+                    WorkspaceEvent.occurred_at.desc(),
+                    WorkspaceEvent.event_order.desc().nullslast(),
+                    WorkspaceEvent.id.desc(),
+                ),
+            )
+            .label("event_rank"),
+        )
+        .where(
+            WorkspaceEvent.event_type.in_(tuple(_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS))
+        )
+        .where(
+            WorkspaceEvent.payload["source_reason_code"].as_string()
+            == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+        )
+        .subquery()
+    )
+    effectively_released = terminal_runtime_effectively_released_expr(
+        correlated_to=Workspace,
+    )
+    terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
+    stmt = (
+        select(
+            Workspace.id,
+            Workspace.status,
+            Workspace.repo_url,
+            Workspace.compose_project_name,
+            Workspace.compose_file_path,
+        )
+        .join(latest_planning_event, latest_planning_event.c.workspace_id == Workspace.id)
+        .where(latest_planning_event.c.event_rank == 1)
+        .where(
+            latest_planning_event.c.event_type.in_(
+                tuple(_PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES)
+            )
+        )
+        .where(latest_planning_event.c.retry_after == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER)
+        .where(Workspace.status.in_(terminal_status_values))
+        .where(
+            or_(
+                Workspace.node_id == self._config.node_id,
+                Workspace.node_id.is_(None),
+            )
+        )
+        .where(effectively_released)
+        .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    async def _operation(session: AsyncSession) -> list[Any]:
+        result = await session.execute(stmt)
+        return list(result.all())
+
+    rows = await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        on_retry=self._log_transient_db_retry,
+    )
+
+    candidates: list[_TerminalRuntimeCandidate] = []
+    for workspace_id, status_val, repo_url, compose_project_name, compose_file_path in rows:
+        if not repo_url:
+            continue
+        candidates.append(
+            _TerminalRuntimeCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus(status_val),
+                repo_url=repo_url,
+                compose_project_name=compose_project_name,
+                compose_file_path=compose_file_path,
+            )
+        )
+    return candidates
 
 
 async def _list_terminal_runtime_candidates(
@@ -422,14 +548,52 @@ async def _record_terminal_runtime_released(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        _log.warning(
-            "worker.planning_scope_auto_retry_resume_after_runtime_release_failed",
+        await _handle_planning_scope_auto_retry_resume_failure(
+            self,
             workspace_id=candidate.workspace_id,
             status=candidate.status.value,
             compose_project_name=candidate.compose_project_name,
-            reason_code="PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED",
-            error_type=type(exc).__name__,
-            error=str(exc)[:240],
+            exc=exc,
+        )
+
+
+async def _handle_planning_scope_auto_retry_resume_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    status: str | None,
+    compose_project_name: str | None,
+    exc: Exception,
+) -> None:
+    log_fields: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "reason_code": _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+        "error_type": type(exc).__name__,
+        "error": str(exc)[:240],
+    }
+    if status is not None:
+        log_fields["status"] = status
+    if compose_project_name is not None:
+        log_fields["compose_project_name"] = compose_project_name
+    _log.warning(
+        "worker.planning_scope_auto_retry_resume_after_runtime_release_failed",
+        **log_fields,
+    )
+    try:
+        await _record_planning_scope_auto_retry_resume_failed_after_runtime_release(
+            self,
+            workspace_id=workspace_id,
+            error=exc,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as record_exc:
+        _log.warning(
+            "worker.planning_scope_auto_retry_resume_failed_event_write_failed",
+            workspace_id=workspace_id,
+            reason_code=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+            error_type=type(record_exc).__name__,
+            error=str(record_exc)[:240],
         )
 
 

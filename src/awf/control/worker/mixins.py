@@ -33,6 +33,12 @@ class WorkerDelegatesMixin:
     _expire_due_secret_leases = _cleanup._expire_due_secret_leases
     _maybe_release_terminal_runtime = _cleanup._maybe_release_terminal_runtime
     _release_terminal_runtime_resources = _cleanup._release_terminal_runtime_resources
+    _resume_pending_planning_scope_auto_retries_after_terminal_release = (
+        _cleanup._resume_pending_planning_scope_auto_retries_after_terminal_release
+    )
+    _list_terminal_released_pending_planning_scope_auto_retry_candidates = (
+        _cleanup._list_terminal_released_pending_planning_scope_auto_retry_candidates
+    )
     _list_terminal_runtime_candidates = _cleanup._list_terminal_runtime_candidates
     _release_terminal_runtime_for_candidate = _cleanup._release_terminal_runtime_for_candidate
     _record_terminal_runtime_released = _cleanup._record_terminal_runtime_released
