@@ -244,6 +244,13 @@ exclude_lines = [
     "raise NotImplementedError",
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
+    # Protocol / abstract method stub bodies written as a bare ``...``. These are
+    # type declarations with no runtime behaviour (the concrete implementation
+    # overrides them), so they are verified by mypy's structural-conformance
+    # checks, not by pytest. Excluding them avoids writing throwaway tests that
+    # call the stub solely to mark the line executed. Matches a line that is
+    # only ``...`` (never ``x = ...`` or ``foo[...]``).
+    '^\s*\.\.\.\s*$',
 ]
 fail_under = 99
 show_missing = true
