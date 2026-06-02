@@ -121,11 +121,13 @@ async def _source_runtime_not_yet_released(
             source_status == WorkspaceStatus.cancelled
             and source.node_id is None
             and not reservations
+            and await _source_cancelled_before_provisioning(session, source.id)
         ):
-            # Cancelled before scheduler/provisioner placement: no compose
-            # metadata, no node, and no reservation means there is no runtime
-            # evidence for cleanup to release. Failed null-runtime rows need
-            # explicit pre-launch provenance before they can retry.
+            # Cancelled before provisioning placement: no compose metadata, no
+            # node, and no reservation history means there is no runtime
+            # evidence for cleanup to release. Cancelled rows that reached
+            # provisioning fall through to the same explicit pre-launch
+            # provenance gate as failed null-runtime rows.
             return False
         # A reservation only proves placement, not that Compose never launched.
         # Upgraded legacy launch failures can have a ResourceReservation while
@@ -135,6 +137,29 @@ async def _source_runtime_not_yet_released(
         # terminal_runtime_released.
         return not await _source_has_pre_launch_failure_event(session, source.id)
     return False
+
+
+async def _source_cancelled_before_provisioning(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    """Return True when the latest cancellation transition came from requested."""
+    stmt = (
+        select(WorkspaceEvent.old_state)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == "workspace.state_changed",
+            WorkspaceEvent.new_state == WorkspaceStatus.cancelled.value,
+        )
+        .order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.event_order.desc().nullslast(),
+            WorkspaceEvent.id.desc(),
+        )
+        .limit(1)
+    )
+    old_state = (await session.execute(stmt)).scalar_one_or_none()
+    return old_state == WorkspaceStatus.requested.value
 
 
 async def _source_has_pre_launch_failure_event(

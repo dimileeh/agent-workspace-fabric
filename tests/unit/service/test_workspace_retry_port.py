@@ -515,6 +515,60 @@ async def test_retry_allows_early_cancelled_source_without_runtime_evidence(
 
 
 @pytest.mark.unit
+async def test_retry_rejects_cancelled_provisioning_null_runtime_source_without_reservation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A legacy cancelled source that reached provisioning needs release evidence."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        ws.node_id = None
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
+        for reservation in await ResourceReservationRepository(session).list_for_workspace(ws.id):
+            await session.delete(reservation)
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason=(
+                    "cancelled provisioning null-runtime source test"
+                ),
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
 async def test_retry_allows_when_source_compose_project_name_is_none(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
