@@ -6,6 +6,7 @@ point is the integration between state transitions and filesystem operations.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -1005,6 +1006,89 @@ class TestOperatorControlRaces:
             ]
             assert len(revoked_events) == 1, (
                 "orphan stop failure must record a terminal_runtime_release_revoked event"
+            )
+
+    @pytest.mark.unit
+    async def test_orphan_stop_timeout_records_false_in_payload(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import patch
+
+        from awf.db.repositories.base import (
+            TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+            TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        )
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            ws.status = WorkspaceStatus.destroyed.value
+            await repo.add_event(
+                ws,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        stop_started = asyncio.Event()
+        never_finish = asyncio.Event()
+
+        async def _mock_stop_project_containers_hangs(
+            compose_project_name: str,
+        ) -> None:
+            assert compose_project_name == f"awf_{ws_id}"
+            stop_started.set()
+            await never_finish.wait()
+
+        monkeypatch.setattr(
+            "awf.node.provisioner._ORPHAN_STOP_TIMEOUT_SECONDS",
+            0.01,
+            raising=False,
+        )
+        with patch(
+            "awf.node.provisioner.stop_project_containers",
+            new=_mock_stop_project_containers_hangs,
+        ):
+            assert await asyncio.wait_for(
+                provisioner._launch_lost_to_terminal_cleanup(ws_id),  # noqa: SLF001
+                timeout=0.5,
+            )
+
+        assert stop_started.is_set()
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            stale_skip_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == "workspace.stale_action_skipped"
+                and e.reason_code == "TERMINAL_CLEANUP_WON_DURING_LAUNCH"
+            ]
+            assert len(stale_skip_events) == 1
+            assert stale_skip_events[0].payload["orphan_containers_stopped"] is False
+            assert "timed out after 0.01s" in stale_skip_events[0].payload["orphan_stop_error"]
+            revoked_events = [
+                e
+                for e in reloaded.events
+                if e.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE
+                and e.reason_code == TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE
+            ]
+            assert len(revoked_events) == 1, (
+                "orphan stop timeout must record a terminal_runtime_release_revoked event"
             )
 
     @pytest.mark.unit

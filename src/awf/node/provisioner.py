@@ -16,6 +16,7 @@ re-raised so the caller can log/alert.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -113,6 +114,9 @@ event, the latest event would remain ``terminal_runtime_released``, falsely
 marking the workspace as released even though orphan containers still hold
 host ports.
 """
+
+_ORPHAN_STOP_TIMEOUT_SECONDS: Final = 30.0
+"""Maximum time to spend stopping orphan containers after launch races cleanup."""
 
 _log = get_logger(__name__)
 
@@ -1309,9 +1313,8 @@ class Provisioner:
         after Docker I/O completes.
 
         Mitigations for pool exhaustion: (1) the DB session is released
-        before Docker I/O; (2) ``stop_project_containers`` should be
-        wrapped with a per-operation timeout by its caller if the
-        pool has a tight size bound; (3) the pool ``max_size`` should
+        before Docker I/O; (2) ``stop_project_containers`` is bounded by
+        ``_ORPHAN_STOP_TIMEOUT_SECONDS``; (3) the pool ``max_size`` should
         account for at most one concurrent orphan-stop per node.
 
         Returns ``True`` when terminal cleanup won and containers were
@@ -1335,9 +1338,23 @@ class Provisioner:
             reason_code="TERMINAL_CLEANUP_WON_DURING_LAUNCH",
         )
         orphan_stopped = True
-        orphan_stop_error = None
+        orphan_stop_error: str | None = None
         try:
-            await stop_project_containers(compose_project)
+            await asyncio.wait_for(
+                stop_project_containers(compose_project),
+                timeout=_ORPHAN_STOP_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            orphan_stopped = False
+            orphan_stop_error = (
+                f"stop_project_containers timed out after {_ORPHAN_STOP_TIMEOUT_SECONDS:g}s"
+            )
+            _log.warning(
+                "provisioner.orphan_container_stop_timeout",
+                workspace_id=workspace_id,
+                reason_code="ORPHAN_STOP_TIMEOUT",
+                timeout_seconds=_ORPHAN_STOP_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
             orphan_stopped = False
             orphan_stop_error = str(exc)
