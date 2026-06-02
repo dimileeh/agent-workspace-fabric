@@ -142,6 +142,28 @@ Sequential — two files but one logical change; trivial. No worktree split need
   - Files: `tests/unit/runtime/test_monitor_prompts.py`, `tests/unit/adapters/test_adapters.py`
   - Verify: full clean-env coverage run stays ≥99%
 
+## Follow-up #4 — coverage-as-you-go discipline (added on PR #360 by request)
+
+Every coverage/TDD mention in the prompts was **reactive** (only when CI is already
+red). Two additions make it **proactive**, while preserving the rule that agents must
+not run the full coverage gate locally:
+
+- **`_AWF_PROMPT_PREAMBLE` rule #7 (`adapters/base.py`)** — cover each behavior you add
+  or change with focused tests (test-first when practical) so total coverage does not
+  drop; reason about which new lines/branches need a test; *but* for genuinely
+  non-behavioral / unreachable / type-only code (e.g. a Protocol stub), add a justified
+  coverage exclusion instead of a hollow test. A line-executing test that asserts
+  nothing is coverage-theater and is rejected.
+- **`_COVERAGE_FAILURE_GUIDANCE` (`monitor_prompts.py`)** — paired the "never `# pragma:
+  no cover` on a live, reachable path" rule with its complement: "when the uncovered
+  code is genuinely non-behavioral/unreachable/type-only, a justified exclusion is the
+  right fix rather than a hollow test." Resolves the exact tension that surfaced in #358.
+
+- [ ] **T5 (P1, human: ~25min / CC: ~3min)** — adapters + runtime — proactive TDD+coverage rule and exclusion-over-theater nuance
+  - Surfaced by: user follow-up — TDD must combine with coverage-thinking; prefer exclusions over pointless tests
+  - Files: `src/awf/adapters/base.py`, `src/awf/runtime/monitor_prompts.py`, both test files
+  - Verify: `pytest tests/unit/runtime/test_monitor_prompts.py tests/unit/adapters/test_adapters.py -q`
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |

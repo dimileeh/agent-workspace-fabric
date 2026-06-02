@@ -64,8 +64,11 @@ _COVERAGE_FAILURE_GUIDANCE = (
     "that assert BEHAVIOR (inputs to outputs or side effects) — never "
     "coverage-theater (tests that only execute lines to move the number), never "
     "weakened assertions, and never `# pragma: no cover` on a live, reachable "
-    "path. The gate is an exact threshold, so a near-miss still fails; prefer one "
-    "meaningful test over many shallow ones.\n"
+    "path. Conversely, when the uncovered code is genuinely non-behavioral, "
+    "unreachable, or type-only (for example a Protocol stub), a justified "
+    "exclusion is the right fix rather than a hollow test. The gate is an exact "
+    "threshold, so a near-miss still fails; prefer one meaningful test over many "
+    "shallow ones.\n"
 )
 
 

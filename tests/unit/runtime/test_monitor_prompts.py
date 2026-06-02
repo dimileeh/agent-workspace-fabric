@@ -961,3 +961,8 @@ class TestReasoningGuidance:
         assert "coverage-theater" in prompt
         assert "# pragma: no cover" in prompt
         assert "exact threshold" in prompt
+        # The exclusion-over-theater nuance: a justified exclusion is correct
+        # for genuinely non-behavioral code, not a hollow test.
+        assert "a justified " in prompt
+        assert "non-behavioral" in prompt
+        assert "Protocol stub" in prompt
