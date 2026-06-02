@@ -41,6 +41,7 @@ from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.git_ops import (
     _git_error_indicates_missing_head_object,
     _git_name_lines,
+    _recover_branch_drift,
 )
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
@@ -630,144 +631,14 @@ async def execute(
 
     try:
         if recovery is None:
-            # ── Branch-drift recovery ──────────────────────────────────
-            # Agent CLIs (Claude Code, Codex) sometimes run
-            # ``git checkout -b <descriptive-name>`` mid-session as part
-            # of "good git hygiene" — they don't know AWF already
-            # created the right branch for them. If they commit on the
-            # drifted branch, ``pr_creator.push_and_open`` pushes the
-            # original (empty) AWF branch to origin and ``gh pr create``
-            # fails with "No commits between development and awf/ws_...".
-            #
-            # Incident 2026-04-24 (T41 Phase 3, ws_9ca6134a): agent
-            # switched to ``awf/t41-phase3-github-app-install-flow``
-            # and committed there. AWF's push of the empty
-            # ``awf/ws_9ca6134a...`` created a no-op PR. Agent's work
-            # stranded in the worktree.
-            #
-            # Recovery: if HEAD's branch diverged, fast-forward the
-            # expected branch to the agent's tip. Both branches share
-            # the same base commit (the worktree was created fresh
-            # from origin/<base>), so this is a safe pointer update.
-            current_branch_r = await _git_in_worktree(["rev-parse", "--abbrev-ref", "HEAD"])
-            # If rev-parse itself failed (corrupted git state, missing
-            # HEAD, etc.) we can't reliably detect drift. Fail loudly
-            # rather than silently skip — a working tree that can't
-            # resolve HEAD is broken enough that continuing to push
-            # would produce nonsense anyway.
-            if not current_branch_r.ok:
-                raise RuntimeError(
-                    "branch drift check: ``git rev-parse --abbrev-ref HEAD`` "
-                    f"failed with exit {current_branch_r.returncode}: "
-                    f"{current_branch_r.stderr!r}"
-                )
-            current_branch = (current_branch_r.stdout or "").strip()
-            if current_branch and current_branch != expected_branch:
-                _log.warning(
-                    "executor.branch_drift_detected",
-                    workspace_id=workspace_id,
-                    current_branch=current_branch,
-                    expected_branch=expected_branch,
-                )
-                agent_head_r = await _git_in_worktree(["rev-parse", "HEAD"])
-                agent_head = (agent_head_r.stdout or "").strip()
-                if not agent_head_r.ok or not agent_head:
-                    raise RuntimeError(
-                        f"branch drift detected (current={current_branch} "
-                        f"expected={expected_branch}) but agent HEAD could not "
-                        f"be resolved: {agent_head_r.stderr!r}"
-                    )
-                # Preserve uncommitted changes. The executor's core
-                # contract is "salvage whatever the agent left on
-                # disk" — including edits not yet committed on the
-                # drifted branch. ``status --porcelain`` with
-                # ``--untracked-files=all`` catches both staged,
-                # unstaged, and untracked files. If any exist, stash
-                # them (with ``-u`` to include untracked) before the
-                # ``switch`` so they don't get lost. Pop after the
-                # fast-forward so they end up on top of the agent's
-                # commits on the expected branch.
-                status_r = await _git_in_worktree(
-                    ["status", "--porcelain=v1", "--untracked-files=all"]
-                )
-                if not status_r.ok:
-                    raise RuntimeError(
-                        f"branch drift recovery: ``git status`` failed: {status_r.stderr!r}"
-                    )
-                has_wip = bool(status_r.stdout.strip())
-                stash_created = False
-                if has_wip:
-                    stash_r = await _git_in_worktree(
-                        [
-                            "stash",
-                            "push",
-                            "--include-untracked",
-                            "--message",
-                            f"awf-drift-recovery-{workspace_id}",
-                        ]
-                    )
-                    if not stash_r.ok:
-                        raise RuntimeError(
-                            f"branch drift recovery: ``git stash push`` failed: "
-                            f"{stash_r.stderr!r} (refusing to switch with dirty "
-                            f"worktree that couldn't be stashed)"
-                        )
-                    stash_created = True
-
-                # Switch to the expected branch. It should exist
-                # locally — AWF created it at worktree-add time.
-                switch_r = await _git_in_worktree(["switch", expected_branch])
-                if not switch_r.ok:
-                    # Best-effort: try to restore stashed WIP so it's
-                    # not silently lost before bailing out.
-                    if stash_created:
-                        await _git_in_worktree(["stash", "pop"])
-                    raise RuntimeError(
-                        f"branch drift recovery: could not switch back to "
-                        f"{expected_branch}: {switch_r.stderr!r}"
-                    )
-                # Fast-forward the expected branch to the agent's tip
-                # using ``merge --ff-only``. The two branches share
-                # the same base (AWF created the worktree fresh from
-                # ``origin/<base>``) and the agent only added commits
-                # on top, so ff must succeed. ``merge --ff-only`` over
-                # ``reset --hard`` because the latter would also wipe
-                # any WIP the user has in the working tree if the
-                # stash step above silently did nothing (e.g. if
-                # ``status`` missed an edge case).
-                merge_r = await _git_in_worktree(["merge", "--ff-only", agent_head])
-                if not merge_r.ok:
-                    if stash_created:
-                        await _git_in_worktree(["stash", "pop"])
-                    raise RuntimeError(
-                        f"branch drift recovery: ``merge --ff-only "
-                        f"{agent_head[:10]}`` failed: {merge_r.stderr!r}"
-                    )
-
-                if stash_created:
-                    pop_r = await _git_in_worktree(["stash", "pop"])
-                    if not pop_r.ok:
-                        # A pop conflict means the agent's WIP and the
-                        # fast-forwarded commits touch the same
-                        # regions. That's a real problem for the
-                        # workspace — the WIP is left in the stash
-                        # under a named entry, but we can't auto-merge
-                        # it. Fail loudly so the operator knows to
-                        # inspect.
-                        raise RuntimeError(
-                            f"branch drift recovery: ``git stash pop`` failed "
-                            f"(WIP conflicts with recovered commits): "
-                            f"{pop_r.stderr!r}"
-                        )
-
-                _log.info(
-                    "executor.branch_drift_recovered",
-                    workspace_id=workspace_id,
-                    recovered_from=current_branch,
-                    recovered_to=expected_branch,
-                    head_sha=agent_head,
-                    wip_stashed=has_wip,
-                )
+            # Branch-drift recovery: fast-forward the expected AWF branch onto
+            # the agent's tip if a coding CLI drifted to a self-named branch
+            # mid-session. See ``git_ops._recover_branch_drift`` for rationale.
+            await _recover_branch_drift(
+                git_in_worktree=_git_in_worktree,
+                workspace_id=workspace_id,
+                expected_branch=expected_branch,
+            )
 
             add_result = await _git_in_worktree(["add", "-A"])
             await self._repair_agent_git_ownership(
