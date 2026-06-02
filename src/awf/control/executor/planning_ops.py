@@ -664,8 +664,12 @@ async def _request_planning_scope_auto_retry(
         rollback = getattr(session, "rollback", None)
         if rollback is not None:
             await rollback()
-        workspace = await repo.get(workspace_id)
+        # The rollback releases retry_workspace_row's row lock; re-lock before
+        # recording a blocked marker so a concurrent retry request can win cleanly.
+        workspace = await repo.get_for_update(workspace_id)
         if workspace is None:
+            return
+        if await _latest_planning_scope_auto_retry_is_retry_requested(session, workspace_id):
             return
         await repo.add_event(
             workspace,
@@ -718,6 +722,40 @@ async def _has_pending_terminal_release_planning_scope_auto_retry(
     session: Any,
     workspace_id: str,
 ) -> bool:
+    event = await _latest_planning_scope_auto_retry_terminal_release_event(
+        session,
+        workspace_id,
+    )
+    if event is None:
+        return False
+    event_type = getattr(event, "event_type", None)
+    payload = _planning_scope_auto_retry_payload(event)
+    return bool(
+        event_type in _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES
+        and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
+    )
+
+
+async def _latest_planning_scope_auto_retry_is_retry_requested(
+    session: Any,
+    workspace_id: str,
+) -> bool:
+    event = await _latest_planning_scope_auto_retry_terminal_release_event(
+        session,
+        workspace_id,
+    )
+    if event is None:
+        return False
+    return getattr(event, "event_type", None) in {
+        _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
+        _PLANNING_SCOPE_AUTO_RETRY_REQUESTED_EVENT_TYPE,
+    }
+
+
+async def _latest_planning_scope_auto_retry_terminal_release_event(
+    session: Any,
+    workspace_id: str,
+) -> Any | None:
     stmt = (
         select(WorkspaceEvent)
         .where(WorkspaceEvent.workspace_id == workspace_id)
@@ -731,23 +769,10 @@ async def _has_pending_terminal_release_planning_scope_auto_retry(
     )
     events = list((await session.execute(stmt)).scalars())
     for event in events:
-        event_type = getattr(event, "event_type", None)
         payload = _planning_scope_auto_retry_payload(event)
-        if event_type == _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE and (
-            _planning_scope_auto_retry_payload_matches(payload)
-        ):
-            return False
-        if (
-            event_type in _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES
-            and _planning_scope_auto_retry_payload_matches(payload)
-            and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
-        ):
-            return True
-        if event_type in _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS and (
-            _planning_scope_auto_retry_payload_matches(payload)
-        ):
-            return False
-    return False
+        if _planning_scope_auto_retry_payload_matches(payload):
+            return event
+    return None
 
 
 def _planning_scope_auto_retry_payload(event: Any) -> Mapping[str, Any]:
