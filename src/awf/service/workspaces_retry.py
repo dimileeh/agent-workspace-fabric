@@ -296,17 +296,22 @@ async def retry_workspace_row(
         )
     )
     # TOCTOU note: source.resolved_profile reflects the profile resolved
-    # when the source workspace was originally provisioned.  If the
-    # repository's auto-resolved profile changed between the source run
-    # and this retry (e.g. .awf.yml was updated), the ports checked here
-    # may not match what the provisioner will actually use.  The
-    # provisioner's _check_auto_resolved_profile_host_ports serves as the
+    # when the source workspace was originally provisioned.  Legacy rows may
+    # still have an inline requested_profile but no resolved_profile snapshot,
+    # so fall back to that requested profile for admission-time source runtime
+    # and conflict checks.  If the repository's auto-resolved profile changed
+    # between the source run and this retry (e.g. .awf.yml was updated), the
+    # ports checked here may not match what the provisioner will actually use.
+    # The provisioner's _check_auto_resolved_profile_host_ports serves as the
     # definitive gate, so a conflict missed here surfaces as an
     # INFRASTRUCTURE_FAILURE inside the provisioner rather than a 409 at
-    # dispatch.  This is an inherent limitation of auto-resolved profiles
-    # at dispatch time.
+    # dispatch.  This is an inherent limitation of auto-resolved profiles at
+    # dispatch time.
+    source_profile_for_port_admission = (
+        source.resolved_profile if source.resolved_profile is not None else source.requested_profile
+    )
     host_ports.extend(
-        workspaces.host_ports_from_resolved_profile(source.resolved_profile),
+        workspaces.host_ports_from_resolved_profile(source_profile_for_port_admission),
     )
     _seen: set[int] = set()
     for _hp in host_ports:

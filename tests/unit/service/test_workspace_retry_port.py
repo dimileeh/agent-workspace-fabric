@@ -588,6 +588,63 @@ async def test_retry_allows_when_no_host_ports_even_if_source_compose_stack_runn
 
 
 @pytest.mark.unit
+async def test_retry_rejects_unreleased_legacy_requested_profile_host_ports(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A legacy inline profile source can have requested_profile ports but no
+    resolved_profile snapshot. Retry admission must still apply the
+    source-runtime release gate for those profile ports."""
+    settings = _settings_with_host_home(tmp_path)
+    payload = _request_with_preflight_override().model_dump(mode="python")
+    payload["workspace"] = {
+        "profile_ref": None,
+        "profile": {
+            "name": "legacy-inline-profile-ports",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "ports": [[5432, 15432]],
+                }
+            ],
+        },
+    }
+    req = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        assert ws.requested_profile is not None
+        assert ws.requested_profile["services"][0]["ports"] == [[5432, 15432]]
+        ws.resolved_profile = None
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="legacy requested-profile port source test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
 async def test_retry_allows_when_target_node_differs_from_source(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
