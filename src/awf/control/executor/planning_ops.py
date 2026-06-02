@@ -769,8 +769,9 @@ async def _latest_planning_scope_auto_retry_terminal_release_event(
     )
     events = list((await session.execute(stmt)).scalars())
     for event in events:
+        event_type = getattr(event, "event_type", None)
         payload = _planning_scope_auto_retry_payload(event)
-        if _planning_scope_auto_retry_payload_matches(payload):
+        if _planning_scope_auto_retry_terminal_release_event_matches(event_type, payload):
             return event
     return None
 
@@ -780,6 +781,15 @@ def _planning_scope_auto_retry_payload(event: Any) -> Mapping[str, Any]:
     if isinstance(payload, Mapping):
         return payload
     return {}
+
+
+def _planning_scope_auto_retry_terminal_release_event_matches(
+    event_type: Any,
+    payload: Mapping[str, Any],
+) -> bool:
+    if event_type == _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE:
+        return True
+    return _planning_scope_auto_retry_payload_matches(payload)
 
 
 def _planning_scope_auto_retry_payload_matches(payload: Mapping[str, Any]) -> bool:

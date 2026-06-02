@@ -26,6 +26,7 @@ from awf.control.executor.planning_ops import (
     _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
     _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS,
     _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER,
+    _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
     _record_planning_scope_auto_retry_resume_failed_after_runtime_release,
     _resume_blocked_planning_scope_auto_retry_after_runtime_release,
 )
@@ -247,8 +248,11 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
             WorkspaceEvent.event_type.in_(tuple(_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS))
         )
         .where(
-            WorkspaceEvent.payload["source_reason_code"].as_string()
-            == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+            or_(
+                WorkspaceEvent.event_type == _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
+                WorkspaceEvent.payload["source_reason_code"].as_string()
+                == AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            )
         )
         .subquery()
     )

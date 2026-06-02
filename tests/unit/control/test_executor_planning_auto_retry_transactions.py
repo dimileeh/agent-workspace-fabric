@@ -295,6 +295,89 @@ async def test_auto_retry_runtime_not_released_skips_blocked_event_after_manual_
 
 
 @pytest.mark.unit
+async def test_auto_retry_runtime_not_released_skips_blocked_event_after_plain_manual_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = SimpleNamespace(
+        event_type="workspace.retry_requested",
+        payload={
+            "source_workspace_id": "ws_retry",
+            "new_workspace_id": "ws_retry_manual",
+            "attempt_number": 2,
+            "provider_readiness_preflight": {},
+        },
+    )
+    session = _RecordingSession(terminal_events=[requested])
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class _WorkspaceRepo:
+        def __init__(self, repo_session: object) -> None:
+            self._session = repo_session
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_retry"
+            session.operations.append("get")
+            return SimpleNamespace(id=workspace_id, task_policy={})
+
+        async def get_for_update(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_retry"
+            session.operations.append("get-for-update")
+            return SimpleNamespace(id=workspace_id, task_policy={})
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            assert self._session is session
+            session.operations.append(f"event:{event_type}")
+            events.append((event_type, reason_code, payload))
+
+    async def _retry_runtime_not_released(
+        retry_session: object,
+        workspace_id: str,
+        **_kwargs: Any,
+    ) -> object:
+        assert retry_session is session
+        assert workspace_id == "ws_retry"
+        session.operations.append("retry")
+        raise WorkspaceRetrySourceRuntimeNotReleasedError(source_workspace_id="ws_retry")
+
+    def _session_factory() -> _RecordingSession:
+        return session
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        executor_planning_ops,
+        "retry_workspace_row",
+        _retry_runtime_not_released,
+    )
+    executor = SimpleNamespace(_session_factory=_session_factory)
+    failure = executor_planning_ops._PlanningRunFailure(  # noqa: SLF001
+        message="scope violation",
+        reason_code=executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    )
+
+    await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+        failure=failure,
+    )
+
+    assert events == []
+    assert session.operations == [
+        "get",
+        "retry",
+        "rollback",
+        "get-for-update",
+        "event-scan",
+    ]
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_release_resumes_blocked_planning_scope_auto_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
