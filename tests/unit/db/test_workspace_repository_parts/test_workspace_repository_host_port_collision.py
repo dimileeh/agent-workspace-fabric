@@ -403,6 +403,70 @@ async def test_has_terminal_runtime_released_event_tied_timestamp_uses_event_ord
     )
 
 
+@pytest.mark.asyncio
+async def test_has_terminal_runtime_released_event_null_event_order_tie_uses_event_id(
+    session: AsyncSession,
+) -> None:
+    """Legacy null event_order ties are broken by newest event id."""
+    from datetime import UTC, datetime
+
+    import sqlalchemy as sa
+    from sqlalchemy.dialects import postgresql
+
+    from awf.db.models import WorkspaceEvent
+    from awf.db.repositories.base import (
+        TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+        has_terminal_runtime_released_event,
+        terminal_runtime_effectively_released_expr,
+    )
+
+    stmt = sa.select(terminal_runtime_effectively_released_expr(workspace_id="ws_tie"))
+    compiled = str(
+        stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "workspace_events.id DESC" in compiled
+
+    repo = WorkspaceRepository(session)
+    ws = await _make_workspace(
+        session,
+        repo,
+        status=WorkspaceStatus.destroyed,
+        task_policy={},
+        compose_project_name="awf_test_null_order_tie",
+    )
+
+    tied_ts = datetime(2026, 5, 31, 12, 0, 0, tzinfo=UTC)
+    session.add_all(
+        [
+            WorkspaceEvent(
+                id="00000000-0000-0000-0000-000000000001",
+                workspace_id=ws.id,
+                event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                event_order=None,
+                occurred_at=tied_ts,
+            ),
+            WorkspaceEvent(
+                id="00000000-0000-0000-0000-000000000002",
+                workspace_id=ws.id,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                event_order=None,
+                occurred_at=tied_ts,
+            ),
+        ]
+    )
+    await session.commit()
+
+    assert await has_terminal_runtime_released_event(session, ws.id) is True, (
+        "release with higher id than revocation at same timestamp and null event_order "
+        "must return True"
+    )
+
+
 class TestCrossNodeAndEdgeCases:
     """Cross-node filtering, terminal release statuses, profile service ports,
     and pre-runtime terminal workspace tests for host-port conflict detection.

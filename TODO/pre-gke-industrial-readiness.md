@@ -1351,6 +1351,11 @@ local open-source AWF Core.
 - [ ] Define Workload Identity and GitHub credential strategy.
 - [ ] Define Kubernetes NetworkPolicy for workspace egress.
 - [ ] Define autoscaling, quota, and cost controls.
+- [ ] Design indexed host-port admission state before high workspace counts:
+  replace the current JSON/Python full-scan conflict detection with either
+  indexed JSONB predicates or a denormalized `host_ports` integer-array field
+  with a GIN index, and add the supporting workspace-event index needed by
+  terminal-runtime release checks.
 - [ ] Define Helm or Kustomize deployment package.
 - [ ] Define production logging, metrics, traces, and alerting.
 - [ ] Decompose monolithic executor, PR monitor runner, worker, and repository

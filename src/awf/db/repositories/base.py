@@ -651,8 +651,8 @@ def terminal_runtime_effectively_released_expr(
     A release is "effective" when the latest ``terminal_runtime_released``
     event has not been superseded by a later ``terminal_runtime_release_revoked``
     event.  The latest event is determined by ordering all release and revoke
-    events by ``(occurred_at DESC, event_order DESC)`` and picking the first
-    row's ``event_type``.  This avoids comparing two independent ``MAX``
+    events by ``(occurred_at DESC, event_order DESC, id DESC)`` and picking
+    the first row's ``event_type``.  This avoids comparing two independent ``MAX``
     projections that can diverge when ``event_order`` is not globally
     monotonic across event types.
 
@@ -680,7 +680,11 @@ def terminal_runtime_effectively_released_expr(
         select(WorkspaceEvent.event_type)
         .where(WorkspaceEvent.event_type.in_(both_types))
         .where(WorkspaceEvent.reason_code.in_(both_reasons))
-        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.event_order.desc().nullslast())
+        .order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.event_order.desc().nullslast(),
+            WorkspaceEvent.id.desc(),
+        )
         .limit(1)
     )
     if correlated_to is not None:
@@ -703,9 +707,9 @@ async def has_terminal_runtime_released_event(
     """Return True if a ``terminal_runtime_released`` event exists for *workspace_id* and has not been revoked.
 
     The latest event among all release and revoke events is determined by
-    ordering on ``(occurred_at DESC, event_order DESC)``; if the latest
-    event's type is ``terminal_runtime_released``, the runtime is effectively
-    released.
+    ordering on ``(occurred_at DESC, event_order DESC, id DESC)``; if the
+    latest event's type is ``terminal_runtime_released``, the runtime is
+    effectively released.
     """
     expr = terminal_runtime_effectively_released_expr(workspace_id=workspace_id)
     stmt = select(expr)
