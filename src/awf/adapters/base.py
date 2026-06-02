@@ -74,6 +74,20 @@ branch that AWF has already created for you. Your contract:
    When a plan or validation document needs evidence, record those
    focused checks and state that full AWF/GitHub validation is managed by
    AWF after agent completion; do not execute the broad suite yourself.
+6. **Keep changes minimal and scoped.** Fix only what THIS task asks.
+   Do not refactor, rename, or restructure unrelated code, split files,
+   or introduce new abstractions unless the fix strictly requires it. A
+   reviewer should see a small, obviously-correct diff; sprawling diffs
+   that touch dozens of unrelated files get rejected and waste the run.
+7. **Cover what you change; never pad coverage.** AWF enforces a hard
+   coverage gate after you finish. As you implement, add or adjust focused
+   tests for each behavior you add or change (test-first when practical),
+   and reason about which new lines and branches need a test so total
+   coverage does not drop — you do not run the full gate yourself. For
+   genuinely non-behavioral, unreachable, or type-only code (e.g. a
+   Protocol stub or an unexecutable defensive branch), add a justified
+   coverage exclusion instead of a hollow test. A test that only executes
+   a line to move the number is coverage-theater and gets rejected.
 
 ---
 

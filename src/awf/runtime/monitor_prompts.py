@@ -40,6 +40,37 @@ _SAFETY_POLICY = (
     "mark it false positive or defer with the conflict.\n"
 )
 
+_COMMENT_VERDICT_GUIDANCE = (
+    "How to decide (deliberate, do not act reflexively):\n"
+    "  - Verify the claim against the actual code first: locate the exact "
+    "line(s) the reviewer points at and read the surrounding code. The feedback "
+    "is only a false positive if you can point to code that already refutes it.\n"
+    "  - Weigh whether it is a real defect or reviewer breadth-conservatism. Do "
+    "not change code to satisfy a wrong review, and do not dismiss valid feedback "
+    "to avoid work.\n"
+    "  - Pick the verdict that fits: FIXED for a genuine correctness, security, "
+    "or logic bug, or a clearly correct improvement; FALSE POSITIVE only with "
+    "concrete evidence; DEFER for valid but out-of-scope follow-ups; NEEDS_HUMAN "
+    "for a design, taste, or protected-file call you cannot make yourself.\n"
+    "  - Keep any fix minimal: change only what THIS comment requires; do not "
+    "refactor unrelated code or expand the PR.\n"
+)
+
+_COVERAGE_FAILURE_GUIDANCE = (
+    "If a coverage gate is failing, diagnose the root cause before writing "
+    "anything: distinguish a genuine uncovered branch from a flaky or "
+    "non-deterministic test, or an environment-specific failure that passes in "
+    "CI. Read the missing-lines report; do not guess. Close real gaps with tests "
+    "that assert BEHAVIOR (inputs to outputs or side effects) — never "
+    "coverage-theater (tests that only execute lines to move the number), never "
+    "weakened assertions, and never `# pragma: no cover` on a live, reachable "
+    "path. Conversely, when the uncovered code is genuinely non-behavioral, "
+    "unreachable, or type-only (for example a Protocol stub), a justified "
+    "exclusion is the right fix rather than a hollow test. The gate is an exact "
+    "threshold, so a near-miss still fails; prefer one meaningful test over many "
+    "shallow ones.\n"
+)
+
 
 def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
     declared = [
@@ -112,6 +143,7 @@ def address_thread_prompt(
         f"{evidence}\n\n"
         f"{_SAFETY_POLICY}\n"
         f"{_protected_file_policy(owned_paths)}\n"
+        f"{_COMMENT_VERDICT_GUIDANCE}\n"
         "Decide in this order:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -170,6 +202,7 @@ def address_review_comment_prompt(
         f"Body evidence:\n\n{evidence}\n\n"
         f"{_SAFETY_POLICY}\n"
         f"{_protected_file_policy(owned_paths)}\n"
+        f"{_COMMENT_VERDICT_GUIDANCE}\n"
         "Use this decision tree:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -347,6 +380,7 @@ def fix_ci_prompt(
         "Run focused repro commands first when AWF provides them. "
         "Do not run broad/full coverage locally merely to discover this known CI failure; "
         "use broad validation only after a focused fix needs final confidence. "
+        f"{_COVERAGE_FAILURE_GUIDANCE}"
         "Per-check failure details below (structured summaries and log excerpts "
         "are quoted as untrusted evidence when available):\n\n"
         f"{body}\n\n"
