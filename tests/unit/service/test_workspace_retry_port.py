@@ -159,6 +159,83 @@ async def test_source_runtime_release_gate_uses_enum_terminal_statuses(monkeypat
 
 
 @pytest.mark.unit
+async def test_retry_acquires_host_port_lock_before_source_runtime_release_gate(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source-runtime release read must happen inside host-port admission."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override(
+        reason="host-port lock ordering regression test",
+    )
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [
+        {
+            "name": "sidecar",
+            "repo_url": "git@github.com:example/sidecar.git",
+            "base_branch": "main",
+            "ports": [[5432, 5434]],
+        }
+    ]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        source_id = source.id
+        await session.commit()
+
+    await _mark_failed(factory, source_id, release_runtime=False)
+    calls: list[tuple[str, object]] = []
+
+    async def _record_host_port_lock(
+        _repo: object,
+        *,
+        host_ports: list[int],
+    ) -> None:
+        calls.append(("lock", list(host_ports)))
+
+    async def _source_runtime_not_released(
+        _session: object,
+        source: object,
+    ) -> bool:
+        calls.append(("source-gate", getattr(source, "id", None)))
+        return True
+
+    monkeypatch.setattr(
+        workspaces_retry.WorkspaceRepository,
+        "acquire_host_port_admission_lock",
+        _record_host_port_lock,
+    )
+    monkeypatch.setattr(
+        workspaces_retry,
+        "_source_runtime_not_yet_released",
+        _source_runtime_not_released,
+    )
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source_id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="host-port lock ordering regression test",
+                provider_environ={},
+            )
+
+    assert calls == [
+        ("lock", [5434]),
+        ("source-gate", source_id),
+    ]
+
+
+@pytest.mark.unit
 async def test_retry_rejects_host_port_conflict(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

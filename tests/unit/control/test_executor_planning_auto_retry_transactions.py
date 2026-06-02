@@ -303,6 +303,106 @@ async def test_auto_retry_planning_scope_failure_dedupes_repeated_host_port_conf
 
 
 @pytest.mark.unit
+async def test_auto_retry_planning_scope_failure_records_changed_host_port_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_block = SimpleNamespace(
+        event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,  # noqa: SLF001
+        reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT_REASON_CODE,  # noqa: SLF001
+        payload={
+            "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            "retry_after": "terminal_runtime_released",
+            "detail": {
+                "host_port": 9090,
+                "conflicting_workspace_id": "ws_previous_blocker",
+            },
+        },
+    )
+    sessions: list[_RecordingSession] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class _WorkspaceRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get(self, workspace_id: str) -> object:
+            return SimpleNamespace(id=workspace_id, task_policy={})
+
+        async def get_for_update(self, workspace_id: str) -> object:
+            assert isinstance(self._session, _RecordingSession)
+            self._session.operations.append("get-for-update")
+            return await self.get(workspace_id)
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            assert isinstance(self._session, _RecordingSession)
+            self._session.operations.append(f"event:{event_type}")
+            events.append((event_type, reason_code, payload))
+
+    def _session_factory() -> _RecordingSession:
+        session = _RecordingSession(terminal_events=[previous_block])
+        sessions.append(session)
+        return session
+
+    async def _retry_port_conflict(
+        session: object,
+        _workspace_id: str,
+        **_kwargs: Any,
+    ) -> object:
+        assert isinstance(session, _RecordingSession)
+        session.operations.append("retry")
+        raise executor_planning_ops.WorkspaceCreateHostPortConflictError(
+            host_port=9090,
+            conflicting_workspace_id="ws_new_blocker",
+        )
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        executor_planning_ops,
+        "retry_workspace_row",
+        _retry_port_conflict,
+    )
+    executor = SimpleNamespace(_session_factory=_session_factory)
+    failure = executor_planning_ops._PlanningRunFailure(  # noqa: SLF001
+        message="scope violation",
+        reason_code=executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    )
+
+    await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+        failure=failure,
+    )
+
+    assert sessions[-1].operations == [
+        "retry",
+        "rollback",
+        "get-for-update",
+        "event-scan",
+        "event:workspace.planning_scope_auto_retry_blocked",
+        "commit",
+    ]
+    assert events[-1] == (
+        "workspace.planning_scope_auto_retry_blocked",
+        "PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT",
+        {
+            "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            "detail": {
+                "host_port": 9090,
+                "conflicting_workspace_id": "ws_new_blocker",
+            },
+            "retry_after": "terminal_runtime_released",
+        },
+    )
+
+
+@pytest.mark.unit
 async def test_auto_retry_planning_scope_failure_dedupes_repeated_source_runtime_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

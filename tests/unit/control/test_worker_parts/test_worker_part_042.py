@@ -1367,6 +1367,151 @@ class TestTerminalRuntimeReleasePart003:
         assert candidates == []
 
     @pytest.mark.unit
+    async def test_pending_planning_scope_retry_scan_uses_reservation_effective_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        node_a_workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-resume-reserved-node-a",
+            WorkspaceStatus.failed,
+        )
+        node_b_workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-resume-reserved-node-b",
+            WorkspaceStatus.failed,
+        )
+
+        async def _mark_released_and_blocked(
+            workspace_id: str,
+            *,
+            reservation_node_id: str,
+        ) -> None:
+            async with session_factory() as s:
+                repo = WorkspaceRepository(s)
+                workspace = await repo.get(workspace_id)
+                assert workspace is not None
+                workspace.node_id = None
+                task = await TaskRepository(s).create_or_get(
+                    repo_url=workspace.repo_url,
+                    base_branch=workspace.branch_base,
+                    title=workspace.task_title,
+                    prompt=workspace.task_prompt,
+                    external_id=None,
+                    idempotency_key=None,
+                    task_class=workspace.task_class,
+                    owned_paths=list(workspace.owned_paths),
+                )
+                attempt = await TaskAttemptRepository(s).create_for_workspace(
+                    task=task,
+                    workspace=workspace,
+                )
+                await ResourceReservationRepository(s).create(
+                    workspace_id=workspace_id,
+                    attempt_id=attempt.id,
+                    node_id=reservation_node_id,
+                    steady_cpu=1.0,
+                    steady_memory_gb=1.0,
+                    peak_cpu=1.0,
+                    peak_memory_gb=1.0,
+                    disk_mb=None,
+                    phase="workspace_lifecycle",
+                )
+                await repo.add_event(
+                    workspace,
+                    event_type="workspace.terminal_runtime_released",
+                    reason_code="TERMINAL_RUNTIME_RELEASED",
+                    payload={"cleanup": WorkspaceCleanupResult.skipped().to_dict()},
+                )
+                await repo.add_event(
+                    workspace,
+                    event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,  # noqa: SLF001
+                    reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,  # noqa: SLF001
+                    payload={
+                        "source_reason_code": (
+                            executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION
+                        ),
+                        "retry_after": "terminal_runtime_released",
+                    },
+                )
+                await s.commit()
+
+        await _mark_released_and_blocked(
+            node_a_workspace_id,
+            reservation_node_id="node-a",
+        )
+        await _mark_released_and_blocked(
+            node_b_workspace_id,
+            reservation_node_id="node-b",
+        )
+        worker = SimpleNamespace(
+            _config=WorkerConfig(node_id="node-a"),
+            _session_factory=session_factory,
+            _log_transient_db_retry=lambda *_args: None,
+        )
+
+        candidates = await (
+            worker_cleanup._list_terminal_released_pending_planning_scope_auto_retry_candidates(
+                worker,
+            )
+        )
+
+        candidate_ids = [candidate.workspace_id for candidate in candidates]
+        assert candidate_ids == [node_a_workspace_id]
+
+    @pytest.mark.unit
+    async def test_pending_planning_scope_retry_scan_preserves_legacy_no_node_fallback(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-resume-legacy-no-node",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = None
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+                payload={"cleanup": WorkspaceCleanupResult.skipped().to_dict()},
+            )
+            await repo.add_event(
+                workspace,
+                event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,  # noqa: SLF001
+                reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,  # noqa: SLF001
+                payload={
+                    "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                    "retry_after": "terminal_runtime_released",
+                },
+            )
+            await s.commit()
+
+        worker = SimpleNamespace(
+            _config=WorkerConfig(node_id="node-a"),
+            _session_factory=session_factory,
+            _log_transient_db_retry=lambda *_args: None,
+        )
+
+        candidates = await (
+            worker_cleanup._list_terminal_released_pending_planning_scope_auto_retry_candidates(
+                worker,
+            )
+        )
+
+        candidate_ids = [candidate.workspace_id for candidate in candidates]
+        assert candidate_ids == [workspace_id]
+
+    @pytest.mark.unit
     async def test_default_local_release_scan_resumes_pending_planning_scope_auto_retry_on_local_node(
         self,
         session_factory: async_sessionmaker[AsyncSession],

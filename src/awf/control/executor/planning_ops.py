@@ -749,7 +749,11 @@ async def _record_planning_scope_auto_retry_blocked_after_retry_rollback(
     )
     if _planning_scope_auto_retry_event_is_retry_requested(latest_event):
         return
-    if _planning_scope_auto_retry_event_is_blocked_for_reason(latest_event, reason_code):
+    if _planning_scope_auto_retry_event_is_blocked_for_reason(
+        latest_event,
+        reason_code,
+        detail=detail,
+    ):
         return
     await repo.add_event(
         workspace,
@@ -798,14 +802,36 @@ def _planning_scope_auto_retry_event_is_retry_requested(event: Any | None) -> bo
 def _planning_scope_auto_retry_event_is_blocked_for_reason(
     event: Any | None,
     reason_code: str,
+    *,
+    detail: object | None = None,
 ) -> bool:
     if event is None:
         return False
     payload = _planning_scope_auto_retry_payload(event)
-    return (
+    if not (
         getattr(event, "event_type", None) == _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE
         and getattr(event, "reason_code", None) == reason_code
         and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
+    ):
+        return False
+    if reason_code != _PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT_REASON_CODE:
+        return True
+    return _planning_scope_auto_retry_host_port_block_detail_matches(
+        payload.get("detail"),
+        detail,
+    )
+
+
+def _planning_scope_auto_retry_host_port_block_detail_matches(
+    previous_detail: object,
+    current_detail: object,
+) -> bool:
+    if not isinstance(previous_detail, Mapping) or not isinstance(current_detail, Mapping):
+        return previous_detail == current_detail
+    return previous_detail.get("host_port") == current_detail.get(
+        "host_port"
+    ) and previous_detail.get("conflicting_workspace_id") == current_detail.get(
+        "conflicting_workspace_id"
     )
 
 

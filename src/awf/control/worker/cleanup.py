@@ -48,6 +48,7 @@ from awf.control.worker.logging import _log
 from awf.control.worker.types import _TerminalRuntimeCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import (
+    ResourceReservation,
     Workspace,
     WorkspaceEvent,
 )
@@ -328,6 +329,28 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
         correlated_to=Workspace,
     )
     worker_node_id = effective_worker_config_node_id(self._config)
+    active_reservation_node = (
+        select(ResourceReservation.node_id)
+        .where(ResourceReservation.workspace_id == Workspace.id)
+        .where(ResourceReservation.released_at.is_(None))
+        .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+        .limit(1)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    latest_reservation_node = (
+        select(ResourceReservation.node_id)
+        .where(ResourceReservation.workspace_id == Workspace.id)
+        .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+        .limit(1)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    effective_node = func.coalesce(
+        Workspace.node_id,
+        active_reservation_node,
+        latest_reservation_node,
+    )
     terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
     stmt = (
         select(
@@ -349,8 +372,12 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
         .where(Workspace.status.in_(terminal_status_values))
         .where(
             or_(
-                Workspace.node_id == worker_node_id,
-                Workspace.node_id.is_(None),
+                effective_node == worker_node_id,
+                and_(
+                    Workspace.node_id.is_(None),
+                    active_reservation_node.is_(None),
+                    latest_reservation_node.is_(None),
+                ),
             )
         )
         .where(effectively_released)

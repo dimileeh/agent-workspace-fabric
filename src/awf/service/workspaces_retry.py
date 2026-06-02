@@ -381,18 +381,11 @@ async def retry_workspace_row(
         # source.  When Phase 2 introduces multi-node, this branch
         # should require a resolved node_id or be replaced by a
         # per-node runtime-release query.
-        # Stale-read window: _source_runtime_not_yet_released reads the
-        # DB *before* acquire_host_port_admission_lock below. If the
-        # cleanup worker emits terminal_runtime_released for the source
-        # in the gap between this check and the lock acquisition, the
-        # caller receives a 409 SOURCE_RUNTIME_NOT_RELEASED even though
-        # the ports were actually freed and the retry could have
-        # proceeded. This is harmless — the caller retries and the next
-        # attempt sees the released event — but it is an extra
-        # round-trip. Do not "fix" this by moving the check inside the
-        # lock; the advisory lock must be acquired before
-        # find_host_port_conflicts to prevent a TOCTOU window on port
-        # admission.
+        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
+        # Read the source runtime-release state after acquiring the
+        # per-port admission lock, just before the third-party conflict
+        # SELECT, so a release committed during lock acquisition is not
+        # converted into an avoidable SOURCE_RUNTIME_NOT_RELEASED block.
         if (
             not ignore_source_runtime_check
             and await _source_runtime_not_yet_released(session, source)
@@ -401,7 +394,6 @@ async def retry_workspace_row(
             raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
                 source_workspace_id=source.id,
             )
-        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
         conflicts = await repo.find_host_port_conflicts(
             host_ports=host_ports,
             excluding_workspace_id=source.id,
