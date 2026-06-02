@@ -57,6 +57,10 @@ class _SchedulerAgeBoostExprBuilder(Protocol):
 
 _POSTGRES_INTEGER_MIN: Final = -(2**31)
 _POSTGRES_INTEGER_MAX: Final = 2**31 - 1
+_LEGACY_LOCAL_RESERVATION_NODE_ID_PREFIXES: Final = (
+    "container-",
+    "legacy-container-",
+)
 
 
 @dataclass(frozen=True)
@@ -134,14 +138,28 @@ def _scheduler_node_scope_condition(
     scope_conditions = [planned_node_id == node_id, planned_node_id.is_(None)]
     if node_id == DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID:
         # Local service upgrades can leave requested reservations stamped with
-        # the old container hostname; current local workers must still adopt them.
+        # the old container hostname; current local workers must still adopt those
+        # known legacy-local rows without taking work reserved for named nodes.
         scope_conditions.append(
             and_(
                 Workspace.node_id.is_(None),
-                latest_reservation_node_id.is_not(None),
+                _legacy_local_reservation_node_condition(latest_reservation_node_id),
             )
         )
     return or_(*scope_conditions)
+
+
+def _legacy_local_reservation_node_condition(
+    reservation_node_id: ColumnElement[Any],
+) -> ColumnElement[bool]:
+    """Return whether a reservation node id has a legacy local container hostname shape."""
+    normalized_node_id = func.lower(reservation_node_id)
+    return or_(
+        *(
+            normalized_node_id.like(f"{prefix}%")
+            for prefix in _LEGACY_LOCAL_RESERVATION_NODE_ID_PREFIXES
+        )
+    )
 
 
 def _latest_active_resource_reservation_node_id_expr() -> ColumnElement[Any]:

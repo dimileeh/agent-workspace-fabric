@@ -743,6 +743,30 @@ class TestOwnedPathOverlapLookup:
         assert legacy_reserved.id in {workspace.id for workspace in listed}
 
     @pytest.mark.unit
+    async def test_requested_scheduler_local_scope_ignores_named_reservation_node(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Local workers must not claim requested rows reserved for named nodes."""
+        repo = WorkspaceRepository(session)
+        reserved_for_node_a = await _create_policy_workspace(session, repo)
+        await _reserve_policy_workspace(
+            session,
+            reserved_for_node_a,
+            node_id="worker-node-a",
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            node_id="local",
+            scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+        )
+
+        assert reserved_for_node_a.id not in {workspace.id for workspace in listed}
+
+    @pytest.mark.unit
     async def test_requested_scheduler_named_scope_ignores_legacy_reservation_hostname(
         self,
         session: AsyncSession,

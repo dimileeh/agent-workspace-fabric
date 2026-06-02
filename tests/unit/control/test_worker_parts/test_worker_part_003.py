@@ -1170,6 +1170,43 @@ class TestRunOncePart003:
         assert workspace.node_id == "local"
 
     @pytest.mark.unit
+    async def test_non_capacity_local_requested_claim_ignores_named_reservation_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        remote_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "non-capacity-local-must-not-claim-named-node-request",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            remote_id,
+            node_id="worker-node-a",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id="local",
+            ),
+        )
+
+        assert await worker._list_requested() == []  # noqa: SLF001
+        assert await worker._claim_requested_ids([remote_id]) == []  # noqa: SLF001
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(remote_id)
+
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.requested.value
+        assert workspace.node_id is None
+
+    @pytest.mark.unit
     async def test_non_capacity_requested_claim_honors_reservation_node(
         self,
         session_factory: async_sessionmaker[AsyncSession],
