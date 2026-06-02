@@ -273,6 +273,7 @@ class Provisioner:
                     inline_profile=ws.requested_profile,
                     profile_ref=ws.profile_ref or ws.env_profile or "auto",
                     validation_commands=list(ws.test_commands),
+                    repo_url=ws.repo_url,
                 )
                 profile = profile_resolution.profile
             else:

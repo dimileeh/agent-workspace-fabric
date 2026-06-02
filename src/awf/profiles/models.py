@@ -25,6 +25,7 @@ from pydantic import (
     model_validator,
 )
 
+from awf.db.enums import ForgeKind
 from awf.profiles.pricing import PricingMetadata
 
 
@@ -721,7 +722,14 @@ class ProfilePricing(BaseModel):
 
 
 class WorkspaceProfile(BaseModel):
-    """Resolved project profile stored on each workspace."""
+    """Workspace profile shape, used both as create/adoption **input** and as the
+    resolved profile persisted on a workspace.
+
+    As submitted (the inline ``profile`` on a workspace-create or PR-adoption
+    request) some fields may still be unresolved — notably ``forge`` may be the
+    ``"auto"`` sentinel. At provision time the resolver stamps concrete values
+    (``forge`` becomes ``github``/``bitbucket``) and that snapshot is what gets
+    stored on the workspace, so a *resolved* profile never carries ``"auto"``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -730,6 +738,16 @@ class WorkspaceProfile(BaseModel):
     description: str | None = Field(default=None, max_length=1024)
     source: str = Field(default="inline", max_length=256)
     confidence: Literal["low", "medium", "high"] = "high"
+    forge: ForgeKind | Literal["auto"] = Field(
+        default="auto",
+        description=(
+            'Code forge the workspace repo lives on (issue #345). "auto" is the '
+            "unresolved input sentinel: it defers to URL-host detection at resolve "
+            "time. The resolver always persists a concrete github/bitbucket value "
+            "(precedence: explicit forge > URL host > github), so a resolved "
+            'profile never carries "auto".'
+        ),
+    )
     runtime: ProfileRuntime = Field(default_factory=ProfileRuntime)
     docker: ProfileDocker = Field(default_factory=ProfileDocker)
     services: list[ProfileService] = Field(default_factory=list)
@@ -789,6 +807,28 @@ class WorkspaceProfile(BaseModel):
             deep=True,
             update={"phases": self.phases.model_copy(update={"validate_commands": []})},
         )
+
+
+def normalize_inline_profile_snapshot(
+    profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalize a stored/requested inline-profile snapshot for idempotent-replay comparison.
+
+    Create idempotency (``workspace_create_payload_matches``) and PR-adoption
+    policy checks (``_raise_if_policy_conflicts``) compare the persisted
+    ``requested_profile`` JSON against a freshly dumped request profile
+    byte-for-byte. The ``forge`` field (issue #345) was added after some
+    workspaces were persisted, so their stored snapshot has no ``forge`` key while
+    an otherwise-identical replay now dumps ``"forge": "auto"`` (the unresolved
+    input default). Default a missing ``forge`` to ``"auto"`` so replays of
+    pre-forge inline profiles stay idempotent instead of raising a spurious
+    conflict. Returns a shallow copy; the input is never mutated.
+    """
+    if profile is None:
+        return None
+    if "forge" in profile:
+        return dict(profile)
+    return {**profile, "forge": "auto"}
 
 
 def _normalized_endpoint_env_name(name: str) -> str:

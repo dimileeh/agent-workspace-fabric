@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncCommandRunner
-from awf.common.github_client import GitHubClient
+from awf.common.forge import ForgeClient
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import MergeCoordinator
 from awf.runtime.pr_monitor import MonitorConfig
@@ -44,7 +44,7 @@ def build_release_pr_monitor(
     session_factory: async_sessionmaker[AsyncSession],
     runner: AsyncCommandRunner,
     adapter: AgentAdapter,
-    gh: GitHubClient,
+    gh: ForgeClient,
     validation: ValidationRunner | None = None,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
@@ -99,7 +99,7 @@ def build_feature_pr_monitor(
     session_factory: async_sessionmaker[AsyncSession],
     runner: AsyncCommandRunner,
     adapter: AgentAdapter,
-    gh: GitHubClient,
+    gh: ForgeClient,
     validation: ValidationRunner | None = None,
     worktrees_root: Path,
     artifacts_root: Path | None = None,

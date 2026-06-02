@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncCommandRunner
-from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
+from awf.common.forge import ForgeClient
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import LogStore
@@ -73,7 +74,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         session_factory: async_sessionmaker[AsyncSession],
         runner: AsyncCommandRunner,
         adapter: AgentAdapter,
-        gh: GitHubClient,
+        gh: ForgeClient,
         validation: ValidationRunner | None = None,
         monitor_config: MonitorConfig | None = None,
         runner_config: MonitorRunnerConfig | None = None,

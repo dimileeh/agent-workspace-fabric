@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import ValidationError
 
+from awf.common.forge import detect_forge_from_url
 from awf.common.profile_paths import PROFILE_MARKER_PATHS
+from awf.db.enums import ForgeKind
 from awf.profiles.lint import lint_workspace_profile
 from awf.profiles.models import (
     ProfileLintFinding,
@@ -56,8 +58,16 @@ class ProfileResolver:
         inline_profile: dict[str, Any] | WorkspaceProfile | None = None,
         profile_ref: str | None = None,
         validation_commands: list[str] | None = None,
+        repo_url: str | None = None,
     ) -> ProfileResolution:
-        """Resolve a workspace profile using local, inline, and registry sources."""
+        """Resolve a workspace profile using local, inline, and registry sources.
+
+        ``repo_url`` drives forge detection when the profile's ``forge`` is
+        ``"auto"``. Precedence is **explicit ``forge:`` > URL host > github**;
+        the resolved concrete forge is stamped onto the profile so
+        ``resolved_profile.forge`` is always ``github``/``bitbucket`` (never
+        ``"auto"``) and later stages read it without re-resolving.
+        """
         considered: list[str] = []
         profile: WorkspaceProfile | None = None
         reason = ""
@@ -103,6 +113,10 @@ class ProfileResolver:
         if validation_commands:
             profile = profile.with_validation_commands(validation_commands)
             reason = f"{reason}; request validation commands appended"
+
+        resolved_forge = _resolve_forge(profile.forge, repo_url)
+        if profile.forge != resolved_forge:
+            profile = profile.model_copy(update={"forge": resolved_forge})
 
         lint_findings = lint_workspace_profile(profile)
         lint_errors = tuple(
@@ -162,6 +176,7 @@ def resolve_workspace_profile(
     inline_profile: dict[str, Any] | WorkspaceProfile | None = None,
     profile_ref: str | None = None,
     validation_commands: list[str] | None = None,
+    repo_url: str | None = None,
 ) -> ProfileResolution:
     """Resolve a workspace profile from local path, inline payload, or registry."""
     return ProfileResolver().resolve(
@@ -169,7 +184,26 @@ def resolve_workspace_profile(
         inline_profile=inline_profile,
         profile_ref=profile_ref,
         validation_commands=validation_commands,
+        repo_url=repo_url,
     )
+
+
+def _resolve_forge(profile_forge: ForgeKind | Literal["auto"], repo_url: str | None) -> ForgeKind:
+    """Resolve the concrete forge: explicit ``forge:`` > URL host > default github.
+
+    ``profile_forge`` is the profile's declared value (``"auto"`` |
+    ``"github"`` | ``"bitbucket"``). An explicit non-``auto`` value always wins.
+    For ``"auto"``, URL-host detection decides; a missing/malformed URL falls
+    through to the default ``"github"`` (detection is best-effort — the executor
+    forge gate is the real fail-fast point).
+    """
+    if profile_forge != "auto":
+        return profile_forge  # explicit forge wins over detection
+    if repo_url:
+        detected = detect_forge_from_url(repo_url)
+        if detected is not None:
+            return detected
+    return "github"
 
 
 def _validation_error_message(exc: ValidationError) -> str:

@@ -8,6 +8,7 @@ from awf.profiles.models import (
     ProfileAppEndpoint,
     ProfileAppEndpointHealth,
     ProfileHealthCheck,
+    normalize_inline_profile_snapshot,
 )
 
 
@@ -47,3 +48,31 @@ def test_app_endpoint_normalizes_scheme_to_lowercase() -> None:
     endpoint = ProfileAppEndpoint(name="web", service="app", port=8080, scheme="HTTPS")
 
     assert endpoint.scheme == "https"
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_passes_through_none() -> None:
+    assert normalize_inline_profile_snapshot(None) is None
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_defaults_missing_forge_to_auto() -> None:
+    """A pre-forge legacy snapshot lacks the key; normalization adds the input
+    default so it compares equal to a fresh replay that dumps ``forge="auto"``."""
+    legacy = {"name": "inline"}
+
+    normalized = normalize_inline_profile_snapshot(legacy)
+
+    assert normalized == {"name": "inline", "forge": "auto"}
+    # The input snapshot (a live ORM attribute at the call sites) must not mutate.
+    assert legacy == {"name": "inline"}
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_preserves_present_forge() -> None:
+    explicit = {"name": "inline", "forge": "github"}
+
+    normalized = normalize_inline_profile_snapshot(explicit)
+
+    assert normalized == {"name": "inline", "forge": "github"}
+    assert normalized is not explicit

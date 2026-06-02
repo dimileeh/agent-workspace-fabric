@@ -26,6 +26,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.forge import (
+    ForgeNotSupportedError,
+    detect_forge_from_url,
+    ensure_forge_supported,
+)
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
@@ -499,6 +504,43 @@ async def _resolve_preserved_active_branch_open_pr(
         return None
 
     lookup_branch = branch_name.strip()
+
+    # Gate detected-but-unsupported forges BEFORE the GitHub-only ``gh pr list``
+    # path. ``BranchOpenPullRequestResolver`` parses ``repo_url`` into a
+    # ``RepoRef`` and shells ``gh pr list --repo owner/repo`` (GitHub), dropping
+    # the forge host — so a preserved-active BitBucket workspace would otherwise
+    # be queried as a *same-slug GitHub* repo and could attach the wrong monitor
+    # instead of failing fast. The executor forge gate does not cover this worker
+    # recovery path, so reject here. ``ensure_forge_supported`` is the single
+    # source of truth for supported forges (the same gate the executor uses), so
+    # detection and dispatch cannot drift. Undetectable URLs (``None``) fall
+    # through to the GitHub resolver unchanged — existing GitHub workspaces never
+    # trip this.
+    detected_forge = detect_forge_from_url(repo_url)
+    if detected_forge is not None:
+        try:
+            ensure_forge_supported(detected_forge)
+        except ForgeNotSupportedError as exc:
+            _log.warning(
+                "worker.preserved_active_open_pr_lookup_forge_not_supported",
+                branch_name=lookup_branch,
+                base_branch=base_branch,
+                forge=detected_forge,
+                reason_code=exc.reason_code,
+            )
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="failed",
+                ambiguity_reason="open_pr_lookup_forge_not_supported",
+                payload={
+                    "branch_name": lookup_branch,
+                    "forge": detected_forge,
+                    "reason_code": exc.reason_code,
+                    "failure": "forge_not_supported",
+                    "source": "open_pr_resolver",
+                },
+            )
+
     try:
         matches = await self._open_pr_resolver.resolve(
             repo_url=repo_url,

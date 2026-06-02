@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncCommandRunner
-from awf.common.github_client import GitHubClient
+from awf.common.forge import ForgeClient
 from awf.runtime.logs import LogStore
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor_runner.config import PostMergeTargetReconciler
@@ -49,7 +49,7 @@ class _RunnerDeps:
     session_factory: async_sessionmaker[AsyncSession]
     runner: AsyncCommandRunner
     adapter: AgentAdapter
-    gh: GitHubClient
+    gh: ForgeClient
     sleep: Callable[[float], Awaitable[None]]
     validation: ValidationRunner | None = None
     provider_recovery_default_model: str | None = None

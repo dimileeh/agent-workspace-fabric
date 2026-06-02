@@ -22,8 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from awf.common.commands import AsyncCommandRunner
+from awf.common.forge import ForgeClient
 from awf.common.github_client import (
-    GitHubClient,
     GitHubClientError,
     PullRequestAdoptionMetadata,
     RepoRef,
@@ -160,7 +160,7 @@ async def _find_open_same_repo_pr_number(
 async def find_or_create_release_pr(
     *,
     runner: AsyncCommandRunner,
-    gh: GitHubClient,
+    gh: ForgeClient,
     repo: RepoRef,
     source_branch: str,
     target_branch: str,
@@ -245,7 +245,7 @@ async def find_or_create_release_pr(
 async def prepare_release_pr_sync(
     *,
     runner: AsyncCommandRunner,
-    gh: GitHubClient,
+    gh: ForgeClient,
     repo: RepoRef,
     cwd: str,
     source_branch: str,

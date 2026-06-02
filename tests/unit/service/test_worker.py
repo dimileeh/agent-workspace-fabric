@@ -97,10 +97,6 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         def __init__(self, runner: object) -> None:
             created["pr_creator_runner"] = runner
 
-    class _GitHubClient:
-        def __init__(self, runner: object) -> None:
-            created["github_runner"] = runner
-
     class _BranchOpenPullRequestResolver:
         def __init__(self, runner: object) -> None:
             created["open_pr_resolver_runner"] = runner
@@ -221,7 +217,16 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monkeypatch.setattr(worker_mod, "LogStore", _LogStore)
     monkeypatch.setattr(worker_mod, "ValidationRunner", _ValidationRunner)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _PullRequestCreator)
-    monkeypatch.setattr(worker_mod, "GitHubClient", _GitHubClient)
+    forge_client = object()
+
+    def _fake_make_forge_client(forge: object, runner: object) -> object:
+        # gh is now built lazily inside _pr_monitor_factory (not at build time)
+        # via make_forge_client(resolved forge, runner) — record both.
+        created["forge_client_forge"] = forge
+        created["forge_client_runner"] = runner
+        return forge_client
+
+    monkeypatch.setattr(worker_mod, "make_forge_client", _fake_make_forge_client)
     monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _BranchOpenPullRequestResolver)
     monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
     monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager)
@@ -262,7 +267,6 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["executor_runner"].__class__ is _Runner
     assert created["validation_runner"] is created["executor_runner"]
     assert created["pr_creator_runner"] is created["executor_runner"]
-    assert created["github_runner"] is created["executor_runner"]
     assert created["open_pr_resolver_runner"] is created["executor_runner"]
     assert created["worker_open_pr_resolver"].__class__ is _BranchOpenPullRequestResolver
     git_env = created["git_env"]
@@ -308,9 +312,17 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
     assert default_monitor is not None
+    # gh is built lazily in the factory from the resolved forge (forge="auto"
+    # on a default profile normalizes to github via concrete_forge_for_repo —
+    # the github repo_url confirms the host) with the shared runner, and the
+    # resulting ForgeClient flows into the monitor kwargs.
+    assert created["forge_client_forge"] == "github"
+    assert created["forge_client_runner"] is created["executor_runner"]
+    assert created["feature_monitor_kwargs"]["gh"] is forge_client
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
     assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 900
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == [
@@ -338,6 +350,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
 
@@ -374,6 +387,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=False,
             initial_review_grace_period_seconds=12.5,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
 
@@ -408,11 +422,35 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="sync_release_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
     assert release_sync_monitor is not None
     assert "feature_monitor_kwargs" not in created
     assert "release_monitor_kwargs" in created
+
+    # Regression (issue:4596733729): the PR-monitor factory must mirror the
+    # executor forge gate's URL-aware resolution (concrete_forge_for_repo), not
+    # plain concrete_forge. A legacy/missing snapshot normalizes profile.forge to
+    # "auto"; if such a workspace's repo_url is a BitBucket URL the factory must
+    # route to the bitbucket forge so make_forge_client raises
+    # FORGE_NOT_SUPPORTED — never silently constructing a GitHubClient for a
+    # BitBucket repo when the factory runs before the executor gate (e.g. a
+    # monitor rebuild on a pre-Phase-1 snapshot). With plain concrete_forge this
+    # would resolve "github".
+    created.pop("forge_client_forge", None)
+    bitbucket_monitor = created["executor_monitor_factory"](
+        object(),
+        WorkspaceProfile(name="legacy-auto"),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+            repo_url="git@bitbucket.org:ws/repo.git",
+        ),
+    )
+    assert bitbucket_monitor is not None
+    assert created["forge_client_forge"] == "bitbucket"
 
 
 @pytest.mark.unit
@@ -512,9 +550,6 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         worker_mod, "PullRequestCreator", type("_AnyInit", (), {"__init__": lambda _s, _r: None})
     )  # type: ignore[type-var]
     monkeypatch.setattr(
-        worker_mod, "GitHubClient", type("_AnyInit", (), {"__init__": lambda _s, _r: None})
-    )  # type: ignore[type-var]
-    monkeypatch.setattr(
         worker_mod, "GitManager", type("_AnyInit", (), {"__init__": lambda _s, _p, **_kw: None})
     )  # type: ignore[type-var]
     monkeypatch.setattr(
@@ -559,6 +594,7 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
     reconciler = created["reconciler"]
@@ -616,7 +652,6 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
     monkeypatch.setattr(worker_mod, "LogStore", _AnyInit)
     monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
-    monkeypatch.setattr(worker_mod, "GitHubClient", _AnyInit)
     monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _AnyInit)
@@ -650,6 +685,7 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
             auto_merge=True,
             initial_review_grace_period_seconds=None,
             task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
         ),
     )
 
@@ -712,7 +748,6 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
     monkeypatch.setattr(worker_mod, "LogStore", _AnyInit)
     monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
-    monkeypatch.setattr(worker_mod, "GitHubClient", _AnyInit)
     monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _AnyInit)
     monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)

@@ -17,6 +17,7 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
+from awf.common.forge import ForgeNotSupportedError, ensure_forge_supported
 from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     PullRequestMetadataError,
@@ -39,6 +40,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.utils import escape_like_pattern as _escape_like_pattern
+from awf.profiles.models import normalize_inline_profile_snapshot
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
@@ -66,6 +68,7 @@ _LIVE_ADOPTION_STATUSES = frozenset(
 _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_ADOPTION_INPUT_REQUIRED"},
     {"error_code": "INVALID_GITHUB_REPO"},
+    {"error_code": "FORGE_NOT_SUPPORTED"},
     {"error_code": "PR_NOT_FOUND"},
     {"error_code": "PR_ALREADY_CLOSED"},
     {"error_code": "PR_ALREADY_MERGED"},
@@ -734,6 +737,14 @@ def _normalize_request_identity(
         try:
             repo, pr_number = parse_github_pull_request_url(request.pr_url)
         except ValueError as exc:
+            # ``parse_github_pull_request_url`` rejects ANY non-github.com host with
+            # a bare ValueError, so a well-formed BitBucket PR URL would surface the
+            # generic input error instead of the contract-documented
+            # FORGE_NOT_SUPPORTED. Re-parse the URL as a forge-aware ``RepoRef`` and
+            # route a recognized-but-unsupported forge through the same gate the
+            # ``repo_url``/``repo_slug`` path uses; a truly unparseable URL falls
+            # through to PR_ADOPTION_INPUT_REQUIRED below.
+            _raise_if_pr_url_forge_unsupported(request.pr_url)
             raise PRMonitorAdoptionError(
                 error_code="PR_ADOPTION_INPUT_REQUIRED",
                 message="Provide a valid GitHub PR URL or repo plus PR number.",
@@ -745,7 +756,16 @@ def _normalize_request_identity(
                 message="PR URL and pr_number refer to different pull requests.",
                 status_code=422,
             )
+        # Precedence: identity conflict > forge gate. A GitHub ``pr_url`` paired
+        # with a BitBucket ``repo_url`` of the same slug surfaces
+        # PR_ADOPTION_INPUT_REQUIRED (the conflict fires first), not
+        # FORGE_NOT_SUPPORTED — see
+        # ``test_github_pr_url_with_same_slug_bitbucket_repo_url_rejected``. The
+        # forge gate below is then defense-in-depth: a canonical ref parsed from a
+        # ``github.com`` PR URL is always ``"github"``, so it never raises on this
+        # path today.
         _raise_if_repo_identity_conflicts(canonical_repo=repo, request=request)
+        _raise_if_forge_unsupported(repo)
         return repo, pr_number
 
     repo_value = request.repo_slug or request.repo_url
@@ -765,7 +785,50 @@ def _normalize_request_identity(
             detail={"repo": repo_value},
         ) from exc
     _raise_if_repo_identity_conflicts(canonical_repo=repo, request=request)
+    _raise_if_forge_unsupported(repo)
     return repo, request.pr_number
+
+
+def _raise_if_forge_unsupported(repo: RepoRef) -> None:
+    """Reject a canonical ref on a forge AWF cannot adopt yet.
+
+    Forge detection (issue #345) makes ``RepoRef.from_url`` accept non-GitHub
+    hosts (e.g. ``bitbucket.org``) as ``RepoRef(forge="bitbucket")``. Adoption
+    fetches PR metadata via the GitHub-only ``gh pr view --repo owner/repo``
+    path, which silently targets GitHub for the same slug — so a non-GitHub ref
+    must fail fast HERE, before any metadata fetch, rather than mis-route to
+    GitHub (and the executor forge gate runs too late to catch it). Routes
+    through :func:`ensure_forge_supported` so the supported-forge set stays a
+    single source of truth.
+    """
+    try:
+        ensure_forge_supported(repo.forge)
+    except ForgeNotSupportedError as exc:
+        raise PRMonitorAdoptionError(
+            error_code=exc.reason_code,
+            message=exc.message,
+            status_code=422,
+            detail={"repo_slug": repo.slug(), "forge": repo.forge},
+        ) from exc
+
+
+def _raise_if_pr_url_forge_unsupported(pr_url: str) -> None:
+    """Surface FORGE_NOT_SUPPORTED for a well-formed PR URL on an unsupported forge.
+
+    ``parse_github_pull_request_url`` only accepts ``github.com`` hosts; every
+    other host raises a bare ``ValueError`` that the caller reads as
+    PR_ADOPTION_INPUT_REQUIRED, so a BitBucket ``pr_url`` would never reach
+    :func:`_raise_if_forge_unsupported`. Re-parse the URL with the forge-aware
+    ``RepoRef.from_url`` (which accepts e.g. ``bitbucket.org``) and route through
+    the same gate, keeping FORGE_NOT_SUPPORTED reachable from the ``pr_url`` branch
+    as the contract documents. A URL that even ``RepoRef.from_url`` cannot parse is
+    genuinely malformed input — return so the caller raises PR_ADOPTION_INPUT_REQUIRED.
+    """
+    try:
+        repo = RepoRef.from_url(pr_url)
+    except ValueError:
+        return
+    _raise_if_forge_unsupported(repo)
 
 
 def _raise_if_repo_identity_conflicts(
@@ -773,6 +836,18 @@ def _raise_if_repo_identity_conflicts(
     canonical_repo: RepoRef,
     request: PullRequestMonitorAdoptionRequest,
 ) -> None:
+    """Reject supplied repo identities that disagree with the canonical ref.
+
+    Repo identity is ``(forge, owner, name)`` — not the ``owner/repo`` slug
+    alone. Forge detection (issue #345) makes ``RepoRef.from_url`` parse a
+    ``bitbucket.org`` ``repo_url`` as ``RepoRef(forge="bitbucket")`` with the
+    *same* slug as a GitHub ``pr_url``. Comparing slug only would accept that
+    inconsistent input; ``_adoption_repo_url`` would then persist the Bitbucket
+    URL and the executor forge gate would fail the workspace too late. Compare
+    the forge as well so a same-slug/different-forge identity is rejected up
+    front, alongside :func:`_raise_if_forge_unsupported` which gates the
+    canonical ref.
+    """
     for field_name, repo_value in (
         ("repo_url", request.repo_url),
         ("repo_slug", request.repo_slug),
@@ -788,7 +863,10 @@ def _raise_if_repo_identity_conflicts(
                 status_code=422,
                 detail={"repo": repo_value, "field": field_name},
             ) from exc
-        if requested_repo.slug().lower() != canonical_repo.slug().lower():
+        if (
+            requested_repo.forge != canonical_repo.forge
+            or requested_repo.slug().lower() != canonical_repo.slug().lower()
+        ):
             raise PRMonitorAdoptionError(
                 error_code="PR_ADOPTION_INPUT_REQUIRED",
                 message="PR adoption repository identities refer to different repositories.",
@@ -796,6 +874,8 @@ def _raise_if_repo_identity_conflicts(
                 detail={
                     "expected_repo_slug": canonical_repo.slug(),
                     "actual_repo_slug": requested_repo.slug(),
+                    "expected_forge": canonical_repo.forge,
+                    "actual_forge": requested_repo.forge,
                     "field": field_name,
                 },
             )
@@ -1003,7 +1083,9 @@ def _raise_if_policy_conflicts(
                 "requested_profile_ref": request.profile_ref,
             },
         )
-    if workspace.requested_profile != requested_profile:
+    if normalize_inline_profile_snapshot(
+        workspace.requested_profile
+    ) != normalize_inline_profile_snapshot(requested_profile):
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
             message="Existing adopted PR monitor uses a different inline profile policy.",

@@ -72,6 +72,24 @@ def _v2_request(
     )
 
 
+def _inline_profile_request() -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
+        repo={"url": "git@github.com:example/idempotency.git", "base_branch": "main"},
+        task={
+            "title": "Serialize inline profile create",
+            "prompt": "Exercise serialized idempotency lookup.",
+            "agent": "codex",
+            "kind": "feature_branch_pr",
+        },
+        workspace={"profile_ref": "auto", "profile": {"name": "inline-forge"}},
+        validation={"commands": ["pytest -q"], "requested_tier": 1},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "idempotency serialization test fixture",
+        },
+    )
+
+
 def _release_sync_request(
     *, auto_merge: bool = True, source_branch: str = "development"
 ) -> WorkspaceCreateRequest:
@@ -743,6 +761,34 @@ async def test_create_auto_profile_legacy_replay_allows_missing_requested_tier(
         request,
         idempotency_key="service-create-v2-legacy-auto-tier",
     )
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_inline_profile_legacy_replay_allows_missing_forge(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A requested_profile persisted before the ``forge`` field (issue #345) lacks
+    the key, while an identical replay now dumps ``forge="auto"`` (the unresolved
+    input default). The replay must still match the legacy row rather than raise a
+    spurious idempotency conflict on the byte-for-byte profile comparison."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-inline-profile-legacy-forge"
+    request = _inline_profile_request()
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        assert workspace.requested_profile is not None
+        assert workspace.requested_profile.get("forge") == "auto"
+        workspace.requested_profile = {
+            key: value for key, value in workspace.requested_profile.items() if key != "forge"
+        }
+        await session.commit()
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
 
     assert replayed.id == created.id
 
