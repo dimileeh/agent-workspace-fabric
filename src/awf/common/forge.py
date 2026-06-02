@@ -218,6 +218,14 @@ def concrete_forge_for_repo(forge: object, repo_url: str | None) -> ForgeKind:
     :func:`concrete_forge`, so detection stays best-effort.
     """
     if forge in (None, "", "auto"):
+        # Phase 2 caveat: a bare ``owner/repo`` slug carries no host, so
+        # ``detect_forge_from_url`` (via ``RepoRef.from_url``) returns ``"github"``
+        # for it — a non-concrete forge with a bare-slug ``repo_url`` resolves to
+        # github by *detection* here, the same result as the ``concrete_forge``
+        # fallback below but reached via the URL path. Always correct in Phase 1
+        # (every bare-slug workspace is GitHub); a Phase 2 BitBucket bare-slug
+        # workspace would need a concrete persisted forge, since host detection
+        # cannot infer bitbucket from a hostless slug.
         detected = detect_forge_from_url(repo_url) if repo_url else None
         if detected is not None:
             return detected
