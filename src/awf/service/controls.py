@@ -1075,8 +1075,9 @@ class WorkspaceControlService:
             },
             expected_version=None,
         )
-        has_runtime_locator = (
-            workspace.compose_project_name is not None or workspace.compose_file_path is not None
+        runtime_cleanup_succeeded = cleanup_result.status == "succeeded"
+        compose_down_succeeded = any(
+            step.name == "compose_down" and step.ok for step in cleanup_result.completed_steps
         )
         if not cleanup_result.ok:
             cleanup_message = _cleanup_failure_message(cleanup_result)
@@ -1147,13 +1148,8 @@ class WorkspaceControlService:
                     reason_code=failed_reason_code,
                     payload=secondary_failure_recorded_payload,
                 )
-            if (
-                has_runtime_locator
-                and not await has_terminal_runtime_released_event(self._session, workspace.id)
-                and any(
-                    step.name == "compose_down" and step.ok
-                    for step in cleanup_result.completed_steps
-                )
+            if compose_down_succeeded and not await has_terminal_runtime_released_event(
+                self._session, workspace.id
             ):
                 await repo.add_event(
                     workspace,
@@ -1218,7 +1214,7 @@ class WorkspaceControlService:
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
                 )
-            if has_runtime_locator and not await has_terminal_runtime_released_event(
+            if runtime_cleanup_succeeded and not await has_terminal_runtime_released_event(
                 self._session, workspace.id
             ):
                 await repo.add_event(

@@ -1086,6 +1086,51 @@ async def test_destroy_partial_cleanup_records_runtime_released_when_compose_dow
 
 
 @pytest.mark.unit
+async def test_destroy_legacy_null_locator_partial_cleanup_records_runtime_released(
+    session: AsyncSession,
+) -> None:
+    partial_result = WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose_down",
+                status="succeeded",
+                reason_code=COMPOSE_DOWN_SUCCEEDED,
+            ),
+            WorkspaceCleanupStepResult(
+                name="worktree_remove",
+                status="failed",
+                reason_code="CLEANUP_STEP_FAILED",
+                error="worktree removal failed",
+            ),
+        ]
+    )
+    cleaner = StructuredCleaner(result=partial_result)
+    service = WorkspaceControlService(
+        session,
+        project_stopper=RecordingStopper(),
+        cleaner_factory=lambda: cleaner,
+    )
+
+    workspace = await _workspace(session, status=WorkspaceStatus.destroying)
+    workspace.compose_project_name = None
+    workspace.compose_file_path = None
+    await session.flush()
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+
+    assert response.status == WorkspaceStatus.failed
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert cleaner.calls[0].compose_project_name is None
+    assert cleaner.calls[0].compose_file_path is None
+    assert await has_terminal_runtime_released_event(session, workspace.id) is True
+
+
+@pytest.mark.unit
 async def test_destroy_compose_file_only_records_runtime_released_after_cleanup(
     session: AsyncSession,
 ) -> None:
@@ -1117,6 +1162,40 @@ async def test_destroy_compose_file_only_records_runtime_released_after_cleanup(
     assert release_events[0].payload is not None
     assert release_events[0].payload["compose_project_name"] is None
     assert release_events[0].payload["compose_file_path"] == compose_file_path
+    assert release_events[0].payload["workspace_status"] == WorkspaceStatus.destroyed.value
+
+
+@pytest.mark.unit
+async def test_destroy_legacy_null_locator_records_runtime_released_after_cleanup(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.destroying)
+    workspace.compose_project_name = None
+    workspace.compose_file_path = None
+    await session.flush()
+    cleaner = RecordingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+    events = await _events(session, workspace.id)
+    release_events = [
+        event for event in events if event.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE
+    ]
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert workspace.status == WorkspaceStatus.destroyed.value
+    assert cleaner.calls[0].compose_project_name is None
+    assert cleaner.calls[0].compose_file_path is None
+    assert await has_terminal_runtime_released_event(session, workspace.id) is True
+    assert len(release_events) == 1
+    assert release_events[0].payload is not None
+    assert release_events[0].payload["compose_project_name"] is None
+    assert release_events[0].payload["compose_file_path"] is None
     assert release_events[0].payload["workspace_status"] == WorkspaceStatus.destroyed.value
 
 
