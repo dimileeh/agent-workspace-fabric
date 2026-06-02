@@ -1065,6 +1065,35 @@ class TestBranchDriftRecovery:
             assert "merge --ff-only" in (ws.failure_message or "")
         assert any("stash" in call.args and "pop" in call.args for call in fake.calls)
 
+    @pytest.mark.unit
+    async def test_branch_drift_merge_failure_clean_worktree_raises_without_stash_pop(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Clean-worktree drift whose ``merge --ff-only`` fails: with nothing
+        stashed there is no WIP to restore, so recovery raises straight away
+        (no ``stash pop``) and the workspace fails with the ff-only message."""
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")  # adapter
+        fake.queue_result(returncode=0, stdout="awf/feature-x\n")  # abbrev-ref → drifted
+        fake.queue_result(returncode=0, stdout="deadbeef12345\n")  # rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="")  # status --porcelain (clean → no stash)
+        fake.queue_result(returncode=0)  # git switch awf/x
+        fake.queue_result(returncode=1, stderr="fatal: not possible to fast-forward")  # merge
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "merge --ff-only" in (ws.failure_message or "")
+        # A clean worktree means nothing was stashed, so there is no pop.
+        assert not any("stash" in call.args for call in fake.calls)
+
 
 class TestCommitStepRuntimeError:
     @pytest.mark.unit
