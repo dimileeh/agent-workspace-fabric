@@ -8,6 +8,9 @@ from typing import Any
 import pytest
 
 from awf.control.executor import planning_ops as executor_planning_ops
+from awf.control.worker import cleanup as worker_cleanup
+from awf.db.enums import WorkspaceStatus
+from awf.node.cleanup import WorkspaceCleanupResult
 from awf.service.workspaces import WorkspaceRetrySourceRuntimeNotReleasedError
 
 
@@ -186,3 +189,198 @@ async def test_auto_retry_planning_scope_failure_blocks_on_unreleased_source_run
             "retry_after": "terminal_runtime_released",
         },
     )
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_resumes_blocked_planning_scope_auto_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[_RecordingSession] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class _WorkspaceRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get(self, workspace_id: str) -> object:
+            return SimpleNamespace(id=workspace_id, task_policy={})
+
+        async def get_for_update(self, workspace_id: str) -> object:
+            return await self.get(workspace_id)
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            assert isinstance(self._session, _RecordingSession)
+            self._session.operations.append(f"event:{event_type}")
+            events.append((event_type, reason_code, payload))
+
+    def _session_factory() -> _RecordingSession:
+        session = _RecordingSession()
+        sessions.append(session)
+        return session
+
+    async def _has_pending_block(session: object, workspace_id: str) -> bool:
+        assert workspace_id == "ws_retry"
+        assert isinstance(session, _RecordingSession)
+        session.operations.append("pending-block-check")
+        return True
+
+    async def _retry_workspace_row(
+        session: object,
+        workspace_id: str,
+        **kwargs: Any,
+    ) -> object:
+        assert workspace_id == "ws_retry"
+        assert kwargs == {}
+        assert isinstance(session, _RecordingSession)
+        session.operations.append("retry")
+        return SimpleNamespace(new_workspace=SimpleNamespace(id="ws_retry_new"))
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        executor_planning_ops,
+        "_has_pending_terminal_release_planning_scope_auto_retry",
+        _has_pending_block,
+    )
+    monkeypatch.setattr(
+        executor_planning_ops,
+        "retry_workspace_row",
+        _retry_workspace_row,
+    )
+    executor = SimpleNamespace(_session_factory=_session_factory)
+
+    await executor_planning_ops._resume_blocked_planning_scope_auto_retry_after_runtime_release(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+    )
+
+    assert sessions[-1].operations == [
+        "pending-block-check",
+        "retry",
+        "event:workspace.planning_scope_auto_retry_requested",
+        "commit",
+    ]
+    assert events == [
+        (
+            "workspace.planning_scope_auto_retry_requested",
+            "PLANNING_SCOPE_AUTO_RETRY_REQUESTED",
+            {
+                "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                "new_workspace_id": "ws_retry_new",
+            },
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_planning_scope_auto_retry_pending_check_requires_latest_blocked_event() -> None:
+    source_reason = executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION
+
+    class _ExecuteResult:
+        def __init__(self, events: list[object]) -> None:
+            self._events = events
+
+        def scalars(self) -> _ExecuteResult:
+            return self
+
+        def __iter__(self) -> object:
+            return iter(self._events)
+
+    class _EventSession:
+        def __init__(self, events: list[object]) -> None:
+            self._events = events
+
+        async def execute(self, _stmt: object) -> _ExecuteResult:
+            return _ExecuteResult(self._events)
+
+    def _event(event_type: str, payload: dict[str, object]) -> object:
+        return SimpleNamespace(event_type=event_type, payload=payload)
+
+    blocked = _event(
+        "workspace.planning_scope_auto_retry_blocked",
+        {
+            "source_reason_code": source_reason,
+            "retry_after": "terminal_runtime_released",
+        },
+    )
+    requested = _event(
+        "workspace.retry_requested",
+        {
+            "source_reason_code": source_reason,
+        },
+    )
+    failed = _event(
+        "workspace.planning_scope_auto_retry_failed",
+        {
+            "source_reason_code": source_reason,
+        },
+    )
+
+    assert (
+        await executor_planning_ops._has_pending_terminal_release_planning_scope_auto_retry(  # noqa: SLF001
+            _EventSession([blocked]),
+            "ws_retry",
+        )
+        is True
+    )
+    assert (
+        await executor_planning_ops._has_pending_terminal_release_planning_scope_auto_retry(  # noqa: SLF001
+            _EventSession([requested, blocked]),
+            "ws_retry",
+        )
+        is False
+    )
+    assert (
+        await executor_planning_ops._has_pending_terminal_release_planning_scope_auto_retry(  # noqa: SLF001
+            _EventSession([failed, blocked]),
+            "ws_retry",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_event_triggers_blocked_planning_scope_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resumed: list[str] = []
+
+    async def _run_db_operation_with_retry(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _resume(_self: object, *, workspace_id: str) -> None:
+        resumed.append(workspace_id)
+
+    monkeypatch.setattr(
+        worker_cleanup,
+        "run_db_operation_with_retry",
+        _run_db_operation_with_retry,
+    )
+    monkeypatch.setattr(
+        worker_cleanup,
+        "_resume_blocked_planning_scope_auto_retry_after_runtime_release",
+        _resume,
+    )
+    worker = SimpleNamespace(
+        _session_factory=lambda: object(),
+        _log_transient_db_retry=lambda _exc, _attempt: None,
+    )
+    candidate = SimpleNamespace(
+        workspace_id="ws_retry",
+        status=WorkspaceStatus.failed,
+        compose_project_name="awf_ws_retry",
+    )
+
+    await worker_cleanup._record_terminal_runtime_released(  # noqa: SLF001
+        worker,
+        candidate,
+        WorkspaceCleanupResult.skipped(),
+    )
+
+    assert resumed == ["ws_retry"]

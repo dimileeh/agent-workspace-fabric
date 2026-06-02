@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from sqlalchemy import select
+
 from awf.adapters.base import (
     AgentAdapter,
     AgentRunError,
@@ -53,7 +55,7 @@ from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
 )
-from awf.db.models import Workspace
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
@@ -95,6 +97,29 @@ from awf.service.workspaces import (
     WorkspaceRetrySourceRuntimeNotReleasedError,
     retry_workspace_row,
 )
+
+_PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE = "workspace.planning_scope_auto_retry_blocked"
+_PLANNING_SCOPE_AUTO_RETRY_FAILED_EVENT_TYPE = "workspace.planning_scope_auto_retry_failed"
+_PLANNING_SCOPE_AUTO_RETRY_REQUESTED_EVENT_TYPE = "workspace.planning_scope_auto_retry_requested"
+_PLANNING_SCOPE_AUTO_RETRY_SKIPPED_EVENT_TYPE = "workspace.planning_scope_auto_retry_skipped"
+_PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE = (
+    "PLANNING_SCOPE_AUTO_RETRY_SOURCE_RUNTIME_NOT_RELEASED"
+)
+_PLANNING_SCOPE_AUTO_RETRY_FAILED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_FAILED"
+_PLANNING_SCOPE_AUTO_RETRY_REQUESTED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_REQUESTED"
+_PLANNING_SCOPE_AUTO_RETRY_SKIPPED_REASON_CODE = "PLANNING_SCOPE_AUTO_RETRY_ALREADY_RETRIED"
+_TERMINAL_RUNTIME_RELEASE_RETRY_AFTER = "terminal_runtime_released"
+_WORKSPACE_RETRY_REQUESTED_EVENT_TYPE = "workspace.retry_requested"
+_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS = frozenset(
+    {
+        _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,
+        _PLANNING_SCOPE_AUTO_RETRY_FAILED_EVENT_TYPE,
+        _PLANNING_SCOPE_AUTO_RETRY_REQUESTED_EVENT_TYPE,
+        _PLANNING_SCOPE_AUTO_RETRY_SKIPPED_EVENT_TYPE,
+        _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
+    }
+)
+_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_SCAN_LIMIT = 100
 
 
 async def _prepare_conformance_salvage_for_execution(
@@ -535,75 +560,162 @@ async def _auto_retry_planning_scope_failure(
     if failure.reason_code != AGENT_PLAN_PHASE_SCOPE_VIOLATION:
         return
     async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
+        await _request_planning_scope_auto_retry(
+            session,
+            workspace_id=workspace_id,
+            source_reason_code=failure.reason_code,
+        )
+
+
+async def _resume_blocked_planning_scope_auto_retry_after_runtime_release(
+    self: Any,
+    *,
+    workspace_id: str,
+) -> None:
+    """Resume a planning-scope auto-retry that was waiting for runtime release."""
+    async with self._session_factory() as session:
+        await _request_planning_scope_auto_retry(
+            session,
+            workspace_id=workspace_id,
+            source_reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            require_pending_terminal_release_block=True,
+            lock_source=True,
+        )
+
+
+async def _request_planning_scope_auto_retry(
+    session: Any,
+    *,
+    workspace_id: str,
+    source_reason_code: str,
+    require_pending_terminal_release_block: bool = False,
+    lock_source: bool = False,
+) -> None:
+    repo = WorkspaceRepository(session)
+    if lock_source:
+        workspace = await repo.get_for_update(workspace_id)
+    else:
+        workspace = await repo.get(workspace_id)
+    if workspace is None:
+        return
+    if require_pending_terminal_release_block and not (
+        await _has_pending_terminal_release_planning_scope_auto_retry(
+            session,
+            workspace_id,
+        )
+    ):
+        return
+    task_policy = workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
+    scheduler_policy = task_policy.get("scheduler")
+    if isinstance(scheduler_policy, Mapping) and scheduler_policy.get("source_workspace_id"):
+        await repo.add_event(
+            workspace,
+            event_type=_PLANNING_SCOPE_AUTO_RETRY_SKIPPED_EVENT_TYPE,
+            reason_code=_PLANNING_SCOPE_AUTO_RETRY_SKIPPED_REASON_CODE,
+            payload={"source_reason_code": source_reason_code},
+        )
+        await session.commit()
+        return
+    try:
+        result = await retry_workspace_row(session, workspace_id)
+    except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
+        rollback = getattr(session, "rollback", None)
+        if rollback is not None:
+            await rollback()
         workspace = await repo.get(workspace_id)
         if workspace is None:
             return
-        task_policy = workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
-        scheduler_policy = task_policy.get("scheduler")
-        if isinstance(scheduler_policy, Mapping) and scheduler_policy.get("source_workspace_id"):
-            await repo.add_event(
-                workspace,
-                event_type="workspace.planning_scope_auto_retry_skipped",
-                reason_code="PLANNING_SCOPE_AUTO_RETRY_ALREADY_RETRIED",
-                payload={"source_reason_code": failure.reason_code},
-            )
-            await session.commit()
-            return
-        try:
-            result = await retry_workspace_row(session, workspace_id)
-        except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
-            rollback = getattr(session, "rollback", None)
-            if rollback is not None:
-                await rollback()
-            workspace = await repo.get(workspace_id)
-            if workspace is None:
-                return
-            await repo.add_event(
-                workspace,
-                event_type="workspace.planning_scope_auto_retry_blocked",
-                reason_code="PLANNING_SCOPE_AUTO_RETRY_SOURCE_RUNTIME_NOT_RELEASED",
-                payload={
-                    "source_reason_code": failure.reason_code,
-                    "detail": exc.detail,
-                    "retry_after": "terminal_runtime_released",
-                },
-            )
-            await session.commit()
-            return
-        except (
-            WorkspaceCreateDuplicateHostPortError,
-            WorkspaceCreateHostPortConflictError,
-            WorkspaceRetryError,
-        ) as exc:
-            rollback = getattr(session, "rollback", None)
-            if rollback is not None:
-                await rollback()
-            workspace = await repo.get(workspace_id)
-            if workspace is None:
-                return
-            await repo.add_event(
-                workspace,
-                event_type="workspace.planning_scope_auto_retry_failed",
-                reason_code="PLANNING_SCOPE_AUTO_RETRY_FAILED",
-                payload={
-                    "source_reason_code": failure.reason_code,
-                    "error": str(exc)[:2000],
-                    "detail": getattr(exc, "detail", None),
-                },
-            )
-            await session.commit()
-            return
         await repo.add_event(
             workspace,
-            event_type="workspace.planning_scope_auto_retry_requested",
-            reason_code="PLANNING_SCOPE_AUTO_RETRY_REQUESTED",
+            event_type=_PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,
+            reason_code=_PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,
             payload={
-                "source_reason_code": failure.reason_code,
-                "new_workspace_id": result.new_workspace.id,
+                "source_reason_code": source_reason_code,
+                "detail": exc.detail,
+                "retry_after": _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER,
             },
         )
         await session.commit()
+        return
+    except (
+        WorkspaceCreateDuplicateHostPortError,
+        WorkspaceCreateHostPortConflictError,
+        WorkspaceRetryError,
+    ) as exc:
+        rollback = getattr(session, "rollback", None)
+        if rollback is not None:
+            await rollback()
+        workspace = await repo.get(workspace_id)
+        if workspace is None:
+            return
+        await repo.add_event(
+            workspace,
+            event_type=_PLANNING_SCOPE_AUTO_RETRY_FAILED_EVENT_TYPE,
+            reason_code=_PLANNING_SCOPE_AUTO_RETRY_FAILED_REASON_CODE,
+            payload={
+                "source_reason_code": source_reason_code,
+                "error": str(exc)[:2000],
+                "detail": getattr(exc, "detail", None),
+            },
+        )
+        await session.commit()
+        return
+    await repo.add_event(
+        workspace,
+        event_type=_PLANNING_SCOPE_AUTO_RETRY_REQUESTED_EVENT_TYPE,
+        reason_code=_PLANNING_SCOPE_AUTO_RETRY_REQUESTED_REASON_CODE,
+        payload={
+            "source_reason_code": source_reason_code,
+            "new_workspace_id": result.new_workspace.id,
+        },
+    )
+    await session.commit()
+
+
+async def _has_pending_terminal_release_planning_scope_auto_retry(
+    session: Any,
+    workspace_id: str,
+) -> bool:
+    stmt = (
+        select(WorkspaceEvent)
+        .where(WorkspaceEvent.workspace_id == workspace_id)
+        .where(WorkspaceEvent.event_type.in_(_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS))
+        .order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.event_order.desc().nullslast(),
+            WorkspaceEvent.id.desc(),
+        )
+        .limit(_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_SCAN_LIMIT)
+    )
+    events = list((await session.execute(stmt)).scalars())
+    for event in events:
+        event_type = getattr(event, "event_type", None)
+        payload = _planning_scope_auto_retry_payload(event)
+        if event_type == _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE and (
+            _planning_scope_auto_retry_payload_matches(payload)
+        ):
+            return False
+        if event_type == _PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE and (
+            _planning_scope_auto_retry_payload_matches(payload)
+            and payload.get("retry_after") == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER
+        ):
+            return True
+        if event_type in _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS and (
+            _planning_scope_auto_retry_payload_matches(payload)
+        ):
+            return False
+    return False
+
+
+def _planning_scope_auto_retry_payload(event: Any) -> Mapping[str, Any]:
+    payload = getattr(event, "payload", None)
+    if isinstance(payload, Mapping):
+        return payload
+    return {}
+
+
+def _planning_scope_auto_retry_payload_matches(payload: Mapping[str, Any]) -> bool:
+    return payload.get("source_reason_code") == AGENT_PLAN_PHASE_SCOPE_VIOLATION
 
 
 async def _run_agent_task_with_optional_planning(

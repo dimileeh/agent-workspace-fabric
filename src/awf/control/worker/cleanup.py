@@ -21,6 +21,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from awf.control.executor.planning_ops import (
+    _resume_blocked_planning_scope_auto_retry_after_runtime_release,
+)
 from awf.control.worker.constants import (
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
@@ -410,6 +413,10 @@ async def _record_terminal_runtime_released(
         status=candidate.status.value,
         compose_project_name=candidate.compose_project_name,
         reason_code=_TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    )
+    await _resume_blocked_planning_scope_auto_retry_after_runtime_release(
+        self,
+        workspace_id=candidate.workspace_id,
     )
 
 
