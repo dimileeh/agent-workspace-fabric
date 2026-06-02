@@ -310,6 +310,7 @@ class ControlWorker(WorkerDelegatesMixin):
         return await self._list_by_status(
             WorkspaceStatus.requested,
             limit=self._config.max_concurrent_provisions,
+            node_id=self._config.node_id or "local",
         )
 
     async def _list_ready(
@@ -346,6 +347,7 @@ class ControlWorker(WorkerDelegatesMixin):
         *,
         limit: int,
         exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
     ) -> list[str]:
         if limit <= 0:
             return []
@@ -361,6 +363,7 @@ class ControlWorker(WorkerDelegatesMixin):
                     status=status,
                     limit=limit,
                     exclude_ids=exclude_ids,
+                    node_id=node_id,
                 )
                 return ids[:limit]
 
@@ -374,6 +377,7 @@ class ControlWorker(WorkerDelegatesMixin):
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
+            node_id=node_id,
         )
 
     def _execution_claim_expires_at(self: Any) -> datetime:

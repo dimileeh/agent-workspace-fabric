@@ -70,6 +70,7 @@ async def _list_scheduler_dispatchable_ids(
     status: WorkspaceStatus,
     limit: int,
     exclude_ids: set[str] | None = None,
+    node_id: str | None = None,
 ) -> list[str]:
     async def _operation(session: AsyncSession) -> list[str]:
         return cast(
@@ -79,6 +80,7 @@ async def _list_scheduler_dispatchable_ids(
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
+                node_id=node_id,
             ),
         )
 
@@ -98,6 +100,7 @@ async def _list_scheduler_dispatchable_ids_from_pages(
     status: WorkspaceStatus,
     limit: int,
     exclude_ids: set[str] | None = None,
+    node_id: str | None = None,
 ) -> list[str]:
     dispatchable_workspaces_by_id: dict[str, Workspace] = {}
     candidate_limit = _scheduler_candidate_fetch_limit(limit)
@@ -111,6 +114,7 @@ async def _list_scheduler_dispatchable_ids_from_pages(
             status=status,
             limit=candidate_limit,
             exclude_ids=exclude_ids,
+            node_id=node_id,
             after=candidate_after,
             scoring_at=scoring_at,
         )

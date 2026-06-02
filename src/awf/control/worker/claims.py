@@ -79,6 +79,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories._scheduler import _scheduler_node_scope_condition
 from awf.db.resilience import run_db_operation_with_retry
 from awf.service.scheduler import SchedulerOrderCursor
 
@@ -435,11 +436,18 @@ async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> boo
         if row_slots <= 0:
             return False
         repo = WorkspaceRepository(session)
+        claim_node_id = self._config.node_id or "local"
         ws = await repo.transition_if_current(
             workspace_id,
             from_status=WorkspaceStatus.requested,
             to=WorkspaceStatus.provisioning,
             reason_code="WORKER_CLAIMED",
+            extra_conditions=(
+                _scheduler_node_scope_condition(
+                    status=WorkspaceStatus.requested,
+                    node_id=claim_node_id,
+                ),
+            ),
         )
         if ws is not None:
             ws.execution_claimed_by = self._worker_id

@@ -1085,15 +1085,88 @@ class TestRunOncePart003:
             *,
             limit: int,
             exclude_ids: set[str] | None = None,
+            node_id: str | None = None,
         ) -> list[str]:
             del status, exclude_ids
             observed_limits.append(limit)
+            assert node_id == "local"
             return []
 
         monkeypatch.setattr(worker, "_list_by_status", _record_list_by_status)
 
         assert await worker._list_requested() == []  # noqa: SLF001
         assert observed_limits == [1]
+
+    @pytest.mark.unit
+    async def test_non_capacity_requested_listing_honors_reservation_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        remote_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "non-capacity-remote-reserved-request",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            remote_id,
+            node_id="worker-node-a",
+        )
+        unreserved_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "non-capacity-unreserved-request",
+            create_task_attempt=True,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=2,
+                node_id="worker-node-b",
+            ),
+        )
+
+        assert await worker._list_requested() == [unreserved_id]  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_non_capacity_requested_claim_honors_reservation_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        remote_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "non-capacity-direct-remote-reserved-request",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            remote_id,
+            node_id="worker-node-a",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id="worker-node-b",
+            ),
+        )
+
+        assert await worker._claim_requested_ids([remote_id]) == []  # noqa: SLF001
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(remote_id)
+
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.requested.value
+        assert workspace.node_id is None
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_records_one_ordered_decision_for_defaulted_claim(
