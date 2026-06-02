@@ -220,7 +220,9 @@ async def find_host_port_conflicts(
     failure), the latest reservation regardless of release status
     provides a last-resort node assignment so that unreleased containers
     on that node are still detected.  Legacy terminal rows with null
-    compose metadata, null node, and no reservation are treated as
+    compose metadata that are stamped to the queried node are treated as
+    possible default-project port holders on that node.  Legacy rows with
+    null compose metadata, null node, and no reservation are treated as
     possible default-project port holders on every node until cleanup
     records a release event.  Host ports are Docker host ports and are
     scoped to the worker node, so a workspace on node A binding port
@@ -248,19 +250,21 @@ async def find_host_port_conflicts(
     ``WorkspaceEvent(workspace_id, event_type, reason_code, occurred_at)``
     to speed up the correlated subquery.
 
-    NODE-FILTER FALLBACK: When *node_id* is provided, workspaces whose
-    ``node_id`` is NULL *and* have no ``ResourceReservation`` row at
+    NODE-FILTER FALLBACK: When *node_id* is provided, terminal
+    null-runtime rows stamped to that node are included because the
+    cleanup scanner can derive their default Compose project.  Workspaces
+    whose ``node_id`` is NULL *and* have no ``ResourceReservation`` row at
     all (legacy rows created before the provisioner started stamping
-    ``node_id`` and before the reservation system existed) are
-    included via a fallback clause that treats such null-node rows as
-    potential conflicts on every node.  Reserved legacy null-runtime
-    rows use their latest reservation node instead.  This prevents an
-    upgraded local install from missing a legacy Docker stack that
-    still owns a host port.  In a true multi-node deployment the
-    no-reservation fallback may produce false positives for legacy rows
-    whose actual node cannot be determined; a node-ownership claim
-    field (e.g.  a ``claimed_node_id`` column on the workspace) would
-    allow precise attribution.
+    ``node_id`` and before the reservation system existed) are included
+    via a fallback clause that treats such null-node rows as potential
+    conflicts on every node.  Reserved legacy null-runtime rows use their
+    latest reservation node instead.  This prevents an upgraded local
+    install from missing a legacy Docker stack that still owns a host
+    port.  In a true multi-node deployment the no-reservation fallback
+    may produce false positives for legacy rows whose actual node cannot
+    be determined; a node-ownership claim field (e.g.  a
+    ``claimed_node_id`` column on the workspace) would allow precise
+    attribution.
     """
     if not host_ports:
         return []
@@ -285,13 +289,16 @@ async def find_host_port_conflicts(
         Workspace.compose_project_name.is_(None),
         Workspace.compose_file_path.is_(None),
     )
+    terminal_null_runtime_port_holder_branches = [
+        resource_reservation_exists,
+        Workspace.node_id.is_(None),
+    ]
+    if node_id is not None:
+        terminal_null_runtime_port_holder_branches.append(Workspace.node_id == node_id)
     terminal_null_runtime_may_hold_ports = and_(
         null_runtime_metadata,
         ~pre_launch_failure_exists,
-        or_(
-            resource_reservation_exists,
-            Workspace.node_id.is_(None),
-        ),
+        or_(*terminal_null_runtime_port_holder_branches),
     )
     terminal_runtime_may_hold_ports = or_(
         Workspace.compose_project_name.isnot(None),

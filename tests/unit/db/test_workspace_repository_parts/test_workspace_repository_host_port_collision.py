@@ -1455,6 +1455,59 @@ class TestCrossNodeAndEdgeCases:
         ]
 
     @pytest.mark.asyncio
+    async def test_node_stamped_legacy_terminal_null_runtime_metadata_blocks_declared_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Node-stamped legacy null-runtime rows may still hold ports on that node."""
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            node_id="node-a",
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            resolved_profile={
+                "name": "node-stamped-legacy-null-runtime-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 15432]],
+                    }
+                ],
+            },
+        )
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await session.commit()
+
+        conflicts_a = await repo.find_host_port_conflicts(
+            host_ports=[8080, 15432],
+            excluding_workspace_id=None,
+            node_id="node-a",
+        )
+        assert sorted((conflict.host_port, conflict.workspace_id) for conflict in conflicts_a) == [
+            (8080, ws.id),
+            (15432, ws.id),
+        ]
+
+        conflicts_b = await repo.find_host_port_conflicts(
+            host_ports=[8080, 15432],
+            excluding_workspace_id=None,
+            node_id="node-b",
+        )
+        assert conflicts_b == []
+
+    @pytest.mark.asyncio
     async def test_reserved_legacy_terminal_null_runtime_metadata_blocks_declared_host_ports(
         self,
         session: AsyncSession,
