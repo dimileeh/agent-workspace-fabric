@@ -1075,6 +1075,9 @@ class WorkspaceControlService:
             },
             expected_version=None,
         )
+        has_runtime_locator = (
+            workspace.compose_project_name is not None or workspace.compose_file_path is not None
+        )
         if not cleanup_result.ok:
             cleanup_message = _cleanup_failure_message(cleanup_result)
             bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
@@ -1145,7 +1148,7 @@ class WorkspaceControlService:
                     payload=secondary_failure_recorded_payload,
                 )
             if (
-                workspace.compose_project_name is not None
+                has_runtime_locator
                 and not await has_terminal_runtime_released_event(self._session, workspace.id)
                 and any(
                     step.name == "compose_down" and step.ok
@@ -1158,6 +1161,7 @@ class WorkspaceControlService:
                     reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                     payload={
                         "compose_project_name": workspace.compose_project_name,
+                        "compose_file_path": workspace.compose_file_path,
                         "workspace_status": workspace.status,
                         "cleanup": cleanup_payload,
                         "partial_release": True,
@@ -1214,9 +1218,8 @@ class WorkspaceControlService:
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
                 )
-            if (
-                workspace.compose_project_name is not None
-                and not await has_terminal_runtime_released_event(self._session, workspace.id)
+            if has_runtime_locator and not await has_terminal_runtime_released_event(
+                self._session, workspace.id
             ):
                 await repo.add_event(
                     workspace,
@@ -1224,6 +1227,7 @@ class WorkspaceControlService:
                     reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                     payload={
                         "compose_project_name": workspace.compose_project_name,
+                        "compose_file_path": workspace.compose_file_path,
                         "workspace_status": workspace.status,
                         "cleanup": cleanup_payload,
                     },
