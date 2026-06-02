@@ -95,6 +95,7 @@ async def _reserve_workspace(
     peak_memory_gb: float = 1.0,
     disk_mb: int | None = None,
     dind_slots: int = 0,
+    node_id: str = "local",
 ) -> None:
     async with session_factory() as s:
         attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
@@ -102,7 +103,7 @@ async def _reserve_workspace(
         await ResourceReservationRepository(s).create(
             workspace_id=workspace_id,
             attempt_id=attempt.id,
-            node_id="local",
+            node_id=node_id,
             steady_cpu=steady_cpu,
             steady_memory_gb=steady_memory_gb,
             peak_cpu=peak_cpu,
@@ -159,6 +160,32 @@ class _UnexpectedProvisioner:
 
     async def provision_claimed(self, workspace_id: str) -> None:
         raise AssertionError(f"workspace {workspace_id} should remain queued")
+
+
+class _TransitioningProvisioner:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+        self.calls: list[str] = []
+
+    async def provision(self, workspace_id: str) -> None:
+        await self.provision_claimed(workspace_id)
+
+    async def provision_claimed(self, workspace_id: str) -> None:
+        self.calls.append(workspace_id)
+        async with self._session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            if ws.status == WorkspaceStatus.requested.value:
+                await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            elif ws.status != WorkspaceStatus.provisioning.value:
+                return
+            ws.branch_name = f"awf/{workspace_id}"
+            ws.base_commit = "b" * 40
+            ws.compose_project_name = f"awf_{workspace_id}"
+            ws.compose_file_path = f"/tmp/awf/{workspace_id}/compose.yml"
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="TEST_READY")
+            await s.commit()
 
 
 class TestRunOnceCapacityDecisionsPart043:
@@ -262,3 +289,72 @@ class TestRunOnceCapacityDecisionsPart043:
             decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
         ]
         assert len(deferred_decisions) == 1
+
+    async def test_requested_capacity_gate_scans_only_workspaces_for_worker_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        remote_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "remote-capacity-request",
+            create_task_attempt=True,
+        )
+        local_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "local-capacity-request",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            remote = await WorkspaceRepository(s).get(remote_id)
+            local = await WorkspaceRepository(s).get(local_id)
+            assert remote is not None
+            assert local is not None
+            remote.node_id = "worker-node-b"
+            local.node_id = "worker-node-a"
+            await s.commit()
+        await _reserve_workspace(
+            session_factory,
+            remote_id,
+            node_id="worker-node-b",
+            steady_cpu=2.0,
+            steady_memory_gb=1.0,
+            peak_cpu=2.0,
+            peak_memory_gb=1.0,
+        )
+        await _reserve_workspace(
+            session_factory,
+            local_id,
+            node_id="worker-node-a",
+            steady_cpu=1.0,
+            steady_memory_gb=1.0,
+            peak_cpu=1.0,
+            peak_memory_gb=1.0,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id="worker-node-a",
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            remote = await WorkspaceRepository(s).get(remote_id)
+            local = await WorkspaceRepository(s).get(local_id)
+            remote_decisions = await QueueDecisionRepository(s).list_for_workspace(remote_id)
+
+        assert provisioner.calls == [local_id]
+        assert remote is not None
+        assert remote.status == WorkspaceStatus.requested.value
+        assert local is not None
+        assert local.status == WorkspaceStatus.ready.value
+        assert remote_decisions == []
