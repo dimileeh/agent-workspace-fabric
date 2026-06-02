@@ -324,6 +324,78 @@ class TestFailureHandling:
             assert reloaded.node_id == "test-node-01"
 
     @pytest.mark.unit
+    async def test_compose_fail_backstop_commit_failure_reraises_original_compose_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        compose_failed = False
+        commit_failures = 0
+        original_commit = AsyncSession.commit
+
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                nonlocal compose_failed
+                del request
+                compose_failed = True
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="docker compose up failed after launch began",
+                    reason_code="COMPOSE_UP_FAILED",
+                )
+
+        async def _fail_first_post_compose_commit(self: AsyncSession) -> None:
+            nonlocal commit_failures
+            if compose_failed and commit_failures == 0:
+                commit_failures += 1
+                raise RuntimeError("compose-fail backstop commit unavailable")
+            await original_commit(self)
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST_CLAIMED")
+            await s.commit()
+            ws_id = ws.id
+
+        monkeypatch.setattr(AsyncSession, "commit", _fail_first_post_compose_commit)
+
+        with pytest.raises(ComposeOperationError) as raised:
+            await provisioner.provision_claimed(ws_id)
+
+        assert raised.value.reason_code == "COMPOSE_UP_FAILED"
+        assert commit_failures == 1
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message == (
+                "compose-fail backstop commit failed; compose_project_name not persisted"
+            )
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+            assert reloaded.node_id == "test-node-01"
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "COMPOSE_FAIL_COMMIT_FATAL"
+
+    @pytest.mark.unit
     async def test_stack_startup_failure_records_computed_egress_audit(
         self,
         session_factory: async_sessionmaker[AsyncSession],

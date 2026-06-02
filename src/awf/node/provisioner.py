@@ -567,7 +567,7 @@ class Provisioner:
                     reason_code="COMPOSE_FAIL_COMMIT_FATAL",
                     compose_launched=True,
                 )
-                return
+                raise exc from commit_exc
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
             # Best-effort and must never mask the original ComposeOperationError.
