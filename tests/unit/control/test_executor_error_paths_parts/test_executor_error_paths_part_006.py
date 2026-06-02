@@ -37,6 +37,7 @@ from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
+    monitor_handoff_companion_env,
 )
 from awf.control.executor import monitor_handoff as executor_monitor_handoff
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -247,7 +248,7 @@ def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
         return "${CANONICAL:-sentinel}"
 
     monkeypatch.setattr(
-        executor_monitor_handoff,
+        monitor_handoff_companion_env,
         "optional_env_secret_compose_placeholder",
         _fake_optional_env_secret_compose_placeholder,
     )

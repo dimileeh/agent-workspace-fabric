@@ -17,8 +17,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-import yaml
-
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
@@ -79,7 +77,6 @@ from awf.node.companion_services import (
     COMPANION_ENV_SECRET_SOURCE_MISSING,
     WorkspaceCompanionSpec,
     companion_specs_from_task_policy,
-    optional_env_secret_compose_placeholder,
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
@@ -102,6 +99,15 @@ _ComposeStringKeySafeLoader = _companion_env._ComposeStringKeySafeLoader
 _atomic_write_text = _companion_env._atomic_write_text
 _compose_environment_list_item_targets = _companion_env._compose_environment_list_item_targets
 _construct_compose_string_key_mapping = _companion_env._construct_compose_string_key_mapping
+_missing_optional_companion_env_secret_targets = (
+    _companion_env._missing_optional_companion_env_secret_targets
+)
+_present_optional_companion_env_secret_refs = (
+    _companion_env._present_optional_companion_env_secret_refs
+)
+_refresh_optional_companion_env_secrets_for_resume = (
+    _companion_env._refresh_optional_companion_env_secrets_for_resume
+)
 _remove_compose_environment_targets = _companion_env._remove_compose_environment_targets
 _represent_compose_interpolation_string = _companion_env._represent_compose_interpolation_string
 _restore_compose_environment_list_refs = _companion_env._restore_compose_environment_list_refs
@@ -388,123 +394,6 @@ def _precheck_required_companion_env_secrets_for_resume(
             stderr="\n".join(stderr for _reason_code, stderr in failures),
             reason_code=failures[0][0],
         )
-
-
-def _refresh_optional_companion_env_secrets_for_resume(
-    *,
-    workspace_id: str,
-    compose_file: Path,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> None:
-    """Refresh optional companion env-secret targets before compose resume."""
-    missing_targets = _missing_optional_companion_env_secret_targets(
-        companion_specs=companion_specs,
-        environ=environ,
-    )
-    present_refs = _present_optional_companion_env_secret_refs(
-        companion_specs=companion_specs,
-        environ=environ,
-    )
-    if not missing_targets and not present_refs:
-        return
-
-    try:
-        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
-    except OSError:
-        _log.warning(
-            "executor.resume_companion_env_secret_refresh_read_failed",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-        )
-        return
-    except yaml.YAMLError:
-        _log.warning(
-            "executor.resume_companion_env_secret_refresh_parse_failed",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-        )
-        return
-
-    # This best-effort resume repair uses PyYAML, which preserves Compose
-    # interpolation via the custom dumper but not comments or block-scalar style.
-    removed_count = _remove_compose_environment_targets(payload, missing_targets)
-    restored_count = _restore_compose_environment_refs(payload, present_refs)
-    if removed_count == 0 and restored_count == 0:
-        return
-
-    try:
-        _atomic_write_text(
-            compose_file,
-            _safe_dump_compose_payload_for_resume(payload),
-            encoding="utf-8",
-        )
-    except OSError:
-        _log.warning(
-            "executor.resume_companion_env_secret_refresh_write_failed",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-        )
-        return
-    _log.warning(
-        "executor.resume_companion_env_secret_refresh_reformatted",
-        workspace_id=workspace_id,
-        compose_file=str(compose_file),
-        removed_count=removed_count,
-        restored_count=restored_count,
-        detail=(
-            "optional companion env-secret refresh rewrote the compose file; "
-            "comments, block-scalar style, and explicit null markers are not preserved"
-        ),
-    )
-    if removed_count:
-        _log.info(
-            "executor.resume_companion_optional_env_secrets_omitted",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-            omitted_count=removed_count,
-        )
-    if restored_count:
-        _log.info(
-            "executor.resume_companion_optional_env_secrets_restored",
-            workspace_id=workspace_id,
-            compose_file=str(compose_file),
-            restored_count=restored_count,
-        )
-
-
-def _missing_optional_companion_env_secret_targets(
-    *,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> dict[str, set[str]]:
-    missing_targets: dict[str, set[str]] = {}
-    for spec in companion_specs:
-        for secret in spec.environment_secrets:
-            if secret.required or secret.provider != "env" or secret.kind != "env":
-                continue
-            if secret.value_from in environ:
-                continue
-            missing_targets.setdefault(spec.name, set()).add(secret.target)
-    return missing_targets
-
-
-def _present_optional_companion_env_secret_refs(
-    *,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> dict[str, dict[str, str]]:
-    present_refs: dict[str, dict[str, str]] = {}
-    for spec in companion_specs:
-        for secret in spec.environment_secrets:
-            if secret.required or secret.provider != "env" or secret.kind != "env":
-                continue
-            if secret.value_from not in environ:
-                continue
-            present_refs.setdefault(spec.name, {})[secret.target] = (
-                optional_env_secret_compose_placeholder(secret.value_from)
-            )
-    return present_refs
 
 
 async def _reject_unsupported_task_kind(
