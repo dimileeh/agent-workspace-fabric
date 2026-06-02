@@ -9,6 +9,7 @@ the parsed-spec branch of the companion compose-up timeout helper.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,8 +29,16 @@ class _UnavailableCompose:
     def __init__(self) -> None:
         self.specs: list[WorkspaceComposeSpec] = []
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> None:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> None:
         del wait
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         self.specs.append(spec)
         raise ComposeOperationError(
             operation="up",

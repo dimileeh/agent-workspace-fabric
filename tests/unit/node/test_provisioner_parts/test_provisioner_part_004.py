@@ -66,7 +66,9 @@ class _FailingComposeLauncher:
     """Stack launcher that always raises ComposeOperationError."""
 
     async def launch(self, request: Any) -> object:
-        del request
+        on_started = getattr(request, "on_compose_up_started", None)
+        if on_started is not None:
+            await on_started()
         raise ComposeOperationError(
             operation="up",
             returncode=1,

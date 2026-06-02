@@ -21,7 +21,7 @@ import contextlib
 import json
 import os
 import secrets
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -361,12 +361,20 @@ class ComposeManager:
 
         return ComposeProjectPaths(project_dir=project_dir, compose_file=compose_file)
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Callable[[], Awaitable[None]] | None = None,
+    ) -> ComposeProjectPaths:
         """Start the stack. With ``wait=True``, blocks until services are healthy."""
         paths = self.render(spec)
         args = ["up", "-d", "--remove-orphans"]
         if wait:
             args.extend(["--wait", "--wait-timeout", str(spec.compose_up_timeout_seconds)])
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         await self._compose(
             spec.project_name(),
             paths.compose_file,

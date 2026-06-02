@@ -96,6 +96,12 @@ async def _force_cancel_provisioning_workspace(
         await s.commit()
 
 
+async def _signal_compose_up_started(request: Any) -> None:
+    on_started = getattr(request, "on_compose_up_started", None)
+    if on_started is not None:
+        await on_started()
+
+
 def _secret_profile() -> WorkspaceProfile:
     return WorkspaceProfile(
         name="provisioner-secret-edges",
@@ -285,6 +291,7 @@ class TestOperatorControlRaces:
     ) -> None:
         class _DestroyingFailingStackLauncher:
             async def launch(self, request: Any) -> object:
+                await _signal_compose_up_started(request)
                 await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
                 raise ComposeOperationError(
                     operation="up",

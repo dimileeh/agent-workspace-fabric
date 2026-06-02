@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,8 +26,14 @@ from awf.profiles.models import WorkspaceProfile
 
 
 class _StubCompose:
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
-        del spec, wait
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> ComposeProjectPaths:
+        del spec, wait, on_compose_up_started
         raise AssertionError("up should not be called by these tests")
 
 
@@ -38,8 +45,16 @@ class _RecordingCompose:
         self.specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> ComposeProjectPaths:
         """Record the rendered spec and return deterministic compose paths."""
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         self.specs.append(spec)
         self.waits.append(wait)
         return ComposeProjectPaths(
@@ -63,8 +78,16 @@ class _MissingImageOnceCompose:
         self.specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> ComposeProjectPaths:
         """Fail once with Docker's missing-image text, then succeed."""
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         self.specs.append(spec)
         self.waits.append(wait)
         if len(self.specs) == 1:
@@ -90,8 +113,16 @@ class _MissingImagesInOrderCompose:
         self.specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
 
-    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+    async def up(
+        self,
+        spec: WorkspaceComposeSpec,
+        *,
+        wait: bool = True,
+        on_compose_up_started: Any | None = None,
+    ) -> ComposeProjectPaths:
         """Fail once per configured tag, then succeed."""
+        if on_compose_up_started is not None:
+            await on_compose_up_started()
         self.specs.append(spec)
         self.waits.append(wait)
         attempt_index = len(self.specs) - 1

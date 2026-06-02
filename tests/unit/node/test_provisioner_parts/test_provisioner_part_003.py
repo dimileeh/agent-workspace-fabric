@@ -78,6 +78,12 @@ def provisioner(
     )
 
 
+async def _signal_compose_up_started(request: Any) -> None:
+    on_started = getattr(request, "on_compose_up_started", None)
+    if on_started is not None:
+        await on_started()
+
+
 class TestFailureHandling:
     @pytest.mark.unit
     async def test_companion_host_port_conflict_fails_before_stack_launch(
@@ -281,6 +287,7 @@ class TestFailureHandling:
     ) -> None:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -338,7 +345,7 @@ class TestFailureHandling:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
                 nonlocal compose_failed
-                del request
+                await _signal_compose_up_started(request)
                 compose_failed = True
                 raise ComposeOperationError(
                     operation="up",
@@ -409,7 +416,7 @@ class TestFailureHandling:
     ) -> None:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
-                del request
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -464,7 +471,7 @@ class TestFailureHandling:
     ) -> None:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
-                del request
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -528,6 +535,7 @@ class TestFailureHandling:
 
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
+                await _signal_compose_up_started(request)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -599,7 +607,15 @@ class TestFailureHandling:
             def __init__(self) -> None:
                 self.up_calls: list[Any] = []
 
-            async def up(self, spec: Any, *, wait: bool = True) -> object:
+            async def up(
+                self,
+                spec: Any,
+                *,
+                wait: bool = True,
+                on_compose_up_started: Any | None = None,
+            ) -> object:
+                if on_compose_up_started is not None:
+                    await on_compose_up_started()
                 self.up_calls.append((spec, wait))
                 return ComposeProjectPaths(
                     project_dir=Path("/tmp/awf-compose/ws_policy"),
@@ -662,7 +678,7 @@ class _FailingComposeLauncher:
     """Stack launcher that fails exactly like a companion healthcheck timeout."""
 
     async def launch(self, request: Any) -> object:
-        del request
+        await _signal_compose_up_started(request)
         raise ComposeOperationError(
             operation="up",
             returncode=1,

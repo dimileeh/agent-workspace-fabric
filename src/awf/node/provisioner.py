@@ -463,10 +463,11 @@ class Provisioner:
                         clear_unlaunched_compose_project=True,
                     )
                     return
-                # Keep this assignment immediately adjacent to launch(): the
-                # unexpected-failure handler treats True as evidence that compose
-                # may have started and must stamp compose_project_name for cleanup.
-                stack_launch_started = True
+
+                async def _mark_compose_up_started() -> None:
+                    nonlocal stack_launch_started
+                    stack_launch_started = True
+
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
@@ -474,6 +475,7 @@ class Provisioner:
                         profile=profile,
                         companions=materialized_companions,
                         companion_graph_prevalidated=companion_graph_prevalidated,
+                        on_compose_up_started=_mark_compose_up_started,
                     )
                 )
                 if await self._launch_lost_to_terminal_cleanup(workspace_id):
@@ -520,6 +522,7 @@ class Provisioner:
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
                 reason_code=exc.reason_code,
+                clear_unlaunched_compose_project=not stack_launch_started,
             )
             raise
         except ComposeOperationError as exc:
@@ -529,6 +532,16 @@ class Provisioner:
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
             )
+            if not stack_launch_started:
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=str(exc)[:2000],
+                    from_status=WorkspaceStatus.provisioning,
+                    reason_code=exc.reason_code,
+                    clear_unlaunched_compose_project=True,
+                )
+                raise
             if await self._launch_lost_to_terminal_cleanup_best_effort(
                 workspace_id,
                 failure_context="stack_startup_failed",
@@ -639,7 +652,7 @@ class Provisioner:
                 workspace_id=workspace_id,
                 error=str(exc),
             )
-            if await self._launch_lost_to_terminal_cleanup_best_effort(
+            if stack_launch_started and await self._launch_lost_to_terminal_cleanup_best_effort(
                 workspace_id,
                 failure_context="unexpected_failed",
             ):
@@ -650,6 +663,7 @@ class Provisioner:
                 message=f"unexpected provisioning failure: {exc}"[:2000],
                 from_status=WorkspaceStatus.provisioning,
                 compose_launched=stack_launch_started,
+                clear_unlaunched_compose_project=not stack_launch_started,
             )
             raise
 
@@ -906,11 +920,11 @@ class Provisioner:
         port and must not block port admission (see ``find_host_port_conflicts``
         docstring).
 
-        ``clear_unlaunched_compose_project`` handles the narrow path where
-        pre-launch metadata was committed, then the final launch recheck failed
-        before Compose I/O began.  Clearing the pre-published project preserves
-        the terminal host-port invariant without recording a runtime release for
-        containers that never started.
+        ``clear_unlaunched_compose_project`` handles paths where pre-launch
+        metadata was committed, then provisioning failed before Compose I/O
+        began.  Clearing the pre-published project preserves the terminal
+        host-port invariant without recording a runtime release for containers
+        that never started.
         """
         try:
             async with self._session_factory() as session:
@@ -952,13 +966,10 @@ class Provisioner:
                     ws.compose_project_name = None
                 # Only persist compose_project_name for failures that occurred
                 # after Docker Compose was (or may have been) started. Pre-launch
-                # failures (port conflicts, git errors, profile errors) never
-                # created containers, so compose_project_name must stay NULL —
-                # otherwise find_host_port_conflicts would incorrectly treat the
-                # workspace as a port-blocker despite it never having bound a
-                # host port. The compose_launched flag is True only for
-                # ComposeOperationError and for catch-all unexpected failures
-                # after the stack launcher call has started.
+                # failures never created containers, so compose_project_name
+                # must stay NULL — otherwise find_host_port_conflicts would
+                # incorrectly treat the workspace as a port-blocker despite it
+                # never having bound a host port.
                 if (
                     ws.compose_project_name is None
                     and from_status == WorkspaceStatus.provisioning

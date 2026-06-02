@@ -137,6 +137,7 @@ class TestFailureHandlingEdgesPart006:
             assert reloaded.failure_reason == "policy_failure"
             assert reloaded.failure_message is not None
             assert "LOCAL_EGRESS_MODE_UNSUPPORTED" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
             assert audit is None
             failed_events = [
                 event
@@ -214,6 +215,66 @@ class TestFailureHandlingEdgesPart006:
             assert reloaded.failure_message is not None
             assert "unexpected provisioning failure" in reloaded.failure_message
             assert "workspace.base.yml.j2" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
+
+    async def test_pre_compose_launcher_failure_clears_prepublished_runtime_ports(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _PreComposeFailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise RuntimeError("companion image revalidation failed before compose up")
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_PreComposeFailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="pre-compose launch failure",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "pre-compose-port-profile",
+                    "services": [
+                        {
+                            "name": "db",
+                            "image": "postgres:16",
+                            "ports": [[80, 19081]],
+                        }
+                    ],
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(RuntimeError, match="before compose up"):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            reloaded = await repo.get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.compose_project_name is None
+            assert any(
+                event.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE for event in reloaded.events
+            )
+            conflicts = await repo.find_host_port_conflicts(
+                host_ports=[19081],
+                excluding_workspace_id=None,
+                node_id="test-node-01",
+            )
+            assert conflicts == []
 
     async def test_unexpected_launch_failure_marks_failed_when_terminal_cleanup_check_raises(
         self,
@@ -224,7 +285,9 @@ class TestFailureHandlingEdgesPart006:
     ) -> None:
         class _ExplodingStackLauncher:
             async def launch(self, request: Any) -> object:
-                del request
+                on_started = getattr(request, "on_compose_up_started", None)
+                if on_started is not None:
+                    await on_started()
                 raise RuntimeError("template workspace.base.yml.j2 was not found")
 
         provisioner = Provisioner(
