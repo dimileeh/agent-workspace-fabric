@@ -322,6 +322,25 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                     )
                 ),
             )
+    except ForgeNotSupportedError as exc:
+        # This resume path bypasses the execute-time forge gate (execution_flow
+        # only runs it for ready -> execution), so an unsupported forge (e.g.
+        # BitBucket) first surfaces here when the factory builds its forge
+        # client. Preserve the stable FORGE_NOT_SUPPORTED reason code and its
+        # doctor guidance instead of flattening it into MONITOR_RECOVERY_FAILED.
+        _log.exception(
+            "executor.pr_monitor_resume_forge_not_supported",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+        )
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"monitor recovery: {exc.message}"[:2000],
+            reason_code=exc.reason_code,
+        )
+        return
     except Exception as exc:
         _log.exception("executor.pr_monitor_resume_build_failed", workspace_id=workspace_id)
         await self._mark_failed(
