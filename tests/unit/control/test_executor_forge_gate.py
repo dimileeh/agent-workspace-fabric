@@ -71,6 +71,13 @@ def _bitbucket_resolved_profile() -> dict:
     ).model_dump(mode="json", by_alias=True)
 
 
+def _bitbucket_requested_profile() -> dict:
+    """An explicit ``forge: bitbucket`` requested/repo-local profile snapshot."""
+    return WorkspaceProfile.model_validate(
+        {"name": "p", "docker": {"mode": "none"}, "forge": "bitbucket"}
+    ).model_dump(mode="json", by_alias=True)
+
+
 def _legacy_auto_resolved_profile() -> dict:
     """A legacy snapshot that predates the ``forge`` field reconstructs as ``auto``."""
     return WorkspaceProfile.model_validate({"name": "p", "docker": {"mode": "none"}}).model_dump(
@@ -86,6 +93,8 @@ async def _seed_ready_bitbucket_workspace(
     *,
     task_kind: str = "feature_branch_pr",
     resolved_profile: object = _DEFAULT_RESOLVED_PROFILE,
+    repo_url: str = "git@bitbucket.org:workspace/repo.git",
+    requested_profile: dict | None = None,
 ) -> str:
     snapshot = (
         _bitbucket_resolved_profile()
@@ -95,12 +104,13 @@ async def _seed_ready_bitbucket_workspace(
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
-            repo_url="git@bitbucket.org:workspace/repo.git",
+            repo_url=repo_url,
             branch_base="development",
             task_title="trivial",
             task_prompt="Add a docstring.",
             agent="codex",
             test_commands=["pytest -q"],
+            requested_profile=requested_profile,
             resolved_profile=snapshot,  # type: ignore[arg-type]
             task_policy={},
             task_kind=task_kind,
@@ -147,6 +157,48 @@ async def test_bitbucket_workspace_fails_fast_with_forge_not_supported(
     # Crash/mis-route is explicitly not allowed: no GitHub PR creation runs.
     assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls), (
         "BitBucket workspace must fail before any gh pr create"
+    )
+
+
+@pytest.mark.unit
+async def test_explicit_bitbucket_requested_profile_fails_fast_without_snapshot(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    fake: FakeCommandRunner,
+) -> None:
+    # The gap the pre-resolution gate misses: a ready workspace with NO
+    # resolved_profile snapshot and a GitHub ``repo_url`` (URL detection → github),
+    # but whose requested/repo-local profile *explicitly* sets ``forge: bitbucket``.
+    # The pre-resolution gate only sees the absent snapshot plus repo_url and returns
+    # github, so the executor resolves+persists the explicit bitbucket forge (the
+    # requested profile is consulted precisely because the snapshot is missing) and
+    # would slip into the agent/push/gh pr create path. Re-gating the just-resolved
+    # profile must fail fast with FORGE_NOT_SUPPORTED before any of that runs.
+    ws_id = await _seed_ready_bitbucket_workspace(
+        factory,
+        resolved_profile=None,
+        repo_url="https://github.com/owner/repo.git",
+        requested_profile=_bitbucket_requested_profile(),
+    )
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "BitBucket forge support is not yet implemented" in (ws.failure_message or "")
+        failed_event = next(
+            event
+            for event in reversed(ws.events)
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        )
+        assert failed_event.reason_code == "FORGE_NOT_SUPPORTED"
+
+    assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls), (
+        "explicit-bitbucket workspace must fail before any gh pr create"
     )
 
 

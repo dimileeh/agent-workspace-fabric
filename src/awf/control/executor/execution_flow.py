@@ -270,6 +270,25 @@ async def execute(
                 profile=profile,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
+            # Re-run the forge gate on the just-resolved profile. The
+            # pre-resolution gate above only saw the *absent* snapshot plus
+            # repo_url, so an explicit ``forge: bitbucket`` carried by the
+            # requested/repo-local profile (with a GitHub or undetectable
+            # repo_url that detects as github) slipped past it. Resolution
+            # has now stamped + persisted the concrete forge onto
+            # ``ws.resolved_profile``, so fail fast here — before profile
+            # setup, the agent run, push, and ``gh pr create`` — instead of
+            # letting an unsupported forge reach the gh path.
+            resolved_forge_error = unsupported_forge_error(ws)
+            if resolved_forge_error is not None:
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=resolved_forge_error.message,
+                    reason_code=resolved_forge_error.reason_code,
+                )
+                return
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,

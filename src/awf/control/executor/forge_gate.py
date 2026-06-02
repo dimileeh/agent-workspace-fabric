@@ -34,6 +34,14 @@ def unsupported_forge_error(ws: Any) -> ForgeNotSupportedError | None:
     slipping into the gh path. A concrete persisted forge always wins; undetectable
     URLs fall back to github so pre-existing GitHub workspaces never trip the gate.
 
+    URL detection is best-effort, so a missing/legacy snapshot whose repo_url
+    detects as github (an explicit ``forge: bitbucket`` lives only in the
+    requested/repo-local profile, or a bare ``owner/repo`` slug) passes this
+    pre-resolution call. The executor closes that gap by re-invoking this gate
+    on ``ws`` immediately after it resolves+persists the snapshot, when
+    ``ws.resolved_profile`` now carries the concrete forge — so the explicit
+    forge fails fast before the agent run / push / ``gh pr create``.
+
     Returns ``None`` when the forge is supported so the caller proceeds.
     """
     try:
