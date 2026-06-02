@@ -952,16 +952,15 @@ async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
 
 
 @pytest.mark.unit
-async def test_retry_auto_retry_excludes_source_from_port_conflict(
+async def test_retry_runtime_gate_override_excludes_source_from_port_conflict(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
-    """When ignore_source_runtime_check=True (auto-retry path), the
-    runtime-not-released gate is skipped, and the source workspace
-    is excluded from port conflict scanning because the retry replaces
-    the source.  Even though the source still holds host ports (no
-    runtime release event), retry succeeds because excluding the
-    source avoids a false conflict with itself."""
+    """When ignore_source_runtime_check=True, the runtime-not-released gate
+    is skipped, and the source workspace is excluded from port conflict
+    scanning because the retry replaces the source. Even though the source
+    still holds host ports (no runtime release event), retry succeeds because
+    excluding the source avoids a false conflict with itself."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
     companion_req = {
@@ -999,13 +998,13 @@ async def test_retry_auto_retry_excludes_source_from_port_conflict(
 
 
 @pytest.mark.unit
-async def test_retry_auto_retry_succeeds_when_source_runtime_released(
+async def test_retry_runtime_gate_override_succeeds_when_source_runtime_released(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
-    """When ignore_source_runtime_check=True AND the source runtime has been
-    released, the auto-retry can proceed because the source's host ports
-    are no longer held and there is no conflict."""
+    """When ignore_source_runtime_check=True and the source runtime has been
+    released, the retry can proceed because the source's host ports are no
+    longer held and there is no conflict."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
     companion_req = {
@@ -1043,13 +1042,13 @@ async def test_retry_auto_retry_succeeds_when_source_runtime_released(
 
 
 @pytest.mark.unit
-async def test_retry_auto_retry_succeeds_no_host_ports_runtime_not_released(
+async def test_retry_runtime_gate_override_succeeds_no_host_ports_runtime_not_released(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
     """When ignore_source_runtime_check=True and there are no host-port
-    claims, the auto-retry must succeed even when the source compose
-    stack has not been released — there are no ports to collide on."""
+    claims, retry must succeed even when the source compose stack has not
+    been released because there are no ports to collide on."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
 

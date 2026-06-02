@@ -118,7 +118,12 @@ async def _source_runtime_not_yet_released(
             # evidence for cleanup to release. Failed null-runtime rows keep
             # blocking as legacy provenance is ambiguous.
             return False
-        return not reservations
+        has_prelaunch_reservation_evidence = bool(reservations)
+        # Failed rows with null compose metadata but a reservation are modern
+        # pre-launch failures and can retry. Failed rows with no reservation
+        # are legacy-ambiguous, so they stay blocked until cleanup records the
+        # terminal runtime release event.
+        return not has_prelaunch_reservation_evidence
     return False
 
 
@@ -374,16 +379,12 @@ async def retry_workspace_row(
         # This is valid because the runtime-release gate
         # (_source_runtime_not_yet_released) has already confirmed the
         # source's containers are down when ignore_source_runtime_check is
-        # False. When ignore_source_runtime_check is True (planning-scope
-        # auto-retry), the provisioner re-checks companion ports and
-        # auto-resolved profile service ports before Docker Compose launch.
-        # If the source stack still owns one of those ports, the retry
-        # workspace fails with COMPANION_HOST_PORT_CHECK_FATAL before
-        # compose-up rather than surfacing as a Docker bind error. This is
-        # the expected outcome for port-bearing workspaces on the
-        # planning-scope auto-retry path: the retry is created but fails
-        # early at the provisioner port-check stage until the cleanup worker
-        # releases the source's runtime. Reordering these two guards without
+        # False. If a specialized caller sets ignore_source_runtime_check=True,
+        # the provisioner still re-checks companion ports and auto-resolved
+        # profile service ports before Docker Compose launch. If the source
+        # stack still owns one of those ports, the retry fails with
+        # COMPANION_HOST_PORT_CHECK_FATAL before compose-up rather than
+        # surfacing as a Docker bind error. Reordering these two guards without
         # updating the provisioner checks could break the invariant.
 
     retried = await repo.create(

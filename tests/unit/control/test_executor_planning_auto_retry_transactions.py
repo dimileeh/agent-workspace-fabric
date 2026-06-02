@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from awf.control.executor import planning_ops as executor_planning_ops
+from awf.service.workspaces import WorkspaceRetrySourceRuntimeNotReleasedError
 
 
 class _RecordingSession:
@@ -109,3 +110,79 @@ async def test_auto_retry_planning_scope_failure_rolls_back_before_failed_event(
             "commit",
         ]
         assert events[-1][0] == "workspace.planning_scope_auto_retry_failed"
+
+
+@pytest.mark.unit
+async def test_auto_retry_planning_scope_failure_blocks_on_unreleased_source_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[_RecordingSession] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class _WorkspaceRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get(self, workspace_id: str) -> object:
+            return SimpleNamespace(id=workspace_id, task_policy={})
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            assert isinstance(self._session, _RecordingSession)
+            self._session.operations.append(f"event:{event_type}")
+            events.append((event_type, reason_code, payload))
+
+    def _session_factory() -> _RecordingSession:
+        session = _RecordingSession()
+        sessions.append(session)
+        return session
+
+    async def _retry_runtime_not_released(
+        session: object,
+        _workspace_id: str,
+        **kwargs: Any,
+    ) -> object:
+        assert isinstance(session, _RecordingSession)
+        assert "ignore_source_runtime_check" not in kwargs
+        session.operations.append("retry")
+        raise WorkspaceRetrySourceRuntimeNotReleasedError(source_workspace_id="ws_retry")
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        executor_planning_ops,
+        "retry_workspace_row",
+        _retry_runtime_not_released,
+    )
+    executor = SimpleNamespace(_session_factory=_session_factory)
+    failure = executor_planning_ops._PlanningRunFailure(  # noqa: SLF001
+        message="scope violation",
+        reason_code=executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    )
+
+    await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+        failure=failure,
+    )
+
+    assert sessions[-1].operations == [
+        "retry",
+        "rollback",
+        "event:workspace.planning_scope_auto_retry_blocked",
+        "commit",
+    ]
+    assert events[-1] == (
+        "workspace.planning_scope_auto_retry_blocked",
+        "PLANNING_SCOPE_AUTO_RETRY_SOURCE_RUNTIME_NOT_RELEASED",
+        {
+            "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            "detail": {"source_workspace_id": "ws_retry"},
+            "retry_after": "terminal_runtime_released",
+        },
+    )

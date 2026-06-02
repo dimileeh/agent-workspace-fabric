@@ -92,6 +92,7 @@ from awf.service.workspaces import (
     WorkspaceCreateDuplicateHostPortError,
     WorkspaceCreateHostPortConflictError,
     WorkspaceRetryError,
+    WorkspaceRetrySourceRuntimeNotReleasedError,
     retry_workspace_row,
 )
 
@@ -530,7 +531,7 @@ async def _auto_retry_planning_scope_failure(
     workspace_id: str,
     failure: _PlanningRunFailure,
 ) -> None:
-    """Create one clean retry for a planning-scope violation."""
+    """Create one clean retry for a planning-scope violation when runtime permits it."""
     if failure.reason_code != AGENT_PLAN_PHASE_SCOPE_VIOLATION:
         return
     async with self._session_factory() as session:
@@ -550,11 +551,26 @@ async def _auto_retry_planning_scope_failure(
             await session.commit()
             return
         try:
-            result = await retry_workspace_row(
-                session,
-                workspace_id,
-                ignore_source_runtime_check=True,
+            result = await retry_workspace_row(session, workspace_id)
+        except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
+            rollback = getattr(session, "rollback", None)
+            if rollback is not None:
+                await rollback()
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
+            await repo.add_event(
+                workspace,
+                event_type="workspace.planning_scope_auto_retry_blocked",
+                reason_code="PLANNING_SCOPE_AUTO_RETRY_SOURCE_RUNTIME_NOT_RELEASED",
+                payload={
+                    "source_reason_code": failure.reason_code,
+                    "detail": exc.detail,
+                    "retry_after": "terminal_runtime_released",
+                },
             )
+            await session.commit()
+            return
         except (
             WorkspaceCreateDuplicateHostPortError,
             WorkspaceCreateHostPortConflictError,
