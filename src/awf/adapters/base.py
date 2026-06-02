@@ -74,6 +74,11 @@ branch that AWF has already created for you. Your contract:
    When a plan or validation document needs evidence, record those
    focused checks and state that full AWF/GitHub validation is managed by
    AWF after agent completion; do not execute the broad suite yourself.
+6. **Keep changes minimal and scoped.** Fix only what THIS task asks.
+   Do not refactor, rename, or restructure unrelated code, split files,
+   or introduce new abstractions unless the fix strictly requires it. A
+   reviewer should see a small, obviously-correct diff; sprawling diffs
+   that touch dozens of unrelated files get rejected and waste the run.
 
 ---
 

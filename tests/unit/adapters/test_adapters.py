@@ -74,6 +74,10 @@ def _assert_prompt_sent_on_stdin(runner: FakeCommandRunner, prompt: str = _PROMP
     assert "inside the agent" in wrapped_prompt
     assert "pytest --cov" in wrapped_prompt
     assert "focused checks" in wrapped_prompt
+    # Scope-discipline contract (#304 follow-up): every agent run is told to
+    # keep the diff minimal and not refactor unrelated code.
+    assert "Keep changes minimal and scoped" in wrapped_prompt
+    assert "refactor, rename, or restructure unrelated code" in wrapped_prompt
     return wrapped_prompt
 
 
