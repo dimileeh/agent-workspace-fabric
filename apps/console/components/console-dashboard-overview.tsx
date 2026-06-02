@@ -31,6 +31,7 @@ Type,
 X
 } from "lucide-react";
 import {
+type SyntheticEvent,
 useEffect,
 useId,
 useLayoutEffect,
@@ -636,6 +637,47 @@ export function WorkspaceList({
   onOpenDetails: (workspaceId: string) => void;
   onOpenLogs: (workspaceId: string) => void;
 }) {
+  const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
+  const [copyToastVisible, setCopyToastVisible] = useState(false);
+  const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyFadeTimeoutRef.current !== null) {
+        clearTimeout(copyFadeTimeoutRef.current);
+      }
+      if (copyClearTimeoutRef.current !== null) {
+        clearTimeout(copyClearTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const copyWorkspaceId = async (event: SyntheticEvent<HTMLElement>, workspaceId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(workspaceId);
+      setCopiedWorkspaceId(workspaceId);
+      setCopyToastVisible(true);
+      if (copyFadeTimeoutRef.current !== null) {
+        clearTimeout(copyFadeTimeoutRef.current);
+      }
+      if (copyClearTimeoutRef.current !== null) {
+        clearTimeout(copyClearTimeoutRef.current);
+      }
+      copyFadeTimeoutRef.current = setTimeout(() => {
+        setCopyToastVisible(false);
+      }, 1000);
+      copyClearTimeoutRef.current = setTimeout(() => {
+        setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
+      }, 1400);
+    } catch {
+      setCopiedWorkspaceId(null);
+      setCopyToastVisible(false);
+    }
+  };
+
   if (items.length === 0) {
     return (
       <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
@@ -670,37 +712,61 @@ export function WorkspaceList({
                   aria-label={`Select ${item.title} for fullscreen logs`}
                   className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
                 />
-                <button
-                  type="button"
-                  onClick={() => onSelect(item.workspace_id)}
-                  className="grid min-w-0 flex-1 gap-2 text-left"
-                >
-                  <span
-                    className="whitespace-normal break-words text-sm font-semibold text-slate-950"
-                    data-testid={`workspace-title-${item.workspace_id}`}
-                  >
-                    {item.title}
-                  </span>
-                  <div className="mono break-all text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
-                    <span>created {formatDateTime(item.created_at)}</span>
-                    <span>updated {formatDateTime(item.updated_at)}</span>
-                  </div>
-                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
-                    <Bot size={13} aria-hidden className="shrink-0" />
-                    <span className="break-words" title={formatAgentTitle(item)}>
-                      {formatAgentLabel(item)}
+                <div className="relative grid min-w-0 flex-1 gap-2 text-left">
+                  <button
+                    type="button"
+                    onClick={() => onSelect(item.workspace_id)}
+                    aria-label={`Open workspace details for ${item.title}`}
+                    className="absolute inset-0 z-0 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                  />
+                  <div className="pointer-events-none relative z-10 grid min-w-0 gap-2">
+                    <span
+                      className="whitespace-normal break-words text-sm font-semibold text-slate-950"
+                      data-testid={`workspace-title-${item.workspace_id}`}
+                    >
+                      {item.title}
                     </span>
-                    <span className="text-slate-300">/</span>
-                    <span className="min-w-0 break-words">{item.base_branch}</span>
+                    <span className="relative inline-flex min-w-0 items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={(event) => void copyWorkspaceId(event, item.workspace_id)}
+                        className="workspace-id-copy pointer-events-auto focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                        aria-label={`Copy workspace id ${item.workspace_id}`}
+                        title="Copy workspace id"
+                      >
+                        {item.workspace_id}
+                      </button>
+                      {copiedWorkspaceId === item.workspace_id ? (
+                        <span
+                          aria-live="polite"
+                          className={`pointer-events-none absolute left-full top-1/2 ml-2 -translate-y-1/2 rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 shadow-sm transition duration-300 ${
+                            copyToastVisible ? "opacity-100" : "opacity-0"
+                          }`}
+                        >
+                          copied
+                        </span>
+                      ) : null}
+                    </span>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
+                      <span>created {formatDateTime(item.created_at)}</span>
+                      <span>updated {formatDateTime(item.updated_at)}</span>
+                    </div>
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
+                      <Bot size={13} aria-hidden className="shrink-0" />
+                      <span className="break-words" title={formatAgentTitle(item)}>
+                        {formatAgentLabel(item)}
+                      </span>
+                      <span className="text-slate-300">/</span>
+                      <span className="min-w-0 break-words">{item.base_branch}</span>
+                    </div>
+                    <div
+                      className="break-words text-xs text-[var(--muted)]"
+                      data-testid={`workspace-repo-${item.workspace_id}`}
+                    >
+                      {item.repo_url}
+                    </div>
                   </div>
-                  <div
-                    className="break-words text-xs text-[var(--muted)]"
-                    data-testid={`workspace-repo-${item.workspace_id}`}
-                  >
-                    {item.repo_url}
-                  </div>
-                </button>
+                </div>
               </div>
               <div className="flex w-28 shrink-0 flex-col items-end gap-1 sm:w-32">
                 <div className="flex max-w-full items-center gap-1">

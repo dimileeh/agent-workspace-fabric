@@ -1,6 +1,6 @@
 import type { WorkspaceOverview } from "@/lib/types";
 
-type AgentLabelWorkspace = Pick<WorkspaceOverview, "agent" | "agent_model">;
+type AgentLabelWorkspace = Pick<WorkspaceOverview, "agent" | "agent_model" | "agent_effort">;
 type AgentTitleWorkspace = Pick<WorkspaceOverview, "agent" | "agent_model" | "agent_effort"> &
   Partial<Pick<WorkspaceOverview, "agent_model_source" | "agent_effort_source">>;
 type AgentEffortWorkspace = Pick<WorkspaceOverview, "agent_effort"> &
@@ -8,7 +8,7 @@ type AgentEffortWorkspace = Pick<WorkspaceOverview, "agent_effort"> &
 
 export function formatAgentLabel(workspace: AgentLabelWorkspace): string {
   const model = compactAgentModel(workspace.agent_model);
-  return model ? `${workspace.agent} · ${model}` : workspace.agent;
+  return [workspace.agent, model, workspace.agent_effort].filter(Boolean).join(" · ");
 }
 
 export function formatAgentTitle(workspace: AgentTitleWorkspace): string {

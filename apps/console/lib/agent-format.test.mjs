@@ -1,7 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatAgentEffort, formatAgentTitle } from "./agent-format.ts";
+import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "./agent-format.ts";
+
+test("formatAgentLabel includes compact model and effort", () => {
+  assert.equal(
+    formatAgentLabel({
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      agent_effort: "xhigh",
+    }),
+    "codex · gpt-5.5 · xhigh",
+  );
+});
+
+test("formatAgentLabel compacts ollama models and omits missing effort", () => {
+  assert.equal(
+    formatAgentLabel({
+      agent: "opencode",
+      agent_model: "ollama/glm-5.1:cloud",
+      agent_effort: null,
+    }),
+    "opencode · glm-5.1:cloud",
+  );
+});
 
 test("formatAgentTitle omits default model and effort provenance", () => {
   assert.equal(

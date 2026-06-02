@@ -305,6 +305,24 @@ code,
   font-variant-numeric: tabular-nums;
 }
 
+.workspace-id-copy {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  cursor: copy;
+  font: 400 11px / 1.5 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-align: left;
+  word-break: break-all;
+}
+
+.workspace-id-copy:hover {
+  color: var(--fg);
+}
+
 /* numeric alignment for metrics, counts, costs, capacity readouts */
 .tnum {
   font-variant-numeric: tabular-nums;

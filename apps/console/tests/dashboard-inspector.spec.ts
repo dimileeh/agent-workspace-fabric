@@ -1,4 +1,14 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+
+async function clickWorkspaceTitle(page: Page, workspaceId: string) {
+  const workspaceTitle = page.getByTestId(`workspace-title-${workspaceId}`);
+  await workspaceTitle.waitFor({ state: "visible" });
+  const titleBox = await workspaceTitle.boundingBox();
+  if (!titleBox) {
+    throw new Error(`Workspace title ${workspaceId} did not produce a clickable box`);
+  }
+  await page.mouse.click(titleBox.x + titleBox.width / 2, titleBox.y + titleBox.height / 2);
+}
 
 // Since we don't have a real API running in the CI for this test, we need to mock it.
 test.describe("Dashboard Workspace Inspector", () => {
@@ -103,9 +113,7 @@ test.describe("Dashboard Workspace Inspector", () => {
     await page.goto("/");
 
     // Wait for the workspace list to load and select the workspace
-    const workspaceRow = page.locator("text=ws_mock123").first();
-    await workspaceRow.waitFor({ state: "visible" });
-    await workspaceRow.click();
+    await clickWorkspaceTitle(page, "ws_mock123");
 
     // Wait for inspector to open
     const inspector = page.locator("h2", { hasText: "Mock Workspace" }).first();
@@ -146,6 +154,32 @@ test.describe("Dashboard Workspace Inspector", () => {
     await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).toBeVisible();
   });
 
+  test("Workspace id copies to clipboard without opening inspector", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: async (text: string) => {
+            (window as typeof window & { __copiedWorkspaceId?: string }).__copiedWorkspaceId = text;
+          },
+        },
+      });
+    });
+
+    await page.goto("/");
+
+    const copyId = page.getByLabel("Copy workspace id ws_mock123");
+    await expect(copyId).toBeVisible();
+    await copyId.click();
+
+    await expect.poll(() => page.evaluate(() => (window as typeof window & { __copiedWorkspaceId?: string }).__copiedWorkspaceId)).toBe("ws_mock123");
+    await expect(page.getByText("copied", { exact: true })).toBeVisible();
+    await expect(page).not.toHaveURL(/workspaceId=ws_mock123/);
+    await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).not.toBeVisible();
+
+    await expect(page.getByText("copied", { exact: true })).not.toBeVisible({ timeout: 2500 });
+  });
+
   test("Inspector fullscreen logs always use the currently inspected workspace", async ({ page }) => {
     await page.goto("/");
 
@@ -158,7 +192,7 @@ test.describe("Dashboard Workspace Inspector", () => {
     await page.locator(".fixed.inset-0.z-50").getByRole("button", { name: "Close" }).click();
     await expect(page.locator(".fixed.inset-0.z-50")).not.toBeVisible();
 
-    await page.getByTestId("workspace-card-ws_mock123").getByText("Mock Workspace").click();
+    await clickWorkspaceTitle(page, "ws_mock123");
     await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).toBeVisible();
     await expect(page.getByText("ws_mock123 agent output").first()).toBeVisible();
 
