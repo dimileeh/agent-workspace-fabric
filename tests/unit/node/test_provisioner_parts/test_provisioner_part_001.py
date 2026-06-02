@@ -1018,6 +1018,59 @@ class TestSuccess:
             assert raw_secret not in json.dumps(event.payload, default=str)
 
     @pytest.mark.unit
+    def test_mount_metadata_event_redacts_companion_secret_fields(self) -> None:
+        """The mount-metadata event redacts ``companion_*`` fields like the companion event.
+
+        Regression: ``_stack_secret_lease_mount_metadata`` copied ``companion_*``
+        secret metadata verbatim while ``_stack_companion_env_secret_event_payload``
+        redacted the same keys, so a sensitive value leaking into a ``companion_*``
+        field would be exposed only in the broader mount-metadata event.
+        """
+        from awf.common.audit import REDACTION_MARKER
+        from awf.node.provisioner_helpers import (
+            _stack_companion_env_secret_event_payload,
+            _stack_secret_lease_mount_metadata,
+        )
+
+        raw_token = "ghp_do_not_log_this"
+        plan = {
+            "schema": "secret_lease_mount_metadata.v1",
+            "mount_plan": "profile_declared_secret_leases",
+            "env_count": 1,
+            "providers": ["env"],
+            "targets": ["GH_TOKEN"],
+            "companion_env_secret_count": 1,
+            "companion_env_secrets": [
+                {"companion": "reviewer", "target": "GH_TOKEN", "token": raw_token},
+            ],
+        }
+        stack_paths = ComposeProjectPaths(
+            project_dir=Path("/tmp/awf-compose/ws_redact"),
+            compose_file=Path("/tmp/awf-compose/ws_redact/compose.yml"),
+            secret_lease_mount_metadata=plan,
+        )
+
+        mount_md = _stack_secret_lease_mount_metadata(
+            workspace_id="ws_redact", stack_paths=stack_paths
+        )
+
+        # The sensitive companion_* field is redacted; the raw token never appears.
+        assert mount_md["companion_env_secrets"] == [
+            {"companion": "reviewer", "target": "GH_TOKEN", "token": REDACTION_MARKER}
+        ]
+        assert raw_token not in json.dumps(mount_md, default=str)
+        # Redaction is identical to the dedicated companion-secret event.
+        companion_event = _stack_companion_env_secret_event_payload(
+            workspace_id="ws_redact", stack_paths=stack_paths
+        )
+        assert companion_event is not None
+        assert mount_md["companion_env_secrets"] == companion_event["companion_env_secrets"]
+        # Non-companion fields stay verbatim (the else branch of the redaction guard).
+        assert mount_md["providers"] == ["env"]
+        assert mount_md["targets"] == ["GH_TOKEN"]
+        assert mount_md["env_count"] == 1
+
+    @pytest.mark.unit
     async def test_uses_persisted_resolved_profile_without_rewriting_it(
         self,
         session_factory: async_sessionmaker[AsyncSession],

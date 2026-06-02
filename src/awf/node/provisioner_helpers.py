@@ -58,7 +58,13 @@ def _stack_secret_lease_mount_metadata(
         "companion_omitted_optional_env_secrets",
     ):
         if key in plan_metadata:
-            metadata[key] = plan_metadata[key]
+            value = plan_metadata[key]
+            # ``companion_*`` fields carry the same secret metadata that the
+            # dedicated companion-secret event redacts (see
+            # ``_stack_companion_env_secret_event_payload`` below); redact them
+            # here too so this broader mount-metadata event never logs them
+            # unredacted. Non-companion fields are counts/provider/target names.
+            metadata[key] = redact_audit_value(value) if key.startswith("companion_") else value
     return metadata
 
 
