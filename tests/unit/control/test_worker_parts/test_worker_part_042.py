@@ -1069,6 +1069,47 @@ class TestTerminalRuntimeReleasePart003:
         assert events == []
 
     @pytest.mark.unit
+    async def test_default_local_release_scan_releases_terminal_workspace_on_local_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-default-local-node",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.node_id = "local"
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 1
+        assert cleaner.calls[0]["workspace_id"] == workspace_id
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(released_events) == 1
+
+    @pytest.mark.unit
     async def test_release_scan_resumes_pending_planning_scope_auto_retry_after_recorded_release(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1085,6 +1126,69 @@ class TestTerminalRuntimeReleasePart003:
             repo = WorkspaceRepository(s)
             workspace = await repo.get(workspace_id)
             assert workspace is not None
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+                payload={"cleanup": WorkspaceCleanupResult.skipped().to_dict()},
+            )
+            await repo.add_event(
+                workspace,
+                event_type=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE,  # noqa: SLF001
+                reason_code=executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_REASON_CODE,  # noqa: SLF001
+                payload={
+                    "source_reason_code": executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                    "retry_after": "terminal_runtime_released",
+                },
+            )
+            await s.commit()
+
+        resumed: list[str] = []
+
+        async def _resume(_self: object, *, workspace_id: str) -> None:
+            resumed.append(workspace_id)
+
+        monkeypatch.setattr(
+            worker_cleanup,
+            "_resume_blocked_planning_scope_auto_retry_after_runtime_release",
+            _resume,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert resumed == [workspace_id]
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_default_local_release_scan_resumes_pending_planning_scope_auto_retry_on_local_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-resume-default-local-node",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = "local"
             await repo.add_event(
                 workspace,
                 event_type="workspace.terminal_runtime_released",

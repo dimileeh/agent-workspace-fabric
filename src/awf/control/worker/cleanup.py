@@ -29,6 +29,9 @@ from awf.control.executor.planning_ops import (
     _record_planning_scope_auto_retry_resume_failed_after_runtime_release,
     _resume_blocked_planning_scope_auto_retry_after_runtime_release,
 )
+from awf.control.worker.config import (
+    effective_worker_config_node_id,
+)
 from awf.control.worker.constants import (
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
@@ -252,6 +255,7 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
     effectively_released = terminal_runtime_effectively_released_expr(
         correlated_to=Workspace,
     )
+    worker_node_id = effective_worker_config_node_id(self._config)
     terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
     stmt = (
         select(
@@ -272,7 +276,7 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
         .where(Workspace.status.in_(terminal_status_values))
         .where(
             or_(
-                Workspace.node_id == self._config.node_id,
+                Workspace.node_id == worker_node_id,
                 Workspace.node_id.is_(None),
             )
         )
@@ -320,6 +324,7 @@ async def _list_terminal_runtime_candidates(
     effectively_released = terminal_runtime_effectively_released_expr(
         correlated_to=Workspace,
     )
+    worker_node_id = effective_worker_config_node_id(self._config)
     stmt = (
         select(
             Workspace.id,
@@ -348,7 +353,7 @@ async def _list_terminal_runtime_candidates(
         # whose release was later revoked (orphan containers still running).
         .where(
             or_(
-                Workspace.node_id == self._config.node_id,
+                Workspace.node_id == worker_node_id,
                 Workspace.node_id.is_(None),
             )
         )
