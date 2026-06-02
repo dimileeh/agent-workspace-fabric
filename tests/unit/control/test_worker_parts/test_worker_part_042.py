@@ -1245,6 +1245,58 @@ class TestTerminalRuntimeReleasePart003:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_pending_planning_scope_retry_scan_does_not_rank_plain_manual_retry_events(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ranked_event_types: list[str] = []
+
+        class _EmptyResult:
+            def all(self) -> list[object]:
+                return []
+
+        class _StatementCapturingSession:
+            async def execute(self, stmt: object) -> _EmptyResult:
+                compiled = stmt.compile()
+                first_event_type_param = compiled.params.get("event_type_1")
+                assert isinstance(first_event_type_param, list | tuple | set | frozenset)
+                ranked_event_types.extend(
+                    item for item in first_event_type_param if isinstance(item, str)
+                )
+                return _EmptyResult()
+
+        async def _run_db_operation_without_retry(
+            _session_factory: object,
+            operation: object,
+            **_kwargs: object,
+        ) -> object:
+            return await operation(_StatementCapturingSession())
+
+        monkeypatch.setattr(
+            worker_cleanup,
+            "run_db_operation_with_retry",
+            _run_db_operation_without_retry,
+        )
+        worker = SimpleNamespace(
+            _config=WorkerConfig(),
+            _session_factory=lambda: None,
+            _log_transient_db_retry=lambda *_args: None,
+        )
+
+        candidates = await (
+            worker_cleanup._list_terminal_released_pending_planning_scope_auto_retry_candidates(
+                worker,
+            )
+        )
+
+        assert candidates == []
+        assert "workspace.retry_requested" not in ranked_event_types
+        assert (
+            executor_planning_ops._PLANNING_SCOPE_AUTO_RETRY_BLOCKED_EVENT_TYPE  # noqa: SLF001
+            in ranked_event_types
+        )
+
+    @pytest.mark.unit
     async def test_default_local_release_scan_resumes_pending_planning_scope_auto_retry_on_local_node(
         self,
         session_factory: async_sessionmaker[AsyncSession],

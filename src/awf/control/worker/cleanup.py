@@ -17,8 +17,9 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm.attributes import flag_modified
 
 from awf.control.executor.planning_ops import (
@@ -237,7 +238,10 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
     latest_planning_event = (
         select(
             WorkspaceEvent.workspace_id.label("workspace_id"),
+            WorkspaceEvent.id.label("event_id"),
             WorkspaceEvent.event_type.label("event_type"),
+            WorkspaceEvent.occurred_at.label("occurred_at"),
+            WorkspaceEvent.event_order.label("event_order"),
             WorkspaceEvent.payload["retry_after"].as_string().label("retry_after"),
             func.row_number()
             .over(
@@ -251,16 +255,49 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
             .label("event_rank"),
         )
         .where(
-            WorkspaceEvent.event_type.in_(tuple(_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS))
+            WorkspaceEvent.event_type.in_(
+                tuple(_PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES)
+            )
+        )
+        .where(
+            WorkspaceEvent.payload["source_reason_code"].as_string()
+            == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+        )
+        .subquery()
+    )
+    # Rank only resumable markers. Later manual retries and terminal
+    # planning-scope events still suppress resume via this guard, without
+    # inflating the ranked candidate set on every cleanup scan.
+    newer_planning_event = aliased(WorkspaceEvent)
+    newer_planning_event_exists = (
+        select(newer_planning_event.id)
+        .where(newer_planning_event.workspace_id == latest_planning_event.c.workspace_id)
+        .where(
+            newer_planning_event.event_type.in_(
+                tuple(_PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_EVENTS)
+            )
         )
         .where(
             or_(
-                WorkspaceEvent.event_type == _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
-                WorkspaceEvent.payload["source_reason_code"].as_string()
+                newer_planning_event.event_type == _WORKSPACE_RETRY_REQUESTED_EVENT_TYPE,
+                newer_planning_event.payload["source_reason_code"].as_string()
                 == AGENT_PLAN_PHASE_SCOPE_VIOLATION,
             )
         )
-        .subquery()
+        .where(
+            tuple_(
+                newer_planning_event.occurred_at,
+                func.coalesce(newer_planning_event.event_order, -1),
+                newer_planning_event.id,
+            )
+            > tuple_(
+                latest_planning_event.c.occurred_at,
+                func.coalesce(latest_planning_event.c.event_order, -1),
+                latest_planning_event.c.event_id,
+            )
+        )
+        .limit(1)
+        .exists()
     )
     effectively_released = terminal_runtime_effectively_released_expr(
         correlated_to=Workspace,
@@ -283,6 +320,7 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
             )
         )
         .where(latest_planning_event.c.retry_after == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER)
+        .where(~newer_planning_event_exists)
         .where(Workspace.status.in_(terminal_status_values))
         .where(
             or_(

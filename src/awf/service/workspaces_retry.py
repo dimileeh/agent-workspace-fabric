@@ -143,7 +143,14 @@ async def retry_workspace_row(
     http_get: HttpGet | None = None,
     ignore_source_runtime_check: bool = False,
 ) -> Any:
-    """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
+    """Create a fresh requested workspace cloned from a failed/cancelled attempt.
+
+    ``ignore_source_runtime_check=True`` is a narrow internal escape hatch:
+    callers may use it only after durable evidence shows the source runtime's
+    host ports were released, or when an equivalent pre-launch safety gate will
+    reject still-live source ports before compose launch. It does not bypass
+    host-port admission locks or conflicts with other workspaces.
+    """
     workspaces = _workspace_service()
     workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()

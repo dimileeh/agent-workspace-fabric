@@ -662,6 +662,9 @@ async def _request_planning_scope_auto_retry(
         await session.commit()
         return
     try:
+        # Keep the source-runtime release check enabled here. Any future
+        # caller that bypasses it must satisfy retry_workspace_row's documented
+        # release-or-equivalent-prelaunch-gate invariant first.
         result = await retry_workspace_row(session, workspace_id)
     except WorkspaceRetrySourceRuntimeNotReleasedError as exc:
         rollback = getattr(session, "rollback", None)
@@ -743,10 +746,7 @@ async def _record_planning_scope_auto_retry_blocked_after_retry_rollback(
     )
     if _planning_scope_auto_retry_event_is_retry_requested(latest_event):
         return
-    if (
-        reason_code == _PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT_REASON_CODE
-        and _planning_scope_auto_retry_event_is_blocked_for_reason(latest_event, reason_code)
-    ):
+    if _planning_scope_auto_retry_event_is_blocked_for_reason(latest_event, reason_code):
         return
     await repo.add_event(
         workspace,
