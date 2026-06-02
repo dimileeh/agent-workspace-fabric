@@ -381,7 +381,7 @@ export function MergeQueuePanel({
               Showing first {items.length} merge candidates. More are queued.
             </div>
           ) : null}
-          <div className="grid max-h-[460px] min-h-0 gap-2 overflow-auto pr-1 2xl:max-h-none 2xl:flex-1">
+          <div className="grid max-h-[460px] min-h-0 content-start gap-2 overflow-auto pr-1 2xl:max-h-none 2xl:flex-1">
             {items.map((item, index) => {
               const rowKey = item.candidate_id ?? item.workspace_id;
               const expanded = expandedRows.has(rowKey);
