@@ -431,7 +431,6 @@ async def retry_workspace_row(
     retry_scheduler_policy["retry_attempt_number"] = max(0, attempt.attempt_number - 1)
     retry_policy[SCHEDULER_POLICY_KEY] = retry_scheduler_policy
     retried.task_policy = retry_policy
-    retry_resource_summary: dict[str, Any] = {}
     # A ResourceReservation is always created on retry, even when the source
     # workspace had no prior reservation (e.g. it failed during early
     # provisioning steps before a reservation was created). The retry
@@ -467,6 +466,7 @@ async def retry_workspace_row(
             dind_mode=dind_mode,
             phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
         )
+    retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     await ResourceReservationRepository(session).create(
         workspace_id=retried.id,
         attempt_id=attempt.id,
@@ -479,8 +479,6 @@ async def retry_workspace_row(
         dind_slots=retry_reservation.dind_slots,
         phase=retry_reservation.phase,
     )
-    if source_reservation is not None:
-        retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     retry_score = scheduler_score_from_workspace(retried, now=retried.created_at)
     await QueueDecisionRepository(session).create(
         workspace_id=retried.id,

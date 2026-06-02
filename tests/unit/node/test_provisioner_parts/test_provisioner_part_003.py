@@ -324,7 +324,7 @@ class TestFailureHandling:
             assert reloaded.node_id == "test-node-01"
 
     @pytest.mark.unit
-    async def test_compose_fail_backstop_commit_failure_reraises_original_compose_error(
+    async def test_compose_fail_backstop_commit_failure_records_terminal_failure_without_reraise(
         self,
         monkeypatch: pytest.MonkeyPatch,
         session_factory: async_sessionmaker[AsyncSession],
@@ -377,10 +377,8 @@ class TestFailureHandling:
 
         monkeypatch.setattr(AsyncSession, "commit", _fail_first_post_compose_commit)
 
-        with pytest.raises(ComposeOperationError) as raised:
-            await provisioner.provision_claimed(ws_id)
+        await provisioner.provision_claimed(ws_id)
 
-        assert raised.value.reason_code == "COMPOSE_UP_FAILED"
         assert commit_failures == 1
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
@@ -392,6 +390,13 @@ class TestFailureHandling:
             )
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.node_id == "test-node-01"
+            failed_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            ]
+            assert len(failed_events) == 1
             failed_event = _latest_failed_event(reloaded.events)
             assert failed_event.reason_code == "COMPOSE_FAIL_COMMIT_FATAL"
 

@@ -789,7 +789,10 @@ async def test_retry_persist_reservation_when_source_has_none(
         assert retried_reservations[0].node_id == "node-1"
         assert retried_reservations[0].dind_slots == 0
         assert len(retry_decisions) == 1
-        assert retry_decisions[0].resource_summary == {}
+        assert retry_decisions[0].resource_summary["node_id"] == "node-1"
+        assert retry_decisions[0].resource_summary["dind_slots"] == 0
+        assert retry_decisions[0].resource_summary["phase"] == retried_reservations[0].phase
+        assert "capacity" in retry_decisions[0].resource_summary
 
 
 @pytest.mark.unit

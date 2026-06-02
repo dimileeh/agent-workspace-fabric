@@ -571,6 +571,22 @@ class Provisioner:
                     reason_code="COMPOSE_FAIL_COMMIT_FATAL",
                     compose_launched=True,
                 )
+                try:
+                    async with self._session_factory() as verify_fail_session:
+                        verify_fail_ws = await WorkspaceRepository(verify_fail_session).get(
+                            workspace_id
+                        )
+                        if (
+                            verify_fail_ws is not None
+                            and verify_fail_ws.status == WorkspaceStatus.failed.value
+                        ):
+                            return
+                except Exception:
+                    _log.exception(
+                        "provisioner.compose_fail_fatal_verify_failed",
+                        workspace_id=workspace_id,
+                        reason_code="COMPOSE_FAIL_COMMIT_FATAL",
+                    )
                 raise exc from commit_exc
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
