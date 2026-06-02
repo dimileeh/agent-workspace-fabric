@@ -38,6 +38,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.repositories.base import (
+    PRE_LAUNCH_FAILURE_EVENT_TYPE,
     PROVISIONING_LAUNCHING_EVENT_TYPE,
     PROVISIONING_LAUNCHING_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
@@ -965,10 +966,18 @@ class Provisioner:
                     ws.compose_project_name = f"awf_{workspace_id}"
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
+                final_reason_code = reason_code or failure_reason.value.upper()
+                if from_status == WorkspaceStatus.provisioning and not compose_launched:
+                    await repo.add_event(
+                        ws,
+                        event_type=PRE_LAUNCH_FAILURE_EVENT_TYPE,
+                        reason_code=final_reason_code,
+                        payload={"workspace_id": workspace_id},
+                    )
                 await repo.transition(
                     ws,
                     to=WorkspaceStatus.failed,
-                    reason_code=reason_code or failure_reason.value.upper(),
+                    reason_code=final_reason_code,
                     payload=event_payload,
                 )
 

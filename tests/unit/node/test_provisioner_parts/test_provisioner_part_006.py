@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
+from awf.db.repositories.base import PRE_LAUNCH_FAILURE_EVENT_TYPE
 from awf.db.session import make_session_factory
 from awf.node.companion_services import MaterializedCompanionService, WorkspaceCompanionSpec
 from awf.node.egress_policy import LocalEgressPolicyError
@@ -331,6 +332,9 @@ class TestFailureHandlingEdgesPart006:
             assert reloaded.status == WorkspaceStatus.failed.value
             assert reloaded.failure_reason == "infrastructure_failure"
             assert reloaded.compose_project_name is None
+            assert any(
+                event.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE for event in reloaded.events
+            )
 
             conflicts = await repo.find_host_port_conflicts(
                 host_ports=[18080],

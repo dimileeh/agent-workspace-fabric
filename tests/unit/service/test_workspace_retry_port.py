@@ -16,6 +16,12 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import (
+    PRE_LAUNCH_FAILURE_EVENT_TYPE,
+    PRE_LAUNCH_FAILURE_REASON_CODE,
+    PROVISIONING_LAUNCHING_EVENT_TYPE,
+    PROVISIONING_LAUNCHING_REASON_CODE,
+)
 from awf.db.session import make_session_factory
 from awf.service import workspaces_retry
 from awf.service.workspaces import (
@@ -436,12 +442,13 @@ async def test_retry_allows_when_source_compose_project_name_is_none(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:
-    """A modern workspace that failed before compose-up has reservation evidence.
+    """A modern workspace that failed before compose-up has explicit evidence.
 
-    When ``compose_project_name`` is None but the source still has its
-    scheduler reservation history, retrying it must not raise
+    When ``compose_project_name`` is None but the source has a durable
+    pre-launch failure marker, retrying it must not raise
     WorkspaceRetrySourceRuntimeNotReleasedError even when no
-    terminal_runtime_released event exists."""
+    terminal_runtime_released event exists.  The reservation is retained as
+    placement evidence, not proof that Compose never launched."""
     settings = _settings_with_host_home(tmp_path)
     req = _request_with_preflight_override()
     companion_req = {
@@ -471,6 +478,11 @@ async def test_retry_allows_when_source_compose_project_name_is_none(
         ws.failure_reason = "clone_failure"
         ws.failure_message = "git clone failed"
         ws.compose_project_name = None
+        await repo.add_event(
+            ws,
+            event_type=PRE_LAUNCH_FAILURE_EVENT_TYPE,
+            reason_code=PRE_LAUNCH_FAILURE_REASON_CODE,
+        )
         await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
         await session.commit()
 
@@ -484,6 +496,75 @@ async def test_retry_allows_when_source_compose_project_name_is_none(
             provider_environ={},
         )
         assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_rejects_null_compose_source_with_reservation_after_launch_started(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A reserved source that reached launch must block until runtime release.
+
+    Upgraded legacy compose failures can have ResourceReservation placement
+    evidence while compose_project_name/compose_file_path are null.  A launch
+    marker means the old awf_<workspace_id> stack may still hold the port, so
+    retry admission must not exclude the source from conflict scanning until
+    cleanup records terminal_runtime_released.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.add_event(
+            ws,
+            event_type=PROVISIONING_LAUNCHING_EVENT_TYPE,
+            reason_code=PROVISIONING_LAUNCHING_REASON_CODE,
+        )
+        ws.failure_reason = "compose_metadata_not_persisted"
+        ws.failure_message = "legacy stack leaked before metadata was persisted"
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await session.commit()
+
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        )
+        assert reservations
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="reserved launch-started source test",
+                provider_environ={},
+            )
 
 
 @pytest.mark.unit

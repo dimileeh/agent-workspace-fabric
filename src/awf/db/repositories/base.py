@@ -627,6 +627,12 @@ PROVISIONING_LAUNCHING_EVENT_TYPE: Final = "workspace.provisioning_launching"
 PROVISIONING_LAUNCHING_REASON_CODE: Final = "PROVISIONING_LAUNCHING"
 """Reason code accompanying the ``workspace.provisioning_launching`` event."""
 
+PRE_LAUNCH_FAILURE_EVENT_TYPE: Final = "workspace.pre_launch_failed"
+"""Event type recorded when provisioning fails before Docker Compose launch starts."""
+
+PRE_LAUNCH_FAILURE_REASON_CODE: Final = "PRE_LAUNCH_FAILED"
+"""Fallback reason code for a pre-launch provisioning failure marker."""
+
 TERMINAL_RUNTIME_RELEASE_EVENT_TYPE: Final = "workspace.terminal_runtime_released"
 """Event type recorded when a terminal-status workspace releases its runtime resources (containers, host ports)."""
 

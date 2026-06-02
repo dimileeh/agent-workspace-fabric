@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
@@ -16,6 +17,7 @@ from awf.db.models import (
     Task,
     TaskAttempt,
     Workspace,
+    WorkspaceEvent,
 )
 from awf.db.repositories import (
     OperationRepository,
@@ -27,6 +29,7 @@ from awf.db.repositories import (
 )
 from awf.db.repositories.base import (
     HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES,
+    PRE_LAUNCH_FAILURE_EVENT_TYPE,
     has_terminal_runtime_released_event,
 )
 from awf.runtime.planning import (
@@ -117,18 +120,33 @@ async def _source_runtime_not_yet_released(
         ):
             # Cancelled before scheduler/provisioner placement: no compose
             # metadata, no node, and no reservation means there is no runtime
-            # evidence for cleanup to release. Failed null-runtime rows keep
-            # blocking as legacy provenance is ambiguous.
+            # evidence for cleanup to release. Failed null-runtime rows need
+            # explicit pre-launch provenance before they can retry.
             return False
-        has_prelaunch_reservation_evidence = bool(reservations)
-        # Rows with null compose metadata but a reservation are modern
-        # pre-launch failures and can retry. Rows with no reservation are
-        # legacy-ambiguous even when node_id is stamped: older failure paths
-        # could create an awf_<workspace_id> stack before compose metadata was
-        # persisted, and node_id only identifies the cleanup target. They stay
-        # blocked until cleanup records the terminal runtime release event.
-        return not has_prelaunch_reservation_evidence
+        # A reservation only proves placement, not that Compose never launched.
+        # Upgraded legacy launch failures can have a ResourceReservation while
+        # compose_project_name/compose_file_path are null after containers were
+        # created. An explicit pre-launch marker is required to admit the retry;
+        # otherwise keep the source ports blocked until cleanup records
+        # terminal_runtime_released.
+        return not await _source_has_pre_launch_failure_event(session, source.id)
     return False
+
+
+async def _source_has_pre_launch_failure_event(
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    """Return True when durable evidence says provisioning failed before launch."""
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def retry_workspace_row(
@@ -393,8 +411,9 @@ async def retry_workspace_row(
         # Safety note: source.id is unconditionally excluded from
         # find_host_port_conflicts above (excluding_workspace_id=source.id).
         # This is valid because the runtime-release gate
-        # (_source_runtime_not_yet_released) has already confirmed the
-        # source's containers are down when ignore_source_runtime_check is
+        # (_source_runtime_not_yet_released) has already confirmed either that
+        # the source's containers are down or that provisioning definitively
+        # failed before Compose launch when ignore_source_runtime_check is
         # False. If a specialized caller sets ignore_source_runtime_check=True,
         # the provisioner still re-checks companion ports and auto-resolved
         # profile service ports before Docker Compose launch. If the source
