@@ -873,6 +873,9 @@ def test_retry_after_transient_fallback_remounts_surviving_upper(tmp_path: Path)
     call = mounter.mounts[-1]
     assert call["upperdir"] == claude_root / "upper"
     assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+    # The stale fresh legacy copy from provision 2 is now unmounted dead weight
+    # (~1.7 GB) superseded by the live overlay — it must be reaped, not orphaned.
+    assert not (claude_root / ".claude").exists()
 
 
 @pytest.mark.unit

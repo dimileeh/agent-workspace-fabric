@@ -658,6 +658,15 @@ def _prepare_isolated_claude_auth(
             mounts.append(mount)
             chown_exempt.add(mount.source)
             extra_chown.extend((upper, work))
+            # A surviving non-empty ``upper`` let the overlay win over a stale
+            # legacy full copy (the ``_overlay_upper_has_data`` override above):
+            # that copy was created by a transient-failure fallback and is now
+            # unmounted dead weight (~1.7 GB) whose contents the live overlay
+            # intentionally supersedes. Remove it so it does not leak on disk for
+            # the workspace's lifetime. ``ignore_errors`` keeps a stuck reap from
+            # failing provisioning — a later provision retries the cleanup.
+            if legacy_claude_copy.exists():
+                shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)
