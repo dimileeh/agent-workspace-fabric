@@ -213,8 +213,13 @@ write them rather than running the broad gate here.
 
 ## Explicit non-goals
 
-- **Not** touching `src/awf/service/gc.py`, `src/awf/node/git_manager.py`, or
-  `src/awf/runtime/pr_monitor_runner/lifecycle.py` (WS-B1/B2/B3).
+- **Not** touching `src/awf/service/gc.py` or `src/awf/node/git_manager.py`
+  (WS-B1/B2/B3). **Update:** `src/awf/runtime/pr_monitor_runner/lifecycle.py`
+  was also a declared non-goal but was later modified (commit `f103db47c`) to
+  address review comment `PRRT_kwDOSJAM6s6Gyua_` — the PR-monitor's own GC path
+  must unmount the Claude auth overlay before `rmtree` or it strands the merged
+  mount (EBUSY). The change is additive and regression-tested; coordinate with
+  WS-B before merge as this file is shared with that workstream.
 - **Not** changing codex/gemini/opencode/ollama auth (still per-workspace copies
   — they are small; out of scope for the 178 GB driver).
 - **Not** changing the per-workspace compose Jinja template (no change needed).
