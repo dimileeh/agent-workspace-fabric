@@ -399,6 +399,54 @@ class _ValidationSideEffectRunner:
         )
 
 
+class _IgnoredFileMutatingRunner:
+    """Validation fake that mutates a pre-existing gitignored file (e.g. .venv)."""
+
+    def __init__(self, *, artifacts_dir: Path) -> None:
+        """Capture artifacts location for synthetic validation output."""
+        self._artifacts_dir = artifacts_dir
+        self.calls = 0
+
+    async def run_profile_coverage(self, **_kwargs: object) -> None:
+        """No-op coverage phase for the ignored-file mutation simulation."""
+        ...
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...] | list[str],
+        worktree_path: Path | None = None,
+        **_kwargs: object,
+    ) -> ValidationResult:
+        """Mutate a gitignored file (.venv/x) and report passing validation."""
+        if tuple(phase_names) == ("setup", "pre_agent"):
+            return ValidationResult()
+        self.calls += 1
+        assert worktree_path is not None
+        ignored = worktree_path / ".venv" / "x"
+        ignored.parent.mkdir(parents=True, exist_ok=True)
+        ignored.write_text("mutated by validation\n", encoding="utf-8")
+        artifacts = self._artifacts_dir / workspace_id
+        artifacts.mkdir(parents=True, exist_ok=True)
+        stdout = artifacts / f"{self.calls:02d}_validate.stdout"
+        stderr = artifacts / f"{self.calls:02d}_validate.stderr"
+        stdout.write_text("ok\n", encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        return ValidationResult(
+            commands=[
+                ValidationCommandResult(
+                    command="pytest -q",
+                    returncode=0,
+                    duration_seconds=0.1,
+                    stdout_path=stdout,
+                    stderr_path=stderr,
+                    reason_code="VALIDATION_OK",
+                )
+            ]
+        )
+
+
 class _StaleValidationFailureRunner:
     """Validation runner that dirties the worktree before exiting with stale status."""
 
@@ -663,6 +711,58 @@ class TestValidationSideEffectCleanup:
             for call in joined_calls
         )
         assert all("push" not in call for call in joined_calls)
+
+    @pytest.mark.unit
+    async def test_executor_ignored_file_mutation_does_not_fail_cleanup(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Regression: validation mutating a gitignored file must not block the push.
+
+        This is the P0 outage: ``uv sync`` / ``ruff`` / ``pytest`` rewrite ``.venv``
+        and cache files. Cleanup leaves ignored paths alone, so the run proceeds to
+        PR push instead of failing with VALIDATION_WORKTREE_CLEANUP_FAILED or
+        VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED.
+        """
+        validation = _IgnoredFileMutatingRunner(artifacts_dir=tmp_path / "artifacts")
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        _mark_git_worktree(worktree_path)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=0, stdout="!! .venv/\n")  # pre-validation: ignored-only
+        # Cleanup internal check still reports only ignored dirt → treated as clean.
+        fake.queue_result(returncode=0, stdout="!! .venv/\n")
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # verify restore ref
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # verify HEAD after cleanup
+        _queue_push_and_pr(fake)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/1"
+        assert runs[-1].status == "succeeded"
+        assert runs[-1].reason_code != VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
+        joined_calls = [" ".join(call.args) for call in fake.calls]
+        # The mutated ignored file is never restored or cleaned.
+        assert all(".venv" not in call for call in joined_calls)
+        assert any("push" in call for call in joined_calls)
+        # The mutation survives because ignored paths are left alone.
+        assert (worktree_path / ".venv" / "x").read_text(encoding="utf-8") == (
+            "mutated by validation\n"
+        )
 
     @pytest.mark.unit
     async def test_executor_cleanup_failure_fails_validation_before_push(

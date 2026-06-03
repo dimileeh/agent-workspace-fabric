@@ -85,46 +85,11 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
     VALIDATION_WORKTREE_STATUS_FAILED,
-    ValidationWorktreeCheck,
     ValidationWorktreeCleanup,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     validation_worktree_preexisting_dirty_message,
 )
-
-
-def _setup_ignored_snapshot_drift(
-    *,
-    setup_ignored_paths: tuple[str, ...],
-    setup_ignored_roots: tuple[str, ...] | None,
-    setup_ignored_path_signatures: tuple[tuple[str, str], ...] | None = None,
-    current_ignored_paths: tuple[str, ...],
-    current_ignored_roots: tuple[str, ...] | None,
-    current_ignored_path_signatures: tuple[tuple[str, str], ...] | None = None,
-) -> tuple[str, ...]:
-    """Return ignored snapshot entries that differ from setup baseline."""
-    setup_path_set = set(setup_ignored_paths)
-    setup_root_set = set(setup_ignored_roots or ())
-    current_path_set = set(current_ignored_paths)
-    current_root_set = set(current_ignored_roots or ())
-    signature_drift: tuple[str, ...] = ()
-    if setup_ignored_path_signatures or current_ignored_path_signatures:
-        setup_signature_map = dict(setup_ignored_path_signatures or ())
-        current_signature_map = dict(current_ignored_path_signatures or ())
-        signature_drift = tuple(
-            path
-            for path in setup_ignored_paths
-            if path in current_path_set
-            and setup_signature_map.get(path) != current_signature_map.get(path)
-        )
-    drift = (
-        tuple(path for path in current_ignored_roots or () if path not in setup_root_set)
-        + tuple(path for path in current_ignored_paths if path not in setup_path_set)
-        + tuple(path for path in (setup_ignored_roots or ()) if path not in current_root_set)
-        + tuple(path for path in setup_ignored_paths if path not in current_path_set)
-        + signature_drift
-    )
-    return tuple(dict.fromkeys(drift))
 
 
 def _safe_validation_artifact_name(value: str) -> str:
@@ -253,9 +218,6 @@ async def run_validation_and_fix_cycle(
         if planning_validation_handoff is not None and recovery is None
         else 0
     )
-    setup_ignored_paths_snapshot: tuple[str, ...] | None = None
-    setup_ignored_paths_snapshot_signatures: tuple[tuple[str, str], ...] | None = None
-    setup_ignored_roots_snapshot: tuple[str, ...] | None = None
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
     # The loop always exits via ``break`` (validation+conformance success) or a
     # terminal ``return`` (budget exhausted / hard failure); the per-category
@@ -285,13 +247,7 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
-            capture_ignored_paths_snapshot=True,
         )
-        pre_validation_ignored_paths_snapshot = pre_validation_check.ignored_paths_snapshot
-        pre_validation_ignored_paths_snapshot_signatures = (
-            pre_validation_check.ignored_paths_snapshot_signatures
-        )
-        pre_validation_ignored_roots_snapshot = pre_validation_check.ignored_paths
         validation_run_id = await self._start_validation_run(
             workspace_id=workspace_id,
             profile=profile,
@@ -327,47 +283,6 @@ async def run_validation_and_fix_cycle(
                 message="could not capture workspace HEAD before AWF validation",
                 has_known_non_plan_output=has_known_non_plan_output,
             )
-        if setup_ignored_paths_snapshot is None:
-            setup_ignored_paths_snapshot = pre_validation_ignored_paths_snapshot
-            setup_ignored_paths_snapshot_signatures = (
-                pre_validation_ignored_paths_snapshot_signatures
-            )
-            setup_ignored_roots_snapshot = pre_validation_ignored_roots_snapshot
-        else:
-            setup_ignored_drift = _setup_ignored_snapshot_drift(
-                setup_ignored_paths=setup_ignored_paths_snapshot,
-                setup_ignored_roots=setup_ignored_roots_snapshot,
-                setup_ignored_path_signatures=setup_ignored_paths_snapshot_signatures,
-                current_ignored_paths=pre_validation_ignored_paths_snapshot,
-                current_ignored_roots=pre_validation_ignored_roots_snapshot,
-                current_ignored_path_signatures=(pre_validation_ignored_paths_snapshot_signatures),
-            )
-            if setup_ignored_drift:
-                dirty_check = ValidationWorktreeCheck(
-                    clean=False,
-                    paths=setup_ignored_drift,
-                    untracked_paths=setup_ignored_drift,
-                    reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
-                    message=(
-                        "Validation worktree ignored entries changed after setup "
-                        "baseline and will not proceed to validation."
-                    ),
-                )
-                reason_code = dirty_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-                message = (
-                    dirty_check.message
-                    if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
-                    else validation_worktree_preexisting_dirty_message(dirty_check)
-                )
-                return await _fail_validation_worktree_guard(
-                    self,
-                    workspace_id=workspace_id,
-                    validation_run_id=validation_run_id,
-                    validation_tier=validation_tier,
-                    reason_code=reason_code,
-                    message=message,
-                    has_known_non_plan_output=has_known_non_plan_output,
-                )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
         try:
@@ -412,9 +327,6 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
-                ignore_ignored_paths=pre_validation_check.ignored_paths,
-                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
-                ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -473,9 +385,6 @@ async def run_validation_and_fix_cycle(
                 run_git=git_in_worktree,
                 worktree_path=worktree_path,
                 restore_ref=validation_workspace_head_sha,
-                ignore_ignored_paths=pre_validation_check.ignored_paths,
-                ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
-                ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
             )
             if (
                 cleanup_guard_result := await _handle_validation_cleanup_guard(
@@ -522,9 +431,6 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
-            ignore_ignored_paths=pre_validation_check.ignored_paths,
-            ignore_ignored_paths_snapshot=pre_validation_ignored_paths_snapshot,
-            ignore_ignored_paths_snapshot_signatures=pre_validation_ignored_paths_snapshot_signatures,
         )
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(
@@ -1401,7 +1307,6 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
-            capture_ignored_paths_snapshot=True,
         )
         if not fix_pass_ignored_check.clean:
             reason_code = (

@@ -16,7 +16,6 @@ from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_valida
 from awf.runtime.validation import ValidationResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
-    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     ValidationWorktreeCheck,
     ValidationWorktreeCleanup,
 )
@@ -164,204 +163,12 @@ async def test_pre_push_validation_untracked_cleanup_allows_fix_pass(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_fix_pass_uses_initial_ignored_snapshot_across_retries(
+async def test_pre_push_validation_fix_pass_runs_cleanup_after_commit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retry attempts should reuse the first ignored snapshot instead of recapturing all ignored files."""
-    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-
-    workspace_id = "workspace_fix_retry"
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True, exist_ok=True)
-    fix_pass_calls: list[dict[str, object]] = []
-    validation_calls: list[dict[str, object]] = []
-    validation_results = [
-        pre_push_validation._PrePushValidationResult(
-            passed=False,
-            validation_run_id="vr1",
-            workspace_head_sha="a" * 40,
-            reason_code="PRE_PUSH_VALIDATION_FAILED",
-            message="attempt 1 failed",
-            validation_reason_code="PYTEST_TEST_FAILURE",
-            result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
-            ignore_ignored_paths=(),
-            ignore_ignored_paths_snapshot=(),
-        ),
-        pre_push_validation._PrePushValidationResult(
-            passed=False,
-            validation_run_id="vr2",
-            workspace_head_sha="a" * 40,
-            reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
-            message="attempt 2 failed",
-            result=None,
-        ),
-    ]
-
-    async def _run_pre_push_validation(
-        _self: Any,
-        *,
-        ignore_ignored_paths: tuple[str, ...] | None,
-        ignore_all_ignored: bool,
-        capture_ignored_paths_snapshot: bool,
-        **_kwargs: object,
-    ) -> pre_push_validation._PrePushValidationResult:
-        validation_calls.append(
-            {
-                "ignore_ignored_paths": ignore_ignored_paths,
-                "ignore_all_ignored": ignore_all_ignored,
-                "capture_ignored_paths_snapshot": capture_ignored_paths_snapshot,
-            }
-        )
-        return validation_results.pop(0)
-
-    async def _run_fix_pass(_runner: object, **_kwargs: object) -> tuple[bool, str | None]:
-        fix_pass_calls.append(cast(dict[str, object], _kwargs))
-        return True, None
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        pre_push_validation_fix_passes=1,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_run_pre_push_validation",
-        _run_pre_push_validation,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_run_pre_push_validation_fix_pass",
-        _run_fix_pass,
-    )
-
-    result = await pre_push_validation._run_pre_push_validation_with_fix_passes(
-        runner,
-        workspace_id=workspace_id,
-        worktree_path=worktree,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        remote_branch=f"awf/{workspace_id}",
-        remote_url=None,
-        state=None,
-    )
-
-    assert len(validation_calls) == 2
-    assert validation_calls[0]["ignore_all_ignored"] is True
-    assert validation_calls[0]["ignore_ignored_paths"] is None
-    assert validation_calls[0]["capture_ignored_paths_snapshot"] is True
-    assert validation_calls[1]["ignore_all_ignored"] is True
-    assert validation_calls[1]["ignore_ignored_paths"] == ()
-    assert validation_calls[1]["capture_ignored_paths_snapshot"] is False
-    assert len(fix_pass_calls) == 1
-    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_fix_pass_rejects_new_ignored_paths_on_retry(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Newly introduced ignored entries should block retry logic before a fix pass."""
-    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-
-    workspace_id = "workspace_fix_retry_new_ignored"
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True, exist_ok=True)
-    validation_calls: list[dict[str, object]] = []
-    fix_pass_calls: list[dict[str, object]] = []
-    validation_results = [
-        pre_push_validation._PrePushValidationResult(
-            passed=False,
-            validation_run_id="vr1",
-            workspace_head_sha="a" * 40,
-            reason_code="PRE_PUSH_VALIDATION_FAILED",
-            message="attempt 1 failed",
-            validation_reason_code="PYTEST_TEST_FAILURE",
-            result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
-            ignore_ignored_paths=(".venv/",),
-            ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
-            ignore_ignored_paths_snapshot_signatures=(
-                (".venv/existing-artifact.log", "sig-existing"),
-            ),
-        ),
-        pre_push_validation._PrePushValidationResult(
-            passed=False,
-            validation_run_id="vr2",
-            workspace_head_sha="a" * 40,
-            reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
-            message="attempt 2 failed",
-            result=None,
-            ignore_ignored_paths=(".venv/",),
-            ignore_ignored_paths_snapshot=(
-                ".venv/existing-artifact.log",
-                ".venv/new-artifact.log",
-            ),
-            ignore_ignored_paths_snapshot_signatures=(
-                (".venv/existing-artifact.log", "sig-existing"),
-                (".venv/new-artifact.log", "sig-new"),
-            ),
-        ),
-    ]
-
-    async def _run_pre_push_validation(
-        _self: Any,
-        **_kwargs: object,
-    ) -> pre_push_validation._PrePushValidationResult:
-        validation_calls.append(cast(dict[str, object], _kwargs))
-        return validation_results.pop(0)
-
-    async def _run_fix_pass(_runner: object, **kwargs: object) -> tuple[bool, str | None]:
-        fix_pass_calls.append(cast(dict[str, object], kwargs))
-        return True, None
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        pre_push_validation_fix_passes=1,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_run_pre_push_validation",
-        _run_pre_push_validation,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_run_pre_push_validation_fix_pass",
-        _run_fix_pass,
-    )
-
-    result = await pre_push_validation._run_pre_push_validation_with_fix_passes(
-        runner,
-        workspace_id=workspace_id,
-        worktree_path=worktree,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        remote_branch=f"awf/{workspace_id}",
-        remote_url=None,
-        state=None,
-    )
-
-    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-    assert len(validation_calls) == 2
-    assert len(fix_pass_calls) == 1
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_fix_pass_cleans_ignored_artifacts_after_commit(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A committed fix pass should clean new ignored artifacts before retrying validation."""
+    """A committed fix pass should clean side effects against the committed head."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
     workspace_id = await seed_monitoring_workspace(factory)
@@ -425,9 +232,6 @@ async def test_pre_push_validation_fix_pass_cleans_ignored_artifacts_after_commi
         remote_url=None,
         state=None,
         validation_result=validation_result,
-        ignore_ignored_paths=(".venv/",),
-        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
-        ignore_ignored_paths_snapshot_signatures=((".venv/existing-artifact.log", "sig-existing"),),
         pass_number=1,
         total_passes=1,
         validation_commands=("pytest -q",),
@@ -439,11 +243,6 @@ async def test_pre_push_validation_fix_pass_cleans_ignored_artifacts_after_commi
         {
             "worktree_path": worktree,
             "restore_ref": committed_head,
-            "ignore_ignored_paths": (".venv/",),
-            "ignore_ignored_paths_snapshot": (".venv/existing-artifact.log",),
-            "ignore_ignored_paths_snapshot_signatures": (
-                (".venv/existing-artifact.log", "sig-existing"),
-            ),
         }
     ]
     assert rev_parse_results == []
@@ -542,8 +341,6 @@ async def test_pre_push_validation_fix_pass_cleanup_failure_stops_retry(
         message="attempt 1 failed",
         validation_reason_code="PYTEST_TEST_FAILURE",
         result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
-        ignore_ignored_paths=(".venv/",),
-        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
     )
 
     async def _run_pre_push_validation(
@@ -615,8 +412,6 @@ async def test_pre_push_validation_fix_pass_infrastructure_failure_avoids_cleanu
         message="attempt 1 failed",
         validation_reason_code="PYTEST_TEST_FAILURE",
         result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
-        ignore_ignored_paths=(".venv/",),
-        ignore_ignored_paths_snapshot=(".venv/existing-artifact.log",),
     )
 
     async def _run_pre_push_validation(
@@ -668,163 +463,6 @@ async def test_pre_push_validation_fix_pass_infrastructure_failure_avoids_cleanu
     )
     assert "fix pass infrastructure failed" in result.message
     assert "cleanup failed" not in result.message
-
-
-@pytest.mark.unit
-async def test_run_pre_push_validation_rejects_new_ignored_entries_before_validation(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A gained ignored snapshot should fail before any validation command executes."""
-    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _set_resolved_profile(factory, workspace_id)
-    worktree = tmp_path / "worktrees" / workspace_id
-    _mark_git_worktree(worktree)
-    cmd = FakeCommandRunner()
-    local_head = "a" * 40
-    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
-
-    async def _run_pre_push_validation_worktree_check(
-        _self: object,
-        **_kwargs: object,
-    ) -> ValidationWorktreeCheck:
-        return ValidationWorktreeCheck(
-            clean=True,
-            ignored_paths=(".venv/",),
-            ignored_paths_snapshot=(
-                ".venv/existing-artifact.log",
-                ".venv/new-artifact.log",
-            ),
-            ignored_paths_snapshot_signatures=(
-                (".venv/existing-artifact.log", "sig-existing"),
-                (".venv/new-artifact.log", "sig-new"),
-            ),
-        )
-
-    started_runs: list[str] = []
-
-    async def _start_pre_push_validation_run(
-        _self: object,
-        **_kwargs: object,
-    ) -> str:
-        started_runs.append("started")
-        return "vr-gained-ignored"
-
-    finish_calls: list[dict[str, object]] = []
-
-    async def _finish_pre_push_validation_run(
-        _self: object,
-        validation_run_id: str,
-        *,
-        status: str,
-        reason_code: str | None,
-        retry_count: int = 0,
-        coverage: dict[str, object] | None = None,
-        command_retries: list[int] | None = None,
-    ) -> None:
-        finish_calls.append(
-            {
-                "validation_run_id": validation_run_id,
-                "status": status,
-                "reason_code": reason_code,
-                "retry_count": retry_count,
-                "coverage": coverage,
-                "command_retries": command_retries,
-            }
-        )
-
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_worktree_check",
-        _run_pre_push_validation_worktree_check,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_start_pre_push_validation_run",
-        _start_pre_push_validation_run,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_finish_pre_push_validation_run",
-        _finish_pre_push_validation_run,
-    )
-
-    result = await pre_push_validation._run_pre_push_validation(
-        runner,
-        workspace_id=workspace_id,
-        worktree_path=worktree,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        remote_branch=f"awf/{workspace_id}",
-        ignore_ignored_paths=(".venv/",),
-        ignore_all_ignored=True,
-        capture_ignored_paths_snapshot=False,
-        baseline_ignored_roots=(".venv/",),
-        baseline_ignored_paths_snapshot=(".venv/existing-artifact.log",),
-        baseline_ignored_paths_snapshot_signatures=(
-            (".venv/existing-artifact.log", "sig-existing"),
-        ),
-    )
-
-    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-    assert result.validation_run_id == "vr-gained-ignored"
-    assert "Validation worktree ignored entries changed after setup baseline" in result.message
-    assert started_runs == ["started"]
-    assert len(finish_calls) == 1
-    assert finish_calls[0]["status"] == "failed"
-    assert finish_calls[0]["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-    assert runner._deps.validation.calls == []
-
-
-@pytest.mark.unit
-def test_pre_push_validation_ignored_entries_drifted_rejects_removed_snapshot_paths() -> None:
-    """Deleted baseline ignored artifacts should be treated as ignored drift."""
-    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-
-    assert pre_push_validation._pre_push_validation_ignored_entries_drifted(
-        baseline_ignored_roots=(".venv/",),
-        baseline_ignored_snapshot=(".venv/existing-artifact.log",),
-        baseline_ignored_snapshot_signatures=((".venv/existing-artifact.log", "sig-existing"),),
-        current_ignored_roots=(".venv/",),
-        current_ignored_snapshot=(),
-        current_ignored_snapshot_signatures=(),
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("baseline_signatures", "current_signatures"),
-    [
-        (((".venv/existing-artifact.log", "sig-existing"),), ()),
-        ((), ((".venv/existing-artifact.log", "sig-existing"),)),
-    ],
-)
-def test_pre_push_validation_ignored_entries_drifted_rejects_one_sided_signature_drift(
-    baseline_signatures: tuple[tuple[str, str], ...],
-    current_signatures: tuple[tuple[str, str], ...],
-) -> None:
-    """One-sided ignored artifact signatures should be treated as ignored drift."""
-    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-
-    assert pre_push_validation._pre_push_validation_ignored_entries_drifted(
-        baseline_ignored_roots=(".venv/",),
-        baseline_ignored_snapshot=(".venv/existing-artifact.log",),
-        baseline_ignored_snapshot_signatures=baseline_signatures,
-        current_ignored_roots=(".venv/",),
-        current_ignored_snapshot=(".venv/existing-artifact.log",),
-        current_ignored_snapshot_signatures=current_signatures,
-    )
 
 
 @pytest.mark.unit
@@ -891,7 +529,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert any("clean -ffdx" in call for call in joined_calls)
+    assert any("clean -ffd" in call for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -989,7 +627,7 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     assert rollback_failed is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert any("clean -ffdx" in call for call in joined_calls)
+    assert any("clean -ffd" in call for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -1025,7 +663,6 @@ async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
             workspace_id="workspace",
             worktree_path=worktree,
             restore_ref=restore_ref,
-            ignore_ignored_paths=(".venv",),
             pass_number=1,
             reason="test",
         )
@@ -1034,8 +671,8 @@ async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
     assert rollback_failure_reason is None
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {restore_ref}" in call for call in joined_calls)
-    assert any("clean -ffdx -- generated.tmp" in call for call in joined_calls)
-    assert all(not ("clean -ffdx" in call and ".venv" in call) for call in joined_calls)
+    assert any("clean -ffd -- generated.tmp" in call for call in joined_calls)
+    assert all(not ("clean -ffd" in call and ".venv" in call) for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -1190,7 +827,7 @@ async def test_pre_push_validation_fix_pass_rollback_does_not_clean_when_reset_f
     assert rollback_failure_reason == "PRE_PUSH_VALIDATION_ROLLBACK_FAILED"
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {restore_ref}" in call for call in joined_calls)
-    assert not any("clean -ffdx" in call for call in joined_calls)
+    assert not any("clean -ffd" in call for call in joined_calls)
 
 
 @pytest.mark.unit
