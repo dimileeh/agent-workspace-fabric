@@ -690,14 +690,30 @@ def _prepare_claude_overlay_mount(
                 error=str(exc),
             )
             return None
-    for directory in (upper, work, merged):
-        directory.mkdir(parents=True, exist_ok=True)
+    try:
+        for directory in (upper, work, merged):
+            directory.mkdir(parents=True, exist_ok=True)
 
-    if fresh_signature is not None:
-        # Record the base signature so a later retry over this upper/work pins to
-        # this exact base instead of recomputing it from a changed host. (Pinned
-        # retries leave ``fresh_signature`` None — the marker already exists.)
-        sig_marker.write_text(fresh_signature)
+        if fresh_signature is not None:
+            # Record the base signature so a later retry over this upper/work pins
+            # to this exact base instead of recomputing it from a changed host.
+            # (Pinned retries leave ``fresh_signature`` None — the marker exists.)
+            sig_marker.write_text(fresh_signature)
+    except OSError as exc:
+        # Creating the per-workspace scratch dirs or writing the signature marker
+        # can fail with OSError (disk full after the base copytree just consumed
+        # space, permissions). Degrade to the legacy full copy rather than
+        # hard-failing provisioning — the same resilience contract honored when
+        # the base build or the mount itself fails. ``upper``/``work`` are left
+        # intact: a retry path may carry the agent's overlay mutations there,
+        # which a teardown would destroy.
+        _log.warning(
+            "claude_auth_overlay_unavailable",
+            reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
+            workspace_auth_root=str(claude_root),
+            error=str(exc),
+        )
+        return None
 
     if overlay_mounter.is_mounted(merged):
         # Idempotent retry: a prior provision already mounted this overlay (e.g.

@@ -393,6 +393,75 @@ def test_shared_base_build_oserror_falls_back_to_legacy_copy(
 
 
 @pytest.mark.unit
+def test_overlay_scratch_dir_oserror_falls_back_to_legacy_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    real_mkdir = auth_mounts_mod.Path.mkdir
+
+    def _mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        # Disk full after the base copytree: creating the per-workspace overlay
+        # scratch dirs (``<claude_root>/{upper,work,merged}``) fails. The legacy
+        # copy's own dirs must still be created.
+        if self.name in {"upper", "work", "merged"} and self.parent.name == "claude":
+            raise OSError("No space left on device")
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(auth_mounts_mod.Path, "mkdir", _mkdir)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_scratch_fail",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_scratch_fail" / "claude"
+    # A scratch-dir OSError degrades to the legacy full copy, not a hard fail.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+
+
+@pytest.mark.unit
+def test_overlay_signature_write_oserror_falls_back_to_legacy_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    def _write_fails(self: Path, *args: object, **kwargs: object) -> int:
+        # The only ``write_text`` in the resolve path is the base-signature
+        # marker; a disk-full filesystem fails it after the scratch dirs exist.
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(auth_mounts_mod.Path, "write_text", _write_fails)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_sig_fail",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_sig_fail" / "claude"
+    # A signature-marker OSError degrades to the legacy full copy, not a hard fail.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+
+
+@pytest.mark.unit
 def test_overlay_reprovision_reuses_live_mount_without_data_loss(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
