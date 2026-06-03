@@ -537,3 +537,39 @@ async def test_cleanup_surfaces_status_failure_from_post_restore_recheck(
     assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
     assert cleanup.cleaned is False
     assert status_calls == 2
+
+
+@pytest.mark.unit
+async def test_cleanup_does_not_rmdir_live_ignored_root_without_gitignore_edit(
+    tmp_path: Path,
+) -> None:
+    """Refutes a reported concern: with NO `.gitignore` edit (so the post-restore
+    recompute does not fire), a live-ignored empty root like `.venv/` must not be
+    `rmdir`'d. The cleanup check runs with `ignore_all_ignored=True`, so nothing
+    under a live ignored root ever enters the cleanup set; passing
+    `ignored_paths=set()` to the empty-dir cleanup is therefore safe.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore=".venv/\n")
+    venv_dir = worktree / ".venv"
+    venv_dir.mkdir()  # empty, live-ignored root
+    # A genuine non-ignored side effect so cleanup actually runs git clean + the
+    # empty-parent-dir pass.
+    side_effect = worktree / "report.txt"
+    side_effect.write_text("side effect\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree, commands),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    # Non-ignored side effect removed; the live-ignored empty root is left intact.
+    assert not side_effect.exists()
+    assert venv_dir.exists() and venv_dir.is_dir()
+    # No tracked .gitignore was restored, so the recompute did NOT fire (no
+    # post-restore recheck status call between the initial check and the verify).
+    assert sum(1 for args in commands if args == _VALIDATION_STATUS_ARGS) == 2
