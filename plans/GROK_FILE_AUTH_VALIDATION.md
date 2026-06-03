@@ -9,6 +9,9 @@ files into each workspace auth directory. Cursor remains API-key based and uncha
 ## Results
 
 - `~/.grok/auth.json` is detected before `XAI_API_KEY` in provider readiness.
+- Local service API/worker containers declare the read-only host `~/.grok`
+  mount, allowing Docker service mode to see the same auth source as local
+  readiness checks.
 - Workspace auth resolution creates a per-workspace writable `/home/agent/.grok`
   mount when host `~/.grok/auth.json` exists.
 - Only `auth.json` and optional `config.toml` are copied; host runtime folders such
@@ -33,7 +36,13 @@ uv run --python 3.12 --extra dev pytest tests/unit/node/test_service_auth_mounts
 Result: `126 passed`.
 
 ```bash
-uv run --python 3.12 --extra dev ruff check src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py tests/unit/node/test_service_auth_mounts.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py
+uv run --python 3.12 --extra dev pytest tests/integration/test_local_service_compose.py::test_local_service_compose_declares_control_plane_stack -q
+```
+
+Result: `1 passed`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py tests/unit/node/test_service_auth_mounts.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py tests/integration/test_local_service_compose.py
 ```
 
 Result: `All checks passed`.
@@ -43,3 +52,9 @@ uv run --python 3.12 --extra dev mypy src/awf/node/auth_mounts.py src/awf/servic
 ```
 
 Result: `Success: no issues found in 2 source files`.
+
+```bash
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml config --quiet
+```
+
+Result: passed with no output.

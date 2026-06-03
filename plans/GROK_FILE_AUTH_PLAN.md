@@ -23,6 +23,9 @@ shadow the Linux runtime `grok` binary.
 - Missing Grok file auth continues to fall back to `XAI_API_KEY`.
 - Workspace auth mount resolution creates `/home/agent/.grok` from a filtered
   isolated copy, not a direct whole-directory mount.
+- Local service API/worker containers can see host `~/.grok` through the same
+  read-only host-home auth mount policy used by other provider folders, so the
+  worker can create the filtered per-workspace copy.
 - The filtered copy excludes non-portable runtime/cache/session files such as
   `bin`, `downloads`, `sessions`, logs, and platform-specific managed binaries.
 - Existing `XAI_API_KEY` environment propagation remains unchanged.
@@ -34,10 +37,13 @@ shadow the Linux runtime `grok` binary.
    `src/awf/node/auth_mounts.py`.
 4. Extend `src/awf/service/provider_readiness.py` to accept `host_home` for
    Grok and check file auth before env auth.
-5. Update docs/reason text only if test expectations or operator clarity
+5. Add the local-service `.grok` read-only mount to API/worker containers so
+   Docker service mode can resolve the same file auth as local readiness checks.
+6. Update docs/reason text only if test expectations or operator clarity
    require it.
 
 ## Verification
 - `uv run --python 3.12 --extra dev pytest tests/unit/node/test_service_auth_mounts.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py -q`
+- `uv run --python 3.12 --extra dev pytest tests/integration/test_local_service_compose.py::test_local_service_compose_declares_control_plane_stack -q`
 - `uv run --python 3.12 --extra dev ruff check src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py tests/unit/node/test_service_auth_mounts.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py`
 - `uv run --python 3.12 --extra dev mypy src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py`
