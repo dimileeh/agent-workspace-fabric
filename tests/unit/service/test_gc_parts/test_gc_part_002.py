@@ -1125,6 +1125,45 @@ async def test_plan_terminal_gc_reaps_preserved_failed_past_cap(
 
 
 @pytest.mark.unit
+async def test_plan_limit_bounds_candidates_across_candidate_and_preserved_queries(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # ``limit`` caps the candidate and preserved SQL queries independently, and
+    # the preserved loop promotes age-capped failed rows into candidates. The
+    # combined candidate count must still honor the batch limit rather than
+    # reclaiming up to ~2x ``limit`` rows in one run.
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    completed_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=300),
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    capped_failed_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=800),
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
+        plan = await plan_terminal_workspace_gc(
+            session_factory,
+            work_dir=tmp_path,
+            now=now,
+            limit=1,
+            max_preserved_failed_hours=720,
+        )
+    # Without the combined-budget guard both queries would each yield one
+    # candidate (the merged-completed row and the age-capped failed row).
+    assert len(plan.candidates) == 1
+    # Oldest-first wins the single slot; the failed row (800h) predates the
+    # completed row (300h).
+    assert [c.workspace_id for c in plan.candidates] == [capped_failed_id]
+    assert completed_id not in {c.workspace_id for c in plan.candidates}
+
+
+@pytest.mark.unit
 async def test_no_work_superseded_workspace_is_gc_candidate_without_recovery_metadata(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

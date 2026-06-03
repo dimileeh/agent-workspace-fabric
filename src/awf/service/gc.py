@@ -557,6 +557,14 @@ async def plan_terminal_workspace_gc(
             candidate_ids.add(workspace.id)
         elif isinstance(classification, WorkspaceGCPreserved):
             preserved.append(classification)
+    # ``limit`` caps the candidate and preserved SQL queries independently, but
+    # the preserved loop promotes age-capped / no-work rows into candidates. Left
+    # unchecked a single batch could reclaim up to ~2x ``limit`` rows, breaking
+    # the "maximum cleanup candidates per batch" contract. Enforce the budget on
+    # the combined set, keeping the oldest candidates so cleanup stays FIFO.
+    if row_limit is not None and len(candidates) > row_limit:
+        candidates.sort(key=lambda candidate: (candidate.updated_at, candidate.workspace_id))
+        candidates = candidates[:row_limit]
     return WorkspaceGCPlan(
         work_dir=normalized_work_dir,
         min_age_hours=min_age_hours,
