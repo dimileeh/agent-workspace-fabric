@@ -1,8 +1,10 @@
-"""Shared scaffolding for the ``awf setup`` CLI tests.
+"""Shared fixtures and helpers for the ``awf setup`` CLI test suites.
 
-Extracted from ``test_setup_commands.py`` so the suite stays under the
-first-party file line limit; both the runner handle and the hermetic
-``harness`` fixture live here and are imported by the test module.
+The setup CLI coverage is split across :mod:`test_setup_commands` (the
+read-only host readiness pass) and :mod:`test_setup_commands_client` (the T08
+client integration dispatch) to keep each file under the maintainability line
+limit. Both suites lean on the same harness fixtures and check builders, which
+live here so the two files stay in lockstep.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from awf.host_setup.providers import (
 )
 from awf.host_setup.rendering import INTERACTIVE_INPUT_REQUIRED
 from awf.host_setup.source_assets import SOURCE_CHECKOUT_MARKERS
-from awf.host_setup.system_checks import SetupCheckLevel, SetupCheckResult
+from awf.host_setup.system_checks import CommandResult, SetupCheckLevel, SetupCheckResult
 
 _runner = CliRunner()
 
@@ -148,3 +150,51 @@ def _make_source_checkout(root: Path) -> Path:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("x", encoding="utf-8")
     return root
+
+
+# --- T08: client integration dispatch helpers -----------------------------
+
+_CLIENT_ENV_FILE = "/srv/awf/docker/compose/.env"
+
+
+@dataclass
+class _ClientHarness:
+    """State for the client-dispatch seams the CLI reads at call time."""
+
+    home: Path
+    runner_calls: list[tuple[str, ...]] = field(default_factory=list)
+
+
+def _which_missing(_binary: str) -> str | None:
+    return None
+
+
+def _which_found(binary: str) -> str:
+    return f"/usr/bin/{binary}"
+
+
+@pytest.fixture
+def client_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _ClientHarness:
+    """Point the client seams at a temp home, a fixed env file, and no CLI."""
+    state = _ClientHarness(home=tmp_path)
+
+    def runner(args: object) -> CommandResult | None:
+        state.runner_calls.append(tuple(args))  # type: ignore[arg-type]
+        return CommandResult(returncode=0)
+
+    monkeypatch.setattr(setup_commands, "_client_home", lambda: state.home)
+    monkeypatch.setattr(
+        setup_commands, "_resolve_client_env_file", lambda *_a: Path(_CLIENT_ENV_FILE)
+    )
+    monkeypatch.setattr(setup_commands, "_client_which", _which_missing)
+    monkeypatch.setattr(setup_commands, "_client_run", runner)
+    # ``_run_client_setup`` threads ``_client_env()`` into ``setup_clients`` and
+    # Codex resolves its config dir from ``CODEX_HOME`` (see
+    # ``ClientDescriptor.config_path``). Leaving ``_client_env`` on the real
+    # process env lets a CI runner with ``CODEX_HOME`` set relocate the planned
+    # config write outside ``state.home``, breaking the temp-dir isolation the
+    # other seams establish. Pin it to an empty mapping so resolution always
+    # falls back to the ``state.home``-anchored path; the CODEX_HOME regression
+    # test overrides this with its own controlled value.
+    monkeypatch.setattr(setup_commands, "_client_env", lambda: {})
+    return state
