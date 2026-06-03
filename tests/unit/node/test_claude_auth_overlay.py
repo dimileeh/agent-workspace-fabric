@@ -189,6 +189,37 @@ def test_shared_base_rebuilt_when_host_claude_changes(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_signature_follows_symlink_target_content(tmp_path: Path) -> None:
+    # An operator keeps ``~/.claude`` config as symlinks into a dotfiles repo.
+    # ``copytree(symlinks=False)`` copies the *targets'* contents into the base,
+    # so the signature must track those targets — not the (unchanging) links.
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    claude = host_home / ".claude"
+    dotfiles = tmp_path / "dotfiles"
+    (dotfiles / "skills" / "linked").mkdir(parents=True)
+    (dotfiles / "skills" / "linked" / "SKILL.md").write_text("v1\n")
+    (dotfiles / "settings.local.json").write_text('{"v": 1}\n')
+
+    # A file symlink and a directory symlink, mirroring real dotfiles setups.
+    (claude / "settings.local.json").symlink_to(dotfiles / "settings.local.json")
+    (claude / "skills" / "linked").symlink_to(
+        dotfiles / "skills" / "linked", target_is_directory=True
+    )
+
+    before_file = _host_claude_signature(host_home)
+    # Update a file symlink's target in place; the link itself is untouched.
+    (dotfiles / "settings.local.json").write_text('{"v": 2, "added": true}\n')
+    after_file = _host_claude_signature(host_home)
+    assert after_file != before_file
+
+    # Update content *inside* a directory symlink's target; the link is untouched.
+    (dotfiles / "skills" / "linked" / "SKILL.md").write_text("v2 — longer\n")
+    after_dir = _host_claude_signature(host_home)
+    assert after_dir != after_file
+
+
+@pytest.mark.unit
 def test_shared_base_content_excludes_history_and_skips_dangling_links(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"

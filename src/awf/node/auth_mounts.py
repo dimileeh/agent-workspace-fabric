@@ -203,20 +203,28 @@ def _host_claude_signature(host_home: Path) -> str:
     reflected the current host; the shared base must not silently fall behind).
     The usage-history dirs excluded from the copied base are excluded here too,
     so churn in those transcript trees never forces a needless rebuild. Cheap:
-    ``lstat`` only, no file reads.
+    ``stat`` only, no file reads.
+
+    Symlinks are followed (``followlinks=True`` + ``stat`` rather than ``lstat``)
+    to mirror the copy, which uses ``copytree(symlinks=False)`` and so copies the
+    *targets'* contents into the base. If an operator keeps skills/plugins/settings
+    as symlinks into a dotfiles repo and updates a target without replacing the
+    link, the link's own ``lstat`` is unchanged — signing on ``lstat`` would reuse a
+    stale base while the copy would have refreshed it. Signing the resolved targets
+    keeps the signature aligned with what actually gets copied.
     """
 
     source = host_home / ".claude"
     excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
     entries: list[str] = []
-    for root, dirs, files in os.walk(source):
+    for root, dirs, files in os.walk(source, followlinks=True):
         dirs[:] = [name for name in dirs if name not in excluded]
         root_path = Path(root)
         for name in (*dirs, *files):
             entry = root_path / name
             rel = entry.relative_to(source).as_posix()
             try:
-                stat = entry.lstat()
+                stat = entry.stat()
             except OSError:
                 entries.append(f"{rel}\0missing")
                 continue
