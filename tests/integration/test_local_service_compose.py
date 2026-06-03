@@ -200,6 +200,15 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}",
         f"{expected_work_dir}:{expected_work_dir}",
     }
+    # The worker mounts the host work dir ``:rshared`` so an overlay it mounts
+    # under the work dir is visible to the sibling agent container the host
+    # daemon launches (see docker/compose/local-service.yml). It is the same
+    # base mount set with the work-dir bind carrying the propagation flag.
+    expected_worker_base_mounts = {
+        "/var/run/docker.sock:/var/run/docker.sock",
+        f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}",
+        f"{expected_work_dir}:{expected_work_dir}:rshared",
+    }
     shared_volumes = data["x-awf-service"]["volumes"]
     assert expected_base_mounts.issubset(set(shared_volumes))
     assert expected_auth_mounts.isdisjoint(set(shared_volumes))
@@ -213,7 +222,10 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert "../..:/app" not in volumes
         assert f"{expected_host_home}:{expected_host_home}:ro" not in volumes
         assert services[service_name]["extra_hosts"] == ["host.docker.internal:host-gateway"]
-        assert expected_base_mounts.issubset(set(volumes))
+        service_base_mounts = (
+            expected_worker_base_mounts if service_name == "worker" else expected_base_mounts
+        )
+        assert service_base_mounts.issubset(set(volumes))
         assert expected_auth_mounts.issubset(set(volumes))
         environment = services[service_name]["environment"]
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
