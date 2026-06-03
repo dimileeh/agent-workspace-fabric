@@ -28,7 +28,7 @@ _VALIDATION_STATUS_ARGS = (
     "--untracked-files=all",
     "--ignored=matching",
 )
-_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffdx", "--")
+_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffd", "--")
 _VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
 
 
@@ -432,3 +432,37 @@ async def test_cleanup_validation_worktree_mixed_untracked_and_ignored(
     assert ignored_file.read_text(encoding="utf-8") == "mutated\n"
     assert cleanup.side_effect_paths == ("report.txt",)
     assert _VALIDATION_CLEAN_ARGS + ("report.txt",) in commands
+
+
+@pytest.mark.unit
+async def test_cleanup_keeps_artifact_when_validation_transiently_unignored_it(
+    tmp_path: Path,
+) -> None:
+    """Regression (#362 P1): if validation edits the tracked `.gitignore` to
+    transiently un-ignore a path, cleanup must not delete the re-ignored
+    artifact. The cleanup set is computed pre-restore (when `.venv/` looked
+    visible), but `git clean -ffd` (no `-x`) re-reads `.gitignore` at clean time
+    (after the tracked restore), so the pre-existing ignored artifact survives.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore=".venv/\n")
+    venv_file = worktree / ".venv" / "artifact"
+    venv_file.parent.mkdir(parents=True)
+    venv_file.write_text("pre-existing ignored\n", encoding="utf-8")
+    # Validation edits the TRACKED .gitignore so .venv/ is transiently un-ignored.
+    (worktree / ".gitignore").write_text("# transiently cleared\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree, commands),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    # .gitignore is restored, and the re-ignored artifact is left untouched.
+    assert (worktree / ".gitignore").read_text(encoding="utf-8") == ".venv/\n"
+    assert venv_file.read_text(encoding="utf-8") == "pre-existing ignored\n"
+    # Cleanup never force-deletes ignored files (no `-x`).
+    assert not any("-ffdx" in " ".join(args) for args in commands)

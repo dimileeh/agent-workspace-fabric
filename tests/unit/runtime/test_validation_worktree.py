@@ -25,7 +25,7 @@ _VALIDATION_STATUS_ARGS = (
     "--untracked-files=all",
     "--ignored=matching",
 )
-_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffdx", "--")
+_VALIDATION_CLEAN_ARGS = ("--literal-pathspecs", "clean", "-ffd", "--")
 _VALIDATION_RESTORE_PREFIX = ("--literal-pathspecs", "restore")
 
 

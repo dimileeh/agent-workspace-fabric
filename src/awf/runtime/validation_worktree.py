@@ -597,9 +597,14 @@ async def cleanup_validation_worktree_side_effects(
             ),
         )
     if cleanup_untracked_paths:
-        # Git requires a second force flag to remove nested repositories created by validation.
+        # `-ff` (second force) removes nested repositories created by validation.
+        # Deliberately NOT `-x`: the cleanup must never delete gitignored files.
+        # `git clean` re-evaluates `.gitignore` at clean time (after the tracked
+        # restore above), so a path that validation transiently un-ignored by
+        # editing a tracked `.gitignore` is left alone once the ignore rules are
+        # restored, honoring the "never police ignored paths" contract.
         clean = await run_git(
-            ["--literal-pathspecs", "clean", "-ffdx", "--", *cleanup_untracked_paths]
+            ["--literal-pathspecs", "clean", "-ffd", "--", *cleanup_untracked_paths]
         )
         if not clean.ok:
             return await _return_after_head_verification(
