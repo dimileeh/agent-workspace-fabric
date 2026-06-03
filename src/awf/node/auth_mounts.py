@@ -734,6 +734,29 @@ def _pinned_overlay_base(work_dir: Path, sig_marker: Path) -> Path | None:
     return base if base.is_dir() else None
 
 
+def _record_overlay_base_pin(sig_marker: Path, signature: str, claude_root: Path) -> None:
+    """Persist the base-signature pin for an already-established overlay.
+
+    Records which shared base the live ``upper``/``work`` belong to so a later
+    teardown + remount pins them to that exact base instead of recomputing it
+    from a since-changed host ``~/.claude`` (which would trip an upper/base
+    mismatch whose failure path ``rmtree``s the agent's overlay mutations). A
+    failed write only forfeits the pin hint for a future teardown+retry (which
+    then recomputes the base from the host); the overlay is already live and
+    correct for this provision, so never hard-fail provisioning on it.
+    """
+
+    try:
+        sig_marker.write_text(signature)
+    except OSError as exc:
+        _log.warning(
+            "claude_auth_overlay_unavailable",
+            reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
+            workspace_auth_root=str(claude_root),
+            error=str(exc),
+        )
+
+
 def _prepare_claude_overlay_mount(
     *,
     host_home: Path,
@@ -820,6 +843,17 @@ def _prepare_claude_overlay_mount(
         # raise EBUSY and the cleanup below would ``rmtree`` the writable
         # ``upper``/``work`` layers, destroying the agent's overlay data and
         # forcing a needless full-copy fallback.
+        if fresh_signature is not None:
+            # The live overlay survived from a prior provision that was killed
+            # after ``mount()`` succeeded but before it recorded the pin (or the
+            # marker write failed): ``upper`` exists yet ``base.signature`` is
+            # missing, so ``_pinned_overlay_base`` returned None and a fresh
+            # signature was computed above. Persist it now — for this unchanged-
+            # host retry it matches the base the live overlay was mounted against
+            # — so a later teardown + host ``~/.claude`` change remounts this
+            # surviving upper over that exact base instead of recomputing it and
+            # tripping the upper/base mismatch that would rmtree the agent's data.
+            _record_overlay_base_pin(sig_marker, fresh_signature, claude_root)
         return (
             AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
             upper,
@@ -870,19 +904,7 @@ def _prepare_claude_overlay_mount(
         # between. A post-mount write means a pin exists only for an overlay that
         # genuinely ran. (Pinned retries leave ``fresh_signature`` None — the
         # marker already exists and was validated by the prior successful mount.)
-        try:
-            sig_marker.write_text(fresh_signature)
-        except OSError as exc:
-            # The overlay is live and correct for this provision; a failed marker
-            # write only forfeits the pin hint for a future teardown+retry (which
-            # then recomputes the base from the host). Keep the working overlay
-            # rather than discarding it — never hard-fail provisioning on this.
-            _log.warning(
-                "claude_auth_overlay_unavailable",
-                reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
-                workspace_auth_root=str(claude_root),
-                error=str(exc),
-            )
+        _record_overlay_base_pin(sig_marker, fresh_signature, claude_root)
 
     return (
         AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),

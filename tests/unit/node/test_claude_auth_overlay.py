@@ -570,6 +570,48 @@ def test_overlay_reprovision_reuses_live_mount_without_data_loss(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_live_mount_reuse_records_pin_when_marker_missing(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_nopin",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_nopin" / "claude"
+    # Simulate a worker killed after ``mount()`` succeeded but before (or while)
+    # the base-signature marker was written: the overlay stays live on disk while
+    # ``base.signature`` is missing.
+    (claude_root / "base.signature").unlink()
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+
+    # The retry reaches the idempotent live-mount branch (no remount) but must
+    # still persist the pin so a later teardown + host change remounts the
+    # surviving upper against this exact base rather than a recomputed one.
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_nopin",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # No second mount onto the busy mountpoint — the live mount was reused.
+    assert len(mounter.mounts) == 1
+    # The pin is now recorded, matching the base the live overlay runs against.
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
 def test_overlay_retry_after_teardown_pins_original_base_when_host_changed(
     tmp_path: Path,
 ) -> None:
