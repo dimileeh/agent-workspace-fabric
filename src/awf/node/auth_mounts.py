@@ -212,6 +212,13 @@ def _host_claude_signature(host_home: Path) -> str:
     link, the link's own ``lstat`` is unchanged — signing on ``lstat`` would reuse a
     stale base while the copy would have refreshed it. Signing the resolved targets
     keeps the signature aligned with what actually gets copied.
+
+    ``st_mode`` is part of the key too. ``copytree`` uses ``copy2``, which preserves
+    permission bits, so an operator running ``chmod +x`` on a plugin/hook script
+    inside ``~/.claude`` changes what the copy produces. ``chmod`` bumps ``ctime``
+    but leaves ``st_size`` and ``st_mtime_ns`` untouched, so signing on size+mtime
+    alone would reuse a stale base that lacks the new mode bits. Including the mode
+    rebuilds when permissions change.
     """
 
     source = host_home / ".claude"
@@ -228,7 +235,7 @@ def _host_claude_signature(host_home: Path) -> str:
             except OSError:
                 entries.append(f"{rel}\0missing")
                 continue
-            entries.append(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}")
+            entries.append(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}\0{stat.st_mode}")
     digest = hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
     return digest[:16]
 

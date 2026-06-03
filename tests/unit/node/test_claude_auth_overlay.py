@@ -189,6 +189,23 @@ def test_shared_base_rebuilt_when_host_claude_changes(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_signature_tracks_file_mode_changes(tmp_path: Path) -> None:
+    # ``copytree`` preserves permission bits, so making a hook/plugin script
+    # executable changes what the copied base contains. ``chmod`` bumps ctime but
+    # not size or mtime, so the signature must key off ``st_mode`` to rebuild.
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    script = host_home / ".claude" / "hooks" / "hook.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/bin/sh\necho hi\n")
+
+    before = _host_claude_signature(host_home)
+    script.chmod(0o755)
+    after = _host_claude_signature(host_home)
+    assert after != before
+
+
+@pytest.mark.unit
 def test_signature_follows_symlink_target_content(tmp_path: Path) -> None:
     # An operator keeps ``~/.claude`` config as symlinks into a dotfiles repo.
     # ``copytree(symlinks=False)`` copies the *targets'* contents into the base,
