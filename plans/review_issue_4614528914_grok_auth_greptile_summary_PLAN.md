@@ -93,3 +93,18 @@ This keeps the artifacts accurate for the review comment that was (re)triggered 
 **Verdict remains:** FALSE POSITIVE (the provided summary is a positive post-fix review; its claims are substantiated by the code/tests at the reviewed commit; per decision tree, pure review-level positive boilerplate requires no code change).
 
 This iteration keeps the plan+validation artifacts accurate for a review comment now pointing at the "fix" commit itself, without violating any AWF workspace contract rules.
+
+## Post-Plan Iteration Note 4 (re-review of the address commit 0650dd7)
+
+**Trigger:** The current AWF-provided evidence (quoted in task prompt) for issue:4614528914 shows "Last reviewed commit: ["fix: address review comment issue:461452..."](https://github.com/dimileeh/aira-agent-workspace-fabric/commit/0650dd7cd9db10f96cc64588042967a9c4d10a7d)". The workspace HEAD is exactly 0650dd7 (this run's starting point). The bot has re-reviewed the address commit 0650dd7 itself (which performed the prior re-verify on ccec5128) and re-emitted the positive "Safe to merge — ... 5/5" Greptile summary (with accurate table: "uses is_file()", "frozenset", "the two previously flagged concerns ... are both addressed in this PR", "No files require special attention"). Per PLAN_EXECUTION_PROTOCOL §4, iteration is required to keep validation evidence current against the newly reviewed commit.
+
+**Actions in this iteration:**
+- Re-inspected code at 0650dd7 HEAD via `git show`: `_check_grok` still `if auth_json.is_file():` (direct, line ~1296); never calls `_existing_credential_sources`; `_prepare_isolated_grok_auth` still `if not (source_dir / "auth.json").is_file(): return ()` + inner `if src.is_file() and not dst.exists()`; `_GROK_AUTH_FILES = frozenset(("auth.json", "config.toml"))`. The dedicated grok regression test and its "Regression test for GitHub PR review thread PRRT_kwDOSJAM6s6G0PEp." comment remain present and unchanged.
+- Re-ran *exactly* the four narrow verification commands listed in the Verification Commands section (the two part_* readiness -k grok selectors, auth-mounts -k grok, and ruff on the precise 4 files only). All green (fresh outputs captured in sibling VALIDATION Iteration 4).
+- Update *only* the sibling VALIDATION.md (add Iteration 4 section with fresh run outputs, requirement status, and explicit "still FALSE POSITIVE"). This PLAN updated with this note only.
+- `git add -f` + commit the updated validation (and this plan) with message referencing issue:4614528914 (so thread bookkeeping follows the reviewed commit).
+- No source, test, docker, or other files touched. (Per scope and AWF workspace contract: only protocol artifacts under plans/ for this review-address task.)
+
+**Verdict remains:** FALSE POSITIVE (the provided summary is a positive post-address re-review; its claims about is_file guards, binary filtering, test coverage, and "previously flagged .exists() vs is_file() mismatch resolved" are substantiated by the code/tests at the exact reviewed commit 0650dd7; per decision tree, pure review-level positive boilerplate requires no code change).
+
+This iteration keeps the plan+validation artifacts accurate for a review comment now pointing at the latest address commit, without violating any AWF workspace contract rules.

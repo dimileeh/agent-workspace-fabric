@@ -38,17 +38,17 @@ No production code, no tests, no compose files, no docs outside plans/.
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py -q -k "grok_file or grok_ignores" --tb=line
 ```
-Result: `.. [100%] 2 passed, 63 deselected in 0.77s`
+Result: `.. [100%] 2 passed, 63 deselected in 0.51s`
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py -q -k "grok_preflight" --tb=line
 ```
-Result: `.... [100%] 4 passed, 35 deselected in 0.70s`
+Result: `.... [100%] 4 passed, 35 deselected in 0.52s`
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/node/test_service_auth_mounts.py -q -k "grok" --tb=line
 ```
-Result: `.. [100%] 2 passed, 21 deselected in 0.68s`
+Result: `.. [100%] 2 passed, 21 deselected in 0.51s`
 
 ```bash
 uv run --python 3.12 --extra dev ruff check src/awf/service/provider_readiness.py src/awf/node/auth_mounts.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py tests/unit/node/test_service_auth_mounts.py
@@ -138,16 +138,58 @@ All grok auth contract tests and style clean at the exact commit the bot reviewe
 
 Full AWF/GitHub validation (99% coverage gate, OpenAPI drift, console, ci-required, etc.) is owned by AWF after agent completion per workspace contract; only the narrow -k grok tests + per-file ruff were executed locally for evidence.
 
+## Iteration 4 (re-review of the address commit 0650dd7)
+
+**Trigger:** The AWF-EVIDENCE quoted in the task prompt for issue:4614528914 lists "Last reviewed commit: ["fix: address review comment issue:461452..."](https://github.com/dimileeh/aira-agent-workspace-fabric/commit/0650dd7cd9db10f96cc64588042967a9c4d10a7d)" . This workspace's HEAD at start of run is exactly 0650dd7cd9db10f96cc64588042967a9c4d10a7d. The prior iteration (in commit 0650dd7) had updated validation for re-review of ccec5128. Now the bot has re-reviewed the address commit 0650dd7 (the one whose message says "re-verify on address commit ccec5128") and emitted the positive Greptile summary again (with the summary table now correctly noting is_file() usage in provider_readiness, the frozenset in auth_mounts, "not dst.exists()", "the two previously flagged concerns were both addressed in this PR", "Safe to merge", "No files require special attention"). Per PLAN_EXECUTION_PROTOCOL §4, an iteration is required to keep the validation evidence current against the reviewed commit (0650dd7).
+
+**Gap identified:** None. The direct `is_file()` contract for grok (in both _check_grok and _prepare_isolated_grok_auth), non-use of _existing_credential_sources for the grok path, the _GROK_AUTH_FILES frozenset filter (only auth.json + config.toml), the `not dst.exists()` preservation logic, the dedicated `test_provider_readiness_grok_ignores_non_file_auth_json` regression (with its explicit review-thread comment), the preflight precedence test, and the mount filter/skip tests are all present and unchanged at 0650dd7 HEAD. The bot's summary description now matches the implementation exactly. Re-verify confirms the address commit did not regress the is_file / mount-safety invariant.
+
+**Actions in this iteration:**
+- Re-inspected current code at 0650dd7 HEAD (using `git show HEAD:...` + read of plan/test locations) to confirm: provider_readiness.py `_check_grok` uses `if auth_json.is_file():` directly (no _existing_... helper); auth_mounts.py `_prepare...` uses `(source_dir / "auth.json").is_file()` guard + `src.is_file() and not dst.exists()` + frozenset; the test in part_002.py:306 still has the "Regression test for GitHub PR review thread PRRT_kwDOSJAM6s6G0PEp." comment and asserts non-file does not produce GROK_FILE_AUTH_PRESENT.
+- Re-ran *exactly* the four narrow verification commands from the PLAN (part_002 -k "grok_file or grok_ignores", part_001 -k "grok_preflight", auth_mounts -k "grok", ruff on the 4 specific files). All passed cleanly (see fresh outputs below).
+- Updated this VALIDATION.md: added this Iteration 4 section (with fresh command outputs from this run at 0650dd7), refreshed the top-level Evidence results to this run's timings, updated the ## Commit section. The PLAN.md received the corresponding "Post-Plan Iteration Note 4".
+- Confirmed no production code, tests, compose yml, or any non-plans/ files were modified (or even targeted for edit).
+- Still no broad commands executed (no pytest without -k, no --cov, no ruff ., no mypy, no full lint, no service commands, no docker).
+
+**Re-verification evidence (fresh from this run at HEAD=0650dd7):**
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py -q -k "grok_file or grok_ignores" --tb=line
+```
+Result: `.. [100%] 2 passed, 63 deselected in 0.51s`
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py -q -k "grok_preflight" --tb=line
+```
+Result: `.... [100%] 4 passed, 35 deselected in 0.52s`
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/node/test_service_auth_mounts.py -q -k "grok" --tb=line
+```
+Result: `.. [100%] 2 passed, 21 deselected in 0.51s`
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf/service/provider_readiness.py src/awf/node/auth_mounts.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py tests/unit/node/test_service_auth_mounts.py
+```
+Result: `All checks passed!`
+
+All grok auth contract tests and style clean at the exact commit the bot reviewed (0650dd7).
+
+**Verdict for this iteration:** Still FALSE POSITIVE. The review comment is a positive bot summary on the address commit 0650dd7 itself ("Safe to merge", 5/5 confidence, "both addressed", "No files require special attention", table correctly describes "uses is_file()", frozenset copy filter, "the two previously flagged concerns were both addressed"). Direct code+test inspection at 0650dd7 HEAD confirms the implementation and protecting tests match the summary's description exactly. Per decision tree: feedback is "stale, or pure review boilerplate" (positive architectural re-summary after the address work); do not change code.
+
+Full AWF/GitHub validation (99% coverage gate, OpenAPI drift, console, ci-required, etc.) is owned by AWF after agent completion per workspace contract; only the narrow -k grok tests + per-file ruff were executed locally for evidence.
+
 ## Commit
 
 The original addressing commit (80064ab7) added the initial plan + validation.
 
 Iteration 2 (ccec5128) updated the validation for post-merge re-verify.
 
-This iteration (current workspace run) updates only the validation protocol artifact for re-review of the address commit:
+Iteration 3 (0650dd7, prior) updated for re-review of the ccec address commit.
+
+This iteration (current workspace run at 0650dd7) updates the protocol artifacts for re-review of the address commit 0650dd7 itself:
 
 ```
-fix: address review comment issue:4614528914 — greptile grok auth summary positive; re-verify on address commit ccec5128, is_file contract + tests intact, no code change
+fix: address review comment issue:4614528914 — greptile grok auth summary positive; re-verify on address commit 0650dd7, is_file contract + tests intact, no code change
 ```
 
-(Only `plans/review_issue_4614528914_grok_auth_greptile_summary_VALIDATION.md` is staged in this commit; the prior plan remains as the source of truth. Use `git add -f` due to /plans/* exclude in the workspace bare mirror.)
+(Only the two `plans/review_issue_4614528914_grok_auth_greptile_summary_*.md` files are staged in this commit. Use `git add -f` due to /plans/* exclude in the workspace bare mirror. The prior plan remains the source of truth; only VAL was the main update target but both touched for the iteration note + evidence.)
