@@ -1351,6 +1351,18 @@ def _classify_workspace_for_gc(
     cleanup_enabled: bool,
     ignore_retention: bool = False,
 ) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
+    """Classify one workspace for GC into candidate / preserved / skip.
+
+    ``ignore_retention`` is only consulted on the ``default_policy=True`` →
+    ``completed`` + merged-PR branch, where it bypasses the retention window for
+    a workspace whose pressure dirs are already disposable. It is a no-op on
+    every other branch, so passing ``ignore_retention=True`` with
+    ``default_policy=False`` would silently apply normal retention. That is a
+    programming error rather than a supported mode, so it is rejected loudly
+    instead of being ignored.
+    """
+    if ignore_retention and not default_policy:
+        raise ValueError("ignore_retention=True requires default_policy=True")
     if workspace.status in PROTECTED_WORKSPACE_GC_STATUSES:
         return None
     if workspace.status not in TERMINAL_WORKSPACE_GC_STATUSES:
