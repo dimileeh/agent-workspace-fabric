@@ -1003,6 +1003,39 @@ def test_selected_grok_preflight_requires_xai_api_key_and_runtime_cli(
 
 
 @pytest.mark.unit
+def test_selected_grok_preflight_uses_file_auth_before_xai_api_key(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".grok").mkdir(parents=True)
+    (home / ".grok" / "auth.json").write_text('{"token":"grok_file_secret"}')
+    token = "xai-env-fallback-secret"
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        assert args[-1] == "command -v grok"
+        assert kwargs["env"]["XAI_API_KEY"] == token
+        return _completed(stdout="/usr/local/bin/grok\n")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="grok",
+        task_policy={},
+        environ={"XAI_API_KEY": token},
+        run_subprocess=_run,
+    )
+
+    assert result["provider"] == "grok"
+    assert result["readiness_status"] == "ready"
+    assert result["auth_status"] == "ok"
+    assert result["auth_source"] == "~/.grok/auth.json"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    serialized = json.dumps(result, sort_keys=True)
+    assert token not in serialized
+    assert "grok_file_secret" not in serialized
+
+
+@pytest.mark.unit
 def test_selected_grok_preflight_blocks_missing_xai_api_key(tmp_path: Path) -> None:
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),

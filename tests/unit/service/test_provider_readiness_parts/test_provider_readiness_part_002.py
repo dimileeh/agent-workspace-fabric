@@ -279,6 +279,30 @@ def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_provider_readiness_grok_file_present_before_env(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".grok").mkdir(parents=True)
+    (home / ".grok" / "auth.json").write_text('{"token":"grok_file_secret"}')
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"XAI_API_KEY": "xai_env_secret"},
+        run_subprocess=_runtime_cli_ok("grok"),
+    )
+
+    grok = payload["providers"]["grok"]
+    assert grok["ok"] is True
+    assert grok["reason"] == "GROK_FILE_AUTH_PRESENT"
+    assert grok["signals"] == ["~/.grok/auth.json"]
+    assert grok["credential_scope"] == "isolated_workspace"
+    assert grok["isolation"] == "per_workspace_copy"
+    assert grok["warnings"] == []
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "grok_file_secret" not in serialized
+    assert "xai_env_secret" not in serialized
+
+
+@pytest.mark.unit
 def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
     """Cursor env auth appears as a static service-env token."""
     payload = collect_agent_readiness(

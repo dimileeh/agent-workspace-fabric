@@ -21,7 +21,9 @@ _CLAUDE_DIR_TARGET = f"{_CONTAINER_HOME}/.claude"
 _CLAUDE_FILE_TARGET = f"{_CONTAINER_HOME}/.claude.json"
 _GEMINI_TARGET = f"{_CONTAINER_HOME}/.gemini"
 _OPENCODE_TARGET = f"{_CONTAINER_HOME}/.config/opencode"
+_GROK_TARGET = f"{_CONTAINER_HOME}/.grok"
 _OLLAMA_TARGET = f"{_CONTAINER_HOME}/.ollama"
+_GROK_AUTH_FILES = ("auth.json", "config.toml")
 _OLLAMA_AUTH_FILES = frozenset(("config.json", "id_ed25519", "id_ed25519.pub"))
 # Per-workspace Claude/Gemini auth copies must exclude historical usage/transcript
 # dirs. Otherwise ``ccusage`` (which reads these local files) would attribute the
@@ -197,6 +199,13 @@ def _workspace_auth_mounts(
                 target_root=auth_root / "opencode",
             )
         )
+    if _GROK_TARGET not in suppressed_targets:
+        mounts.extend(
+            _prepare_isolated_grok_auth(
+                host_home=host_home,
+                target_root=auth_root / "grok",
+            )
+        )
     if _OLLAMA_TARGET not in suppressed_targets:
         mounts.extend(
             _prepare_isolated_ollama_auth(
@@ -370,6 +379,34 @@ def _prepare_isolated_opencode_auth(
         AuthMount(
             source=str(target_dir),
             target=_OPENCODE_TARGET,
+            mode="rw",
+        ),
+    )
+
+
+def _prepare_isolated_grok_auth(
+    *,
+    host_home: Path,
+    target_root: Path,
+) -> tuple[AuthMount, ...]:
+    """Seed per-workspace Grok auth without copying host runtime binaries."""
+
+    source_dir = host_home / ".grok"
+    if not (source_dir / "auth.json").is_file():
+        return ()
+
+    target_dir = target_root / ".grok"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for filename in _GROK_AUTH_FILES:
+        src = source_dir / filename
+        dst = target_dir / filename
+        if src.is_file() and not dst.exists():
+            shutil.copy2(src, dst)
+
+    return (
+        AuthMount(
+            source=str(target_dir),
+            target=_GROK_TARGET,
             mode="rw",
         ),
     )
