@@ -78,3 +78,18 @@ Per PLAN_EXECUTION_PROTOCOL §4, an iteration was performed:
 - Still no source/test/docker edits; verdict remains FALSE POSITIVE.
 
 This keeps the artifacts accurate for the review comment that was (re)triggered against the post-merge state without violating scope or contract rules on broad validation.
+
+## Post-Plan Iteration Note 3 (re-review of the address commit itself)
+
+**Trigger:** The current AWF-provided evidence for issue:4614528914 quotes the Greptile summary with "Last reviewed commit: ["fix: address review comment issue:461452..."](https://github.com/dimileeh/aira-agent-workspace-fabric/commit/ccec5128bd6502259ae5c87f51a393e76076c439)". HEAD of this workspace is exactly ccec5128 (the prior iteration's addressing commit). The bot has re-reviewed the fix commit that closed the prior flag, and emitted the positive "Safe to merge" summary (with accurate "uses is_file()" description in its table, and explicit note that the two flagged concerns were addressed). Per PLAN_EXECUTION_PROTOCOL §4, an iteration is required to keep the validation evidence current against the reviewed commit.
+
+**Actions in this iteration:**
+- Re-inspected code at ccec5128 HEAD: `_check_grok` (provider_readiness.py:1296) still `if auth_json.is_file():` (direct, never calls `_existing_credential_sources`); `_prepare_isolated_grok_auth` (auth_mounts.py:395) `if not (source_dir / "auth.json").is_file(): return ()`, inner `if src.is_file() and not dst.exists()`, `_GROK_AUTH_FILES = frozenset(...)`. All grok regression tests and comments still present and unchanged.
+- Re-run exactly the four narrow verification commands listed in the Verification Commands section (pytest -k selectors + ruff on the precise 4 files only).
+- Update *only* the sibling VALIDATION.md (add Iteration 3 section with fresh run outputs, requirement status, and explicit "still FALSE POSITIVE" for this re-review of the address commit). PLAN updated with this note only.
+- `git add -f` + commit the validation (referencing issue:4614528914 so thread bookkeeping follows the reviewed commit).
+- No source, test, docker, or other files touched.
+
+**Verdict remains:** FALSE POSITIVE (the provided summary is a positive post-fix review; its claims are substantiated by the code/tests at the reviewed commit; per decision tree, pure review-level positive boilerplate requires no code change).
+
+This iteration keeps the plan+validation artifacts accurate for a review comment now pointing at the "fix" commit itself, without violating any AWF workspace contract rules.
