@@ -81,6 +81,154 @@ def test_publish_workflow_generates_manifest_without_removing_checksum_artifact(
     assert "artifacts/release/awf-install-manifest.json" in uploaded_paths
 
 
+def _jobs(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Return the workflow jobs mapping."""
+    jobs = workflow.get("jobs", {})
+    assert isinstance(jobs, dict)
+    return jobs
+
+
+@pytest.mark.unit
+def test_publish_workflow_build_verifies_release_artifact_drift() -> None:
+    """The build job runs the drift gate over the generated manifest and checksums."""
+    build_job = _job(_publish_workflow(), "build")
+    commands = _run_steps(build_job)
+
+    assert "scripts/check_release_artifacts.py" in commands
+    assert "--manifest artifacts/release/awf-install-manifest.json" in commands
+    assert "--checksums-file artifacts/release/python-distribution-sha256.txt" in commands
+    assert "--dist-dir dist" in commands
+
+    # The drift check must run after the manifest is generated.
+    step_names = [str(step.get("name")) for step in _steps(build_job)]
+    assert "Verify release artifact drift" in step_names
+
+
+@pytest.mark.unit
+def test_publish_workflow_has_installer_smoke_job_consuming_release_artifacts() -> None:
+    """A dedicated installer-smoke job consumes the uploaded artifacts and runs install.sh."""
+    workflow = _publish_workflow()
+    jobs = _jobs(workflow)
+    assert {"build", "installer-smoke", "publish"}.issubset(jobs)
+
+    smoke_job = _job(workflow, "installer-smoke")
+    needs = smoke_job.get("needs")
+    needs_set = {needs} if isinstance(needs, str) else set(needs or [])
+    assert "build" in needs_set
+
+    # Downloads the two release artifacts built by the build job.
+    downloaded = {
+        step.get("with", {}).get("name")
+        for step in _steps(smoke_job)
+        if step.get("uses") == "actions/download-artifact@v4"
+    }
+    assert "python-distributions" in downloaded
+    assert "python-distribution-checksums" in downloaded
+
+    # Checks out the repo (for install.sh + scripts) and runs the smoke generator.
+    assert any(
+        str(step.get("uses", "")).startswith("actions/checkout") for step in _steps(smoke_job)
+    )
+    commands = _run_steps(smoke_job)
+    assert "scripts/release_smoke.py" in commands
+    assert "--run" in commands
+    # The smoke must be driven via the script, never a raw install.sh invocation.
+    # Ignore comment lines (the script's purpose is documented in a comment that
+    # mentions install.sh); only executable command lines are asserted against.
+    executable_commands = "\n".join(
+        line for line in commands.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "packaging/install.sh" not in executable_commands
+
+
+@pytest.mark.unit
+def test_publish_workflow_installer_smoke_guarded_on_generated_manifest() -> None:
+    """installer-smoke must skip when the build job did not produce a manifest.
+
+    On non-release refs ``generate_install_manifest.py`` SKIPs and removes the
+    manifest while the checksum file survives, so the upload still succeeds.
+    ``release_smoke.py`` hard-fails without the manifest, so the job has to be
+    gated on a build-job output rather than run unconditionally.
+    """
+    workflow = _publish_workflow()
+    build_job = _job(workflow, "build")
+
+    # The build job exposes a manifest_generated output wired from the build step.
+    outputs = build_job.get("outputs", {})
+    assert isinstance(outputs, dict)
+    assert "manifest_generated" in outputs
+
+    build_step = _step_named(build_job, "Build wheel and sdist")
+    assert build_step.get("id") == "build"
+    assert str(outputs["manifest_generated"]) == ("${{ steps.build.outputs.manifest_generated }}")
+
+    build_commands = _run_steps(build_job)
+    assert 'echo "manifest_generated=true" >> "${GITHUB_OUTPUT}"' in build_commands
+    assert 'echo "manifest_generated=false" >> "${GITHUB_OUTPUT}"' in build_commands
+
+    # The installer-smoke job only runs when a manifest was generated.
+    smoke_job = _job(workflow, "installer-smoke")
+    condition = str(smoke_job.get("if", ""))
+    assert "needs.build.outputs.manifest_generated == 'true'" in condition
+
+
+@pytest.mark.unit
+def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> None:
+    """The publish job stays gated on manual dispatch with a non-none target (AC4)."""
+    workflow = _publish_workflow()
+    publish_job = _job(workflow, "publish")
+
+    condition = str(publish_job.get("if", ""))
+    assert "workflow_dispatch" in condition
+    assert "inputs.publish_target != 'none'" in condition
+
+    publish_steps = _steps(publish_job)
+    assert any(
+        step.get("uses") == "pypa/gh-action-pypi-publish@release/v1" for step in publish_steps
+    )
+
+
+@pytest.mark.unit
+def test_publish_workflow_publish_job_gated_on_installer_smoke() -> None:
+    """Publishing must depend on installer-smoke so a failed smoke check blocks release."""
+    workflow = _publish_workflow()
+    publish_job = _job(workflow, "publish")
+
+    needs = publish_job.get("needs")
+    needs_set = {needs} if isinstance(needs, str) else set(needs or [])
+    assert "build" in needs_set
+    assert "installer-smoke" in needs_set
+
+
+@pytest.mark.unit
+def test_publish_workflow_publish_not_silently_skipped_when_smoke_skips() -> None:
+    """A workflow_dispatch publish must not be silently skipped by a skipped smoke job.
+
+    GitHub Actions propagates a ``skipped`` status from any ``needs`` job to
+    dependents whose ``if`` omits ``always()``. ``installer-smoke`` skips on
+    non-release refs (no manifest), so without ``always()`` a manual
+    ``publish_target=testpypi`` dispatch from a development branch would be
+    silently skipped, defeating the manual gate (AC4). The publish condition
+    must therefore use ``always()`` and gate explicitly on dependency results:
+    build must succeed and the smoke must not have failed, while a *skipped*
+    smoke (no manifest to verify) still allows the manual publish to proceed.
+    """
+    workflow = _publish_workflow()
+    publish_job = _job(workflow, "publish")
+    condition = str(publish_job.get("if", ""))
+
+    # always() defeats the implicit skip-propagation from installer-smoke.
+    assert "always()" in condition
+    # Build must have succeeded for there to be artifacts to publish.
+    assert "needs.build.result == 'success'" in condition
+    # A failed (or cancelled) smoke still blocks the release...
+    assert "needs.installer-smoke.result != 'failure'" in condition
+    assert "needs.installer-smoke.result != 'cancelled'" in condition
+    # ...but a skipped smoke must not be treated as a blocker, so the condition
+    # must not require the smoke to have succeeded outright.
+    assert "needs.installer-smoke.result == 'success'" not in condition
+
+
 @pytest.mark.unit
 def test_publish_workflow_does_not_treat_v_prefixed_branch_as_release_tag() -> None:
     """Manual dispatch from a v-prefixed branch must still use the version tag."""

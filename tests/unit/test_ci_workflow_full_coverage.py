@@ -334,7 +334,9 @@ def test_publish_workflow_builds_on_tags_and_uses_trusted_publishing() -> None:
     assert {"build", "publish"}.issubset(jobs)
 
     publish_job = _job(workflow, "publish")
-    assert publish_job.get("needs") == "build"
+    # publish gates on both build (artifacts) and installer-smoke (verifies the
+    # released wheel) so a failed/cancelled smoke blocks the release.
+    assert publish_job.get("needs") == ["build", "installer-smoke"]
     assert publish_job.get("permissions", {}).get("id-token") == "write"
 
     commands = _run_steps(_job(workflow, "build"))
