@@ -481,6 +481,80 @@ def test_recheck_env_ref_ready_without_env_var_marks_unavailable(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_recheck_file_backed_ready_reprobes_when_auth_still_present(tmp_path: Path) -> None:
+    """A prior ready file entry is re-probed (not just preserved) when auth remains.
+
+    A file-backed entry holds no storable ref — its readiness lives in the
+    mounted auth files, which are cheap to verify. A targeted recheck must
+    re-probe and report ``rechecked=True`` rather than carrying the last-known
+    ready state forward unverified.
+    """
+    codex_dir = tmp_path / "home" / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "auth.json").write_text("{}", encoding="utf-8")
+    existing = ProviderConfig(status="ready", source="file")
+    base = HostSetupConfig(providers={"codex": existing})
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=base,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        capture=lambda _provider: None,
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    assert result.status == "ready"
+    assert result.rechecked is True
+    assert result.reason_code == "CODEX_FILE_AUTH_PRESENT"
+    assert config.providers["codex"].status == "ready"
+    assert config.providers["codex"].source == "file"
+
+
+@pytest.mark.unit
+def test_recheck_file_backed_ready_degrades_when_auth_removed(tmp_path: Path) -> None:
+    """A prior ready file entry degrades to unavailable once its auth file is gone.
+
+    After the operator deletes ~/.codex/auth.json and reruns
+    ``awf setup --provider codex``, the recheck must not preserve the stale ready
+    state: both the summary and the persisted config are degraded to unavailable
+    (``rechecked=True``) so ``awf setup`` agrees with the runtime readiness probe.
+    """
+    existing = ProviderConfig(status="ready", source="file")
+    base = HostSetupConfig(providers={"codex": existing})
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=base,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        capture=lambda _provider: None,
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    assert result.status == "unavailable"
+    assert result.configured is True
+    # The absence is a current determination, not a stale carry-over.
+    assert result.rechecked is True
+    assert result.reason_code == "CODEX_FILE_AUTH_MISSING"
+    # The persisted entry is degraded so it cannot linger on disk as ready.
+    assert config.providers["codex"].status == "unavailable"
+    assert config.providers["codex"].source == "file"
+
+
+@pytest.mark.unit
 def test_provider_invalid_credential_marks_unavailable(tmp_path: Path) -> None:
     """A GitHub token the ``gh`` probe cannot confirm is reported unavailable.
 

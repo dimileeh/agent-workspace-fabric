@@ -511,20 +511,24 @@ def _orchestrate_agent_provider(
         env_var = _first_present(environ, spec.env_ref_vars)
         if env_var is None:
             existing = config.providers.get(spec.name)
-            if existing is not None:
+            if existing is not None and existing.source != "file":
                 # The provider was configured by a prior run (e.g. keyring or
                 # plain_file) but no fresh secret/env is available to re-probe.
                 # Preserve and report that state instead of falsely reporting
                 # not_configured and discarding the existing ref.
                 return _preserved_existing_result(spec, existing)
-            # No captured secret, no env ref, and no prior config — but several
-            # providers authenticate purely from documented file-based auth
-            # (e.g. Codex in ~/.codex, Claude in ~/.claude) that the readiness
-            # probe already treats as ready and that ``awf start`` mounts per
-            # workspace. Probe before declaring the provider not_configured so
-            # ``awf setup --provider codex --non-interactive`` honors mounted
-            # auth files instead of demanding interactive input no file-auth
-            # setup needs.
+            # No captured secret and no env ref. Either there is no prior config
+            # or the prior entry is file-backed (``source="file"``), which holds
+            # no storable ref — its readiness lives entirely in the mounted auth
+            # files (e.g. Codex in ~/.codex, Claude in ~/.claude) that the
+            # readiness probe already treats as ready and that ``awf start``
+            # mounts per workspace. Those files are cheap to re-probe, so probe
+            # before reporting: a targeted recheck such as
+            # ``awf setup --provider codex`` after the operator deletes
+            # ~/.codex/auth.json must degrade a stale ``ready`` file entry rather
+            # than preserve it as last-known ready, and a fresh provider with
+            # mounted auth must report ready instead of demanding interactive
+            # input no file-auth setup needs.
             return _orchestrate_file_backed_provider(
                 spec,
                 settings=settings,
@@ -532,6 +536,7 @@ def _orchestrate_agent_provider(
                 non_interactive=non_interactive,
                 run_subprocess=run_subprocess,
                 http_get=http_get,
+                existing=existing,
             )
         ref = _build_env_ref(spec, env_var, capabilities, backends)
         source = "env"
@@ -604,18 +609,26 @@ def _orchestrate_file_backed_provider(
     non_interactive: bool,
     run_subprocess: SubprocessRun,
     http_get: HttpGet | None,
+    existing: ProviderConfig | None = None,
 ) -> tuple[ProviderSetupResult, ProviderConfig | None]:
     """Honor documented file-based provider auth before reporting not_configured.
 
-    Reached only when there is no captured secret, no service-visible env ref,
-    and no prior config. Providers such as Codex (``~/.codex``), Claude Code
-    (``~/.claude``), Gemini (``~/.gemini``/``GOOGLE_APPLICATION_CREDENTIALS``),
-    and OpenCode (``~/.config/opencode``/``~/.ollama``) can still be ready via
-    mounted auth files that ``awf start`` copies per workspace. Run the same
-    bounded readiness probe ``_orchestrate_agent_provider`` uses for an env ref;
-    if it reports ready, persist a ref-less ``ready`` file config so
-    ``awf setup`` agrees with runtime instead of falsely prompting for input.
-    Otherwise fall back to the not_configured result.
+    Reached when there is no captured secret and no service-visible env ref, and
+    either no prior config or a prior *file-backed* (``source="file"``) entry.
+    Providers such as Codex (``~/.codex``), Claude Code (``~/.claude``), Gemini
+    (``~/.gemini``/``GOOGLE_APPLICATION_CREDENTIALS``), and OpenCode
+    (``~/.config/opencode``/``~/.ollama``) can still be ready via mounted auth
+    files that ``awf start`` copies per workspace. Run the same bounded readiness
+    probe ``_orchestrate_agent_provider`` uses for an env ref; if it reports
+    ready, persist a ref-less ``ready`` file config so ``awf setup`` agrees with
+    runtime instead of falsely prompting for input.
+
+    When the probe fails and a prior file-backed entry was persisted ready, the
+    mounted auth has gone (e.g. the operator deleted ~/.codex/auth.json before a
+    targeted ``awf setup --provider codex`` recheck). Degrade and re-persist that
+    entry as ``unavailable`` so the stored config cannot linger as ready while
+    the summary reports it unusable; with no prior entry, fall back to the
+    not_configured result.
     """
     readiness_provider = spec.readiness_provider
     if readiness_provider is None:  # pragma: no cover - registry guarantees a mapping.
@@ -628,6 +641,22 @@ def _orchestrate_file_backed_provider(
         http_get=http_get,
     )
     if readiness.get("ok") is not True:
+        if existing is not None:
+            degraded = existing.model_copy(update={"status": "unavailable"})
+            return (
+                ProviderSetupResult(
+                    name=spec.name,
+                    status="unavailable",
+                    reason_code=f"{spec.name.upper()}_FILE_AUTH_MISSING",
+                    summary=(
+                        f"Previously ready {spec.name} file-based auth is no longer "
+                        "present; marking unavailable."
+                    ),
+                    configured=True,
+                    rechecked=True,
+                ),
+                degraded,
+            )
         return _not_configured_result(spec, non_interactive=non_interactive)
     # File-based auth carries no storable reference (the credential lives in the
     # mounted files, never a value AWF holds); record a ref-less ready config so
