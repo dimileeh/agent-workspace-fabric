@@ -379,18 +379,33 @@ class GitManager:
         async with lock:
             if worktree_path.exists():
                 # ``--force`` because a failed task may leave dirty state.
-                await self._run(
-                    [
-                        "git",
-                        "--git-dir",
-                        str(mirror_path),
-                        "worktree",
-                        "remove",
-                        "--force",
-                        str(worktree_path),
-                    ],
-                    operation="worktree.remove",
-                )
+                try:
+                    await self._run(
+                        [
+                            "git",
+                            "--git-dir",
+                            str(mirror_path),
+                            "worktree",
+                            "remove",
+                            "--force",
+                            str(worktree_path),
+                        ],
+                        operation="worktree.remove",
+                    )
+                except GitOperationError as exc:
+                    # Idempotent removal: a directory left behind with stale git
+                    # metadata makes ``git worktree remove`` fail with
+                    # ``fatal: '<path>' is not a working tree``. That is an
+                    # already-removed condition, not a failure — the
+                    # ``worktree prune`` below clears the stale entry. Re-raise
+                    # any genuine removal error (we match only this condition).
+                    if "is not a working tree" not in exc.stderr.lower():
+                        raise
+                    _log.info(
+                        "worktree.remove.already_gone",
+                        workspace_id=workspace_id,
+                        worktree_path=str(worktree_path),
+                    )
 
             if mirror_path.exists():
                 await self._run(

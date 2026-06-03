@@ -884,6 +884,57 @@ class TestRemoveWorktree:
         # Should not raise.
         await manager.remove_worktree(workspace_id="ws_never_created", repo_url=str(origin_repo))
 
+    @pytest.mark.unit
+    async def test_stale_metadata_worktree_remove_is_success(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        # A directory exists at the worktree path but was never registered as a
+        # git worktree, so ``git worktree remove`` emits
+        # ``fatal: '<path>' is not a working tree``. Removal must be idempotent.
+        await manager.ensure_mirror(str(origin_repo))
+        worktree_path = manager._worktrees_dir / "ws_stale"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / "leftover.txt").write_text("stale\n")
+        assert worktree_path.exists()
+
+        pruned: list[str] = []
+        real_run = manager._run
+
+        async def _tracking_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            if operation == "worktree.prune":
+                pruned.append(operation)
+            return await real_run(args, operation=operation)
+
+        manager._run = _tracking_run  # type: ignore[method-assign]
+
+        # Idempotent success: the already-removed condition is not an error.
+        await manager.remove_worktree(workspace_id="ws_stale", repo_url=str(origin_repo))
+        # ``git worktree prune`` still ran to clear stale metadata.
+        assert pruned == ["worktree.prune"]
+
+    @pytest.mark.unit
+    async def test_genuine_remove_error_still_raises(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        await manager.ensure_mirror(str(origin_repo))
+        worktree_path = manager._worktrees_dir / "ws_boom"
+        worktree_path.mkdir(parents=True)
+
+        async def _failing_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            if operation == "worktree.remove":
+                raise GitOperationError(
+                    operation=operation,
+                    returncode=1,
+                    stdout="",
+                    stderr="fatal: some other failure",
+                )
+            raise AssertionError(f"unexpected operation {operation}")
+
+        manager._run = _failing_run  # type: ignore[method-assign]
+
+        with pytest.raises(GitOperationError):
+            await manager.remove_worktree(workspace_id="ws_boom", repo_url=str(origin_repo))
+
 
 class TestHeadSha:
     @pytest.mark.unit

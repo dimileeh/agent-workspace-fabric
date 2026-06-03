@@ -23,7 +23,9 @@ from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
     COMPLETED_PR_RETENTION_EXPIRED,
     FAILED_WORKSPACE_NO_WORK,
+    FAILED_WORKSPACE_TRIAGE_PRESERVED,
     PATH_ALREADY_REMOVED,
+    PRESERVED_FAILED_AGE_CAP_RECLAIMED,
     TERMINAL_WORKSPACE_RETENTION_EXPIRED,
     WORKSPACE_WITHIN_RETENTION,
     WorkspaceGCCandidate,
@@ -990,6 +992,136 @@ def test_classify_workspace_failed_has_work_but_expired_no_default_policy():
             cleanup_enabled=True,
         )
         assert isinstance(res, WorkspaceGCPreserved)
+
+
+def test_classify_preserved_failed_past_cap_reclaims_pressure_dirs():
+    now = datetime.now(UTC)
+    ws = Workspace(
+        id="ws_capped",
+        status=WorkspaceStatus.failed.value,
+        updated_at=now - timedelta(hours=800),
+        compose_project_name="proj",
+        compose_file_path="/work/compose/ws_capped/compose.yml",
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/work"),
+            now=now,
+            cutoff_at=now - timedelta(hours=168),
+            default_policy=True,
+            cleanup_enabled=True,
+            preserved_failed_cutoff_at=now - timedelta(hours=720),
+        )
+    assert isinstance(res, WorkspaceGCCandidate)
+    assert res.reason_code == PRESERVED_FAILED_AGE_CAP_RECLAIMED
+    # Pressure dirs are reaped; the durable DB row is never touched by classify.
+    assert res.worktree.path == Path("/work/git/worktrees/ws_capped")
+    assert res.auth.path == Path("/work/auth/ws_capped")
+    assert res.compose.path == Path("/work/compose/ws_capped")
+
+
+def test_classify_preserved_failed_under_cap_is_left_alone():
+    now = datetime.now(UTC)
+    ws = Workspace(
+        id="ws_young",
+        status=WorkspaceStatus.failed.value,
+        updated_at=now - timedelta(hours=100),
+        compose_project_name="proj",
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/work"),
+            now=now,
+            cutoff_at=now - timedelta(hours=168),
+            default_policy=True,
+            cleanup_enabled=True,
+            preserved_failed_cutoff_at=now - timedelta(hours=720),
+        )
+    assert isinstance(res, WorkspaceGCPreserved)
+    assert res.reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED
+
+
+def test_classify_preserved_failed_no_cutoff_preserves():
+    now = datetime.now(UTC)
+    ws = Workspace(
+        id="ws_nocap",
+        status=WorkspaceStatus.failed.value,
+        updated_at=now - timedelta(hours=10_000),
+        compose_project_name="proj",
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/work"),
+            now=now,
+            cutoff_at=now - timedelta(hours=168),
+            default_policy=True,
+            cleanup_enabled=True,
+            preserved_failed_cutoff_at=None,
+        )
+    assert isinstance(res, WorkspaceGCPreserved)
+    assert res.reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED
+
+
+def test_classify_preserved_superseded_past_cap_reclaims():
+    now = datetime.now(UTC)
+    ws = Workspace(
+        id="ws_super",
+        status="superseded",
+        updated_at=now - timedelta(hours=800),
+        compose_project_name="proj",
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/work"),
+            now=now,
+            cutoff_at=now - timedelta(hours=168),
+            default_policy=True,
+            cleanup_enabled=True,
+            preserved_failed_cutoff_at=now - timedelta(hours=720),
+        )
+    assert isinstance(res, WorkspaceGCCandidate)
+    assert res.reason_code == PRESERVED_FAILED_AGE_CAP_RECLAIMED
+
+
+def test_preserved_failed_age_cap_reason_code_is_distinct():
+    # Auditable separately from the 168 h idle / no-work cleanup paths.
+    assert PRESERVED_FAILED_AGE_CAP_RECLAIMED != FAILED_WORKSPACE_NO_WORK
+    assert PRESERVED_FAILED_AGE_CAP_RECLAIMED != FAILED_WORKSPACE_TRIAGE_PRESERVED
+
+
+@pytest.mark.unit
+async def test_plan_terminal_gc_reaps_preserved_failed_past_cap(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    old_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=800),
+    )
+    young_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=100),
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
+        plan = await plan_terminal_workspace_gc(
+            session_factory,
+            work_dir=tmp_path,
+            now=now,
+            max_preserved_failed_hours=720,
+        )
+    capped = {c.workspace_id: c for c in plan.candidates}
+    preserved = {p.workspace_id: p for p in plan.preserved}
+    assert old_id in capped
+    assert capped[old_id].reason_code == PRESERVED_FAILED_AGE_CAP_RECLAIMED
+    assert young_id in preserved
+    assert preserved[young_id].reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED
 
 
 @pytest.mark.unit
