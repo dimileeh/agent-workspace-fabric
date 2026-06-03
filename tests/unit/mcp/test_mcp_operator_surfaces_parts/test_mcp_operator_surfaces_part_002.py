@@ -1110,6 +1110,39 @@ class TestMcpOperatorSurfaceParityPart001:
         assert fallback_result["checks"]["db"]["reason"] is None
 
     @pytest.mark.unit
+    async def test_readiness_fallback_propagates_auto_cleanup_orphans(
+        self,
+        resource_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The MCP readiness fallback must thread ``auto_cleanup_orphans`` into the
+        shared health helper so MCP clients see the reaping posture (not the default
+        dry-run-only summary) whenever ``AWF_AUTO_CLEANUP_ORPHANS`` is enabled."""
+        import awf.api.routes.health as health_route
+
+        captured: dict[str, Any] = {}
+        real = health_route._check_orphan_resources_with_concurrent_scans
+
+        async def _capture(**kwargs: Any) -> Any:
+            captured["auto_cleanup_orphans"] = kwargs.get("auto_cleanup_orphans")
+            return await real(**kwargs)
+
+        monkeypatch.setattr(
+            health_route,
+            "_check_orphan_resources_with_concurrent_scans",
+            _capture,
+        )
+        settings = resource_stack.settings.model_copy(update={"auto_cleanup_orphans": True})
+
+        await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=settings,
+            session_factory=resource_stack.factory,
+        )
+
+        assert captured["auto_cleanup_orphans"] is True
+
+    @pytest.mark.unit
     async def test_readiness_fallback_reports_db_failure_when_no_session_factory(
         self,
         resource_stack: OperatorStack,

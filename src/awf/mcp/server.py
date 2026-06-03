@@ -398,6 +398,7 @@ async def _provided_readiness(
     readiness_kwargs: dict[str, Any] = {}
     if validated_strict_providers is not None:
         readiness_kwargs["validated_strict_providers"] = validated_strict_providers
+    service_settings = resolve_service_settings(settings)
     runner = AsyncioSubprocessRunner()
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(session_factory))
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
@@ -430,12 +431,13 @@ async def _provided_readiness(
             workspace_view_task=workspace_view_task,
             docker_scan_task=docker_scan_task,
             worktree_scan_task=worktree_scan_task,
+            auto_cleanup_orphans=service_settings.auto_cleanup_orphans,
         )
     )
     agent_readiness_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
         asyncio.to_thread(
             collect_agent_readiness,
-            resolve_service_settings(settings),
+            service_settings,
             **readiness_kwargs,
         )
     )
