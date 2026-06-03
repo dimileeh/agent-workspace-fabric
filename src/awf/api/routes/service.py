@@ -43,6 +43,11 @@ async def trigger_service_gc(
     candidate_limit = (
         payload.limit if payload.limit is not None else settings.workspace_cleanup_batch_limit
     )
+    # NOTE: this awaits the full GC run synchronously. For large --execute
+    # reclaims (many workspaces, Docker teardowns, multi-GB rmtree) this can
+    # take several minutes. The CLI defaults to --timeout-seconds 900; ensure
+    # any upstream proxy (nginx/traefik) has a matching or higher read timeout
+    # so the connection is not dropped while the run is still in progress.
     result = await run_service_workspace_gc(
         session_factory,
         work_dir=Path(settings.work_dir).expanduser().resolve(),
