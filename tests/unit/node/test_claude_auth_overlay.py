@@ -1056,7 +1056,7 @@ def test_teardown_noop_when_not_mounted(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_teardown_raises_and_logs_on_real_umount_error(tmp_path: Path) -> None:
+def test_teardown_raises_without_logging_on_real_umount_error(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     merged = work_dir / "auth" / "ws_busy" / "claude" / "merged"
     merged.mkdir(parents=True)
@@ -1065,11 +1065,16 @@ def test_teardown_raises_and_logs_on_real_umount_error(tmp_path: Path) -> None:
     )
     mounter.mounted.add(merged)
 
+    # The failure is re-raised so callers can surface it, but it is *not* logged
+    # here: each caller owns the single warning entry (with its own event name
+    # and the shared reason code), so logging here too would double-record it.
     with capture_logs() as logs, pytest.raises(subprocess.CalledProcessError):
         teardown_workspace_auth_overlay(
             work_dir=work_dir, workspace_id="ws_busy", overlay_mounter=mounter
         )
-    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED" for entry in logs)
+    assert not any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED" for entry in logs
+    )
 
 
 @pytest.mark.unit

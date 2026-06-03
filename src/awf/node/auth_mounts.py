@@ -989,24 +989,18 @@ def teardown_workspace_auth_overlay(
     Unmount-before-remove: a busy overlay mount makes ``rmtree`` fail with
     ``EBUSY``, which is exactly the class of leak GC cannot clean up. This only
     unmounts (GC owns removal) and is idempotent — a no-op when nothing is
-    mounted, and it surfaces (logs and re-raises) a genuine busy/umount error.
+    mounted, and it re-raises a genuine busy/umount error. The failure is *not*
+    logged here: every caller (``gc._unmount_candidate_auth_overlay`` and
+    ``lifecycle._teardown_completed_workspace_auth_overlay``) already logs it
+    with its own context and the shared ``CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED``
+    reason code, so logging here too would double-record every failure.
     """
 
     mounter = overlay_mounter or default_overlay_mounter()
     merged = work_dir.expanduser() / "auth" / workspace_id / "claude" / "merged"
     if not mounter.is_mounted(merged):
         return
-    try:
-        mounter.unmount(merged)
-    except (OSError, subprocess.SubprocessError) as exc:
-        _log.warning(
-            "claude_auth_overlay_unmount_failed",
-            reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
-            workspace_id=workspace_id,
-            merged=str(merged),
-            error=str(exc),
-        )
-        raise
+    mounter.unmount(merged)
 
 
 def _prepare_isolated_gemini_auth(*, host_home: Path, target_root: Path) -> tuple[AuthMount, ...]:
