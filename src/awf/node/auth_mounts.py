@@ -223,40 +223,49 @@ def _host_claude_signature(host_home: Path) -> str:
     ``followlinks=True`` does not detect symlink cycles, so a circular link in
     ``~/.claude`` (e.g. a skills dir linked back to a parent) would otherwise loop
     forever — and unlike the legacy per-workspace ``copytree`` this runs on every
-    provision call, so one cycle would silently hang all future provisioning. A
-    ``visited`` set of resolved ``(st_dev, st_ino)`` directory identities bounds
-    the walk: a directory already seen is pruned before descent.
+    provision call, so one cycle would silently hang all future provisioning. Each
+    walked directory path carries the set of resolved ``(st_dev, st_ino)`` identities
+    of its *own ancestors*; a child whose identity is already an ancestor is a true
+    cycle and is pruned before descent. Crucially this prunes only ancestor cycles,
+    not every repeat of an inode: two directory symlinks to the same target are not
+    a cycle, and ``copytree(symlinks=False)`` copies each linked path separately, so
+    both must be walked and signed — deduping them globally would leave the signature
+    blind to a second link and reuse a base missing content reachable through it.
     """
 
     source = host_home / ".claude"
     excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
     entries: list[str] = []
-    visited: set[tuple[int, int]] = set()
+    # Per-branch ancestor identities, keyed by walked path. Seeded with the source's
+    # own identity so a child linking straight back to ``~/.claude`` is caught.
+    ancestors_by_path: dict[str, frozenset[tuple[int, int]]] = {}
     try:
         source_stat = source.stat()
-        visited.add((source_stat.st_dev, source_stat.st_ino))
+        ancestors_by_path[os.fspath(source)] = frozenset({(source_stat.st_dev, source_stat.st_ino)})
     except OSError:
-        pass
+        ancestors_by_path[os.fspath(source)] = frozenset()
     for root, dirs, files in os.walk(source, followlinks=True):
         root_path = Path(root)
+        root_ancestors = ancestors_by_path.get(os.fspath(root_path), frozenset())
         kept: list[str] = []
         for name in dirs:
             if name in excluded:
                 continue
+            child = root_path / name
             try:
-                dir_stat = (root_path / name).stat()
+                dir_stat = child.stat()
             except OSError:
                 # A dangling/broken dir link: keep it so the entry loop below
                 # records the ``missing`` marker, matching the prior behaviour.
                 kept.append(name)
                 continue
             identity = (dir_stat.st_dev, dir_stat.st_ino)
-            if identity in visited:
-                # Cycle (or a dir reachable via two links): pruning it bounds
-                # the walk without dropping content already signed under its
-                # first-seen path.
+            if identity in root_ancestors:
+                # True ancestor cycle: descending re-enters a directory we are
+                # already inside. Prune to bound the walk. A distinct link to the
+                # same target that is *not* an ancestor is kept and walked.
                 continue
-            visited.add(identity)
+            ancestors_by_path[os.fspath(child)] = root_ancestors | {identity}
             kept.append(name)
         dirs[:] = kept
         for name in (*dirs, *files):

@@ -258,6 +258,32 @@ def test_signature_terminates_on_circular_symlink(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_signature_tracks_duplicate_symlinks_to_same_target(tmp_path: Path) -> None:
+    # Two directory symlinks to the same target are NOT a cycle: ``copytree(
+    # symlinks=False)`` copies each linked path separately, so the base gains both
+    # ``alpha/`` and ``beta/``. Deduping by inode identity would prune the second
+    # path entirely, leaving the signature blind to it — a new ``beta`` link could
+    # then reuse a stale base missing skills/plugins reachable through it. The walk
+    # must bound only true ancestor cycles, signing each distinct path.
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    claude = host_home / ".claude"
+    dotfiles = tmp_path / "dotfiles"
+    (dotfiles / "shared").mkdir(parents=True)
+    (dotfiles / "shared" / "SKILL.md").write_text("v1\n")
+
+    # Links placed directly under ``~/.claude`` (whose own mtime is never part of
+    # the signature) so the duplicate-path coverage — not an incidental parent
+    # mtime bump — is what the assertion exercises.
+    (claude / "alpha").symlink_to(dotfiles / "shared", target_is_directory=True)
+    before = _host_claude_signature(host_home)
+
+    (claude / "beta").symlink_to(dotfiles / "shared", target_is_directory=True)
+    after = _host_claude_signature(host_home)
+    assert after != before
+
+
+@pytest.mark.unit
 def test_shared_base_content_excludes_history_and_skips_dangling_links(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
