@@ -546,9 +546,15 @@ class TestCollectSmokeReportExceptionPaths:
         ws_phase = next(p for p in report["phases"] if p["name"] == "workspace_request")
         assert ws_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_FAILED"
 
-    async def test_service_readiness_warns_in_mocked_with_unreachable_status(
+    async def test_service_readiness_fails_in_mocked_with_unreachable_status(
         self, tmp_path: Path
     ) -> None:
+        """No false-green: an unhealthy local Core stays a hard fail in mocked mode.
+
+        Regression lock for the T10 headline bug. The no-token proof relaxes only
+        provider/PR requirements; local Core health is never downgraded to warn.
+        """
+
         async def _unreachable_svc(settings, *, http_client=None):
             return {"status": "down"}
 
@@ -563,34 +569,170 @@ class TestCollectSmokeReportExceptionPaths:
         )
 
         service_phase = next(p for p in report["phases"] if p["name"] == "service_readiness")
-        assert service_phase["status"] == "warn"
+        assert service_phase["status"] == "fail"
         assert service_phase["reason_code"] == "SMOKE_SERVICE_UNREACHABLE"
+        assert report["status"] == "fail"
 
-    async def test_default_service_collector_returns_ok_on_200(
+    async def test_service_readiness_ok_in_mocked_exposes_api_and_worker_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        """Mocked success keeps Core health real and proves it via sub-statuses."""
+
+        async def _healthy_svc(settings, *, http_client=None):
+            return {"status": "ok", "api": "ok", "worker": "ok"}
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_healthy_svc,
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        service_phase = next(p for p in report["phases"] if p["name"] == "service_readiness")
+        assert service_phase["status"] == "ok"
+        assert service_phase["reason_code"] == "SMOKE_SERVICE_READY"
+        assert service_phase["evidence"]["api"] == "ok"
+        assert service_phase["evidence"]["worker"] == "ok"
+        # PR path is mocked (no GitHub authority handed over); overall not fail.
+        pr_phase = next(p for p in report["phases"] if p["name"] == "pr_monitor")
+        assert pr_phase["reason_code"] == "SMOKE_PR_MOCKED_LOCAL"
+        assert report["status"] != "fail"
+
+    async def test_service_readiness_fails_when_worker_substrate_down_in_mocked(
+        self, tmp_path: Path
+    ) -> None:
+        """API up but worker DB substrate down is a hard fail even in mocked mode."""
+
+        async def _worker_down_svc(settings, *, http_client=None):
+            return {"status": "degraded", "api": "ok", "worker": "fail"}
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_worker_down_svc,
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        service_phase = next(p for p in report["phases"] if p["name"] == "service_readiness")
+        assert service_phase["status"] == "fail"
+        assert service_phase["reason_code"] == "SMOKE_WORKER_UNAVAILABLE"
+        assert service_phase["evidence"]["api"] == "ok"
+        assert service_phase["evidence"]["worker"] == "fail"
+        assert report["status"] == "fail"
+
+    async def test_service_readiness_plain_ok_collector_stays_ok(self, tmp_path: Path) -> None:
+        """Backward compat: a plain ``{"status": "ok"}`` collector (no worker key) is ok."""
+
+        async def _plain_ok_svc(settings, *, http_client=None):
+            return {"status": "ok"}
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_plain_ok_svc,
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        service_phase = next(p for p in report["phases"] if p["name"] == "service_readiness")
+        assert service_phase["status"] == "ok"
+        assert service_phase["reason_code"] == "SMOKE_SERVICE_READY"
+
+    async def test_default_service_collector_returns_ok_when_db_ready(
         self,
     ) -> None:
+        """`/healthz` 200 + `/readyz` `checks.db.ok=true` ⇒ api + worker both ok."""
+
+        async def _get(url: str):
+            if url.endswith("/healthz"):
+                return SimpleNamespace(status_code=200)
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"checks": {"db": {"ok": True}}},
+            )
+
         with patch("httpx.AsyncClient") as mock_cls:
-            mock_get = AsyncMock()
-            mock_get.return_value = SimpleNamespace(status_code=200)
             mock_instance = SimpleNamespace()
-            mock_instance.get = mock_get
+            mock_instance.get = _get
             mock_cls.return_value.__aenter__.return_value = mock_instance
 
             result = await _default_service_collector(_settings())
         assert result["status"] == "ok"
+        assert result["api"] == "ok"
+        assert result["worker"] == "ok"
 
-    async def test_default_service_collector_returns_unreachable_on_503(
+    async def test_default_service_collector_worker_fail_when_db_down_even_on_503(
         self,
     ) -> None:
+        """`/readyz` 503 (providers missing) but readable body ⇒ api ok, worker fail.
+
+        Proves the provider-free worker signal works while the overall /readyz
+        status is 503 because no provider token is configured.
+        """
+
+        async def _get(url: str):
+            if url.endswith("/healthz"):
+                return SimpleNamespace(status_code=200)
+            return SimpleNamespace(
+                status_code=503,
+                json=lambda: {"checks": {"db": {"ok": False}}},
+            )
+
         with patch("httpx.AsyncClient") as mock_cls:
-            mock_get = AsyncMock()
-            mock_get.return_value = SimpleNamespace(status_code=503)
             mock_instance = SimpleNamespace()
-            mock_instance.get = mock_get
+            mock_instance.get = _get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_service_collector(_settings())
+        assert result["status"] == "degraded"
+        assert result["api"] == "ok"
+        assert result["worker"] == "fail"
+
+    async def test_default_service_collector_returns_unreachable_on_503_healthz(
+        self,
+    ) -> None:
+        """A non-200 `/healthz` is unreachable without consulting `/readyz`."""
+
+        async def _get(url: str):
+            assert url.endswith("/healthz")
+            return SimpleNamespace(status_code=503)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_instance = SimpleNamespace()
+            mock_instance.get = _get
             mock_cls.return_value.__aenter__.return_value = mock_instance
 
             result = await _default_service_collector(_settings())
         assert result["status"] == "unreachable"
+
+    async def test_default_service_collector_worker_fail_when_readyz_raises(
+        self,
+    ) -> None:
+        """`/readyz` failing while `/healthz` is up still yields a real (fail) signal."""
+        import httpx
+
+        async def _get(url: str):
+            if url.endswith("/healthz"):
+                return SimpleNamespace(status_code=200)
+            raise httpx.ConnectError("readyz refused")
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_instance = SimpleNamespace()
+            mock_instance.get = _get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_service_collector(_settings())
+        assert result["status"] == "degraded"
+        assert result["api"] == "ok"
+        assert result["worker"] == "fail"
 
     async def test_default_service_collector_error_bubbles_to_phase_handler(
         self,
@@ -602,9 +744,7 @@ class TestCollectSmokeReportExceptionPaths:
             mock_instance.get = mock_get
             mock_cls.return_value.__aenter__.return_value = mock_instance
 
-            result = await _phase_service_readiness(
-                _settings(), mocked_local=False, service_collector=None
-            )
+            result = await _phase_service_readiness(_settings(), service_collector=None)
         assert result["status"] == "fail"
         assert result["reason_code"] == "SMOKE_SERVICE_UNREACHABLE"
         assert "boom" in result["evidence"]["error"]

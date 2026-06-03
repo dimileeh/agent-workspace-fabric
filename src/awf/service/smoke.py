@@ -56,7 +56,7 @@ async def collect_smoke_report(
     phases: list[dict[str, Any]] = []
     overall: list[str] = []
 
-    phases.append(await _phase_service_readiness(settings, mocked_local, service_collector))
+    phases.append(await _phase_service_readiness(settings, service_collector))
     overall.append(phases[-1]["status"])
 
     phases.append(_phase_auth_readiness(settings, mocked_local, auth_collector))
@@ -153,17 +153,26 @@ async def collect_smoke_report(
 
 async def _phase_service_readiness(
     settings: ServiceSettings,
-    mocked_local: bool,
     service_collector: ServiceCollector | None,
 ) -> dict[str, Any]:
-    """Probe AWF service health for smoke readiness."""
+    """Probe AWF local Core health for smoke readiness.
+
+    Local Core health is a *hard* signal even in ``mocked_local`` mode: the
+    no-token proof only relaxes the provider/PR (token + GitHub) requirements, so
+    an unreachable or unhealthy Core always fails. A richer collector may report
+    ``api`` and ``worker`` sub-signals; ``status == "ok"`` means API-up, and a
+    ``worker`` value that is not healthy fails with a worker-specific reason so the
+    report proves Core health rather than merely echoing a URL. A plain
+    ``{"status": "ok"}`` (no ``worker`` key) stays ``ok`` for backward
+    compatibility with injected collectors.
+    """
     try:
         collector = service_collector or _default_service_collector
         result = await collector(settings)
     except Exception as exc:
         return {
             "name": "service_readiness",
-            "status": "warn" if mocked_local else "fail",
+            "status": "fail",
             "reason_code": "SMOKE_SERVICE_UNREACHABLE",
             "message": f"AWF local service is unreachable: {exc}",
             "evidence": {"api_url": settings.api_base_url, "error": str(exc)},
@@ -171,22 +180,56 @@ async def _phase_service_readiness(
         }
 
     svc_status = result.get("status", "unreachable")
-    if svc_status == "ok":
+    api_status = result.get("api", svc_status)
+    worker_status = result.get("worker")
+    api_up = svc_status == "ok" or api_status == "ok"
+    if not api_up:
         return {
             "name": "service_readiness",
-            "status": "ok",
-            "reason_code": "SMOKE_SERVICE_READY",
-            "message": "AWF local service health check passed.",
-            "evidence": {"api_url": settings.api_base_url, "status": "ok"},
-            "action": "No action required.",
+            "status": "fail",
+            "reason_code": "SMOKE_SERVICE_UNREACHABLE",
+            "message": "AWF local service health check did not pass.",
+            "evidence": {
+                "api_url": settings.api_base_url,
+                "status": svc_status,
+                "api": api_status,
+                "worker": worker_status if worker_status is not None else "unknown",
+            },
+            "action": "Run `awf service bootstrap` or inspect service logs.",
+        }
+
+    # API is up. If the collector also reports a worker substrate signal, it must
+    # be healthy — a reachable API with a dead worker DB substrate is not a healthy
+    # Core, even in mocked-local mode (the no-token proof keeps Core health hard).
+    if worker_status is not None and worker_status != "ok":
+        return {
+            "name": "service_readiness",
+            "status": "fail",
+            "reason_code": "SMOKE_WORKER_UNAVAILABLE",
+            "message": "AWF API is reachable but the worker DB substrate is not healthy.",
+            "evidence": {
+                "api_url": settings.api_base_url,
+                "status": svc_status,
+                "api": api_status,
+                "worker": worker_status,
+            },
+            "action": (
+                "Run `awf service bootstrap` or inspect worker/DB logs; the worker "
+                "poll/claim loop needs a reachable control-plane database."
+            ),
         }
     return {
         "name": "service_readiness",
-        "status": "warn" if mocked_local else "fail",
-        "reason_code": "SMOKE_SERVICE_UNREACHABLE",
-        "message": "AWF local service health check did not pass.",
-        "evidence": {"api_url": settings.api_base_url, "status": svc_status},
-        "action": "Run `awf service bootstrap` or inspect service logs.",
+        "status": "ok",
+        "reason_code": "SMOKE_SERVICE_READY",
+        "message": "AWF local Core health check passed (API and worker substrate).",
+        "evidence": {
+            "api_url": settings.api_base_url,
+            "status": "ok",
+            "api": api_status,
+            "worker": worker_status if worker_status is not None else "ok",
+        },
+        "action": "No action required.",
     }
 
 
@@ -550,14 +593,51 @@ def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
 
 
 async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any]:
-    """Check AWF service healthz endpoint and return status map."""
+    """Probe AWF local Core health and return an api/worker status map.
+
+    ``/healthz`` is dependency-free liveness ("the API process answered"). To
+    prove Core health rather than mere liveness, also consult ``/readyz`` and read
+    its ``checks.db.ok`` sub-check — the worker is a DB poll/claim loop, so DB
+    reachability is the token-free worker-substrate signal. ``/readyz`` returns its
+    JSON body even on 503 (its *overall* status is 503 whenever a provider token is
+    unconfigured), so the DB sub-check is readable without provider tokens; the
+    provider/``agent_readiness`` parts are intentionally ignored to keep the probe
+    provider-free. Docker-dependent ``/readyz`` checks are *not* required for the
+    no-token proof — the worker substrate proven here is the DB; the live smoke
+    path covers docker/provisioning. ``/readyz`` failures degrade the worker signal
+    to ``fail`` rather than crashing the probe.
+    """
     import httpx
 
+    base = settings.api_base_url.rstrip("/")
     async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.get(f"{settings.api_base_url.rstrip('/')}/healthz")
-        if response.status_code == 200:
-            return {"status": "ok"}
-        return {"status": "unreachable"}
+        health = await client.get(f"{base}/healthz")
+        if health.status_code != 200:
+            return {"status": "unreachable", "api": "fail", "worker": "unknown"}
+        worker_status = await _probe_worker_substrate(client, base)
+
+    if worker_status == "ok":
+        return {"status": "ok", "api": "ok", "worker": "ok"}
+    return {"status": "degraded", "api": "ok", "worker": worker_status}
+
+
+async def _probe_worker_substrate(client: Any, base: str) -> str:
+    """Return the worker-substrate signal from ``/readyz`` ``checks.db.ok``.
+
+    Reads the DB sub-check regardless of the ``/readyz`` HTTP status (the body is
+    returned on 503 too). Any failure to reach or parse ``/readyz`` degrades the
+    worker signal to ``fail`` so the proof never reports a false-green.
+    """
+    import httpx
+
+    try:
+        ready = await client.get(f"{base}/readyz")
+        db_ok = bool(ready.json()["checks"]["db"]["ok"])
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        # Transport failure, non-JSON body, or a malformed/missing db sub-check:
+        # treat the worker substrate as unproven (fail), never a crash.
+        return "fail"
+    return "ok" if db_ok else "fail"
 
 
 async def _default_console_checker(url: str) -> bool:

@@ -166,6 +166,27 @@ def test_setup_dry_run_json_success_shape(harness: _Harness) -> None:
     assert payload["next_steps"]
 
 
+@pytest.mark.unit
+def test_setup_success_next_step_is_provider_free_and_leads_to_start(
+    harness: _Harness,
+) -> None:
+    """The setup→start→smoke first-run chain stays provider-free (T10).
+
+    Setup's success next step must point at ``awf start`` (no token/provider
+    prompt), guarding the documented first-run chain into the provider-free local
+    proof without duplicating T07 provider logic.
+    """
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    next_steps = json.loads(result.stdout)["next_steps"]
+    leading = next_steps[0].lower()
+    assert "awf start" in leading
+    assert "token" not in leading
+    assert "secret" not in leading
+    assert "provider" not in leading
+
+
 # --- Compose env merge for host checks ------------------------------------
 
 

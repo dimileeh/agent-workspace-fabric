@@ -187,6 +187,20 @@ class TestSmokeRunCommand:
         assert result.exit_code == 0
         assert "smoke" in result.stdout.lower()
 
+    def test_help_describes_provider_free_local_proof(self) -> None:
+        """`smoke run --help` advertises the no-token local proof (T10).
+
+        The first-run chain points evaluators here, so the help text must make
+        clear the proof needs no provider token or GitHub access.
+        """
+        result = _runner.invoke(app, ["smoke", "run", "--help"])
+        assert result.exit_code == 0
+        lowered = result.stdout.lower()
+        assert "--mocked-local" in result.stdout
+        assert "without" in lowered
+        # No provider token or GitHub authority is required for the local proof.
+        assert "token" in lowered or "github" in lowered
+
 
 @pytest.mark.unit
 class TestSmokeGroupRegistration:
