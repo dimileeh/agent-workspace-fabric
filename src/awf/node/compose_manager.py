@@ -551,9 +551,12 @@ class ComposeManager:
                     remove_volumes=remove_volumes,
                 )
             except ComposeOperationError as label_exc:
+                # Preserve the fallback's structured classification (e.g.
+                # ``DOCKER_UNAVAILABLE``) rather than collapsing it into the
+                # generic down-failed code so operators see the real cause.
                 return ComposeTeardownResult(
                     status="failed",
-                    reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                    reason_code=label_exc.reason_code,
                     error=redact_secrets(str(label_exc))[:1000],
                 )
             return ComposeTeardownResult(
@@ -582,9 +585,13 @@ class ComposeManager:
                     remove_volumes=remove_volumes,
                 )
             except ComposeOperationError as label_exc:
+                # ``down`` already failed (logged above with its reason_code);
+                # surface the proximate fallback failure's specific code rather
+                # than the generic down-failed bucket so the structured
+                # classification is not lost.
                 return ComposeTeardownResult(
                     status="failed",
-                    reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                    reason_code=label_exc.reason_code,
                     error=redact_secrets(str(label_exc))[:1000],
                 )
             return ComposeTeardownResult(

@@ -1014,7 +1014,10 @@ class TestRender:
         )
 
         assert result.status == "failed"
-        assert result.reason_code == "DOCKER_COMPOSE_DOWN_FAILED"
+        # The fallback failed with a specific ``DOCKER_UNAVAILABLE`` classification;
+        # teardown must surface that rather than collapse it into the generic
+        # down-failed bucket, while still reporting a loud failure.
+        assert result.reason_code == "DOCKER_UNAVAILABLE"
         assert result.error is not None
         assert result.ok is False
 
@@ -1133,7 +1136,10 @@ class TestRender:
         )
 
         assert result.status == "failed"
-        assert result.reason_code == "DOCKER_COMPOSE_DOWN_FAILED"
+        # The label probe failed with ``DOCKER_UNAVAILABLE``; that specific
+        # classification must survive instead of collapsing into the generic
+        # down-failed code, while the failure stays loud.
+        assert result.reason_code == "DOCKER_UNAVAILABLE"
         assert result.ok is False
 
     @pytest.mark.unit
