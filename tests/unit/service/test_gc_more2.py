@@ -146,6 +146,25 @@ def test_classify_workspace_failed_has_work_but_expired_no_default_policy():
         assert isinstance(res, WorkspaceGCPreserved)
 
 
+def test_classify_workspace_ignore_retention_requires_default_policy():
+    ws = Workspace(
+        id="ws_1",
+        status=WorkspaceStatus.completed.value,
+        updated_at=datetime.now(UTC) - timedelta(hours=25),
+        compose_project_name="proj",
+    )
+    with pytest.raises(ValueError, match="ignore_retention=True requires default_policy=True"):
+        _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/tmp"),
+            now=datetime.now(UTC),
+            cutoff_at=datetime.now(UTC) - timedelta(hours=24),
+            default_policy=False,
+            cleanup_enabled=True,
+            ignore_retention=True,
+        )
+
+
 def test_pr_has_merged_true_when_merge_sha_set():
     ws = Workspace(
         id="ws_1",

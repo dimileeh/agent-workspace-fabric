@@ -671,6 +671,20 @@ async def _gc_completed_workspace_filesystem(self: Any, workspace_id: str) -> No
             work_dir=self._work_dir,
             workspace_id=workspace_id,
             execute=True,
+            # A merged PR's pressure dirs are reclaimable now -- bypass the
+            # retention window so disk is returned on merge rather than a week
+            # later. The durable DB row, events, and logs are always kept.
+            ignore_retention=True,
+            # compose_teardown is intentionally omitted. This method only runs
+            # when teardown_ok is True (see the gate above), and that holds in
+            # two distinct cases. When a compose project exists (compose_project
+            # and compose_file are both set), _teardown_compose_stack already
+            # ran ``docker compose down --remove-orphans --volumes`` and reaped
+            # the per-workspace Docker volumes. When compose_project or
+            # compose_file is None the stack was never launched, so teardown_ok
+            # keeps its default True and no Docker volumes exist to reap. Either
+            # way passing a teardown callback here would only attempt a
+            # redundant second teardown.
         )
     except Exception as exc:
         _log.warning(

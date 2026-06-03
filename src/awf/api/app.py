@@ -36,6 +36,7 @@ from awf.api.routes import (
     metrics,
     operations,
     runtime,
+    service,
     tasks,
     validation,
     workspaces,
@@ -126,6 +127,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     app.include_router(metrics.router)
     app.include_router(operations.router)
     app.include_router(controls.router)
+    app.include_router(service.router)
     app.include_router(ws.router)
 
     return app

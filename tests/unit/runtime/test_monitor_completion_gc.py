@@ -118,22 +118,23 @@ async def _issue_monitor_secret_lease(
 
 
 @pytest.mark.unit
-async def test_completed_monitor_defers_recent_workspace_pressure_dir_cleanup(
+async def test_completed_monitor_reclaims_recent_workspace_pressure_dirs_immediately(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
+    # On a successful merge the pressure dirs (worktree, compose, auth) are
+    # reclaimed immediately -- bypassing the retention window -- while the
+    # durable record (DB row, events, logs) is preserved.
     work_dir = tmp_path / "service"
     worktrees_root = work_dir / "git" / "worktrees"
     ws_id = await seed_monitoring_workspace(factory, pr_merge_sha="m" * 40)
     worktree = worktrees_root / ws_id
-    compose_dir = work_dir / "compose" / ws_id
     auth = work_dir / "auth" / ws_id
     log_file = work_dir / "logs" / ws_id / "agent.log"
     _write(worktree / "repo.txt", "repo")
-    _write(compose_dir / "compose.yml", "compose")
     _write(auth / "codex" / "auth.json", "auth")
     _write(log_file, "keep logs")
 
@@ -149,22 +150,19 @@ async def test_completed_monitor_defers_recent_workspace_pressure_dir_cleanup(
         sleep_fn=sleep_fn,
         worktrees_root=worktrees_root,
     )
-    with structlog.testing.capture_logs() as captured:
+    with _mock_worktree_remove_success(), structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
-            compose_file=compose_dir / "compose.yml",
+            compose_file=work_dir / "compose" / ws_id / "compose.yml",
         )
 
-    assert worktree.exists()
-    assert compose_dir.exists()
-    assert auth.exists()
+    assert not worktree.exists()
+    assert not auth.exists()
+    # The durable record is kept.
     assert log_file.exists()
-    assert any(
-        record.get("event") == "monitor.filesystem_gc_deferred"
-        and record.get("reason_code") == "WORKSPACE_WITHIN_RETENTION"
-        for record in captured
-    )
+    assert any(record.get("event") == "monitor.filesystem_gc_ok" for record in captured)
+    assert not any(record.get("event") == "monitor.filesystem_gc_deferred" for record in captured)
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
