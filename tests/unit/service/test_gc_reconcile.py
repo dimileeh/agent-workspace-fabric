@@ -358,6 +358,26 @@ def test_scan_ignores_non_ws_and_non_directory_entries(tmp_path: Path) -> None:
     assert dropped == 0
 
 
+def test_scan_skips_non_directory_root_without_crashing(tmp_path: Path) -> None:
+    # A stray file occupying a root path must not raise NotADirectoryError;
+    # ``is_dir()`` skips it the same way a missing root is skipped.
+    now = 9_500_000.0
+    (tmp_path / "auth").write_text("not a directory", encoding="utf-8")
+    _make_dir(tmp_path / "compose" / "ws_live", age_seconds=100.0, now=now)
+
+    targets, scanned, dropped = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset(),
+        now=now,
+        min_age_hours=0,
+        limit=10,
+    )
+
+    assert [target.workspace_id for target in targets] == ["ws_live"]
+    assert scanned == 1
+    assert dropped == 0
+
+
 @pytest.mark.usefixtures("engine")
 async def test_result_to_dict_round_trips(
     session_factory: async_sessionmaker[AsyncSession],

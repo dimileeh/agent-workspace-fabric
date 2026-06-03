@@ -204,7 +204,10 @@ def scan_orphan_workspace_dirs(
     grace_seconds = max(0.0, min_age_hours) * 3600.0
     for kind, parts in _ORPHAN_DIR_ROOTS:
         root = work_dir.joinpath(*parts)
-        if not root.exists():
+        if not root.is_dir():
+            # ``is_dir()`` (not ``exists()``) guards against a stray non-directory
+            # file at the root path: ``iterdir()`` would raise ``NotADirectoryError``
+            # and crash the background sweep. A missing root is also handled here.
             continue
         for entry in sorted(root.iterdir(), key=lambda item: item.name):
             if not entry.name.startswith("ws_"):
