@@ -61,14 +61,15 @@ def smoke_invocation(
     installer: Path,
     manifest_path: Path,
     *,
+    channel: str,
     method: str = "uv",
 ) -> tuple[list[str], dict[str, str]]:
     """Return the argv + env for a checksum-before-install dry-run via install.sh.
 
-    The ``--channel`` is derived from the manifest at ``manifest_path`` so a
-    prerelease smoke does not trip the installer's channel cross-check.
+    The ``--channel`` is the manifest's channel, threaded in from the in-memory
+    smoke manifest, so a prerelease smoke does not trip the installer's channel
+    cross-check. ``manifest_path`` is the on-disk manifest the installer reads.
     """
-    channel = _manifest_channel(manifest_path)
     argv = [
         "bash",
         str(installer),
@@ -91,10 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = _load_manifest(args.manifest)
         smoke = build_smoke_manifest(manifest, args.dist_dir)
+        channel = _manifest_channel(smoke)
         _write_smoke_manifest(smoke, args.smoke_manifest_out)
         for method in methods:
             invocation, env = smoke_invocation(
-                args.installer, args.smoke_manifest_out, method=method
+                args.installer, args.smoke_manifest_out, channel=channel, method=method
             )
             _print_invocation(invocation, env)
             if args.run:
@@ -128,12 +130,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _manifest_channel(manifest_path: Path) -> str:
+def _manifest_channel(manifest: dict[str, Any]) -> str:
     """Return the manifest's top-level channel, defaulting to stable."""
-    manifest = _load_manifest(manifest_path)
     channel = manifest.get("channel", "stable")
     if not isinstance(channel, str) or not channel:
-        raise SmokeError(f"manifest channel must be a non-empty string: {manifest_path}")
+        raise SmokeError(f"manifest channel must be a non-empty string: {channel!r}")
     return channel
 
 

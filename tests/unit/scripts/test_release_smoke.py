@@ -90,7 +90,7 @@ def test_smoke_invocation_builds_dry_run_command(tmp_path: Path, method: str) ->
     """The invocation is a dry-run with method + manifest-derived channel and env."""
     _dist_dir, _checksums_file, manifest_path = _build_release(tmp_path)
 
-    argv, env = smoke_invocation(INSTALLER, manifest_path, method=method)
+    argv, env = smoke_invocation(INSTALLER, manifest_path, channel="stable", method=method)
 
     assert argv == [
         "bash",
@@ -105,16 +105,23 @@ def test_smoke_invocation_builds_dry_run_command(tmp_path: Path, method: str) ->
 
 
 @pytest.mark.unit
-def test_smoke_invocation_uses_prerelease_channel_from_manifest(tmp_path: Path) -> None:
-    """A prerelease manifest yields a --channel prerelease invocation."""
-    _dist_dir, _checksums_file, manifest_path = _build_release(
+def test_release_smoke_uses_prerelease_channel_from_manifest(tmp_path: Path) -> None:
+    """A prerelease manifest drives a --channel prerelease invocation."""
+    dist_dir, _checksums_file, manifest_path = _build_release(
         tmp_path, version="0.2.0rc1", channel="auto"
     )
+    smoke_out = tmp_path / "awf-install-manifest.smoke.json"
 
-    argv, _env = smoke_invocation(INSTALLER, manifest_path, method="uv")
+    result = _run_smoke(
+        dist_dir=dist_dir,
+        manifest_path=manifest_path,
+        smoke_out=smoke_out,
+        methods=["uv"],
+        run=False,
+    )
 
-    assert "--channel" in argv
-    assert argv[argv.index("--channel") + 1] == "prerelease"
+    assert result.returncode == 0, result.stderr
+    assert "--channel prerelease" in result.stdout
 
 
 @pytest.mark.unit
@@ -218,7 +225,7 @@ def test_release_smoke_run_aborts_before_install_on_checksum_mismatch(tmp_path: 
     wheel = next(dist_dir.glob("*.whl"))
     wheel.write_bytes(b"corrupted wheel bytes\n")
 
-    argv, env = smoke_invocation(INSTALLER, smoke_out, method="uv")
+    argv, env = smoke_invocation(INSTALLER, smoke_out, channel=smoke["channel"], method="uv")
     result = subprocess.run(
         argv,
         check=False,
