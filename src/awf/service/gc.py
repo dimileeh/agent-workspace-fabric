@@ -15,14 +15,14 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.sql.elements import ColumnElement
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector
+from awf.service import gc_predicates as _gc_predicates
 from awf.service import gc_worktrees as _gc_worktrees
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
@@ -65,7 +65,22 @@ _run_worktree_remove = _gc_worktrees.run_worktree_remove
 _worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
 _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 
+# SQL predicate builders live in ``gc_predicates`` (file-size budget); re-aliased
+# under their historical ``_workspace_*`` names for callers/tests.
+_workspace_gc_candidate_predicate = _gc_predicates.workspace_gc_candidate_predicate
+_workspace_gc_preserved_predicate = _gc_predicates.workspace_gc_preserved_predicate
+_workspace_gc_age_capped_predicate = _gc_predicates.workspace_gc_age_capped_predicate
+_workspace_has_pr_metadata_predicate = _gc_predicates.workspace_has_pr_metadata_predicate
+_workspace_lacks_pr_metadata_predicate = _gc_predicates.workspace_lacks_pr_metadata_predicate
+_workspace_has_pr_merge_predicate = _gc_predicates.workspace_has_pr_merge_predicate
+_workspace_pr_not_merged_predicate = _gc_predicates.workspace_pr_not_merged_predicate
+
 DEFAULT_MIN_AGE_HOURS = 168
+# Preserved-failed workspaces (work was kept for triage) are otherwise retained
+# indefinitely. Once they age past this cap their pressure dirs are reclaimed
+# while the durable record (DB row, events, logs) is kept. Far above the 168 h
+# idle window so the two paths stay distinct and separately auditable.
+DEFAULT_MAX_PRESERVED_FAILED_HOURS = 720
 
 COMPLETED_PR_RETENTION_EXPIRED = "COMPLETED_PR_RETENTION_EXPIRED"
 COMPLETED_PR_IMMEDIATE_RECLAIM = "COMPLETED_PR_IMMEDIATE_RECLAIM"
@@ -73,6 +88,7 @@ TERMINAL_WORKSPACE_RETENTION_EXPIRED = "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
 WORKSPACE_WITHIN_RETENTION = "WORKSPACE_WITHIN_RETENTION"
 FAILED_WORKSPACE_TRIAGE_PRESERVED = "FAILED_WORKSPACE_TRIAGE_PRESERVED"
 FAILED_WORKSPACE_NO_WORK = "FAILED_WORKSPACE_NO_WORK"
+PRESERVED_FAILED_AGE_CAP_RECLAIMED = "PRESERVED_FAILED_AGE_CAP_RECLAIMED"
 COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
 COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
@@ -423,6 +439,7 @@ async def plan_terminal_workspace_gc(
     include_statuses: Iterable[WorkspaceStatus | str] | None = None,
     exclude_statuses: Iterable[WorkspaceStatus | str] | None = None,
     cleanup_enabled: bool = True,
+    max_preserved_failed_hours: float = DEFAULT_MAX_PRESERVED_FAILED_HOURS,
     now: datetime | None = None,
 ) -> WorkspaceGCPlan:
     """Build a terminal-workspace filesystem cleanup plan.
@@ -434,6 +451,7 @@ async def plan_terminal_workspace_gc(
     current_time = _to_utc(now or datetime.now(UTC))
     normalized_work_dir = Path(work_dir).expanduser()
     cutoff_at = current_time - timedelta(hours=min_age_hours)
+    preserved_failed_cutoff_at = current_time - timedelta(hours=max_preserved_failed_hours)
     requested_statuses = _normalize_statuses(include_statuses)
     excluded_statuses = _normalize_statuses(exclude_statuses) or set()
     default_policy = requested_statuses is None
@@ -477,9 +495,16 @@ async def plan_terminal_workspace_gc(
         default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     )
+    age_capped_predicate = _workspace_gc_age_capped_predicate(
+        eligible_statuses=eligible_statuses,
+        preserved_failed_cutoff_at=preserved_failed_cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    )
 
     candidate_rows: list[Workspace] = []
     preserved_rows: list[Workspace] = []
+    age_capped_rows: list[Workspace] = []
     async with session_factory() as session:
         if candidate_predicate is not None:
             candidate_stmt = (
@@ -503,6 +528,20 @@ async def plan_terminal_workspace_gc(
                 preserved_stmt = preserved_stmt.limit(row_limit)
             preserved_rows = list((await session.execute(preserved_stmt)).scalars())
 
+        # Age-capped failed/superseded rows are fetched independently so a
+        # backlog of older indefinitely-preserved rows (e.g. completed-without-PR)
+        # cannot fill the preserved-query limit and starve the cap, leaving aged
+        # pressure dirs unreclaimed.
+        if age_capped_predicate is not None:
+            age_capped_stmt = (
+                select(Workspace)
+                .where(age_capped_predicate)
+                .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+            )
+            if row_limit is not None:
+                age_capped_stmt = age_capped_stmt.limit(row_limit)
+            age_capped_rows = list((await session.execute(age_capped_stmt)).scalars())
+
     candidates: list[WorkspaceGCCandidate] = []
     preserved: list[WorkspaceGCPreserved] = []
     candidate_ids: set[str] = set()
@@ -515,15 +554,20 @@ async def plan_terminal_workspace_gc(
             cutoff_at=cutoff_at,
             default_policy=default_policy,
             cleanup_enabled=cleanup_enabled,
+            preserved_failed_cutoff_at=preserved_failed_cutoff_at,
         )
         if isinstance(classification, WorkspaceGCCandidate):
             candidates.append(classification)
             candidate_ids.add(workspace.id)
         elif classification is not None:
             preserved.append(classification)
-    for workspace in preserved_rows:
-        if workspace.id in candidate_ids:
+    classified_ids: set[str] = set()
+    # Age-capped rows may also surface in the preserved query; dedup so a row
+    # matched by both is classified exactly once.
+    for workspace in (*preserved_rows, *age_capped_rows):
+        if workspace.id in candidate_ids or workspace.id in classified_ids:
             continue
+        classified_ids.add(workspace.id)
         classification = await asyncio.to_thread(
             _classify_workspace_for_gc,
             workspace,
@@ -532,12 +576,21 @@ async def plan_terminal_workspace_gc(
             cutoff_at=cutoff_at,
             default_policy=default_policy,
             cleanup_enabled=cleanup_enabled,
+            preserved_failed_cutoff_at=preserved_failed_cutoff_at,
         )
         if isinstance(classification, WorkspaceGCCandidate):
             candidates.append(classification)
             candidate_ids.add(workspace.id)
         elif isinstance(classification, WorkspaceGCPreserved):
             preserved.append(classification)
+    # ``limit`` caps the candidate and preserved SQL queries independently, but
+    # the preserved loop promotes age-capped / no-work rows into candidates. Left
+    # unchecked a single batch could reclaim up to ~2x ``limit`` rows, breaking
+    # the "maximum cleanup candidates per batch" contract. Enforce the budget on
+    # the combined set, keeping the oldest candidates so cleanup stays FIFO.
+    if row_limit is not None and len(candidates) > row_limit:
+        candidates.sort(key=lambda candidate: (candidate.updated_at, candidate.workspace_id))
+        candidates = candidates[:row_limit]
     return WorkspaceGCPlan(
         work_dir=normalized_work_dir,
         min_age_hours=min_age_hours,
@@ -551,90 +604,6 @@ async def plan_terminal_workspace_gc(
     )
 
 
-def _workspace_gc_candidate_predicate(
-    *,
-    eligible_statuses: set[str],
-    cutoff_at: datetime,
-    default_policy: bool,
-    cleanup_enabled: bool,
-) -> ColumnElement[bool] | None:
-    if not cleanup_enabled:
-        return None
-    if default_policy:
-        if WorkspaceStatus.completed.value not in eligible_statuses:
-            return None
-        return and_(
-            Workspace.status == WorkspaceStatus.completed.value,
-            Workspace.updated_at <= cutoff_at,
-            _workspace_has_pr_metadata_predicate(),
-            _workspace_has_pr_merge_predicate(),
-        )
-    return and_(
-        Workspace.status.in_(sorted(eligible_statuses)),
-        Workspace.updated_at <= cutoff_at,
-    )
-
-
-def _workspace_gc_preserved_predicate(
-    *,
-    eligible_statuses: set[str],
-    cutoff_at: datetime,
-    default_policy: bool,
-    cleanup_enabled: bool,
-) -> ColumnElement[bool] | None:
-    if not cleanup_enabled:
-        return Workspace.status.in_(sorted(eligible_statuses))
-    if default_policy:
-        clauses: list[ColumnElement[bool]] = []
-        if WorkspaceStatus.failed.value in eligible_statuses:
-            clauses.append(Workspace.status == WorkspaceStatus.failed.value)
-        if "superseded" in eligible_statuses:
-            clauses.append(Workspace.status == "superseded")
-        if WorkspaceStatus.completed.value in eligible_statuses:
-            clauses.append(
-                and_(
-                    Workspace.status == WorkspaceStatus.completed.value,
-                    or_(
-                        _workspace_lacks_pr_metadata_predicate(),
-                        _workspace_pr_not_merged_predicate(),
-                        Workspace.updated_at > cutoff_at,
-                    ),
-                )
-            )
-        if not clauses:
-            return None
-        return or_(*clauses)
-    return and_(
-        Workspace.status.in_(sorted(eligible_statuses)),
-        Workspace.updated_at > cutoff_at,
-    )
-
-
-def _workspace_has_pr_metadata_predicate() -> ColumnElement[bool]:
-    return or_(
-        Workspace.pr_number.is_not(None),
-        and_(Workspace.pr_url.is_not(None), Workspace.pr_url != ""),
-    )
-
-
-def _workspace_lacks_pr_metadata_predicate() -> ColumnElement[bool]:
-    return and_(
-        Workspace.pr_number.is_(None),
-        or_(Workspace.pr_url.is_(None), Workspace.pr_url == ""),
-    )
-
-
-def _workspace_has_pr_merge_predicate() -> ColumnElement[bool]:
-    return Workspace.pr_merge_sha.is_not(None)
-
-
-def _workspace_pr_not_merged_predicate() -> ColumnElement[bool]:
-    return and_(
-        _workspace_has_pr_metadata_predicate(),
-        Workspace.pr_merge_sha.is_(None),
-    )
-
-
 async def run_terminal_workspace_gc(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -645,6 +614,7 @@ async def run_terminal_workspace_gc(
     exclude_statuses: Iterable[WorkspaceStatus | str] | None = None,
     execute: bool = False,
     cleanup_enabled: bool = True,
+    max_preserved_failed_hours: float = DEFAULT_MAX_PRESERVED_FAILED_HOURS,
     compose_teardown: WorkspaceGCComposeTeardown | None = None,
     worktree_remover: WorkspaceGCWorktreeRemove | None = None,
     companion_image_prune: CompanionImagePrune | None = None,
@@ -661,6 +631,7 @@ async def run_terminal_workspace_gc(
         include_statuses=include_statuses,
         exclude_statuses=exclude_statuses,
         cleanup_enabled=cleanup_enabled,
+        max_preserved_failed_hours=max_preserved_failed_hours,
         now=current_time,
     )
     if not execute:
@@ -771,6 +742,7 @@ async def run_service_workspace_gc(
     include_statuses: Iterable[WorkspaceStatus | str] | None = None,
     exclude_statuses: Iterable[WorkspaceStatus | str] | None = None,
     cleanup_enabled: bool = True,
+    max_preserved_failed_hours: float = DEFAULT_MAX_PRESERVED_FAILED_HOURS,
     companion_image_cache_enabled: bool = False,
     companion_image_retention_hours: int = DEFAULT_MIN_AGE_HOURS,
     compose_manager: ComposeManager | None = None,
@@ -816,6 +788,7 @@ async def run_service_workspace_gc(
         exclude_statuses=exclude_statuses,
         execute=execute,
         cleanup_enabled=cleanup_enabled,
+        max_preserved_failed_hours=max_preserved_failed_hours,
         compose_teardown=compose_teardown,
         companion_image_prune=companion_image_prune,
         now=now,
@@ -848,6 +821,7 @@ async def run_workspace_filesystem_gc(
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
     cleanup_enabled: bool = True,
     ignore_retention: bool = False,
+    max_preserved_failed_hours: float = DEFAULT_MAX_PRESERVED_FAILED_HOURS,
     compose_teardown: WorkspaceGCComposeTeardown | None = None,
     worktree_remover: WorkspaceGCWorktreeRemove | None = None,
     now: datetime | None = None,
@@ -868,6 +842,7 @@ async def run_workspace_filesystem_gc(
     current_time = _to_utc(now or datetime.now(UTC))
     normalized_work_dir = Path(work_dir).expanduser()
     cutoff_at = current_time - timedelta(hours=min_age_hours)
+    preserved_failed_cutoff_at = current_time - timedelta(hours=max_preserved_failed_hours)
     resolved_worktree_remover = _resolve_worktree_remover(
         worktree_remover, session_factory, work_dir
     )
@@ -888,6 +863,7 @@ async def run_workspace_filesystem_gc(
             default_policy=True,
             cleanup_enabled=cleanup_enabled,
             ignore_retention=ignore_retention,
+            preserved_failed_cutoff_at=preserved_failed_cutoff_at,
         )
         if isinstance(classification, WorkspaceGCCandidate):
             candidates.append(classification)
@@ -1324,8 +1300,16 @@ def _classify_workspace_for_gc(
     default_policy: bool,
     cleanup_enabled: bool,
     ignore_retention: bool = False,
+    preserved_failed_cutoff_at: datetime | None = None,
 ) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
     """Classify one workspace for GC into candidate / preserved / skip.
+
+    ``preserved_failed_cutoff_at`` caps how long a failed/superseded workspace
+    whose work was preserved for triage is retained. When set and the workspace
+    last changed at or before it, the pressure dirs are reclaimed under
+    ``PRESERVED_FAILED_AGE_CAP_RECLAIMED`` (the durable record — DB row, events,
+    logs — is kept, since GC never deletes it). ``None`` (the default) preserves
+    indefinitely, matching the prior behavior for callers that don't set the cap.
 
     ``ignore_retention`` is only consulted on the ``default_policy=True`` →
     ``completed`` + merged-PR branch, where it bypasses the retention window for
@@ -1353,6 +1337,24 @@ def _classify_workspace_for_gc(
             reason_code=WORKSPACE_CLEANUP_DISABLED,
         )
 
+    def _preserved_failed_or_age_capped() -> WorkspaceGCCandidate | WorkspaceGCPreserved:
+        # Work was preserved for triage. Reap pressure dirs once past the cap;
+        # otherwise keep the record (and its disk) for inspection.
+        if preserved_failed_cutoff_at is not None and updated_at <= preserved_failed_cutoff_at:
+            return _candidate_for_workspace(
+                workspace,
+                work_dir=work_dir,
+                now=now,
+                reason_code=PRESERVED_FAILED_AGE_CAP_RECLAIMED,
+            )
+        return WorkspaceGCPreserved(
+            workspace_id=workspace.id,
+            status=workspace.status,
+            updated_at=updated_at,
+            age_hours=age_hours,
+            reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
+        )
+
     if default_policy:
         if workspace.status == WorkspaceStatus.failed.value:
             if _failed_terminal_workspace_has_no_work(workspace):
@@ -1370,13 +1372,7 @@ def _classify_workspace_for_gc(
                     age_hours=age_hours,
                     reason_code=WORKSPACE_WITHIN_RETENTION,
                 )
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
-            )
+            return _preserved_failed_or_age_capped()
         if workspace.status == "superseded":
             if _failed_terminal_workspace_has_no_work(workspace):
                 if updated_at <= cutoff_at:
@@ -1393,13 +1389,7 @@ def _classify_workspace_for_gc(
                     age_hours=age_hours,
                     reason_code=WORKSPACE_WITHIN_RETENTION,
                 )
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
-            )
+            return _preserved_failed_or_age_capped()
         if workspace.status != WorkspaceStatus.completed.value:
             return None
         if not _has_pr_metadata(workspace):
