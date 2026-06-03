@@ -512,9 +512,9 @@ def service_gc(
         headers=_api_token_headers(api_token),
     )
     if response.status_code >= 400:
-        # ``_handle_response`` prints the error envelope and exits non-zero.
+        # ``_handle_response`` prints the error envelope and always raises
+        # ``typer.Exit`` for >= 400, so control never returns from this call.
         _handle_response(response, fmt)
-        return
     payload = response.json()
     _emit(payload, fmt)
     if isinstance(payload, dict) and payload.get("status") == "partial":
