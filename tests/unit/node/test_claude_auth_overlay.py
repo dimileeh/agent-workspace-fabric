@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 from awf.node import auth_mounts as auth_mounts_mod
 from awf.node.auth_mounts import (
     _has_cap_sys_admin,
+    _host_claude_signature,
     _overlay_filesystem_available,
     _shared_claude_base_dir,
     _SubprocessOverlayMounter,
@@ -100,7 +101,7 @@ def test_overlay_happy_path_mounts_shared_base_with_per_workspace_upper(tmp_path
     assert by_target["/home/agent/.claude"].mode == "rw"
     assert len(mounter.mounts) == 1
     call = mounter.mounts[0]
-    assert call["lowerdir"] == _shared_claude_base_dir(work_dir)
+    assert call["lowerdir"] == _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
     assert call["upperdir"] == claude_root / "upper"
     assert call["workdir"] == claude_root / "work"
     assert call["merged"] == claude_root / "merged"
@@ -122,9 +123,9 @@ def test_shared_base_built_once_and_reused_across_workspaces(tmp_path: Path) -> 
         host_env={},
         overlay_mounter=mounter,
     )
-    base = _shared_claude_base_dir(work_dir)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
     # A rebuild would replace ``base`` via os.replace and lose this marker; its
-    # survival proves the second workspace reuses the existing base.
+    # survival proves the second workspace (same host content) reuses the base.
     marker = base / ".reuse-marker"
     marker.write_text("kept")
 
@@ -144,6 +145,45 @@ def test_shared_base_built_once_and_reused_across_workspaces(tmp_path: Path) -> 
     assert first_by_target["/home/agent/.claude"].source != (
         second_by_target["/home/agent/.claude"].source
     )
+
+
+@pytest.mark.unit
+def test_shared_base_rebuilt_when_host_claude_changes(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_a",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert (base_a / "settings.json").read_text() == '{"theme": "dark"}\n'
+
+    # An operator updates ``~/.claude`` (here a setting) after the first
+    # workspace; later workspaces must see the change, not a stale base.
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_b",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    base_b = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+
+    # The changed host yields a fresh, distinct base carrying the new content,
+    # and the second workspace mounts it instead of the stale one.
+    assert base_b != base_a
+    assert (base_b / "settings.json").read_text() == '{"theme": "light"}\n'
+    assert mounter.mounts[1]["lowerdir"] == base_b
+    # The old base is immutable — left intact for any still-live overlay mount.
+    assert (base_a / "settings.json").read_text() == '{"theme": "dark"}\n'
 
 
 @pytest.mark.unit
@@ -167,7 +207,7 @@ def test_shared_base_content_excludes_history_and_skips_dangling_links(tmp_path:
         overlay_mounter=FakeOverlayMounter(supported=True),
     )
 
-    base = _shared_claude_base_dir(work_dir)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
     assert (base / "skills" / "demo" / "SKILL.md").read_text() == "# demo skill\n"
     assert (base / "settings.json").read_text() == '{"theme": "dark"}\n'
     for excluded in ("projects", "todos", "shell-snapshots", "statsig"):
@@ -205,7 +245,7 @@ def test_overlay_isolation_only_chowns_upper_and_work_not_merged_or_base(
         workspace_owner_gid=1000,
         overlay_mounter=mounter,
     )
-    base = _shared_claude_base_dir(work_dir)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
     chowned.clear()  # discard the one-time base build chowns
 
     resolve_service_auth_mounts(
@@ -363,7 +403,7 @@ def test_shared_base_build_loses_race_and_reuses_existing(
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
     _seed_host_claude(host_home)
-    base = _shared_claude_base_dir(work_dir)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
 
     def _lost_race(self: Path, target: Path) -> None:
         raise OSError("base populated by a concurrent provision")
@@ -390,7 +430,7 @@ def test_shared_base_build_loses_race_and_reuses_existing(
 @pytest.mark.unit
 def test_shared_base_is_never_under_a_workspace_auth_dir(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
-    base = _shared_claude_base_dir(work_dir)
+    base = _shared_claude_base_dir(work_dir, "sig0")
     auth_root = work_dir / "auth"
     # The base lives under ``auth/_shared`` and never under any concrete
     # ``auth/<workspace_id>`` dir, so GC candidate enumeration cannot reap it.

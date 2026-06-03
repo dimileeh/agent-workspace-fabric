@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -158,10 +159,49 @@ def claude_auth_isolation_label(*, overlay_mounter: OverlayMounter | None = None
     return _ISOLATION_OVERLAY if mounter.supported() else _ISOLATION_COPY
 
 
-def _shared_claude_base_dir(work_dir: Path) -> Path:
-    """Return the host-wide shared read-only ``~/.claude`` base (overlay lowerdir)."""
+def _shared_claude_base_dir(work_dir: Path, signature: str) -> Path:
+    """Return the host-wide shared read-only ``~/.claude`` base for ``signature``.
 
-    return work_dir / "auth" / _SHARED_AUTH_DIRNAME / _CLAUDE_BASE_DIRNAME / ".claude"
+    The host-content ``signature`` names the base dir so a changed host
+    ``~/.claude`` (operator added/updated skills, plugins, settings, tokens, …)
+    builds a *fresh* base instead of reusing a stale one. Bases are immutable
+    once built: a new signature gets a new dir and old signature dirs are left
+    untouched, so a workspace that still has an old base mounted as its overlay
+    lowerdir keeps a consistent view (overlayfs forbids mutating a live lower).
+    """
+
+    return work_dir / "auth" / _SHARED_AUTH_DIRNAME / _CLAUDE_BASE_DIRNAME / signature / ".claude"
+
+
+def _host_claude_signature(host_home: Path) -> str:
+    """Return a content signature of the host ``~/.claude`` overlay source.
+
+    Lets a new workspace notice that an operator changed ``~/.claude`` since the
+    shared base was last built, so it rebuilds under a fresh signature rather
+    than mounting a stale lowerdir (the legacy per-workspace copy always
+    reflected the current host; the shared base must not silently fall behind).
+    The usage-history dirs excluded from the copied base are excluded here too,
+    so churn in those transcript trees never forces a needless rebuild. Cheap:
+    ``lstat`` only, no file reads.
+    """
+
+    source = host_home / ".claude"
+    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
+    entries: list[str] = []
+    for root, dirs, files in os.walk(source):
+        dirs[:] = [name for name in dirs if name not in excluded]
+        root_path = Path(root)
+        for name in (*dirs, *files):
+            entry = root_path / name
+            rel = entry.relative_to(source).as_posix()
+            try:
+                stat = entry.lstat()
+            except OSError:
+                entries.append(f"{rel}\0missing")
+                continue
+            entries.append(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}")
+    digest = hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
+    return digest[:16]
 
 
 class WorkspaceAuthMountResolver(Protocol):
@@ -597,15 +637,18 @@ def _ensure_shared_claude_base(
     workspace_owner_uid: int | None,
     workspace_owner_gid: int | None,
 ) -> Path:
-    """Build (once) and return the shared read-only ``~/.claude`` overlay base.
+    """Build (once per host-content signature) the shared ``~/.claude`` base.
 
-    Built into a temp dir and moved into place atomically so a concurrent
-    provision either sees a complete base or loses the rename race and reuses
-    the winner's. Chowned once to the agent uid/gid (all workspace agents share
-    uid 1000) so the read-only lower is readable through the overlay.
+    The base dir is keyed by a signature of the current host ``~/.claude`` so a
+    later workspace whose host changed gets a freshly built base instead of a
+    stale lowerdir; an unchanged host reuses the existing one. Built into a temp
+    dir and moved into place atomically so a concurrent provision either sees a
+    complete base or loses the rename race and reuses the winner's. Chowned once
+    to the agent uid/gid (all workspace agents share uid 1000) so the read-only
+    lower is readable through the overlay.
     """
 
-    base = _shared_claude_base_dir(work_dir)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
     if base.is_dir():
         return base
 
