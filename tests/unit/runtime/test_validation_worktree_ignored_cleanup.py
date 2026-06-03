@@ -537,6 +537,9 @@ async def test_cleanup_surfaces_status_failure_from_post_restore_recheck(
     assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
     assert cleanup.cleaned is False
     assert status_calls == 2
+    # The recheck is preserved so its git stderr survives for diagnosis.
+    assert cleanup.verify_check is not None
+    assert cleanup.verify_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
 
 
 @pytest.mark.unit

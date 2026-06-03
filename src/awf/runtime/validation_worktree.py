@@ -606,6 +606,9 @@ async def cleanup_validation_worktree_side_effects(
                     restore_ref=restore_ref,
                     reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
                     message=post_restore_check.message,
+                    # Carry the recheck so its `git status` stderr survives in
+                    # `details()` for diagnosis.
+                    verify_check=post_restore_check,
                 )
             )
         cleanup_source = post_restore_check
