@@ -227,5 +227,125 @@ def test_service_gc_supports_pretty_output() -> None:
     assert "candidate_count: 1" in result.stdout
 
 
+def _service_env_settings_stub(*, api_base_url: str, api_token: str | None) -> MagicMock:
+    """Stub the resolved service settings the local ``.env`` would produce."""
+    settings = MagicMock()
+    settings.api_base_url = api_base_url
+    settings.api_token = api_token
+    return settings
+
+
+def _clear_service_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("AWF_API_TOKEN", "AWF_BASE_URL", "AWF_CLI_BASE_URL", "AWF_API_HOST_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.mark.unit
+def test_service_gc_loads_service_env_token_and_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no flags or process env, the compose ``.env`` token/URL are honoured.
+
+    ``service gc`` is the only ``service_*`` command that triggers an
+    authenticated REST call, so an ``AWF_API_TOKEN``/API port living only in
+    ``docker/compose/.env`` must still reach the request -- matching sibling
+    commands instead of silently 401-ing.
+    """
+    _clear_service_env(monkeypatch)
+    settings = _service_env_settings_stub(
+        api_base_url="http://localhost:9999", api_token="env-token"
+    )
+    response = _mock_response(payload=_dry_run_payload())
+    with (
+        patch("awf.service.config.local_service_environ", return_value={}),
+        patch("awf.service.config.resolve_service_settings", return_value=settings),
+        patch("awf.cli.common.httpx.request", return_value=response) as mock,
+    ):
+        result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 0, result.output
+    _, url = mock.call_args.args
+    assert url.startswith("http://localhost:9999/")
+    assert mock.call_args.kwargs["headers"]["Authorization"] == "Bearer env-token"
+
+
+@pytest.mark.unit
+def test_service_gc_loads_service_env_base_url_when_token_in_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process-env token wins, but a missing base URL still falls back to ``.env``."""
+    _clear_service_env(monkeypatch)
+    monkeypatch.setenv("AWF_API_TOKEN", "proc-token")
+    settings = _service_env_settings_stub(
+        api_base_url="http://localhost:9999", api_token="env-token"
+    )
+    response = _mock_response(payload=_dry_run_payload())
+    with (
+        patch("awf.service.config.local_service_environ", return_value={}),
+        patch("awf.service.config.resolve_service_settings", return_value=settings),
+        patch("awf.cli.common.httpx.request", return_value=response) as mock,
+    ):
+        result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 0, result.output
+    _, url = mock.call_args.args
+    assert url.startswith("http://localhost:9999/")
+    assert mock.call_args.kwargs["headers"]["Authorization"] == "Bearer proc-token"
+
+
+@pytest.mark.unit
+def test_service_gc_loads_service_env_token_when_base_url_in_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process-env base URL wins, but a missing token still falls back to ``.env``."""
+    _clear_service_env(monkeypatch)
+    monkeypatch.setenv("AWF_BASE_URL", "http://proc-host:1234")
+    settings = _service_env_settings_stub(
+        api_base_url="http://localhost:9999", api_token="env-token"
+    )
+    response = _mock_response(payload=_dry_run_payload())
+    with (
+        patch("awf.service.config.local_service_environ", return_value={}),
+        patch("awf.service.config.resolve_service_settings", return_value=settings),
+        patch("awf.cli.common.httpx.request", return_value=response) as mock,
+    ):
+        result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 0, result.output
+    _, url = mock.call_args.args
+    assert url.startswith("http://proc-host:1234/")
+    assert mock.call_args.kwargs["headers"]["Authorization"] == "Bearer env-token"
+
+
+@pytest.mark.unit
+def test_service_gc_skips_service_env_when_overrides_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit ``--base-url``/``--api-token`` flags bypass the ``.env`` lookup entirely."""
+    _clear_service_env(monkeypatch)
+    response = _mock_response(payload=_dry_run_payload())
+    with (
+        patch("awf.service.config.resolve_service_settings") as resolve_settings,
+        patch("awf.cli.common.httpx.request", return_value=response) as mock,
+    ):
+        result = _runner.invoke(
+            app,
+            [
+                "service",
+                "gc",
+                "--base-url",
+                "http://flag-host:4321",
+                "--api-token",
+                "flag-token",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    resolve_settings.assert_not_called()
+    _, url = mock.call_args.args
+    assert url.startswith("http://flag-host:4321/")
+    assert mock.call_args.kwargs["headers"]["Authorization"] == "Bearer flag-token"
+
+
 def _combined_output(result: Any) -> str:
     return f"{result.stdout}{getattr(result, 'stderr', '')}"

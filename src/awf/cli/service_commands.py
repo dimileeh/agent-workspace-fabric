@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from enum import StrEnum
 from pathlib import Path
 
@@ -435,6 +436,48 @@ def service_logs(
         typer.echo(result.stderr, err=True, nl=False)
 
 
+def _resolve_local_service_gc_target(
+    base_url: str | None,
+    api_token: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the ``service gc`` REST target, honouring the local service ``.env``.
+
+    ``service gc`` is a thin trigger over ``POST /v1/service/gc``. Like the
+    sibling ``service_*`` commands, it must honour an ``AWF_API_TOKEN`` or API
+    port that lives only in ``docker/compose/.env`` (the documented setup path).
+    Explicit ``--base-url`` / ``--api-token`` flags and process-environment
+    overrides still win; the compose ``.env`` is consulted only when neither is
+    present, so existing ``AWF_BASE_URL`` / ``AWF_API_TOKEN`` shell overrides
+    keep their precedence.
+    """
+    needs_api_token = api_token is None and not os.environ.get("AWF_API_TOKEN")
+    needs_base_url = base_url is None and not (
+        os.environ.get("AWF_BASE_URL")
+        or os.environ.get("AWF_CLI_BASE_URL")
+        or os.environ.get("AWF_API_HOST_PORT")
+    )
+    if not needs_api_token and not needs_base_url:
+        return base_url, api_token
+
+    from awf.common.config import Settings
+    from awf.service.config import local_service_environ, resolve_service_settings
+
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, _ = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
+    resolved_base_url = settings.api_base_url if needs_base_url else base_url
+    resolved_api_token = settings.api_token if needs_api_token else api_token
+    return resolved_base_url, resolved_api_token
+
+
 @service_app.command("gc")
 def service_gc(
     execute: bool = typer.Option(
@@ -493,6 +536,8 @@ def service_gc(
     a running API is required (``awf serve`` / control-plane up). Defaults for
     retention and batch limit are applied server-side.
     """
+    resolved_base_url, resolved_api_token = _resolve_local_service_gc_target(base_url, api_token)
+
     body: dict[str, object] = {"execute": execute}
     if min_age_hours is not None:
         body["min_age_hours"] = min_age_hours
@@ -506,10 +551,10 @@ def service_gc(
     response = _call(
         "POST",
         "/v1/service/gc",
-        base_url=_base_url(base_url),
+        base_url=_base_url(resolved_base_url),
         timeout=timeout_seconds,
         json=body,
-        headers=_api_token_headers(api_token),
+        headers=_api_token_headers(resolved_api_token),
     )
     if response.status_code >= 400:
         # ``_handle_response`` prints the error envelope and always raises
