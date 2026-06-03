@@ -432,6 +432,48 @@ async def test_already_removed_dir_is_idempotent_success(
     assert result.reaped[0].status == "already_removed"
 
 
+@pytest.mark.usefixtures("engine")
+async def test_gc_path_construction_runs_off_event_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_gc_path`` (whose ``rglob`` walk is expensive) must not run on the loop.
+
+    Regression: it was constructed on the event loop before the
+    ``asyncio.to_thread`` deletion call, so the recursive ``_estimate_bytes``
+    filesystem walk could stall the worker loop for seconds per orphan.
+    """
+    import threading
+
+    from awf.service import gc_reconcile
+
+    now = 12_000_000.0
+    _make_dir(tmp_path / "auth" / "ws_offloop", age_seconds=0.0, now=now)
+
+    loop_thread = threading.get_ident()
+    observed_threads: list[int] = []
+    real_gc_path = gc_reconcile._gc_path
+
+    def _recording_gc_path(kind: str, path: Path):
+        observed_threads.append(threading.get_ident())
+        return real_gc_path(kind, path)
+
+    monkeypatch.setattr("awf.service.gc_reconcile._gc_path", _recording_gc_path)
+
+    result = await reconcile_orphaned_workspace_dirs(
+        session_factory,
+        work_dir=tmp_path,
+        now=now,
+        min_age_hours=0,
+        execute=True,
+    )
+
+    assert result.reaped_count == 1
+    assert len(observed_threads) == 1
+    assert observed_threads[0] != loop_thread
+
+
 async def test_build_default_compose_teardown_invokes_manager() -> None:
     from awf.service.gc_reconcile import build_default_compose_teardown
 
