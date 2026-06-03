@@ -43,8 +43,13 @@ test("dashboard displays llm usage correctly when available", async ({ page }) =
   await page.goto("/");
   await waitForConsoleReady(page);
 
-  // Click the workspace that has usage
-  await page.getByText("Usage Workspace", { exact: true }).first().click();
+  // Open the workspace that has usage via its full-card open-details button.
+  // The title text now sits in a pointer-events-none layer over this button, so
+  // a click on the title text never lands. Use exact matching because the
+  // aria-label is a substring of "...No Usage Workspace".
+  await page
+    .getByRole("button", { name: "Open workspace details for Usage Workspace", exact: true })
+    .click();
 
   // Find the LLM usage block
   const usageBlock = page.locator("section").filter({ hasText: "LLM usage" }).first();
@@ -66,8 +71,10 @@ test("dashboard hides llm usage metrics when unavailable", async ({ page }) => {
   await page.goto("/");
   await waitForConsoleReady(page);
 
-  // Click the workspace that has no usage
-  await page.getByText("No Usage Workspace", { exact: true }).first().click();
+  // Open the workspace that has no usage via its full-card open-details button.
+  await page
+    .getByRole("button", { name: "Open workspace details for No Usage Workspace", exact: true })
+    .click();
 
   // Actually wait, our UsageSummaryBlock renders a div, and it is inside some Panel in details.
   // Wait, let's verify what the text is.
@@ -84,7 +91,9 @@ test("dashboard renders ccusage-backed totals and source label", async ({ page }
   await page.goto("/");
   await waitForConsoleReady(page);
 
-  await page.getByText("Ccusage Workspace", { exact: true }).first().click();
+  await page
+    .getByRole("button", { name: "Open workspace details for Ccusage Workspace", exact: true })
+    .click();
 
   // Scope to the usage block itself: the surrounding details section also
   // carries the workspace title/id/branch ("Ccusage Workspace", "ws_ccusage"),
@@ -104,7 +113,9 @@ test("dashboard renders ccusage unavailable reason", async ({ page }) => {
   await page.goto("/");
   await waitForConsoleReady(page);
 
-  await page.getByText("Ccusage Timeout Workspace", { exact: true }).first().click();
+  await page
+    .getByRole("button", { name: "Open workspace details for Ccusage Timeout Workspace", exact: true })
+    .click();
 
   await expect(page.getByText("LLM usage").first()).toBeVisible();
   await expect(page.getByText("unavailable").first()).toBeVisible();
