@@ -1384,6 +1384,62 @@ def test_reaper_skips_when_classification_unknown(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reaper_skips_when_scanner_unavailable_with_partial_orphans(tmp_path: Path) -> None:
+    """A scanner failure that still surfaces partial orphans must not drive reaping.
+
+    When the container list succeeds but the network/volume scan fails,
+    ``scan_docker_resources`` returns ``ok=False`` while still carrying the
+    listed containers. Those containers classify as orphans, so the summary
+    takes the orphan-present (``blocked``) branch rather than the
+    scanner-``unknown`` branch -- but the inventory is incomplete, so the reaper
+    must still skip rather than tear down stacks on guesswork.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_dead-agent-1",
+                    "project": "awf_ws_dead",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            ),
+            fail_networks=True,
+        ),
+    )
+    assert docker.ok is False
+    assert docker.resources  # partial inventory: the container survived the failed scan
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),  # no rows -> the listed container is a "missing" orphan
+        auto_cleanup_orphans=True,
+    )
+    assert summary.orphan_count >= 1
+    assert summary.cleanup_readiness.status == "blocked"
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+        )
+    )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "ORPHAN_REAP_SKIPPED_UNKNOWN"
+    assert teardown.calls == []
+
+
+@pytest.mark.unit
 def test_reaper_permission_denied_is_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from awf.service.gc_classify import PATH_DELETE_PERMISSION_DENIED
     from awf.service.orphan_resources import reap_classified_orphans

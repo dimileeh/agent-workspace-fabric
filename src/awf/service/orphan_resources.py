@@ -803,11 +803,22 @@ async def reap_classified_orphans(
             status="disabled",
             reason_code=ORPHAN_REAP_DISABLED,
         )
-    if summary.cleanup_readiness.status == "unknown":
+    # Classification is only reliable when every scanner produced a complete
+    # inventory. A scanner that failed mid-scan (``ok=False``) can still surface
+    # partial resources -- e.g. ``docker ps`` lists containers but the network or
+    # volume list errored -- and those partial records can classify as orphans,
+    # sending ``build_orphan_resource_summary`` down the orphan-present
+    # (``blocked``) branch before it ever reaches the scanner-unavailable
+    # (``unknown``) branch. Reaping on that incomplete inventory would tear down
+    # stacks on guesswork, so check scanner availability alongside the readiness
+    # status rather than relying on ``status == "unknown"`` alone.
+    scanner_unavailable = any(scanner.get("ok") is False for scanner in summary.scanners.values())
+    if summary.cleanup_readiness.status == "unknown" or scanner_unavailable:
         _log.warning(
             "orphan_resources.reap_skipped_unknown",
             reason_code=ORPHAN_REAP_SKIPPED_UNKNOWN,
             summary_reason=summary.reason,
+            scanner_unavailable=scanner_unavailable,
         )
         return OrphanReapResult(
             enabled=True,
