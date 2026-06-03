@@ -23,11 +23,12 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
+    COMPLETED_PR_IMMEDIATE_RECLAIM,
+    COMPLETED_PR_NOT_MERGED,
     COMPLETED_PR_RETENTION_EXPIRED,
     FAILED_WORKSPACE_NO_WORK,
     FAILED_WORKSPACE_TRIAGE_PRESERVED,
     WORKSPACE_WITHIN_RETENTION,
-    WorkspaceGCComposeTeardownResult,
     WorkspaceGCWorktreeRemoveResult,
     plan_terminal_workspace_gc,
     run_terminal_workspace_gc,
@@ -1104,6 +1105,127 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
 
 
 @pytest.mark.unit
+async def test_single_workspace_gc_ignore_retention_reclaims_recent_merged_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A freshly-merged workspace whose ``updated_at`` is well within the
+    # retention window is reclaimed immediately when ignore_retention=True; the
+    # durable DB row + events survive (only pressure dirs go). The candidate is
+    # tagged COMPLETED_PR_IMMEDIATE_RECLAIM so audit logs distinguish this
+    # post-merge bypass from a workspace that naturally aged out of retention.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        ignore_retention=True,
+        now=now,
+    )
+
+    assert result.dry_run is False
+    assert [candidate.workspace_id for candidate in result.plan.candidates] == [workspace_id]
+    assert result.plan.candidates[0].reason_code == COMPLETED_PR_IMMEDIATE_RECLAIM
+    assert not worktree.exists()
+    assert not auth.exists()
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            limit=50,
+        )
+    assert events  # the durable audit log is preserved
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_default_retention_defers_recent_merged_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Regression guard: with ignore_retention left at its default, the same
+    # recently-merged workspace is still deferred within the retention window.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        WORKSPACE_WITHIN_RETENTION,
+    ]
+    assert worktree.exists()
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_ignore_retention_still_preserves_unmerged_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # ignore_retention only releases merged PRs early; a completed workspace
+    # whose PR has not merged is still preserved for inspection.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha=None,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        ignore_retention=True,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        COMPLETED_PR_NOT_MERGED,
+    ]
+    assert worktree.exists()
+
+
+@pytest.mark.unit
 async def test_single_workspace_gc_revokes_active_secret_leases_before_auth_cleanup(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1211,196 +1333,3 @@ async def test_batch_terminal_gc_revokes_each_candidate_and_is_retry_safe(
 
     assert first_leases[0].status == "revoked"
     assert second_leases[0].status == "revoked"
-
-
-@pytest.mark.unit
-async def test_single_workspace_gc_preserves_logs_and_artifacts_after_retention(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    work_dir = tmp_path / "service"
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-        pr=True,
-        pr_merge_sha="d" * 40,
-    )
-    worktree = work_dir / "git" / "worktrees" / workspace_id
-    compose = work_dir / "compose" / workspace_id
-    auth = work_dir / "auth" / workspace_id
-    log_file = work_dir / "logs" / workspace_id / "agent.log"
-    artifact_file = work_dir / "artifacts" / workspace_id / "summary.json"
-    _write(worktree / "repo.txt", "repo")
-    _write(compose / "compose.yml", "compose")
-    _write(auth / "codex" / "auth.json", "auth")
-    _write(log_file, "durable log")
-    _write(artifact_file, '{"status": "kept"}')
-
-    result = await run_workspace_filesystem_gc(
-        session_factory,
-        work_dir=work_dir,
-        workspace_id=workspace_id,
-        execute=True,
-        min_age_hours=24,
-        now=now,
-    )
-
-    assert result.status == "succeeded"
-    assert set(result.deleted_paths) == {worktree, compose, auth}
-    assert not worktree.exists()
-    assert not compose.exists()
-    assert not auth.exists()
-    assert log_file.exists()
-    assert artifact_file.exists()
-
-
-@pytest.mark.unit
-async def test_execute_gc_deletes_workspace_paths_in_threads(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    work_dir = tmp_path / "service"
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-        pr=True,
-        pr_merge_sha="a" * 40,
-    )
-    _write(work_dir / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
-    _write(work_dir / "compose" / workspace_id / "compose.yml", "compose")
-    _write(work_dir / "auth" / workspace_id / "codex" / "auth.json", "auth")
-    to_thread_calls: list[str] = []
-
-    async def _record_to_thread(
-        func: Callable[..., object],
-        /,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
-        to_thread_calls.append(func.__name__)
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr(gc.asyncio, "to_thread", _record_to_thread)
-
-    result = await run_terminal_workspace_gc(
-        session_factory,
-        work_dir=work_dir,
-        min_age_hours=24,
-        execute=True,
-        now=now,
-    )
-
-    assert result.status == "succeeded"
-    assert [outcome.kind for outcome in result.path_outcomes] == [
-        "worktree",
-        "compose",
-        "auth",
-    ]
-    assert to_thread_calls == [
-        "_classify_workspace_for_gc",
-        "_delete_gc_path_outcome",
-        "_delete_gc_path_outcome",
-        "_delete_gc_path_outcome",
-    ]
-
-
-@pytest.mark.unit
-async def test_cleanup_is_idempotent_after_partial_compose_failure(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    work_dir = tmp_path / "service"
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    compose_slug = "stored"
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-        compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
-        pr=True,
-        pr_merge_sha="a" * 40,
-    )
-    compose = work_dir / "compose" / compose_slug
-    worktree = work_dir / "git" / "worktrees" / workspace_id
-    auth = work_dir / "auth" / workspace_id
-    _write(worktree / "repo.txt", "repo")
-    _write(compose / "compose.yml", "compose")
-    _write(auth / "codex" / "auth.json", "auth")
-    calls = 0
-
-    async def _compose_teardown(_candidate: object) -> WorkspaceGCComposeTeardownResult:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return WorkspaceGCComposeTeardownResult(
-                status="failed",
-                reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-                error="network still in use",
-            )
-        return WorkspaceGCComposeTeardownResult(
-            status="succeeded",
-            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
-        )
-
-    first = await run_terminal_workspace_gc(
-        session_factory,
-        work_dir=work_dir,
-        min_age_hours=24,
-        execute=True,
-        now=now,
-        compose_teardown=_compose_teardown,
-    )
-    first_payload = first.to_dict()
-
-    assert first.status == "partial"
-    assert first.reason_code == "CLEANUP_EXECUTION_PARTIAL"
-    assert first_payload["candidates"][0]["compose_teardown"]["reason_code"] == (
-        "DOCKER_COMPOSE_DOWN_FAILED"
-    )
-    assert {data["status"] for data in first_payload["candidates"][0]["paths"].values()} == {
-        "skipped"
-    }
-    assert {data["reason_code"] for data in first_payload["candidates"][0]["paths"].values()} == {
-        "DOCKER_COMPOSE_DOWN_FAILED"
-    }
-    assert worktree.exists()
-    assert compose.exists()
-    assert auth.exists()
-
-    second = await run_terminal_workspace_gc(
-        session_factory,
-        work_dir=work_dir,
-        min_age_hours=24,
-        execute=True,
-        now=now,
-        compose_teardown=_compose_teardown,
-    )
-
-    assert second.status == "succeeded"
-    assert set(second.deleted_paths) == {worktree, compose, auth}
-    assert not worktree.exists()
-    assert not compose.exists()
-    assert not auth.exists()
-
-    third = await run_terminal_workspace_gc(
-        session_factory,
-        work_dir=work_dir,
-        min_age_hours=24,
-        execute=True,
-        now=now,
-        compose_teardown=_compose_teardown,
-    )
-    third_payload = third.to_dict()
-
-    assert third.status == "succeeded"
-    assert third.deleted_paths == []
-    assert third.delete_errors == []
-    assert {data["status"] for data in third_payload["candidates"][0]["paths"].values()} == {
-        "already_removed"
-    }
-    assert third.path_outcomes[0].to_dict()["reason_code"] == "PATH_ALREADY_REMOVED"

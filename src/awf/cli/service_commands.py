@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-from functools import partial
+import os
+from enum import StrEnum
 from pathlib import Path
 
 import typer
 
 from awf.cli.common import (
     OutputFormat,
+    _api_token_headers,
+    _api_token_option,
+    _base_url,
+    _call,
     _emit,
-    _run_companion_image_prune,
-    _run_terminal_workspace_compose_teardown,
-    _run_terminal_workspace_worktree_remove,
+    _handle_response,
 )
 from awf.cli.init_ops import (
     _resolve_service_compose_paths,
     _resolve_service_runtime_env_files,
 )
-from awf.db.enums import WorkspaceStatus
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 _DX_FIRST_PATH_HELP = """
@@ -32,6 +34,35 @@ _PROVIDER_HELP = (
     "Repeatable provider strictness check: github, codex, claude_code, cursor, "
     "gemini, opencode, grok, or docker."
 )
+
+
+class GCStatusFilter(StrEnum):
+    """Status vocabulary accepted by ``awf service gc`` ``--status`` filters.
+
+    Mirrors every :class:`~awf.db.enums.WorkspaceStatus` plus ``superseded`` -- a
+    terminal GC status that is *not* a ``WorkspaceStatus`` enum member (see
+    ``GCTerminalStatus`` in ``api/schemas.py`` and ``TERMINAL_WORKSPACE_GC_STATUSES``
+    in ``service/gc.py``). Typing the CLI options as the bare ``WorkspaceStatus``
+    enum left the thin client unable to send ``superseded``, so the
+    superseded-only cleanup path the API now accepts was unreachable from the CLI.
+    The drift guard in ``tests/unit/cli/test_service_gc_cli.py`` keeps this in
+    lockstep with ``WorkspaceStatus``.
+    """
+
+    requested = "requested"
+    provisioning = "provisioning"
+    ready = "ready"
+    running = "running"
+    validating = "validating"
+    pushing = "pushing"
+    monitoring_pr = "monitoring_pr"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+    destroying = "destroying"
+    destroyed = "destroyed"
+    superseded = "superseded"
+
 
 service_app = typer.Typer(help="Local service operations.")
 
@@ -405,6 +436,48 @@ def service_logs(
         typer.echo(result.stderr, err=True, nl=False)
 
 
+def _resolve_local_service_gc_target(
+    base_url: str | None,
+    api_token: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the ``service gc`` REST target, honouring the local service ``.env``.
+
+    ``service gc`` is a thin trigger over ``POST /v1/service/gc``. Like the
+    sibling ``service_*`` commands, it must honour an ``AWF_API_TOKEN`` or API
+    port that lives only in ``docker/compose/.env`` (the documented setup path).
+    Explicit ``--base-url`` / ``--api-token`` flags and process-environment
+    overrides still win; the compose ``.env`` is consulted only when neither is
+    present, so existing ``AWF_BASE_URL`` / ``AWF_API_TOKEN`` shell overrides
+    keep their precedence.
+    """
+    needs_api_token = api_token is None and not os.environ.get("AWF_API_TOKEN")
+    needs_base_url = base_url is None and not (
+        os.environ.get("AWF_BASE_URL")
+        or os.environ.get("AWF_CLI_BASE_URL")
+        or os.environ.get("AWF_API_HOST_PORT")
+    )
+    if not needs_api_token and not needs_base_url:
+        return base_url, api_token
+
+    from awf.common.config import Settings
+    from awf.service.config import local_service_environ, resolve_service_settings
+
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, _ = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
+    resolved_base_url = settings.api_base_url if needs_base_url else base_url
+    resolved_api_token = settings.api_token if needs_api_token else api_token
+    return resolved_base_url, resolved_api_token
+
+
 @service_app.command("gc")
 def service_gc(
     execute: bool = typer.Option(
@@ -428,65 +501,77 @@ def service_gc(
         min=1,
         help="Maximum number of candidates to plan, oldest first.",
     ),
-    status: list[WorkspaceStatus] = typer.Option(
+    status: list[GCStatusFilter] = typer.Option(
         [],
         "--status",
         help=(
-            "Repeatable terminal status filter. Active statuses are always protected "
-            "even when requested."
+            "Repeatable terminal status filter (accepts ``superseded``). Active "
+            "statuses are always protected even when requested."
         ),
     ),
-    exclude_status: list[WorkspaceStatus] = typer.Option(
+    exclude_status: list[GCStatusFilter] = typer.Option(
         [],
         "--exclude-status",
         help="Repeatable status filter to remove from the eligible terminal set.",
     ),
+    timeout_seconds: float = typer.Option(
+        900.0,
+        "--timeout-seconds",
+        min=0.0,
+        help=(
+            "HTTP timeout for the GC trigger. Defaults high because an "
+            "``--execute`` run tearing down Docker stacks and deleting large "
+            "worktree trees can take minutes; raise it further for very large "
+            "reclaims so the CLI does not report a false timeout."
+        ),
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
-    """Plan or execute filesystem GC for terminal service workspaces."""
-    from awf.db.session import make_engine, make_session_factory
-    from awf.service.config import resolve_service_settings
-    from awf.service.gc import run_terminal_workspace_gc
+    """Plan or execute filesystem GC for terminal service workspaces.
 
-    settings = resolve_service_settings()
-    engine = make_engine(settings.database_url)
-    session_factory = make_session_factory(engine)
-    retention_hours = (
-        settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
+    This is a thin trigger over ``POST /v1/service/gc``: the root control-plane
+    (the api container) runs the deletion in-container with correct ownership, so
+    a running API is required (``awf serve`` / control-plane up). Defaults for
+    retention and batch limit are applied server-side.
+    """
+    resolved_base_url, resolved_api_token = _resolve_local_service_gc_target(base_url, api_token)
+
+    body: dict[str, object] = {"execute": execute}
+    if min_age_hours is not None:
+        body["min_age_hours"] = min_age_hours
+    if limit is not None:
+        body["limit"] = limit
+    if status:
+        body["statuses"] = [item.value for item in status]
+    if exclude_status:
+        body["exclude_statuses"] = [item.value for item in exclude_status]
+
+    response = _call(
+        "POST",
+        "/v1/service/gc",
+        base_url=_base_url(resolved_base_url),
+        timeout=timeout_seconds,
+        json=body,
+        headers=_api_token_headers(resolved_api_token),
     )
-    candidate_limit = limit if limit is not None else settings.workspace_cleanup_batch_limit
-
-    async def _run() -> object:
-        """Execute run."""
-        try:
-            result = await run_terminal_workspace_gc(
-                session_factory,
-                work_dir=Path(settings.work_dir).expanduser().resolve(),
-                min_age_hours=retention_hours,
-                limit=candidate_limit,
-                include_statuses=status or None,
-                exclude_statuses=exclude_status or None,
-                execute=execute,
-                cleanup_enabled=settings.workspace_cleanup_enabled,
-                compose_teardown=_run_terminal_workspace_compose_teardown,
-                worktree_remover=partial(
-                    _run_terminal_workspace_worktree_remove,
-                    session_factory=session_factory,
-                ),
-                companion_image_prune=(
-                    partial(
-                        _run_companion_image_prune,
-                        settings.companion_image_retention_hours,
-                    )
-                    if settings.companion_image_cache_enabled
-                    else None
-                ),
-            )
-            return result.to_dict()
-        finally:
-            await engine.dispose()
-
-    payload = asyncio.run(_run())
+    if response.status_code >= 400:
+        # ``_handle_response`` prints the error envelope and always raises
+        # ``typer.Exit`` for >= 400, so control never returns from this call.
+        _handle_response(response, fmt)
+    try:
+        payload = response.json()
+    except ValueError:
+        # A proxy, load balancer, or early-close can return a 2xx with a
+        # non-JSON (or empty) body; surface a clean error instead of letting
+        # ``json.JSONDecodeError`` bubble out as a cryptic traceback.
+        typer.echo(
+            f"error: GC API returned a non-JSON response (HTTP {response.status_code}): "
+            f"{response.text[:200]}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
     _emit(payload, fmt)
     if isinstance(payload, dict) and payload.get("status") == "partial":
         raise typer.Exit(code=1)

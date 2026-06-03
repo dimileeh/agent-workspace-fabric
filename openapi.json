@@ -5037,6 +5037,123 @@
         "title": "RuntimeServiceResponse",
         "type": "object"
       },
+      "ServiceGCRequest": {
+        "additionalProperties": false,
+        "description": "Trigger payload for ``POST /v1/service/gc``.\n\nThe CLI is a thin client over this route: it maps its flags to these fields\nand lets the root control-plane run the deletion (so root-owned per-workspace\ndirs are actually reclaimed and per-workspace Docker volumes are reaped).",
+        "properties": {
+          "exclude_statuses": {
+            "description": "Status filter to remove from the eligible terminal set.",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WorkspaceStatus"
+                },
+                {
+                  "const": "superseded",
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Exclude Statuses",
+            "type": "array"
+          },
+          "execute": {
+            "default": false,
+            "description": "Delete selected pressure directories. Defaults to a dry-run plan.",
+            "title": "Execute",
+            "type": "boolean"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Maximum number of candidates to plan, oldest first.",
+            "title": "Limit"
+          },
+          "min_age_hours": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only consider workspaces whose last update is at least this old. Defaults to AWF_COMPLETED_WORKSPACE_RETENTION_HOURS.",
+            "title": "Min Age Hours"
+          },
+          "statuses": {
+            "description": "Terminal status filter. Active statuses are always protected.",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WorkspaceStatus"
+                },
+                {
+                  "const": "superseded",
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Statuses",
+            "type": "array"
+          }
+        },
+        "title": "ServiceGCRequest",
+        "type": "object"
+      },
+      "ServiceGCResponse": {
+        "additionalProperties": true,
+        "description": "GC result envelope returned by ``POST /v1/service/gc``.\n\nThe stable top-level fields are documented; the full GC payload\n(``candidates``, ``preserved``, ``delete_errors``, ...) is carried through\nvia ``extra=\"allow\"`` so the CLI can render it without a server round-trip.",
+        "properties": {
+          "candidate_count": {
+            "default": 0,
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "deleted_path_count": {
+            "default": 0,
+            "title": "Deleted Path Count",
+            "type": "integer"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "preserved_count": {
+            "default": 0,
+            "title": "Preserved Count",
+            "type": "integer"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total_estimated_bytes": {
+            "default": 0,
+            "title": "Total Estimated Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "reason_code",
+          "dry_run"
+        ],
+        "title": "ServiceGCResponse",
+        "type": "object"
+      },
       "SloMetricsSummaryResponse": {
         "properties": {
           "actionable_failure_count": {
@@ -12545,6 +12662,81 @@
         "summary": "Get Operation",
         "tags": [
           "operations"
+        ]
+      }
+    },
+    "/v1/service/gc": {
+      "post": {
+        "description": "Plan or execute terminal-workspace filesystem GC in the root control-plane.",
+        "operationId": "trigger_service_gc_v1_service_gc_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceGCRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceGCResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Trigger Service Gc",
+        "tags": [
+          "service"
         ]
       }
     },

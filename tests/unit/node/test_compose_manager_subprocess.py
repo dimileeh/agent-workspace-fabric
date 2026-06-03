@@ -136,6 +136,30 @@ class TestUp:
         assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
 
     @pytest.mark.unit
+    async def test_up_translates_permission_error_to_structured_unavailable(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        # ``create_subprocess_exec`` can raise ``OSError`` subclasses other than
+        # ``FileNotFoundError`` -- notably ``PermissionError`` (the docker binary
+        # exists but is not executable). ``_compose`` must translate these to a
+        # structured ``ComposeOperationError`` rather than letting a raw ``OSError``
+        # escape, or callers like ``teardown_project`` (which catch only
+        # ``ComposeOperationError``) abort the whole ``awf service gc`` request.
+        spec = _spec(tmp_path)
+        with (
+            patch(
+                "awf.node.compose_manager.asyncio.create_subprocess_exec",
+                side_effect=PermissionError(13, "Permission denied"),
+            ),
+            pytest.raises(ComposeOperationError) as exc,
+        ):
+            await manager.up(spec)
+
+        assert exc.value.operation == "up"
+        assert exc.value.returncode == 127
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+
+    @pytest.mark.unit
     async def test_up_retries_once_when_docker_compose_dispatch_drops_compose(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

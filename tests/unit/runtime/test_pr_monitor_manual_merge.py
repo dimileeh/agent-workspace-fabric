@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -34,6 +35,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.release_pr_monitor import build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
+from awf.service.gc import WorkspaceGCWorktreeRemoveResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -563,7 +565,18 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
         worktrees_root=worktrees_root,
         auto_merge=False,
     )
-    with structlog.testing.capture_logs() as captured:
+    with (
+        patch(
+            "awf.service.gc._default_worktree_remover",
+            new=AsyncMock(
+                return_value=WorkspaceGCWorktreeRemoveResult(
+                    status="succeeded",
+                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
+                )
+            ),
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
@@ -586,17 +599,15 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
     assert _call_index(cmd, _is_docker_down) > _call_index(cmd, _is_pr_comment)
     docker_down = _calls(cmd, _is_docker_down)[0]
     assert docker_down[-3:] == ["down", "--remove-orphans", "--volumes"]
-    assert worktree.exists()
-    assert compose_dir.exists()
-    assert auth_dir.exists()
+    # On a successful (externally-driven) merge the pressure dirs are reclaimed
+    # immediately, bypassing the retention window; the durable record stays.
+    assert not worktree.exists()
+    assert not auth_dir.exists()
     assert log_file.exists()
     assert not _has_call(cmd, _is_pr_merge)
     assert any(record.get("event") == "monitor.compose_teardown_ok" for record in captured)
-    assert any(
-        record.get("event") == "monitor.filesystem_gc_deferred"
-        and record.get("reason_code") == "WORKSPACE_WITHIN_RETENTION"
-        for record in captured
-    )
+    assert any(record.get("event") == "monitor.filesystem_gc_ok" for record in captured)
+    assert not any(record.get("event") == "monitor.filesystem_gc_deferred" for record in captured)
 
 
 @pytest.mark.unit
