@@ -17,6 +17,8 @@ import pytest
 from typer.testing import CliRunner
 
 from awf.cli.main import app
+from awf.cli.service_commands import GCStatusFilter
+from awf.db.enums import WorkspaceStatus
 
 _runner = CliRunner()
 
@@ -98,6 +100,51 @@ def test_service_gc_maps_flags_to_request_body() -> None:
         "statuses": ["completed"],
         "exclude_statuses": ["failed"],
     }
+
+
+@pytest.mark.unit
+def test_service_gc_can_target_superseded_status() -> None:
+    """The thin client must drive the superseded-only cleanup path the API accepts.
+
+    ``superseded`` is a terminal GC status but not a ``WorkspaceStatus`` enum
+    member, so a bare ``list[WorkspaceStatus]`` option would reject it at parse
+    time and leave the API's superseded path unreachable from the CLI.
+    """
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(
+            app,
+            [
+                "service",
+                "gc",
+                "--execute",
+                "--status",
+                "superseded",
+                "--exclude-status",
+                "superseded",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock.call_args.kwargs["json"] == {
+        "execute": True,
+        "statuses": ["superseded"],
+        "exclude_statuses": ["superseded"],
+    }
+
+
+@pytest.mark.unit
+def test_gc_status_filter_mirrors_workspace_status_plus_superseded() -> None:
+    """``GCStatusFilter`` must stay in lockstep with the API's GC vocabulary."""
+    assert {member.value for member in GCStatusFilter} == {
+        member.value for member in WorkspaceStatus
+    } | {"superseded"}
 
 
 @pytest.mark.unit

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -20,7 +21,6 @@ from awf.cli.init_ops import (
     _resolve_service_compose_paths,
     _resolve_service_runtime_env_files,
 )
-from awf.db.enums import WorkspaceStatus
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 _DX_FIRST_PATH_HELP = """
@@ -33,6 +33,35 @@ _PROVIDER_HELP = (
     "Repeatable provider strictness check: github, codex, claude_code, cursor, "
     "gemini, opencode, grok, or docker."
 )
+
+
+class GCStatusFilter(StrEnum):
+    """Status vocabulary accepted by ``awf service gc`` ``--status`` filters.
+
+    Mirrors every :class:`~awf.db.enums.WorkspaceStatus` plus ``superseded`` -- a
+    terminal GC status that is *not* a ``WorkspaceStatus`` enum member (see
+    ``GCTerminalStatus`` in ``api/schemas.py`` and ``TERMINAL_WORKSPACE_GC_STATUSES``
+    in ``service/gc.py``). Typing the CLI options as the bare ``WorkspaceStatus``
+    enum left the thin client unable to send ``superseded``, so the
+    superseded-only cleanup path the API now accepts was unreachable from the CLI.
+    The drift guard in ``tests/unit/cli/test_service_gc_cli.py`` keeps this in
+    lockstep with ``WorkspaceStatus``.
+    """
+
+    requested = "requested"
+    provisioning = "provisioning"
+    ready = "ready"
+    running = "running"
+    validating = "validating"
+    pushing = "pushing"
+    monitoring_pr = "monitoring_pr"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+    destroying = "destroying"
+    destroyed = "destroyed"
+    superseded = "superseded"
+
 
 service_app = typer.Typer(help="Local service operations.")
 
@@ -429,15 +458,15 @@ def service_gc(
         min=1,
         help="Maximum number of candidates to plan, oldest first.",
     ),
-    status: list[WorkspaceStatus] = typer.Option(
+    status: list[GCStatusFilter] = typer.Option(
         [],
         "--status",
         help=(
-            "Repeatable terminal status filter. Active statuses are always protected "
-            "even when requested."
+            "Repeatable terminal status filter (accepts ``superseded``). Active "
+            "statuses are always protected even when requested."
         ),
     ),
-    exclude_status: list[WorkspaceStatus] = typer.Option(
+    exclude_status: list[GCStatusFilter] = typer.Option(
         [],
         "--exclude-status",
         help="Repeatable status filter to remove from the eligible terminal set.",
