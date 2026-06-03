@@ -191,6 +191,40 @@ for artifact in manifest["artifacts"]:
 PY
 ```
 
+### Verify release artifacts (drift + installer smoke)
+
+The publish workflow runs these checks automatically, but you can reproduce both
+locally to confirm the manifest and checksums match the built distributions and
+that the installer verifies the artifact **before install**.
+
+Drift gate — fails if the manifest or `python-distribution-sha256.txt` drift
+from the built `dist/*` (recorded `sha256`, filenames, channel/version/tag, or
+checksum bytes):
+
+```bash
+uv run --python 3.12 python scripts/check_release_artifacts.py \
+  --dist-dir dist \
+  --checksums-file artifacts/release/python-distribution-sha256.txt \
+  --manifest artifacts/release/awf-install-manifest.json \
+  --version 0.1.0 \
+  --tag v0.1.0 \
+  --repository-url https://github.com/dimileeh/aira-agent-workspace-fabric
+```
+
+Installer smoke — rewrites the manifest's artifact URLs to the local `dist/`
+wheel and runs `packaging/install.sh --dry-run`, so the manifest-pinned `sha256`
+is verified against the real wheel bytes **before install**; it prints
+`Checksum verified` and never installs:
+
+```bash
+uv run --python 3.12 python scripts/release_smoke.py \
+  --dist-dir dist \
+  --manifest artifacts/release/awf-install-manifest.json \
+  --smoke-manifest-out artifacts/release/awf-install-manifest.smoke.json \
+  --method uv \
+  --run
+```
+
 The generator only writes manifest metadata; it does not publish files to
 GitHub Releases. After the tag exists and the publish workflow has produced the
 release artifacts, upload the exact distributions, checksum file, and manifest

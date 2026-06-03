@@ -81,6 +81,76 @@ def test_publish_workflow_generates_manifest_without_removing_checksum_artifact(
     assert "artifacts/release/awf-install-manifest.json" in uploaded_paths
 
 
+def _jobs(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Return the workflow jobs mapping."""
+    jobs = workflow.get("jobs", {})
+    assert isinstance(jobs, dict)
+    return jobs
+
+
+@pytest.mark.unit
+def test_publish_workflow_build_verifies_release_artifact_drift() -> None:
+    """The build job runs the drift gate over the generated manifest and checksums."""
+    build_job = _job(_publish_workflow(), "build")
+    commands = _run_steps(build_job)
+
+    assert "scripts/check_release_artifacts.py" in commands
+    assert "--manifest artifacts/release/awf-install-manifest.json" in commands
+    assert "--checksums-file artifacts/release/python-distribution-sha256.txt" in commands
+    assert "--dist-dir dist" in commands
+
+    # The drift check must run after the manifest is generated.
+    step_names = [str(step.get("name")) for step in _steps(build_job)]
+    assert "Verify release artifact drift" in step_names
+
+
+@pytest.mark.unit
+def test_publish_workflow_has_installer_smoke_job_consuming_release_artifacts() -> None:
+    """A dedicated installer-smoke job consumes the uploaded artifacts and runs install.sh."""
+    workflow = _publish_workflow()
+    jobs = _jobs(workflow)
+    assert {"build", "installer-smoke", "publish"}.issubset(jobs)
+
+    smoke_job = _job(workflow, "installer-smoke")
+    needs = smoke_job.get("needs")
+    needs_set = {needs} if isinstance(needs, str) else set(needs or [])
+    assert "build" in needs_set
+
+    # Downloads the two release artifacts built by the build job.
+    downloaded = {
+        step.get("with", {}).get("name")
+        for step in _steps(smoke_job)
+        if step.get("uses") == "actions/download-artifact@v4"
+    }
+    assert "python-distributions" in downloaded
+    assert "python-distribution-checksums" in downloaded
+
+    # Checks out the repo (for install.sh + scripts) and runs the smoke generator.
+    assert any(
+        str(step.get("uses", "")).startswith("actions/checkout") for step in _steps(smoke_job)
+    )
+    commands = _run_steps(smoke_job)
+    assert "scripts/release_smoke.py" in commands
+    assert "--run" in commands
+    assert "packaging/install.sh" not in commands or "scripts/release_smoke.py" in commands
+
+
+@pytest.mark.unit
+def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> None:
+    """The publish job stays gated on manual dispatch with a non-none target (AC4)."""
+    workflow = _publish_workflow()
+    publish_job = _job(workflow, "publish")
+
+    condition = str(publish_job.get("if", ""))
+    assert "workflow_dispatch" in condition
+    assert "inputs.publish_target != 'none'" in condition
+
+    publish_steps = _steps(publish_job)
+    assert any(
+        step.get("uses") == "pypa/gh-action-pypi-publish@release/v1" for step in publish_steps
+    )
+
+
 @pytest.mark.unit
 def test_publish_workflow_does_not_treat_v_prefixed_branch_as_release_tag() -> None:
     """Manual dispatch from a v-prefixed branch must still use the version tag."""
