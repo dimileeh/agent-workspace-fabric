@@ -964,6 +964,116 @@ def test_mount_ebusy_after_concurrent_mount_reuses_live_overlay(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_mount_ebusy_after_concurrent_mount_pins_actual_base_when_host_changed(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    # First provision establishes a live overlay against base A, then the racing
+    # winner is modelled as killed before its post-mount pin write: ``upper`` is
+    # live on disk and ``base.signature`` is missing when the retry runs.
+    seed_mounter = FakeOverlayMounter(supported=True)
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_race_pin",
+        host_env={},
+        overlay_mounter=seed_mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_race_pin" / "claude"
+    signature_a = _host_claude_signature(host_home)
+    base_a = _shared_claude_base_dir(work_dir, signature_a)
+    (claude_root / "base.signature").unlink()
+
+    # The operator edits ``~/.claude`` before the retry, so a signature recomputed
+    # from the host now names a *different* base than the one the live overlay (the
+    # racing winner's) is actually mounted against.
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+    signature_b = _host_claude_signature(host_home)
+    assert signature_b != signature_a
+
+    class RacingOverlayMounter(FakeOverlayMounter):
+        """The pre-check sees ``merged`` unmounted; our ``mount`` then loses the
+        race to a concurrent provision that wins the mount (against base A) and
+        collides with EBUSY."""
+
+        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
+            # The racing winner's live overlay runs against the original base A,
+            # not the base recomputed from the since-changed host.
+            self.mounts.append(
+                {"lowerdir": base_a, "upperdir": upperdir, "workdir": workdir, "merged": merged}
+            )
+            self.mounted.add(Path(merged))
+            raise OSError("device or resource busy")
+
+    mounter = RacingOverlayMounter(supported=True)
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_race_pin",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The pin records the base the live overlay is *actually* mounted against
+    # (base A recovered from the mount), never the guessed base B from the changed
+    # host — so a later teardown + remount reuses the correct lowerdir instead of
+    # tripping the upper/base mismatch whose failure path ``rmtree``s the agent's
+    # overlay mutations.
+    assert (claude_root / "base.signature").read_text() == signature_a
+    assert base_a != _shared_claude_base_dir(work_dir, signature_b)
+
+
+@pytest.mark.unit
+def test_mount_ebusy_after_concurrent_mount_skips_pin_when_lowerdir_unrecoverable(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    seed_mounter = FakeOverlayMounter(supported=True)
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_race_norecover",
+        host_env={},
+        overlay_mounter=seed_mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_race_norecover" / "claude"
+    (claude_root / "base.signature").unlink()
+
+    class UnrecoverableRacingMounter(FakeOverlayMounter):
+        """Wins the race (overlay live, EBUSY for us) but exposes no lowerdir."""
+
+        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
+            self.mounted.add(Path(merged))
+            raise OSError("device or resource busy")
+
+        def active_lowerdir(self, merged: Path) -> Path | None:
+            return None
+
+    mounter = UnrecoverableRacingMounter(supported=True)
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_race_norecover",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # No pin is guessed when the racing winner's base cannot be recovered; a later
+    # teardown + retry recomputes from the host instead of locking to a guess.
+    assert not (claude_root / "base.signature").exists()
+
+
+@pytest.mark.unit
 def test_transient_mount_failure_preserves_surviving_upper(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"

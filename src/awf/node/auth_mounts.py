@@ -960,6 +960,20 @@ def _prepare_claude_overlay_mount(
             # ``upper``/``work`` here would destroy the winner's writable layer
             # while the overlay stays mounted; reuse the live mount instead,
             # exactly as the idempotent-retry pre-check does.
+            if fresh_signature is not None:
+                # Mirror the idempotent-retry reuse branch: the live overlay was
+                # mounted by the racing winner, which may have been killed before
+                # its post-mount pin write, leaving ``base.signature`` missing
+                # (so ``_pinned_overlay_base`` returned None and a fresh signature
+                # was computed above). That fresh value matches the live overlay's
+                # base only if the host is unchanged; pinning it after an operator
+                # ``~/.claude`` edit would later remount the surviving upper over
+                # the wrong base. Pin the base the live mount is *actually* using —
+                # recovered from the mount — and write nothing if it cannot be
+                # recovered, never a guess from the changed host.
+                pin_signature = _live_overlay_pin_signature(overlay_mounter, merged, work_dir)
+                if pin_signature is not None:
+                    _record_overlay_base_pin(sig_marker, pin_signature, claude_root)
             return (
                 AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
                 upper,
