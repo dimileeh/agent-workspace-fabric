@@ -328,7 +328,13 @@ def _run_client_setup(
     one multi-issue report.
     """
     selected = normalize_clients(clients)
-    env_file = _resolve_client_env_file(source_checkout)
+    try:
+        env_file = _resolve_client_env_file(source_checkout)
+    except SourceCheckoutError as error:
+        # An explicit/persisted source checkout that fails validation must block
+        # with the same reason the readiness flow surfaces instead of writing a
+        # client config diff pointing the MCP server at a non-checkout env file.
+        return _client_source_checkout_blocked_payload(error)
     home = _client_home()
     payloads = [
         setup_client(
@@ -353,16 +359,21 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     Reuses the same source-checkout / packaged-asset resolution ``awf start``
     uses so the registered ``--env-file`` matches the ``docker/compose/.env``
     ``awf start`` / ``awf setup`` actually honor: an explicit ``--source-checkout``
-    pins that checkout's ``docker/compose/.env``; otherwise a previously persisted,
-    still-valid source checkout (revalidated like ``awf start``'s
-    ``_resolve_start_source_checkout``) pins *its* compose env; only with neither
-    does it fall back to the packaged/default ``.env`` from
-    ``resolve_service_compose_paths``. The file is never opened here -- only its
-    path is threaded into the client config -- so a dry-run diff needs no env file
-    on disk and no provider token is ever read.
+    is validated (``validate_source_checkout``, exactly like the readiness flow's
+    ``_resolve_setup_source_checkout``) and pins that checkout's
+    ``docker/compose/.env``; otherwise a previously persisted, still-valid source
+    checkout (revalidated like ``awf start``'s ``_resolve_start_source_checkout``)
+    pins *its* compose env; only with neither does it fall back to the
+    packaged/default ``.env`` from ``resolve_service_compose_paths``. Validating
+    the explicit checkout keeps an invalid or stale path from registering an MCP
+    ``--env-file`` that points at a non-checkout env file ``awf start`` would
+    itself reject; the failure raises ``SourceCheckoutError`` for the caller to
+    surface as a blocked payload. The file is never opened here -- only its path
+    is threaded into the client config -- so a dry-run diff needs no env file on
+    disk and no provider token is ever read.
     """
     if source_checkout is not None:
-        return source_checkout.expanduser() / "docker" / "compose" / ".env"
+        return validate_source_checkout(source_checkout).root / "docker" / "compose" / ".env"
     persisted = _persisted_client_source_checkout()
     if persisted is not None:
         return persisted.root / "docker" / "compose" / ".env"
@@ -391,6 +402,36 @@ def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
         return verified_source_from_metadata(config.source_checkout)
     except SourceCheckoutError:
         return None
+
+
+def _client_source_checkout_blocked_payload(error: SourceCheckoutError) -> FirstRunPayload:
+    """Render a blocked client payload for an invalid/stale source checkout.
+
+    Mirrors the readiness flow's ``_source_checkout_issue`` so the ``--client``
+    path surfaces the same SOURCE_CHECKOUT_INVALID / SOURCE_CHECKOUT_ASSETS_STALE
+    reason, root, and missing markers instead of registering an MCP ``--env-file``
+    under a checkout ``awf start`` would reject.
+    """
+    details: dict[str, Any] = {"check": "source_checkout", "root": str(error.root)}
+    if error.missing_markers:
+        details["missing_markers"] = list(error.missing_markers)
+    for key, value in error.details.items():
+        details.setdefault(key, value)
+    issue = first_run_issue_from_reason_code(
+        error.reason_code,
+        severity="blocked",
+        details=details,
+        problem=error.message,
+    )
+    return first_run_report_payload(
+        command=SETUP_COMMAND,
+        summary="AWF could not resolve the source checkout for MCP client setup.",
+        issues=(issue,),
+        next_steps=(
+            "Fix the reported --source-checkout path above, then re-run "
+            "awf setup --client <client>.",
+        ),
+    )
 
 
 def _combine_client_payloads(

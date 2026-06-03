@@ -19,6 +19,7 @@ from awf.host_setup.source_assets import (
     SOURCE_CHECKOUT_INVALID,
     SOURCE_CHECKOUT_MARKERS,
     SourceCheckoutAssetMetadata,
+    SourceCheckoutError,
     validate_source_checkout,
 )
 from awf.host_setup.system_checks import CommandResult, SetupCheckLevel, SetupCheckResult
@@ -1479,11 +1480,60 @@ def test_setup_mixed_clients_block_when_one_conflicts(client_harness: _ClientHar
 
 
 @pytest.mark.unit
-def test_resolve_client_env_file_uses_source_checkout_when_given(tmp_path: Path) -> None:
-    """Verify an explicit source checkout pins its docker/compose/.env path."""
-    resolved = setup_commands._resolve_client_env_file(tmp_path)
+def test_setup_client_invalid_source_checkout_blocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6GxEYa: an explicit, invalid ``--source-checkout``
+    on the ``--client`` path blocks with SOURCE_CHECKOUT_INVALID instead of emitting a
+    client config diff/write pointing the MCP server at a non-checkout env file."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(setup_commands, "_client_home", lambda: home)
+    empty = tmp_path / "empty-checkout"
+    empty.mkdir()
 
-    assert resolved == tmp_path / "docker" / "compose" / ".env"
+    result = _runner.invoke(
+        app,
+        [
+            "setup",
+            "--client",
+            "claude",
+            "--source-checkout",
+            str(empty),
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == SOURCE_CHECKOUT_INVALID
+    # No client config report/diff was produced for the unvalidated path.
+    assert "clients" not in payload.get("details", {})
+    assert not list(home.rglob("*.json"))
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_uses_source_checkout_when_given(tmp_path: Path) -> None:
+    """Verify an explicit, valid source checkout pins its docker/compose/.env path."""
+    root = _make_source_checkout(tmp_path / "awf")
+    resolved = setup_commands._resolve_client_env_file(root)
+
+    assert resolved == validate_source_checkout(root).root / "docker" / "compose" / ".env"
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_invalid_source_checkout_raises(tmp_path: Path) -> None:
+    """Regression for PRRT_kwDOSJAM6s6GxEYa: an explicit ``--source-checkout`` is
+    validated like the readiness flow, so an invalid path raises instead of pinning
+    an MCP ``--env-file`` under a non-checkout directory."""
+    empty = tmp_path / "empty-checkout"
+    empty.mkdir()
+
+    with pytest.raises(SourceCheckoutError):
+        setup_commands._resolve_client_env_file(empty)
 
 
 @pytest.mark.unit
