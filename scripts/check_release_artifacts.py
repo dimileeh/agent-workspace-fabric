@@ -32,8 +32,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.generate_install_manifest import (
     DEFAULT_PACKAGE,
     ManifestError,
-    _parse_checksums,
-    _validate_checksum_coverage,
     build_manifest,
 )
 
@@ -79,16 +77,6 @@ def check_release_artifacts(
     package = published.get("package", DEFAULT_PACKAGE)
     commit = source.get("commit")
     generated_at = _required_str(published, "generated_at")
-
-    # Independent checksum-coverage assertion: a stale/edited checksum file that
-    # no longer matches the dist set fails here with a precise message even before
-    # the full re-derivation runs.
-    checksums = _parse_checksums(checksums_file)
-    distribution_files = sorted(
-        (path for path in dist_dir.iterdir() if path.is_file()),
-        key=lambda path: path.name,
-    )
-    _validate_checksum_coverage(distribution_files, checksums)
 
     expected = build_manifest(
         dist_dir=dist_dir,
