@@ -58,6 +58,7 @@ _CLAUDE_BASE_DIRNAME = "claude-base"
 # live copy takes so a concurrent provision's in-progress staging dir is never hit.
 _STALE_STAGING_MAX_AGE_SECONDS = 3600.0
 _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
+_CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED"
 _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
 _PROC_SELF_STATUS = Path("/proc/self/status")
@@ -801,9 +802,13 @@ def _record_overlay_base_pin(sig_marker: Path, signature: str, claude_root: Path
     try:
         sig_marker.write_text(signature)
     except OSError as exc:
+        # The overlay is already mounted and correct for this provision; only the
+        # base-signature pin write failed. Use a distinct reason code so this
+        # harmless metadata-write failure is not conflated with an actual
+        # mount-unavailable event when operators grep the logs.
         _log.warning(
-            "claude_auth_overlay_unavailable",
-            reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
+            "claude_auth_overlay_base_pin_write_failed",
+            reason_code=_CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED,
             workspace_auth_root=str(claude_root),
             error=str(exc),
         )

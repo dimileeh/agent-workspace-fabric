@@ -537,7 +537,15 @@ def test_overlay_signature_write_oserror_keeps_live_overlay(
     assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
     assert not (claude_root / ".claude").exists()
     assert not (claude_root / "base.signature").exists()
-    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+    # The mount succeeded, so the failure must surface as a base-pin-write event,
+    # *not* a mount-unavailable one — operators grepping for the latter to diagnose
+    # real mount failures must not see this harmless metadata-write failure.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED"
+        and entry.get("event") == "claude_auth_overlay_base_pin_write_failed"
+        for entry in logs
+    )
+    assert not any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
 
 
 @pytest.mark.unit
