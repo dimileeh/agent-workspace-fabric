@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,21 @@ from typer.testing import CliRunner
 from awf.cli.main import app
 
 _runner = CliRunner()
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI SGR color codes from help output.
+
+    Rich auto-enables color under CI (it detects GitHub Actions), and it styles
+    each segment of an option flag separately — so ``--mocked-local`` renders as
+    ``-`` ``-mocked`` ``-local`` with escape codes wedged between the pieces. A
+    raw substring check then fails in CI while passing locally (no color). Strip
+    the styling so assertions see the literal flag text the help advertises.
+    """
+    return _ANSI_ESCAPE.sub("", text)
+
 
 _MOCK_SETTINGS = SimpleNamespace(
     api_base_url="http://localhost:8000",
@@ -195,8 +211,9 @@ class TestSmokeRunCommand:
         """
         result = _runner.invoke(app, ["smoke", "run", "--help"])
         assert result.exit_code == 0
-        lowered = result.stdout.lower()
-        assert "--mocked-local" in result.stdout
+        plain = _strip_ansi(result.stdout)
+        lowered = plain.lower()
+        assert "--mocked-local" in plain
         assert "without" in lowered
         # No provider token or GitHub authority is required for the local proof.
         assert "token" in lowered or "github" in lowered
