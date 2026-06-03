@@ -22,6 +22,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      manifest_generated: ${{ steps.build.outputs.manifest_generated }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -38,6 +40,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Build wheel and sdist
+        id: build
         run: |
           uv venv --python 3.12
           uv pip install build
@@ -71,6 +74,15 @@ jobs:
             echo "AWF_RELEASE_VERSION=${VERSION}"
             echo "AWF_RELEASE_TAG=${TAG}"
           } >> "${GITHUB_ENV}"
+          # Signal whether a manifest was generated for this ref. On non-release
+          # refs generate_install_manifest.py SKIPs and removes the --output
+          # manifest, so downstream jobs (installer-smoke) must not run without
+          # it. The checksum file alone is not enough to satisfy release_smoke.py.
+          if [[ -f artifacts/release/awf-install-manifest.json ]]; then
+            echo "manifest_generated=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "manifest_generated=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Verify release artifact drift
         run: |
@@ -108,6 +120,10 @@ jobs:
 
   installer-smoke:
     needs: build
+    # Only run when the build job actually produced a manifest. On non-release
+    # refs the manifest is intentionally skipped/removed, and release_smoke.py
+    # hard-fails without it — so guard the whole job rather than fail spuriously.
+    if: ${{ needs.build.outputs.manifest_generated == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

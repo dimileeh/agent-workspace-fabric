@@ -136,6 +136,37 @@ def test_publish_workflow_has_installer_smoke_job_consuming_release_artifacts() 
 
 
 @pytest.mark.unit
+def test_publish_workflow_installer_smoke_guarded_on_generated_manifest() -> None:
+    """installer-smoke must skip when the build job did not produce a manifest.
+
+    On non-release refs ``generate_install_manifest.py`` SKIPs and removes the
+    manifest while the checksum file survives, so the upload still succeeds.
+    ``release_smoke.py`` hard-fails without the manifest, so the job has to be
+    gated on a build-job output rather than run unconditionally.
+    """
+    workflow = _publish_workflow()
+    build_job = _job(workflow, "build")
+
+    # The build job exposes a manifest_generated output wired from the build step.
+    outputs = build_job.get("outputs", {})
+    assert isinstance(outputs, dict)
+    assert "manifest_generated" in outputs
+
+    build_step = _step_named(build_job, "Build wheel and sdist")
+    assert build_step.get("id") == "build"
+    assert str(outputs["manifest_generated"]) == ("${{ steps.build.outputs.manifest_generated }}")
+
+    build_commands = _run_steps(build_job)
+    assert 'echo "manifest_generated=true" >> "${GITHUB_OUTPUT}"' in build_commands
+    assert 'echo "manifest_generated=false" >> "${GITHUB_OUTPUT}"' in build_commands
+
+    # The installer-smoke job only runs when a manifest was generated.
+    smoke_job = _job(workflow, "installer-smoke")
+    condition = str(smoke_job.get("if", ""))
+    assert "needs.build.outputs.manifest_generated == 'true'" in condition
+
+
+@pytest.mark.unit
 def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> None:
     """The publish job stays gated on manual dispatch with a non-none target (AC4)."""
     workflow = _publish_workflow()
