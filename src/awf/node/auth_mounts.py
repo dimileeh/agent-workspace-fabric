@@ -522,6 +522,25 @@ class _ClaudeAuthResult:
     extra_chown_paths: tuple[Path, ...] = ()
 
 
+def _overlay_upper_has_data(upper: Path) -> bool:
+    """True when a surviving overlay ``upper`` carries agent mutations.
+
+    The first overlay attempt creates an empty ``upper`` before mounting; a failed
+    mount leaves that empty dir on disk while provisioning falls back to the legacy
+    full copy (which the agent then mutates). An empty leftover therefore must not
+    masquerade as a real overlay and shadow the mutated legacy copy. Only an
+    ``upper`` with at least one entry — the writable layer of a previously mounted
+    overlay — counts as real overlay data.
+    """
+
+    try:
+        return any(upper.iterdir())
+    except OSError:
+        # Missing dir (a pure legacy/no-overlay workspace) or an unreadable one:
+        # treat as no overlay data so the legacy-copy guard stays in force.
+        return False
+
+
 def _prepare_isolated_claude_auth(
     *,
     host_home: Path,
@@ -554,19 +573,27 @@ def _prepare_isolated_claude_auth(
         # for the overlay when no legacy copy exists — otherwise keep using that
         # copy.
         #
-        # Exception: a surviving overlay ``upper`` overrides that guard. A
-        # transient remount failure preserves ``upper``/``work`` on disk but still
+        # Exception: a surviving *non-empty* overlay ``upper`` overrides that guard.
+        # A transient remount failure preserves ``upper``/``work`` on disk but still
         # degrades this provision to a *fresh* legacy copy (no mutations). Without
         # this override the next retry would see that fresh copy, skip the overlay
         # forever, and strand the agent's real mutations in the unremounted
-        # ``upper``. ``upper`` exists only for overlay-backed workspaces (a pure
-        # legacy copy never has one), so its presence safely distinguishes "remount
-        # the surviving overlay" from "preserve a real legacy copy". The overlay
-        # mount, when it succeeds, takes precedence over the stale legacy copy.
+        # ``upper``. A non-empty ``upper`` exists only for overlay-backed workspaces
+        # (a pure legacy copy never has one), so its presence safely distinguishes
+        # "remount the surviving overlay" from "preserve a real legacy copy". The
+        # overlay mount, when it succeeds, takes precedence over the stale legacy
+        # copy.
+        #
+        # The ``upper`` must be *non-empty* to override: the first overlay attempt
+        # creates an empty ``upper`` before the mount, and if that mount fails the
+        # empty dir is left behind while the fallback legacy copy is what the agent
+        # actually mutates. Treating that empty leftover as a real overlay would
+        # mount it over a fresh shared base and silently shadow the mutated legacy
+        # copy. So only a ``upper`` carrying real overlay data bypasses the guard.
         overlay_upper = target_root / "upper"
         overlay = (
             None
-            if legacy_claude_copy.exists() and not overlay_upper.exists()
+            if legacy_claude_copy.exists() and not _overlay_upper_has_data(overlay_upper)
             else _prepare_claude_overlay_mount(
                 host_home=host_home,
                 claude_root=target_root,

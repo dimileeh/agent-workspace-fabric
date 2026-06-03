@@ -811,6 +811,53 @@ def test_retry_after_transient_fallback_remounts_surviving_upper(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_empty_surviving_upper_does_not_shadow_mutated_legacy_copy(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    # Provision 1: the very first overlay attempt fails its mount, so ``upper`` is
+    # created on disk but never goes live — it stays *empty*. Provisioning degrades
+    # to a fresh legacy ``.claude`` copy, which the agent then mutates.
+    mounter = FakeOverlayMounter(supported=True, mount_error=OSError("transient mount failure"))
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_empty_upper",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_empty_upper" / "claude"
+    # An empty leftover upper survives alongside the mutated legacy copy.
+    assert (claude_root / "upper").is_dir()
+    assert not any((claude_root / "upper").iterdir())
+    legacy_copy = claude_root / ".claude" / "settings.json"
+    assert legacy_copy.read_text() == '{"theme": "dark"}\n'
+    legacy_copy.write_text('{"theme": "agent-edited"}\n')
+
+    # Provision 2: the mount works again. The empty surviving ``upper`` carries no
+    # agent data, so it must NOT override the legacy-copy guard and shadow the
+    # mutated legacy copy behind a fresh shared-base overlay. The legacy copy (with
+    # the agent's mutations) must keep serving auth.
+    mounter._mount_error = None
+    mounter.mounted.clear()
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_empty_upper",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    # Auth keeps pointing at the legacy copy; no overlay is mounted over the empty
+    # upper, so the agent's mutations are not hidden.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert mounter.mounts == []
+    assert legacy_copy.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
 def test_prepin_upper_mount_failure_does_not_pin_guessed_base(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
