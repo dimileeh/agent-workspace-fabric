@@ -406,8 +406,13 @@ class GitManager:
                     # directory and its contents are still on disk; ``worktree
                     # prune`` below only clears metadata for *missing* dirs and
                     # would leave the disk space behind. Reclaim it ourselves so
-                    # GC actually frees the space it reports as reclaimed.
-                    await asyncio.to_thread(shutil.rmtree, worktree_path, ignore_errors=True)
+                    # GC actually frees the space it reports as reclaimed. We must
+                    # NOT swallow genuine deletion failures (e.g. permission
+                    # errors): if rmtree fails the directory is still on disk, and
+                    # callers like ``WorkspaceCleanupService.cleanup_workspace``
+                    # rely on a raised error to record the step as partial/failed
+                    # instead of falsely reporting removal success.
+                    await asyncio.to_thread(self._reclaim_stale_worktree, worktree_path)
                     _log.info(
                         "worktree.remove.already_gone",
                         workspace_id=workspace_id,
@@ -434,6 +439,29 @@ class GitManager:
         return result.stdout.strip()
 
     # ── Internals ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _reclaim_stale_worktree(worktree_path: Path) -> None:
+        """Delete a leftover worktree directory, surfacing genuine failures.
+
+        Runs in a worker thread. A concurrent remover may win the race and
+        delete the directory first; that already-gone case is success. Any
+        other ``OSError`` (permissions, read-only filesystem) means the disk
+        space was *not* reclaimed, so we raise ``GitOperationError`` to keep
+        cleanup honest rather than silently leaking the directory.
+        """
+        try:
+            shutil.rmtree(worktree_path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise GitOperationError(
+                operation="worktree.remove",
+                returncode=1,
+                stdout="",
+                stderr=f"failed to reclaim stale worktree dir {worktree_path}: {exc}",
+                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            ) from exc
 
     def _mirror_path(self, repo_url: str) -> Path:
         """Derive a filesystem-safe mirror name from the repo URL.

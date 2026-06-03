@@ -917,6 +917,43 @@ class TestRemoveWorktree:
         assert not worktree_path.exists()
 
     @pytest.mark.unit
+    async def test_stale_dir_reclaim_failure_propagates(
+        self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``git worktree remove`` reports the path is not a working tree, so the
+        # rmtree fallback is responsible for reclaiming the directory. If that
+        # deletion genuinely fails (e.g. a permission error), the failure must
+        # surface as a ``GitOperationError`` rather than being swallowed — else
+        # callers record removal success while the directory leaks on disk.
+        await manager.ensure_mirror(str(origin_repo))
+        worktree_path = manager._worktrees_dir / "ws_rmfail"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / "leftover.txt").write_text("stale\n")
+
+        async def _stale_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            if operation == "worktree.remove":
+                raise GitOperationError(
+                    operation=operation,
+                    returncode=1,
+                    stdout="",
+                    stderr=f"fatal: '{worktree_path}' is not a working tree",
+                )
+            raise AssertionError(f"unexpected operation {operation}")
+
+        manager._run = _stale_run  # type: ignore[method-assign]
+
+        def _boom(path: Path) -> None:
+            raise PermissionError(f"cannot remove {path}")
+
+        monkeypatch.setattr("awf.node.git_manager.shutil.rmtree", _boom)
+
+        with pytest.raises(GitOperationError) as excinfo:
+            await manager.remove_worktree(workspace_id="ws_rmfail", repo_url=str(origin_repo))
+        assert excinfo.value.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
+        # The directory is still on disk; the failure was reported, not hidden.
+        assert worktree_path.exists()
+
+    @pytest.mark.unit
     async def test_genuine_remove_error_still_raises(
         self, manager: GitManager, origin_repo: Path
     ) -> None:
