@@ -729,6 +729,47 @@ def test_github_invalid_env_token_overwrites_prior_ready_config(tmp_path: Path) 
     assert _FAKE_GH_TOKEN not in json.dumps(config.providers["github"].model_dump())
 
 
+@pytest.mark.unit
+def test_github_env_ref_removed_degrades_prior_ready_config(tmp_path: Path) -> None:
+    """Removing the env var behind a ready GitHub env ref must degrade it on recheck.
+
+    A prior run marked GitHub ready via an ``env://NAME`` ref. The operator then
+    removes that env var and ``gh`` cannot confirm auth, so this recheck finds no
+    visible token. The summary must report unavailable and persist that change,
+    mirroring the agent-provider path — not leave the stale ready entry on disk.
+    """
+    existing = ProviderConfig(
+        credential_ref="env://GH_TOKEN",
+        backend="env_ref",
+        status="ready",
+        source="env",
+    )
+    base = HostSetupConfig(providers={"github": existing})
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["github"],
+        config=base,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        run_subprocess=_SubprocessSpy(raise_exc=FileNotFoundError("gh")),
+        http_get=_unexpected_http,
+    )
+
+    github = summary.result_for("github")
+    assert github is not None
+    assert github.status == "unavailable"
+    assert github.reason_code == "GITHUB_ENV_REF_MISSING"
+    assert github.configured is True
+    assert github.rechecked is True
+    # The persisted config must agree with the summary, not retain the stale ready
+    # entry; the safe ref itself is retained.
+    assert config.providers["github"].status == "unavailable"
+    assert config.providers["github"].backend == "env_ref"
+    assert config.providers["github"].credential_ref == "env://GH_TOKEN"
+
+
 # --- AWF Cloud stub -------------------------------------------------------
 
 

@@ -345,6 +345,7 @@ def _orchestrate_one(
             return _orchestrate_github(
                 spec,
                 environ=environ,
+                config=config,
                 non_interactive=non_interactive,
                 capabilities=capabilities,
                 run_subprocess=run_subprocess,
@@ -371,6 +372,7 @@ def _orchestrate_github(
     spec: ProviderSpec,
     *,
     environ: dict[str, str],
+    config: HostSetupConfig,
     non_interactive: bool,
     capabilities: HostCredentialCapabilities,
     run_subprocess: SubprocessRun,
@@ -439,6 +441,15 @@ def _orchestrate_github(
             provider_config,
         )
 
+    existing = config.providers.get(spec.name)
+    if existing is not None:
+        # No visible token and ``gh`` could not confirm auth, but a prior run
+        # persisted a GitHub entry (always an ``env://`` ref — GitHub never stores
+        # a raw token). Route it through the shared helper so a stale ``ready`` env
+        # ref is degraded to ``unavailable`` and re-persisted, mirroring the
+        # agent-provider path; without this the not-configured (config=None) return
+        # would leave the old ready entry on disk, disagreeing with this recheck.
+        return _preserved_existing_result(spec, existing)
     return _not_configured_result(spec, non_interactive=non_interactive)
 
 
