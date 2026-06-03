@@ -19,6 +19,7 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
+    VALIDATION_WORKTREE_STATUS_FAILED,
     cleanup_validation_worktree_side_effects,
 )
 
@@ -466,3 +467,73 @@ async def test_cleanup_keeps_artifact_when_validation_transiently_unignored_it(
     assert venv_file.read_text(encoding="utf-8") == "pre-existing ignored\n"
     # Cleanup never force-deletes ignored files (no `-x`).
     assert not any("-ffdx" in " ".join(args) for args in commands)
+
+
+@pytest.mark.unit
+async def test_cleanup_keeps_empty_dir_when_validation_transiently_unignored_it(
+    tmp_path: Path,
+) -> None:
+    """Regression (#362 P2): an empty directory that validation transiently
+    un-ignored (by editing the tracked `.gitignore`) must not be `rmdir`'d by the
+    empty-dir cleanup once the ignore rules are restored. The cleanup set is
+    recomputed from the post-restore status, so the re-ignored empty dir never
+    becomes a cleanup candidate.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="cache/\n")
+    cache_dir = worktree / "cache"
+    cache_dir.mkdir()  # empty, ignored directory
+    # Validation edits the TRACKED .gitignore so cache/ is transiently un-ignored.
+    (worktree / ".gitignore").write_text("# transiently cleared\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree, commands),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    # .gitignore restored; the re-ignored empty dir is left in place (not rmdir'd).
+    assert (worktree / ".gitignore").read_text(encoding="utf-8") == "cache/\n"
+    assert cache_dir.exists() and cache_dir.is_dir()
+
+
+@pytest.mark.unit
+async def test_cleanup_surfaces_status_failure_from_post_restore_recheck(
+    tmp_path: Path,
+) -> None:
+    """When a restored `.gitignore` triggers the post-restore recheck and that
+    `git status` fails, cleanup surfaces VALIDATION_WORKTREE_STATUS_FAILED rather
+    than proceeding with a stale cleanup set.
+    """
+    worktree = _init_fake_worktree(tmp_path)
+    restore_ref = "a" * 40
+    status_calls = 0
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Pre-restore reports a tracked .gitignore edit; the recheck status fails."""
+        nonlocal status_calls
+        if args == list(_VALIDATION_STATUS_ARGS):
+            status_calls += 1
+            if status_calls == 1:
+                return _CommandResultLike(0, " M .gitignore\n", None)
+            return _CommandResultLike(1, None, "fatal: status failed")
+        if args[:2] == list(_VALIDATION_RESTORE_PREFIX):
+            return _CommandResultLike(0, "", None)
+        if args == ["rev-parse", restore_ref]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        if args == ["rev-parse", "HEAD"]:
+            return _CommandResultLike(0, f"{restore_ref}\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=run_git,
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert cleanup.cleaned is False
+    assert status_calls == 2

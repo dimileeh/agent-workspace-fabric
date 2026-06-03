@@ -580,10 +580,40 @@ async def cleanup_validation_worktree_side_effects(
                 )
             )
 
-    # ``check`` ran with ``ignore_all_ignored=True``, so ``check.untracked_paths``
-    # already excludes everything git currently reports as ignored. The cleanup
-    # set is therefore exactly the untracked, non-ignored side effects.
-    cleanup_untracked_paths = _collapse_descendant_cleanup_paths(list(check.untracked_paths))
+    # By default the pre-restore ``check`` (run with ``ignore_all_ignored=True``)
+    # already gives exactly the untracked, non-ignored side effects. The one case
+    # where it can be stale is when the tracked restore above just restored a
+    # ``.gitignore`` that validation transiently edited: a path that was
+    # un-ignored at check time may be ignored again now. Only then do we recompute
+    # the cleanup set from a POST-restore status, so a re-ignored path is excluded
+    # from both ``git clean`` and the empty-dir cleanup below (honoring the
+    # "never police ignored paths" contract) without paying an extra status call
+    # on every cleanup.
+    restored_a_gitignore = any(
+        path == ".gitignore" or path.endswith("/.gitignore") for path in tracked_paths
+    )
+    if restored_a_gitignore:
+        post_restore_check = await check_validation_worktree_clean(
+            run_git=run_git,
+            worktree_path=worktree_path,
+            ignore_all_ignored=True,
+        )
+        if post_restore_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+            return await _return_after_head_verification(
+                ValidationWorktreeCleanup(
+                    cleaned=False,
+                    check=check,
+                    restore_ref=restore_ref,
+                    reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                    message=post_restore_check.message,
+                )
+            )
+        cleanup_source = post_restore_check
+    else:
+        cleanup_source = check
+    cleanup_untracked_paths = _collapse_descendant_cleanup_paths(
+        list(cleanup_source.untracked_paths)
+    )
     cleaned_paths = tuple(dict.fromkeys((*tracked_paths, *cleanup_untracked_paths)))
     if restore_ref is None and cleanup_untracked_paths:
         return ValidationWorktreeCleanup(
@@ -620,8 +650,9 @@ async def cleanup_validation_worktree_side_effects(
                     cleanup_stderr=(clean.stderr or "")[:1000],
                 )
             )
-        # Only non-ignored cleanup paths exist here, so no ignored parent dirs
-        # can be implicated; an empty ignored set keeps every parent eligible.
+        # ``cleanup_untracked_paths`` was recomputed from the POST-restore status,
+        # so it already excludes anything git now reports as ignored. No ignored
+        # parent dir can be implicated, so an empty ignored set is correct here.
         failed_empty_untracked_dirs = _cleanup_empty_untracked_parent_dirs(
             worktree_path=worktree_path,
             cleanup_paths=tuple(cleanup_untracked_paths),
