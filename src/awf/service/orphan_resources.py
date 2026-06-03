@@ -48,7 +48,15 @@ ORPHAN_REAP_OK = "ORPHAN_REAP_OK"
 ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 
 # (project_name, compose_file, workspace_id) -> teardown outcome.
-OrphanComposeTeardown = Callable[[str, Path, str], Awaitable[ComposeTeardownOutcome]]
+#
+# Distinct from :data:`gc_reconcile.OrphanComposeTeardown`, which is
+# ``Callable[[OrphanDirTarget], ...]``. The two are deliberately *not*
+# interchangeable: gc_reconcile's reaper works from scanned ``OrphanDirTarget``
+# records, whereas this resource-level reaper already holds the explicit
+# ``(project_name, compose_file, workspace_id)`` triple. The differing name
+# makes the incompatibility explicit rather than letting a same-named alias
+# imply the closures are swappable.
+OrphanResourceComposeTeardown = Callable[[str, Path, str], Awaitable[ComposeTeardownOutcome]]
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "terminal", "missing", "unknown"]
@@ -697,7 +705,7 @@ class OrphanReapResult:
         }
 
 
-def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanComposeTeardown:
+def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanResourceComposeTeardown:
     """Volume-removing compose-teardown closure over a ``ComposeManager`` (WS-B1 path)."""
 
     async def _teardown(
@@ -757,7 +765,7 @@ async def reap_classified_orphans(
     summary: OrphanResourceSummary,
     *,
     work_dir: Path | str,
-    compose_teardown: OrphanComposeTeardown,
+    compose_teardown: OrphanResourceComposeTeardown,
     enabled: bool,
     now: float | None = None,
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
