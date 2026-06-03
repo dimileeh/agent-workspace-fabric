@@ -5,22 +5,17 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
-import traceback
 from collections.abc import Mapping
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, NoReturn, cast
 from uuid import uuid4
 
 import httpx
 import typer
 import typer.rich_utils as typer_rich_utils
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.node.companion_images import run_companion_image_prune
-from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 
 # Re-exported for callers/tests that still drive the companion-image prune via
 # the CLI helper namespace; the implementation lives in ``node.companion_images``
@@ -163,152 +158,6 @@ def _control_headers(
     if if_match is not None:
         headers["If-Match"] = if_match
     return headers
-
-
-def _run_terminal_workspace_compose_teardown(
-    candidate: Any,
-) -> WorkspaceGCComposeTeardownResult:
-    """Tear down the compose stack for a terminal workspace candidate.
-
-    This keeps the `service gc` cleanup command consistent with operational
-    expectations when a terminal workspace is being removed.
-    """
-    compose_file = getattr(candidate, "compose", None)
-    compose_path = None if compose_file is None else getattr(compose_file, "path", None)
-    candidate_compose_file_path = getattr(candidate, "compose_file_path", None)
-    workspace_id = getattr(candidate, "workspace_id", None)
-    compose_project_name = getattr(candidate, "compose_project_name", None)
-    compose_project_name = compose_project_name if isinstance(compose_project_name, str) else None
-    compose_file_path = (
-        candidate_compose_file_path.expanduser()
-        if isinstance(candidate_compose_file_path, Path)
-        else (
-            Path(candidate_compose_file_path).expanduser()
-            if isinstance(candidate_compose_file_path, str)
-            else compose_path
-        )
-    )
-    if not isinstance(compose_file_path, Path) or not isinstance(workspace_id, str):
-        return WorkspaceGCComposeTeardownResult(
-            status="failed",
-            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-            error="candidate had unexpected workspace_id/compose shape",
-        )
-    if not compose_file_path.exists():
-        return WorkspaceGCComposeTeardownResult(
-            status="skipped",
-            reason_code="NO_COMPOSE_STACK",
-        )
-    if compose_file_path.is_dir():
-        candidate_compose_paths = (
-            compose_file_path / "compose.yml",
-            compose_file_path / "compose.yaml",
-            compose_file_path / "docker-compose.yml",
-            compose_file_path / "docker-compose.yaml",
-        )
-        compose_file_path = next(
-            (path for path in candidate_compose_paths if path.exists()),
-            None,
-        )
-        if compose_file_path is None:
-            return WorkspaceGCComposeTeardownResult(
-                status="failed",
-                reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-                error="compose stack file not found",
-            )
-    compose_name = compose_project_name or f"awf_{workspace_id}"
-
-    command = [
-        "docker",
-        "compose",
-        "-p",
-        compose_name,
-        "-f",
-        str(compose_file_path),
-        "down",
-        "--remove-orphans",
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired:
-        return WorkspaceGCComposeTeardownResult(
-            status="failed",
-            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-            error="docker compose down timed out after 60s",
-        )
-    except OSError as exc:
-        return WorkspaceGCComposeTeardownResult(
-            status="failed",
-            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-            error=str(exc),
-        )
-    if result.returncode == 0:
-        return WorkspaceGCComposeTeardownResult(
-            status="succeeded",
-            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
-        )
-    return WorkspaceGCComposeTeardownResult(
-        status="failed",
-        reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-        error=(result.stderr or result.stdout or "docker compose down failed")[:1000],
-    )
-
-
-async def _run_terminal_workspace_worktree_remove(
-    candidate: Any,
-    *,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> WorkspaceGCWorktreeRemoveResult:
-    """Remove the git worktree for a terminal workspace candidate.
-
-    This keeps the ``service gc`` cleanup command consistent with operational
-    expectations: the GC path calls ``git worktree remove`` before issuing
-    ``shutil.rmtree``, so stale worktree metadata in the bare mirror is
-    cleaned up atomically.
-
-    The caller must provide a shared ``session_factory`` so that a batch GC
-    run does not open and close a fresh connection pool per candidate.
-    """
-    from awf.db.models import Workspace as WsModel
-    from awf.node.git_manager import GitManager
-    from awf.service.config import resolve_service_settings
-
-    workspace_id = getattr(candidate, "workspace_id", None)
-    if not isinstance(workspace_id, str):
-        return WorkspaceGCWorktreeRemoveResult(
-            status="skipped",
-            reason_code="NO_WORKSPACE_ID",
-        )
-    async with session_factory() as session:
-        workspace = await session.get(WsModel, workspace_id)
-    if workspace is None or not workspace.repo_url:
-        return WorkspaceGCWorktreeRemoveResult(
-            status="skipped",
-            reason_code="NO_REPO_URL",
-        )
-    settings = resolve_service_settings()
-    git_manager = GitManager(Path(settings.work_dir).expanduser().resolve() / "git")
-    try:
-        await git_manager.remove_worktree(
-            workspace_id=workspace_id,
-            repo_url=workspace.repo_url,
-        )
-        return WorkspaceGCWorktreeRemoveResult(
-            status="succeeded",
-            reason_code="WORKTREE_REMOVE_SUCCEEDED",
-        )
-    except Exception as exc:
-        return WorkspaceGCWorktreeRemoveResult(
-            status="failed",
-            reason_code="GIT_WORKTREE_REMOVE_FAILED",
-            error="".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[:1000],
-        )
 
 
 def _emit(payload: object, fmt: OutputFormat) -> None:
