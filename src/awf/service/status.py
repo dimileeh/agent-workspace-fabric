@@ -447,10 +447,15 @@ def _orphan_resources_check_payload(
     payload["reason"] = _orphan_resources_reason(payload.get("reason"))
     if "resource_counts" in payload:
         payload.setdefault("counts_by_kind", payload["resource_counts"])
-    payload["cleanup_readiness"] = _orphan_resources_cleanup_readiness(
+    cleanup_readiness = _orphan_resources_cleanup_readiness(
         payload,
         auto_cleanup_orphans=auto_cleanup_orphans,
     )
+    payload["cleanup_readiness"] = cleanup_readiness
+    if auto_cleanup_orphans and payload.get("orphan_count"):
+        # Keep the top-level action consistent with the reaping-aware readiness
+        # action so the two never disagree on the same check payload.
+        payload["action"] = cleanup_readiness["action"]
     return payload
 
 
@@ -558,6 +563,13 @@ def _runtime_workspaces_from_view(
     return tuple(by_id[workspace_id] for workspace_id in sorted(by_id))
 
 
+ORPHAN_REAPING_ACTION = (
+    "Reaping is enabled (auto_cleanup_orphans): the worker will tear down the "
+    "listed orphaned AWF stacks and remove their worktrees automatically; no "
+    "manual cleanup is required."
+)
+
+
 def _orphan_resources_reason(reason: object) -> str:
     if reason == "ORPHANS_PRESENT":
         return "ORPHAN_RESOURCES_PRESENT"
@@ -575,13 +587,20 @@ def _orphan_resources_cleanup_readiness(
     # idle/unavailable branches stay report-only so operators are not told the
     # worker will act when no orphans are present or detection degraded.
     if bool(payload.get("orphan_count")):
+        if auto_cleanup_orphans:
+            # Do not forward the legacy "run manual cleanup" action: with reaping
+            # enabled the worker tears the orphans down itself, so a manual-cleanup
+            # action would contradict ``dry_run_only`` being False.
+            orphan_action: str = ORPHAN_REAPING_ACTION
+        elif isinstance(action, str) and action:
+            orphan_action = action
+        else:
+            orphan_action = "Review the listed AWF resources before running cleanup."
         return {
             "ready": False,
             "status": "blocked",
             "reason": reason,
-            "action": action
-            if isinstance(action, str) and action
-            else "Review the listed AWF resources before running cleanup.",
+            "action": orphan_action,
             "dry_run_only": not auto_cleanup_orphans,
         }
     if payload.get("status") == "ok":

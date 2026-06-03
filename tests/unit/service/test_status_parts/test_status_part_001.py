@@ -1170,6 +1170,58 @@ def test_orphan_resources_check_payload_threads_auto_cleanup_flag() -> None:
 
 
 @pytest.mark.unit
+def test_orphan_resources_check_payload_aligns_action_with_reaping() -> None:
+    # The legacy ``action`` from ``to_check_payload`` tells operators to run a
+    # manual cleanup path. When reaping is enabled the worker reaps the orphans
+    # itself, so neither the top-level action nor the readiness action may keep
+    # pointing operators at manual cleanup while ``dry_run_only`` is False.
+    legacy_action = (
+        "Inspect the listed resources, then use the existing explicit workspace "
+        "cleanup or service GC path after confirming no active workspace owns them."
+    )
+    payload = _orphan_resources_check_payload(
+        {
+            "ok": False,
+            "status": "fail",
+            "reason": "ORPHANS_PRESENT",
+            "orphan_count": 1,
+            "action": legacy_action,
+        },
+        auto_cleanup_orphans=True,
+    )
+
+    readiness = payload["cleanup_readiness"]
+    assert readiness["dry_run_only"] is False
+    assert readiness["action"] != legacy_action
+    assert "auto_cleanup_orphans" in readiness["action"]
+    # Readiness and the top-level action must not disagree on the same payload.
+    assert payload["action"] == readiness["action"]
+
+
+@pytest.mark.unit
+def test_orphan_resources_check_payload_keeps_legacy_action_without_reaping() -> None:
+    legacy_action = (
+        "Inspect the listed resources, then use the existing explicit workspace "
+        "cleanup or service GC path after confirming no active workspace owns them."
+    )
+    payload = _orphan_resources_check_payload(
+        {
+            "ok": False,
+            "status": "fail",
+            "reason": "ORPHANS_PRESENT",
+            "orphan_count": 1,
+            "action": legacy_action,
+        },
+        auto_cleanup_orphans=False,
+    )
+
+    readiness = payload["cleanup_readiness"]
+    assert readiness["dry_run_only"] is True
+    assert readiness["action"] == legacy_action
+    assert payload["action"] == legacy_action
+
+
+@pytest.mark.unit
 def test_service_status_reports_stranded_active_workspaces(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
         _container(
