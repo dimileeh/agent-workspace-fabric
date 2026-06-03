@@ -1031,7 +1031,6 @@ async def _delete_gc_plan_paths(
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
     worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] = {}
     for candidate in plan.candidates:
-        await asyncio.to_thread(_unmount_candidate_auth_overlay, candidate, work_dir=plan.work_dir)
         teardown = await _run_compose_teardown(candidate, compose_teardown)
         if teardown is not None:
             compose_teardowns[candidate.workspace_id] = teardown
@@ -1058,6 +1057,16 @@ async def _delete_gc_plan_paths(
                         )
                     )
                 continue
+        # Unmount the Claude auth overlay only *after* the compose stack is torn
+        # down. While the agent container is up it bind-mounts the overlay
+        # ``merged`` dir, so a pre-teardown umount fails ``EBUSY`` (and is swallowed
+        # by ``_unmount_candidate_auth_overlay``); nothing would retry it before the
+        # auth-dir ``rmtree`` below, stranding the still-mounted overlay. Teardown
+        # stops the container first, so the umount here releases the mount and the
+        # auth dir can be removed. When teardown failed above we ``continue`` without
+        # reaching here — the stack is still up and no paths are deleted, so there is
+        # nothing to strand.
+        await asyncio.to_thread(_unmount_candidate_auth_overlay, candidate, work_dir=plan.work_dir)
         wt_remove = await _run_worktree_remove(candidate, worktree_remover)
         if wt_remove is not None:
             worktree_removes[candidate.workspace_id] = wt_remove

@@ -314,6 +314,103 @@ async def test_service_gc_unmounts_auth_overlay_before_removing_auth_dir(
 
 
 @pytest.mark.unit
+async def test_service_gc_unmounts_auth_overlay_after_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # While the agent container is up it bind-mounts the overlay ``merged`` dir, so
+    # a pre-teardown umount fails EBUSY and the auth dir is stranded. The overlay
+    # unmount must therefore run *after* the compose stack is torn down (which stops
+    # the container), so the umount succeeds before the auth-dir removal.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    compose_slug = "stored"
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
+        pr=True,
+        pr_merge_sha="d" * 40,
+    )
+    _write(work_dir / "compose" / compose_slug / "compose.yml", "compose")
+    _write(work_dir / "auth" / workspace_id / "claude" / "merged" / "settings.json", "{}")
+
+    events: list[str] = []
+
+    async def _compose_teardown(_candidate: object) -> WorkspaceGCComposeTeardownResult:
+        events.append("teardown")
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    teardown = Mock(side_effect=lambda **_kw: events.append("unmount"))
+
+    with patch("awf.node.auth_mounts.teardown_workspace_auth_overlay", teardown):
+        result = await run_terminal_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            min_age_hours=24,
+            execute=True,
+            now=now,
+            compose_teardown=_compose_teardown,
+        )
+
+    assert result.status == "succeeded"
+    # The compose stack is torn down before the overlay is unmounted.
+    assert events == ["teardown", "unmount"]
+    assert not (work_dir / "auth" / workspace_id).exists()
+
+
+@pytest.mark.unit
+async def test_service_gc_skips_overlay_unmount_when_compose_teardown_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A failed compose teardown means the container is still up and no paths are
+    # deleted, so there is nothing to strand: the overlay unmount (which would fail
+    # EBUSY against the live container anyway) is skipped entirely.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    compose_slug = "stored"
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
+        pr=True,
+        pr_merge_sha="e" * 40,
+    )
+    _write(work_dir / "compose" / compose_slug / "compose.yml", "compose")
+    _write(work_dir / "auth" / workspace_id / "claude" / "merged" / "settings.json", "{}")
+
+    async def _compose_teardown(_candidate: object) -> WorkspaceGCComposeTeardownResult:
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+            error="network still in use",
+        )
+
+    teardown = Mock()
+
+    with patch("awf.node.auth_mounts.teardown_workspace_auth_overlay", teardown):
+        result = await run_terminal_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            min_age_hours=24,
+            execute=True,
+            now=now,
+            compose_teardown=_compose_teardown,
+        )
+
+    assert result.status == "partial"
+    teardown.assert_not_called()
+    # Paths are preserved for a later retry rather than stranded.
+    assert (work_dir / "auth" / workspace_id).exists()
+
+
+@pytest.mark.unit
 async def test_service_gc_swallows_and_logs_overlay_unmount_failure(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
