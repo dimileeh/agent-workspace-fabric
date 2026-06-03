@@ -6,8 +6,7 @@ Official Grok Build docs:
   ``--output-format``, and ``--model`` for headless scripting.
 - https://docs.x.ai/build/enterprise documents ``XAI_API_KEY`` authentication
   for non-interactive environments.
-- https://docs.x.ai/developers/models/grok-build-0.1 documents the
-  ``grok-build-0.1`` model used by AWF defaults.
+- `grok models` reports ``grok-build`` as the default Grok Build coding model.
 """
 
 from __future__ import annotations
