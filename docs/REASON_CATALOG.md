@@ -264,7 +264,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### GROK_AUTH_MISSING
 **Problem:** No Grok Build auth signal was visible.
 **Likely Cause:** Missing xAI API credentials for the official Grok Build CLI.
-**Operator Fix:** Set XAI_API_KEY in the AWF service environment.
+**Operator Fix:** Mount ~/.grok or set XAI_API_KEY in the AWF service environment.
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.x.ai/build/enterprise](https://docs.x.ai/build/enterprise)
 
