@@ -16,7 +16,12 @@ from typing import Any
 import pytest
 
 from awf.host_setup.config import HostSetupConfig, ProviderConfig
-from awf.host_setup.credentials import KeyringCredentialBackend
+from awf.host_setup.credentials import (
+    CREDENTIAL_REF_INVALID,
+    CredentialError,
+    CredentialRef,
+    KeyringCredentialBackend,
+)
 from awf.host_setup.providers import (
     PROVIDER_REGISTRY,
     ProviderSetupSummary,
@@ -221,6 +226,58 @@ def test_mixed_provider_partial_readiness_is_independent(tmp_path: Path) -> None
     assert github is not None and github.status == "ready"
     assert opencode is not None and opencode.status == "unavailable"
     assert claude is not None and claude.status == "not_configured"
+
+
+class _RaisingKeyringBackend:
+    """Keyring backend selected by ``store_provider_credential`` that then fails.
+
+    Its cheap ``is_available()`` probe passes so the selector returns it, but
+    ``create_ref`` raises a *non-degradable* ``CredentialError`` (one whose reason
+    code is not ``CREDENTIAL_BACKEND_UNAVAILABLE``), so the error propagates out of
+    ``store_provider_credential`` exactly as a real storage/consent fault would.
+    """
+
+    kind = "keyring"
+
+    def is_available(self) -> bool:
+        return True
+
+    def create_ref(self, request: object) -> CredentialRef:
+        raise CredentialError(
+            reason_code=CREDENTIAL_REF_INVALID,
+            message="keyring rejected the credential identifier",
+        )
+
+
+@pytest.mark.unit
+def test_credential_storage_error_isolates_to_that_provider(tmp_path: Path) -> None:
+    """A ``CredentialError`` from one provider's storage never aborts the others."""
+    gh_ok = _SubprocessSpy(returncode=0)
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex", "github"],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"GH_TOKEN": _FAKE_GH_TOKEN},
+        capture=lambda provider: _FAKE_TOKEN if provider == "codex" else None,
+        run_subprocess=gh_ok,
+        http_get=_unexpected_http,
+        keyring_backend=_RaisingKeyringBackend(),
+    )
+
+    # Codex's storage failure is contained as an unavailable result carrying the
+    # error's reason code, and GitHub is still orchestrated (the loop did not abort).
+    codex = summary.result_for("codex")
+    assert codex is not None
+    assert codex.status == "unavailable"
+    assert codex.reason_code == CREDENTIAL_REF_INVALID
+    assert codex.configured is False
+    github = summary.result_for("github")
+    assert github is not None and github.status == "ready"
+    # The failed provider leaves no fabricated config, and no secret leaks anywhere.
+    assert "codex" not in config.providers
+    assert _FAKE_TOKEN not in json.dumps(summary.model_dump())
 
 
 # --- Selected-provider isolation -----------------------------------------

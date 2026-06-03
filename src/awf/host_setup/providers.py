@@ -35,6 +35,7 @@ from awf.common.logging import get_logger
 from awf.host_setup.config import HostSetupConfig, ProviderConfig
 from awf.host_setup.credentials import (
     CredentialBackend,
+    CredentialError,
     CredentialRef,
     CredentialRequest,
     HostCredentialCapabilities,
@@ -312,28 +313,37 @@ def _orchestrate_one(
             ),
             None,
         )
-    if spec.github_first_class:
-        return _orchestrate_github(
+    # A credential backend can raise ``CredentialError`` for a genuine storage or
+    # consent fault (e.g. ``CREDENTIAL_REF_INVALID`` / ``INTERACTIVE_INPUT_REQUIRED``
+    # that ``store_provider_credential`` deliberately propagates rather than
+    # degrading). Contain it here so one provider's failure marks only that provider
+    # unavailable and never aborts the registry loop — the per-provider isolation
+    # this module documents by construction.
+    try:
+        if spec.github_first_class:
+            return _orchestrate_github(
+                spec,
+                environ=environ,
+                non_interactive=non_interactive,
+                capabilities=capabilities,
+                run_subprocess=run_subprocess,
+                backends=backends,
+            )
+        return _orchestrate_agent_provider(
             spec,
+            settings=settings,
             environ=environ,
+            config=config,
+            allow_plain_secrets=allow_plain_secrets,
             non_interactive=non_interactive,
             capabilities=capabilities,
+            capture=capture,
             run_subprocess=run_subprocess,
+            http_get=http_get,
             backends=backends,
         )
-    return _orchestrate_agent_provider(
-        spec,
-        settings=settings,
-        environ=environ,
-        config=config,
-        allow_plain_secrets=allow_plain_secrets,
-        non_interactive=non_interactive,
-        capabilities=capabilities,
-        capture=capture,
-        run_subprocess=run_subprocess,
-        http_get=http_get,
-        backends=backends,
-    )
+    except CredentialError as exc:
+        return _credential_failure_result(spec, exc), None
 
 
 def _orchestrate_github(
@@ -584,6 +594,29 @@ def _not_configured_result(
             summary=f"No credential was found for {spec.name}.",
         ),
         None,
+    )
+
+
+def _credential_failure_result(spec: ProviderSpec, exc: CredentialError) -> ProviderSetupResult:
+    """Build an unavailable result from a contained credential-backend failure.
+
+    The error is reason-coded and secret-free by construction (see
+    :class:`CredentialError`), so its ``reason_code``/``message`` flow straight into
+    the result. No config is persisted for the provider: storage failed, so there is
+    no safe ref to record, and the existing config (if any) stays untouched.
+    """
+    logger.warning(
+        "provider_setup.credential_error",
+        provider=spec.name,
+        reason_code=exc.reason_code,
+    )
+    return ProviderSetupResult(
+        name=spec.name,
+        status="unavailable",
+        reason_code=exc.reason_code,
+        summary=exc.message,
+        configured=False,
+        rechecked=False,
     )
 
 
