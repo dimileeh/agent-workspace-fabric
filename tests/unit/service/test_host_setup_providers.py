@@ -124,7 +124,63 @@ def test_registry_covers_every_known_setup_provider() -> None:
             assert spec.readiness_provider is not None
 
 
+@pytest.mark.unit
+def test_registry_env_ref_vars_mirror_readiness() -> None:
+    """Setup must discover every alternate env var runtime readiness accepts.
+
+    The registry's ``env_ref_vars`` (primary first) must equal the matching
+    ``provider_readiness._<PROVIDER>_ENV_KEYS`` tuple, so ``awf setup`` never
+    rejects as not_configured a token (e.g. CODEX_API_KEY) that ``awf start``
+    would use successfully. Mismatches here are the drift this guards against.
+    """
+    from awf.service import provider_readiness as readiness
+
+    expected_env_keys = {
+        "github": readiness._GITHUB_TOKEN_ENV_KEYS,
+        "codex": readiness._CODEX_ENV_KEYS,
+        "claude_code": readiness._CLAUDE_ENV_KEYS,
+        "cursor": readiness._CURSOR_ENV_KEYS,
+        "gemini": readiness._GEMINI_ENV_KEYS,
+        "opencode": readiness._OPENCODE_ENV_KEYS,
+        "grok": readiness._XAI_ENV_KEYS,
+    }
+    for spec in PROVIDER_REGISTRY:
+        if spec.stub:
+            continue
+        assert spec.name in expected_env_keys, spec.name
+        assert spec.env_ref_vars == expected_env_keys[spec.name], spec.name
+
+
 # --- Provider success / missing / invalid / mixed ------------------------
+
+
+@pytest.mark.unit
+def test_alternate_env_var_is_discovered_and_rechecked_ready(tmp_path: Path) -> None:
+    """An alternate token (CODEX_API_KEY) that readiness accepts is configured.
+
+    Without honoring the alternate env vars, setup would fall through to
+    not_configured even though ``awf start`` accepts the same token.
+    """
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=False,
+        environ={"CODEX_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    assert result.status == "ready"
+    assert result.configured is True
+    assert result.rechecked is True
+    assert result.credential_ref == "env://CODEX_API_KEY"
+    assert config.providers["codex"].credential_ref == "env://CODEX_API_KEY"
+    assert _FAKE_TOKEN not in json.dumps(result.model_dump())
 
 
 @pytest.mark.unit

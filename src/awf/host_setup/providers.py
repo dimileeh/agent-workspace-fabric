@@ -128,14 +128,27 @@ PROVIDER_REGISTRY: tuple[ProviderSpec, ...] = (
             "AWF Cloud is a reserved future provider slot; no setup is performed in this release."
         ),
     ),
-    ProviderSpec(name="codex", readiness_provider="codex", env_ref_vars=("OPENAI_API_KEY",)),
+    # Each agent provider's ``env_ref_vars`` mirror the matching
+    # ``provider_readiness._<PROVIDER>_ENV_KEYS`` tuple (primary var first) so
+    # ``awf setup`` discovers every alternate token ``awf start`` already accepts;
+    # otherwise a config readiness would honor (e.g. CODEX_API_KEY) is rejected as
+    # not_configured. ``test_registry_env_ref_vars_mirror_readiness`` guards drift.
+    ProviderSpec(
+        name="codex",
+        readiness_provider="codex",
+        env_ref_vars=("OPENAI_API_KEY", "OPENAI_API_TOKEN", "CODEX_API_KEY", "CODEX_AUTH_TOKEN"),
+    ),
     ProviderSpec(
         name="claude_code",
         readiness_provider="claude_code",
-        env_ref_vars=("ANTHROPIC_API_KEY",),
+        env_ref_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
     ),
     ProviderSpec(name="opencode", readiness_provider="opencode", env_ref_vars=("OLLAMA_API_KEY",)),
-    ProviderSpec(name="gemini", readiness_provider="gemini", env_ref_vars=("GEMINI_API_KEY",)),
+    ProviderSpec(
+        name="gemini",
+        readiness_provider="gemini",
+        env_ref_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_ACCESS_TOKEN"),
+    ),
     ProviderSpec(name="cursor", readiness_provider="cursor", env_ref_vars=("CURSOR_API_KEY",)),
     ProviderSpec(name="grok", readiness_provider="grok", env_ref_vars=("XAI_API_KEY",)),
 )
