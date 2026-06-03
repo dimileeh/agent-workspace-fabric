@@ -783,13 +783,16 @@ class TestRender:
 
         manager = _RecordingComposeManager()
 
-        await manager.down_project(
+        ran = await manager.down_project(
             project_name="awf_ws_missing",
             compose_file=tmp_path / "missing-compose.yml",
             workspace_id="ws_missing",
         )
 
         assert manager.calls == []
+        # A missing compose file noops and signals the down never ran so
+        # callers (e.g. ``teardown_project``) can fall back to a label reap.
+        assert ran is False
 
     @pytest.mark.unit
     async def test_remove_project_by_label_removes_containers_networks_and_volumes(
@@ -1068,6 +1071,77 @@ class TestRender:
         # No compose file -> never invokes ``down``; reaps via label scope instead.
         assert manager.compose_calls == []
         assert ("volume rm", "volume", "rm", "-f", "awf-ws_gone-dind_data") in manager.label_calls
+
+    @pytest.mark.unit
+    async def test_teardown_project_reaps_volumes_when_compose_file_vanishes_mid_teardown(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A compose file removed between the existence check and ``down`` still reaps.
+
+        ``teardown_project`` confirms the compose file exists, but a concurrent
+        GC run can delete the compose directory before ``down_project`` runs its
+        own existence check. ``down_project`` then silently noops; teardown must
+        route to the label-scoped fallback so the per-workspace volumes are
+        reclaimed instead of being reported as a successful down that removed
+        nothing.
+        """
+        compose_file = tmp_path / "work" / "compose" / "ws_race" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RacingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.compose_calls: list[str] = []
+                self.label_calls: list[tuple[str, ...]] = []
+
+            async def down_project(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                remove_volumes: bool = True,
+            ) -> bool:
+                # Simulate a concurrent GC removing the compose directory after
+                # ``teardown_project``'s existence check but before the down.
+                compose_file.unlink()
+                return await super().down_project(
+                    project_name=project_name,
+                    compose_file=compose_file,
+                    workspace_id=workspace_id,
+                    remove_volumes=remove_volumes,
+                )
+
+            async def _compose(self, *args: object, **kwargs: object) -> None:
+                self.compose_calls.append("compose")
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.label_calls.append((operation, *args))
+                if operation == "volume ls":
+                    return "awf-ws_race-dind_data\n"
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.label_calls.append((operation, *args))
+
+        manager = _RacingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_race",
+            compose_file=compose_file,
+            workspace_id="ws_race",
+            remove_volumes=True,
+        )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_PROJECT_LABEL_REMOVED"
+        assert result.ok is True
+        # ``down`` noop'd (file vanished) -> never invoked compose; the leaked
+        # volume is reaped via label scope instead.
+        assert manager.compose_calls == []
+        assert ("volume rm", "volume", "rm", "-f", "awf-ws_race-dind_data") in manager.label_calls
 
     @pytest.mark.unit
     async def test_teardown_project_is_idempotent_when_nothing_left_to_reap(

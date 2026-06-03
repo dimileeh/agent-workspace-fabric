@@ -459,17 +459,24 @@ class ComposeManager:
         compose_file: Path,
         workspace_id: str,
         remove_volumes: bool = True,
-    ) -> None:
-        """Stop + remove a stack using an already-rendered compose file path."""
+    ) -> bool:
+        """Stop + remove a stack using an already-rendered compose file path.
+
+        Returns ``True`` when the compose ``down`` actually ran, ``False`` when
+        the compose file was absent and the call short-circuited as a noop. The
+        flag lets ``teardown_project`` detect a compose file that vanished after
+        its own existence check and fall back to a label-scoped volume reap.
+        """
         if not compose_file.exists():
             # Nothing rendered; assume never launched.
             _log.info("compose.down.noop", workspace_id=workspace_id)
-            return
+            return False
 
         args = ["down", "--remove-orphans"]
         if remove_volumes:
             args.append("-v")
         await self._compose(project_name, compose_file, args, operation="down")
+        return True
 
     async def remove_project_by_label(
         self,
@@ -544,27 +551,13 @@ class ComposeManager:
                 workspace_id=workspace_id,
                 project_name=project_name,
             )
-            try:
-                await self.remove_project_by_label(
-                    project_name=project_name,
-                    workspace_id=workspace_id,
-                    remove_volumes=remove_volumes,
-                )
-            except ComposeOperationError as label_exc:
-                # Preserve the fallback's structured classification (e.g.
-                # ``DOCKER_UNAVAILABLE``) rather than collapsing it into the
-                # generic down-failed code so operators see the real cause.
-                return ComposeTeardownResult(
-                    status="failed",
-                    reason_code=label_exc.reason_code,
-                    error=redact_secrets(str(label_exc))[:1000],
-                )
-            return ComposeTeardownResult(
-                status="succeeded",
-                reason_code="DOCKER_COMPOSE_PROJECT_LABEL_REMOVED",
+            return await self._reap_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
             )
         try:
-            await self.down_project(
+            down_ran = await self.down_project(
                 project_name=project_name,
                 compose_file=compose_file,
                 workspace_id=workspace_id,
@@ -578,29 +571,61 @@ class ComposeManager:
                 reason_code=down_exc.reason_code,
                 error=redact_secrets(str(down_exc))[:1000],
             )
-            try:
-                await self.remove_project_by_label(
-                    project_name=project_name,
-                    workspace_id=workspace_id,
-                    remove_volumes=remove_volumes,
-                )
-            except ComposeOperationError as label_exc:
-                # ``down`` already failed (logged above with its reason_code);
-                # surface the proximate fallback failure's specific code rather
-                # than the generic down-failed bucket so the structured
-                # classification is not lost.
-                return ComposeTeardownResult(
-                    status="failed",
-                    reason_code=label_exc.reason_code,
-                    error=redact_secrets(str(label_exc))[:1000],
-                )
-            return ComposeTeardownResult(
-                status="succeeded",
-                reason_code="DOCKER_COMPOSE_PROJECT_LABEL_REMOVED",
+            return await self._reap_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        if not down_ran:
+            # The compose file existed at the check above but vanished before
+            # ``down`` ran its own existence check (e.g. a concurrent GC removed
+            # the compose directory). ``down_project`` silently noops in that
+            # case, which would skip the volume reap, so fall back to the
+            # label-scoped teardown instead of reporting a successful down that
+            # never removed the project's volumes.
+            _log.info(
+                "compose.teardown_project.compose_vanished_label_fallback",
+                workspace_id=workspace_id,
+                project_name=project_name,
+            )
+            return await self._reap_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
             )
         return ComposeTeardownResult(
             status="succeeded",
             reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    async def _reap_project_by_label(
+        self,
+        *,
+        project_name: str,
+        workspace_id: str,
+        remove_volumes: bool,
+    ) -> ComposeTeardownResult:
+        """Label-scoped reap fallback, mapped to a :class:`ComposeTeardownResult`.
+
+        On failure, preserve the fallback's structured classification (e.g.
+        ``DOCKER_UNAVAILABLE``) rather than collapsing it into the generic
+        down-failed code so operators see the real cause.
+        """
+        try:
+            await self.remove_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        except ComposeOperationError as label_exc:
+            return ComposeTeardownResult(
+                status="failed",
+                reason_code=label_exc.reason_code,
+                error=redact_secrets(str(label_exc))[:1000],
+            )
+        return ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_PROJECT_LABEL_REMOVED",
         )
 
     async def companion_image_inspect(self, tag: str) -> bool:
