@@ -442,6 +442,17 @@ def service_gc(
         "--exclude-status",
         help="Repeatable status filter to remove from the eligible terminal set.",
     ),
+    timeout_seconds: float = typer.Option(
+        900.0,
+        "--timeout-seconds",
+        min=0.0,
+        help=(
+            "HTTP timeout for the GC trigger. Defaults high because an "
+            "``--execute`` run tearing down Docker stacks and deleting large "
+            "worktree trees can take minutes; raise it further for very large "
+            "reclaims so the CLI does not report a false timeout."
+        ),
+    ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
@@ -467,6 +478,7 @@ def service_gc(
         "POST",
         "/v1/service/gc",
         base_url=_base_url(base_url),
+        timeout=timeout_seconds,
         json=body,
         headers=_api_token_headers(api_token),
     )

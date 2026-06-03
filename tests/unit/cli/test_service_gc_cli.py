@@ -101,6 +101,36 @@ def test_service_gc_maps_flags_to_request_body() -> None:
 
 
 @pytest.mark.unit
+def test_service_gc_uses_long_default_timeout() -> None:
+    """Large ``--execute`` reclaims must not hit the 30s default request timeout."""
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 0, result.output
+    assert mock.call_args.kwargs["timeout"] == 900.0
+
+
+@pytest.mark.unit
+def test_service_gc_honors_timeout_override() -> None:
+    response = _mock_response(payload=_dry_run_payload())
+    with patch("awf.cli.common.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(
+            app,
+            ["service", "gc", "--execute", "--timeout-seconds", "3600"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock.call_args.kwargs["timeout"] == 3600.0
+
+
+@pytest.mark.unit
 def test_service_gc_partial_status_exits_nonzero() -> None:
     response = _mock_response(
         payload={

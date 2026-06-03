@@ -591,12 +591,25 @@ def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
     return parsed
 
 
-def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
-    """Execute call."""
+def _call(
+    method: str,
+    path: str,
+    *,
+    base_url: str,
+    timeout: float = 30.0,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Execute call.
+
+    ``timeout`` defaults to 30s but callers driving long-running control-plane
+    operations (e.g. ``service gc --execute`` reclaiming multi-GB worktrees) may
+    pass a larger ceiling so the CLI does not report a false timeout failure
+    while the API is still working.
+    """
 
     url = normalize_api_url(base_url, path)
     try:
-        return httpx.request(method, url, timeout=30.0, **kwargs)
+        return httpx.request(method, url, timeout=timeout, **kwargs)
     except httpx.RequestError as exc:
         typer.echo(
             f"error: could not reach AWF API at {sanitize_request_url(url)}: {exc}",
