@@ -61,14 +61,14 @@ def test_classifies_xai_grok_auth_failure_and_redacts_secret_fingerprint() -> No
         stdout="",
         stderr="XAI_API_KEY=xai-provider-secret was rejected: unauthorized",
         provider=None,
-        model="grok-build-0.1",
+        model="grok-build",
     )
 
     assert classification is not None
     assert classification.reason_code == AGENT_AUTH_FAILED
     assert classification.failure_type == "auth"
     assert classification.provider == "xai"
-    assert classification.model == "grok-build-0.1"
+    assert classification.model == "grok-build"
     assert classification.retryable is True
     assert "xai-provider-secret" not in classification.failure_fingerprint
     assert "<redacted>" in classification.failure_fingerprint
@@ -80,7 +80,7 @@ def test_classifies_xai_rate_limit_from_model_marker() -> None:
         stdout="",
         stderr="Grok Build request failed: 429 too many requests. Retry-After: 60",
         provider=None,
-        model="grok-build-0.1",
+        model="grok-build",
     )
 
     assert classification is not None
@@ -187,7 +187,7 @@ def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
     assert infer_provider(model="claude-sonnet-4.5", output=None) == "anthropic"
     assert infer_provider(model=None, output="ollama local model is unavailable") == "ollama"
     assert infer_provider(model=None, output="cursor-agent: unauthorized") == "cursor"
-    assert infer_provider(model="grok-build-0.1", output=None) == "xai"
+    assert infer_provider(model="grok-build", output=None) == "xai"
     assert infer_provider(model=None, output="xAI Grok rate limit") == "xai"
 
 
