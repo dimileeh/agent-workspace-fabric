@@ -543,14 +543,28 @@ def _prepare_isolated_claude_auth(
     chown_exempt: set[str] = set()
     extra_chown: list[Path] = []
     source_dir = host_home / ".claude"
+    legacy_claude_copy = target_root / ".claude"
     if _CLAUDE_DIR_TARGET not in suppressed_targets and source_dir.is_dir():
-        overlay = _prepare_claude_overlay_mount(
-            host_home=host_home,
-            claude_root=target_root,
-            work_dir=work_dir,
-            overlay_mounter=overlay_mounter,
-            workspace_owner_uid=workspace_owner_uid,
-            workspace_owner_gid=workspace_owner_gid,
+        # A prior legacy/pre-upgrade provision (overlay unsupported then) may have
+        # left a per-workspace ``.claude`` copy carrying the agent's auth/config
+        # mutations. The legacy branch deliberately reuses such a copy (``if not
+        # target_dir.exists()``) to preserve retry state; mounting a fresh
+        # shared-base overlay over it would silently drop those mutations (empty
+        # ``upper``, lower seeded from the current host). So only reach for the
+        # overlay when no legacy copy exists — otherwise keep using that copy.
+        # (Overlay→overlay retries are unaffected: they never write ``.claude``,
+        # and a remount reuses the surviving on-disk ``upper``/``work``.)
+        overlay = (
+            None
+            if legacy_claude_copy.exists()
+            else _prepare_claude_overlay_mount(
+                host_home=host_home,
+                claude_root=target_root,
+                work_dir=work_dir,
+                overlay_mounter=overlay_mounter,
+                workspace_owner_uid=workspace_owner_uid,
+                workspace_owner_gid=workspace_owner_gid,
+            )
         )
         if overlay is not None:
             mount, upper, work = overlay
@@ -558,7 +572,7 @@ def _prepare_isolated_claude_auth(
             chown_exempt.add(mount.source)
             extra_chown.extend((upper, work))
         else:
-            target_dir = target_root / ".claude"
+            target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)
             if not target_dir.exists():
                 shutil.copytree(

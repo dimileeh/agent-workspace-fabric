@@ -431,6 +431,47 @@ def test_overlay_reprovision_reuses_live_mount_without_data_loss(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_overlay_capable_retry_preserves_prior_legacy_copy(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    # First provision predates overlay support (legacy/pre-upgrade): a
+    # per-workspace ``.claude`` copy is written and the agent mutates it.
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_upgrade",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=False),
+    )
+    claude_root = work_dir / "auth" / "ws_upgrade" / "claude"
+    legacy_copy = claude_root / ".claude" / "settings.json"
+    assert legacy_copy.read_text() == '{"theme": "dark"}\n'
+    legacy_copy.write_text('{"theme": "agent-edited"}\n')
+
+    # AWF is upgraded and overlay support becomes available on the retry. The
+    # existing legacy copy (with the agent's mutations) must be reused, not
+    # dropped for a fresh shared-base overlay that would seed from the host.
+    mounter = FakeOverlayMounter(supported=True)
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_upgrade",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    # The mount keeps pointing at the legacy copy and no overlay is mounted.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert mounter.mounts == []
+    assert not (claude_root / "merged").exists()
+    # The agent's mutation survives the retry rather than being overwritten.
+    assert legacy_copy.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
 def test_mount_ebusy_after_concurrent_mount_reuses_live_overlay(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
