@@ -35,6 +35,7 @@ from awf.control.worker.config import (
     effective_worker_config_node_id,
 )
 from awf.control.worker.constants import (
+    _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
@@ -186,7 +187,7 @@ async def _maybe_reconcile_orphan_dirs(self: Any) -> None:
         else:
             _log.exception(
                 "worker.orphan_dir_reconcile_failed",
-                reason_code="ORPHAN_DIR_RECONCILE_FAILED",
+                reason_code=_ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
                 error_type=type(exc).__name__,
             )
         interval = max(0.0, self._config.orphan_reconcile_scan_interval_seconds)
