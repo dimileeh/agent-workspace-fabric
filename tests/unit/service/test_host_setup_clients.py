@@ -1014,6 +1014,30 @@ def test_build_plan_codex_blank_codex_home_falls_back_to_home(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+def test_build_plan_codex_expands_tilde_in_codex_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a ``~``-prefixed CODEX_HOME is expanded, not taken literally.
+
+    Regression for PRRT_kwDOSJAM6s6G1gpw: a ``CODEX_HOME=~/.codex`` set outside
+    a shell (no shell expansion) must resolve under the real home directory the
+    Codex CLI loads, not a literal ``~`` directory relative to the cwd.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    plan = build_client_config_plan(
+        "codex",
+        env_file=_ENV_FILE,
+        home=tmp_path,
+        which=_which_missing,
+        now=_now,
+        env={"CODEX_HOME": "~/.codex"},
+    )
+
+    assert plan.config_path == tmp_path / ".codex" / "config.toml"
+
+
+@pytest.mark.unit
 def test_build_plan_claude_ignores_codex_home(tmp_path: Path) -> None:
     """Verify CODEX_HOME never affects the Claude config path (no home override)."""
     plan = build_client_config_plan(

@@ -124,12 +124,15 @@ class ClientDescriptor:
         there — so the planned/written path must follow the override rather than
         the hard-coded ``home``-anchored path the client would never load. The
         override replaces the first relative segment (the home-anchored config
-        dir), keeping the config filename.
+        dir), keeping the config filename. A leading ``~``/``~user`` in the
+        override is expanded (mirroring ``home`` resolution) so a
+        ``CODEX_HOME=~/.codex`` set outside a shell does not target a literal
+        ``~`` directory the client never loads.
         """
         if self.config_home_env is not None:
             override = env.get(self.config_home_env, "").strip()
             if override:
-                return Path(override).joinpath(*self.config_relative_path[1:])
+                return Path(override).expanduser().joinpath(*self.config_relative_path[1:])
         return home.joinpath(*self.config_relative_path)
 
     def desired_entry(self, env_file: str) -> dict[str, Any]:
