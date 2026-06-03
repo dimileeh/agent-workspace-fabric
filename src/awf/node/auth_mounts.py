@@ -242,8 +242,17 @@ def _host_claude_signature(host_home: Path) -> str:
     try:
         source_stat = source.stat()
         ancestors_by_path[os.fspath(source)] = frozenset({(source_stat.st_dev, source_stat.st_ino)})
+        # ``copytree`` preserves the top-level directory's mode, so the root's own
+        # ``st_mode`` is part of what the copy produces. The walk below only signs
+        # the root's *children*, so without this an operator fixing ``~/.claude``
+        # itself (e.g. an inaccessible mode to ``0700``) would leave the signature
+        # unchanged and keep reusing a base with stale root permissions.
+        entries.append(
+            f".\0{source_stat.st_size}\0{source_stat.st_mtime_ns}\0{source_stat.st_mode}"
+        )
     except OSError:
         ancestors_by_path[os.fspath(source)] = frozenset()
+        entries.append(".\0missing")
     for root, dirs, files in os.walk(source, followlinks=True):
         root_path = Path(root)
         root_ancestors = ancestors_by_path.get(os.fspath(root_path), frozenset())

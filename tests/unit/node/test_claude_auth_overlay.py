@@ -207,6 +207,25 @@ def test_signature_tracks_file_mode_changes(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_signature_tracks_root_directory_mode_changes(tmp_path: Path) -> None:
+    # ``copytree`` preserves the top-level directory's mode, so an operator who
+    # fixes ``~/.claude`` itself from an inaccessible mode to ``0700`` changes
+    # what the copied base looks like at its root. ``chmod`` on the root bumps
+    # ctime but not size or mtime, and the walk's per-child entries never cover
+    # the root dir, so the signature must sign the root's own ``st_mode`` to
+    # rebuild instead of reusing a base with stale root permissions.
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    claude = host_home / ".claude"
+
+    claude.chmod(0o700)
+    before = _host_claude_signature(host_home)
+    claude.chmod(0o755)
+    after = _host_claude_signature(host_home)
+    assert after != before
+
+
+@pytest.mark.unit
 def test_signature_follows_symlink_target_content(tmp_path: Path) -> None:
     # An operator keeps ``~/.claude`` config as symlinks into a dotfiles repo.
     # ``copytree(symlinks=False)`` copies the *targets'* contents into the base,
