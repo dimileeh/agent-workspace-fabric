@@ -209,7 +209,10 @@ async def collect_service_status(
         run_subprocess=resolved_run,
     )
     orphan_workspaces_check = orphan_summary.to_check_payload()
-    orphan_resources_check = _orphan_resources_check_payload(orphan_workspaces_check)
+    orphan_resources_check = _orphan_resources_check_payload(
+        orphan_workspaces_check,
+        auto_cleanup_orphans=settings.auto_cleanup_orphans,
+    )
     stranded_workspaces_check = _stranded_workspaces_check_payload(
         workspace_view,
         runtime_docker_scan,
@@ -437,12 +440,17 @@ def _check_agent_runtime_image(
 
 def _orphan_resources_check_payload(
     orphan_workspaces_check: Mapping[str, object],
+    *,
+    auto_cleanup_orphans: bool = False,
 ) -> CheckPayload:
     payload: CheckPayload = dict(orphan_workspaces_check)
     payload["reason"] = _orphan_resources_reason(payload.get("reason"))
     if "resource_counts" in payload:
         payload.setdefault("counts_by_kind", payload["resource_counts"])
-    payload["cleanup_readiness"] = _orphan_resources_cleanup_readiness(payload)
+    payload["cleanup_readiness"] = _orphan_resources_cleanup_readiness(
+        payload,
+        auto_cleanup_orphans=auto_cleanup_orphans,
+    )
     return payload
 
 
@@ -556,9 +564,16 @@ def _orphan_resources_reason(reason: object) -> str:
     return str(reason or "UNKNOWN")
 
 
-def _orphan_resources_cleanup_readiness(payload: Mapping[str, object]) -> dict[str, object]:
+def _orphan_resources_cleanup_readiness(
+    payload: Mapping[str, object],
+    *,
+    auto_cleanup_orphans: bool = False,
+) -> dict[str, object]:
     reason = _orphan_resources_reason(payload.get("reason"))
     action = payload.get("action")
+    # Only the orphan-reaping path actually deletes resources; readiness and the
+    # idle/unavailable branches stay report-only so operators are not told the
+    # worker will act when no orphans are present or detection degraded.
     if bool(payload.get("orphan_count")):
         return {
             "ready": False,
@@ -567,7 +582,7 @@ def _orphan_resources_cleanup_readiness(payload: Mapping[str, object]) -> dict[s
             "action": action
             if isinstance(action, str) and action
             else "Review the listed AWF resources before running cleanup.",
-            "dry_run_only": True,
+            "dry_run_only": not auto_cleanup_orphans,
         }
     if payload.get("status") == "ok":
         return {

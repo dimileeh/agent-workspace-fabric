@@ -1120,6 +1120,56 @@ def test_service_status_includes_orphan_resource_summary(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_service_status_orphan_resources_reflect_auto_cleanup(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), auto_cleanup_orphans=True)
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / "ws_ghost"
+    worktree.mkdir(parents=True)
+
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_ghost-agent-1",
+            state="exited",
+            status="Exited",
+            project="awf_ws_ghost",
+            service="agent",
+        )
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+        )
+    )
+
+    orphan_resources = status["checks"]["orphan_resources"]
+    assert orphan_resources["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_resources["cleanup_readiness"]["dry_run_only"] is False
+
+
+@pytest.mark.unit
+def test_orphan_resources_check_payload_threads_auto_cleanup_flag() -> None:
+    payload = _orphan_resources_check_payload(
+        {
+            "ok": False,
+            "status": "fail",
+            "reason": "ORPHANS_PRESENT",
+            "orphan_count": 1,
+        },
+        auto_cleanup_orphans=True,
+    )
+
+    assert payload["cleanup_readiness"]["dry_run_only"] is False
+
+
+@pytest.mark.unit
 def test_service_status_reports_stranded_active_workspaces(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
         _container(
