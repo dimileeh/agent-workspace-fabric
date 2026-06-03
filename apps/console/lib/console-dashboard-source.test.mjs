@@ -7,6 +7,10 @@ const dashboardSource = {
   overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
+  detail: readFileSync(
+    new URL("../components/console-dashboard-workspace-detail.tsx", import.meta.url),
+    "utf8",
+  ),
 };
 
 test("task details modal locks body scroll in a layout effect", () => {

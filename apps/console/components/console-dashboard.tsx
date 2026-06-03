@@ -52,7 +52,8 @@ RuntimePanel,
 terminalLifecycleSourceStage,
 } from "./console-dashboard-capacity";
 import { LogsPanel,MultiWorkspaceLogsFullscreen } from "./console-dashboard-logs";
-import { type FleetKpi,FleetHealthStrip,SectionNav,TaskDetailsModal,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar,WorkspaceSummary } from "./console-dashboard-overview";
+import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar } from "./console-dashboard-overview";
+import { TaskDetailsModal,WorkspaceSummary } from "./console-dashboard-workspace-detail";
 import { FailureAnalysisPanel,SecretsLeasesPanel,SecurityEgressPanel } from "./console-dashboard-security";
 import {
 type DetailState,
