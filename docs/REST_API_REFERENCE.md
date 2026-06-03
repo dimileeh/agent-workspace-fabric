@@ -653,6 +653,41 @@ curl "http://localhost:8000/v1/metrics/slo?since_hours=168"
 
 ---
 
+## Service Operations
+
+### Garbage-collect terminal workspaces
+
+Plan or execute filesystem GC for terminal workspaces. Auth required. The root
+control-plane runs the deletion in-container (so root-owned per-workspace auth
+dirs are actually reclaimed) and tears down each per-workspace compose stack with
+its volumes. This is the endpoint the thin `awf service gc` CLI calls.
+
+Dry-run plan (default):
+
+```bash
+curl -X POST "http://localhost:8000/v1/service/gc" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"min_age_hours": 168}'
+```
+
+Execute the reclaim:
+
+```bash
+curl -X POST "http://localhost:8000/v1/service/gc" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"execute": true, "statuses": ["completed"], "limit": 50}'
+```
+
+The response is `ServiceGCResponse`: the top-level `status`
+(`dry_run`/`succeeded`/`partial`), `reason_code`, and counts, plus the full GC
+plan (`candidates`, `preserved`, `delete_errors`). A permission-denied delete is
+reported loudly as a `partial` result with reason code
+`PATH_DELETE_PERMISSION_DENIED` -- never a silent success.
+
+---
+
 ## Secret Leases
 
 See [Secret lease status (operator metadata)](#secret-lease-status-operator-metadata)

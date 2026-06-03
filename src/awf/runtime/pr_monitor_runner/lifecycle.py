@@ -643,6 +643,10 @@ async def _gc_completed_workspace_filesystem(self: Any, workspace_id: str) -> No
             work_dir=self._work_dir,
             workspace_id=workspace_id,
             execute=True,
+            # A merged PR's pressure dirs are reclaimable now -- bypass the
+            # retention window so disk is returned on merge rather than a week
+            # later. The durable DB row, events, and logs are always kept.
+            ignore_retention=True,
         )
     except Exception as exc:
         _log.warning(

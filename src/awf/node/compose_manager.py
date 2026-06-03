@@ -24,7 +24,7 @@ import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
@@ -87,6 +87,24 @@ class ComposeOperationError(Exception):
             f"(exit={returncode}, reason={reason_code}): "
             f"{stderr.strip() or stdout.strip() or '<no output>'}"
         )
+
+
+@dataclass(frozen=True)
+class ComposeTeardownResult:
+    """Structured outcome of a best-effort, volume-removing stack teardown.
+
+    ``ok`` covers both a successful teardown and an idempotent skip (nothing
+    left to tear down), so a caller can treat an already-down stack as success
+    rather than a partial failure.
+    """
+
+    status: Literal["succeeded", "failed", "skipped"]
+    reason_code: str
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {"succeeded", "skipped"}
 
 
 def _is_missing_image_inspect_failure(exc: ComposeOperationError) -> bool:
@@ -492,6 +510,67 @@ class ComposeManager:
             containers=len(container_ids),
             networks=len(network_ids),
             volumes=len(volume_names),
+        )
+
+    async def teardown_project(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool = True,
+    ) -> ComposeTeardownResult:
+        """Tear down a per-workspace stack, reaping its volumes by default.
+
+        Used by terminal GC to reclaim the per-workspace Docker volumes
+        (``awf-<project>-dind_data`` / ``-postgres_data``) that otherwise leak.
+        Prefers ``down_project`` (compose-file driven); if that fails (e.g. an
+        unusable compose file), falls back to label-scoped
+        ``remove_project_by_label`` so volumes are still removed. An absent
+        compose file is an idempotent ``skipped`` no-op -- a prior ``down -v``
+        already reaped the stack -- never a failure.
+        """
+        if not compose_file.exists():
+            _log.info(
+                "compose.teardown_project.noop",
+                workspace_id=workspace_id,
+                project_name=project_name,
+            )
+            return ComposeTeardownResult(status="skipped", reason_code="NO_COMPOSE_STACK")
+        try:
+            await self.down_project(
+                project_name=project_name,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        except ComposeOperationError as down_exc:
+            _log.warning(
+                "compose.teardown_project.down_failed",
+                workspace_id=workspace_id,
+                project_name=project_name,
+                reason_code=down_exc.reason_code,
+                error=redact_secrets(str(down_exc))[:1000],
+            )
+            try:
+                await self.remove_project_by_label(
+                    project_name=project_name,
+                    workspace_id=workspace_id,
+                    remove_volumes=remove_volumes,
+                )
+            except ComposeOperationError as label_exc:
+                return ComposeTeardownResult(
+                    status="failed",
+                    reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                    error=redact_secrets(str(label_exc))[:1000],
+                )
+            return ComposeTeardownResult(
+                status="succeeded",
+                reason_code="DOCKER_COMPOSE_PROJECT_LABEL_REMOVED",
+            )
+        return ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
         )
 
     async def companion_image_inspect(self, tag: str) -> bool:

@@ -482,6 +482,52 @@ async def test_gc_execution_reports_refused_file_symlink_and_out_of_root_paths(
 
 
 @pytest.mark.unit
+async def test_gc_execution_reports_permission_denied_loudly_not_already_removed(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A root-owned auth dir that the deleting process cannot remove must surface
+    # as a loud, reason-coded ``partial`` failure -- never a silent success.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    auth = work_dir / "auth" / workspace_id
+    _write(auth / "codex" / "auth.json", "auth")
+
+    def _raise_permission(_path: object) -> None:
+        raise PermissionError(13, "Operation not permitted")
+
+    monkeypatch.setattr("shutil.rmtree", _raise_permission)
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert result.status == "partial"
+    auth_errors = [error for error in result.delete_errors if error.kind == "auth"]
+    assert auth_errors, result.delete_errors
+    assert auth_errors[0].reason_code == "PATH_DELETE_PERMISSION_DENIED"
+    payload = result.to_dict()
+    assert payload["candidates"][0]["paths"]["auth"]["status"] == "failed"
+    assert payload["candidates"][0]["paths"]["auth"]["reason_code"] == (
+        "PATH_DELETE_PERMISSION_DENIED"
+    )
+    assert auth.exists()
+
+
+@pytest.mark.unit
 def test_delete_gc_path_rejects_unknown_gc_kind(tmp_path: Path) -> None:
     target = tmp_path / "service" / "unknown" / "ws_unknown"
     target.mkdir(parents=True)
@@ -492,10 +538,11 @@ def test_delete_gc_path_rejects_unknown_gc_kind(tmp_path: Path) -> None:
         estimated_bytes=0,
     )
 
-    deleted, error = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+    deleted, error, reason_code = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
 
     assert deleted is False
     assert error == "path is outside the expected service GC roots"
+    assert reason_code == "PATH_DELETE_FAILED"
     assert gc_path.to_dict(error=error)["error"] == error
     assert target.exists()
 
@@ -509,10 +556,11 @@ def test_delete_gc_path_treats_missing_path_as_already_removed(tmp_path: Path) -
         estimated_bytes=0,
     )
 
-    deleted, error = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+    deleted, error, reason_code = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
 
     assert deleted is False
     assert error is None
+    assert reason_code is None
 
 
 @pytest.mark.unit
@@ -528,14 +576,69 @@ def test_delete_gc_path_handles_rmtree_oserror(
         estimated_bytes=0,
     )
 
-    monkeypatch.setattr(
-        "shutil.rmtree", lambda _p: (_ for _ in ()).throw(OSError("permission denied"))
-    )
+    monkeypatch.setattr("shutil.rmtree", lambda _p: (_ for _ in ()).throw(OSError("disk gone")))
 
-    deleted, error = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+    deleted, error, reason_code = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
 
     assert deleted is False
-    assert error == "permission denied"
+    assert error == "disk gone"
+    # A generic OSError (no permission errno) stays a plain delete failure.
+    assert reason_code == "PATH_DELETE_FAILED"
+
+
+@pytest.mark.unit
+def test_delete_gc_path_reports_permission_denied_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Root-owned per-workspace dirs cannot be removed by the host uid-1000
+    # process. Such a refusal must surface as a distinct, reason-coded failure
+    # -- never silently collapse to ``already_removed`` success.
+    target = tmp_path / "service" / "auth" / "ws_root_owned"
+    target.mkdir(parents=True)
+    gc_path = WorkspaceGCPath(
+        kind="auth",
+        path=target,
+        exists=True,
+        estimated_bytes=0,
+    )
+
+    def _raise_permission(_path: object) -> None:
+        raise PermissionError(13, "Operation not permitted")
+
+    monkeypatch.setattr("shutil.rmtree", _raise_permission)
+
+    deleted, error, reason_code = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+
+    assert deleted is False
+    assert reason_code == "PATH_DELETE_PERMISSION_DENIED"
+    assert error is not None
+
+
+@pytest.mark.unit
+def test_delete_gc_path_classifies_eperm_oserror_as_permission_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    target = tmp_path / "service" / "auth" / "ws_eperm"
+    target.mkdir(parents=True)
+    gc_path = WorkspaceGCPath(
+        kind="auth",
+        path=target,
+        exists=True,
+        estimated_bytes=0,
+    )
+
+    def _raise_eperm(_path: object) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr("shutil.rmtree", _raise_eperm)
+
+    deleted, error, reason_code = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+
+    assert deleted is False
+    assert reason_code == "PATH_DELETE_PERMISSION_DENIED"
+    assert error is not None
 
 
 @pytest.mark.unit

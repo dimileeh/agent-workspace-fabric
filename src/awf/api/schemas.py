@@ -1496,5 +1496,61 @@ class HttpExceptionErrorResponse(BaseModel):
     detail: ErrorResponse
 
 
+class ServiceGCRequest(BaseModel):
+    """Trigger payload for ``POST /v1/service/gc``.
+
+    The CLI is a thin client over this route: it maps its flags to these fields
+    and lets the root control-plane run the deletion (so root-owned per-workspace
+    dirs are actually reclaimed and per-workspace Docker volumes are reaped).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    execute: bool = Field(
+        default=False,
+        description="Delete selected pressure directories. Defaults to a dry-run plan.",
+    )
+    min_age_hours: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Only consider workspaces whose last update is at least this old. "
+            "Defaults to AWF_COMPLETED_WORKSPACE_RETENTION_HOURS."
+        ),
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum number of candidates to plan, oldest first.",
+    )
+    statuses: list[WorkspaceStatus] = Field(
+        default_factory=list,
+        description="Terminal status filter. Active statuses are always protected.",
+    )
+    exclude_statuses: list[WorkspaceStatus] = Field(
+        default_factory=list,
+        description="Status filter to remove from the eligible terminal set.",
+    )
+
+
+class ServiceGCResponse(BaseModel):
+    """GC result envelope returned by ``POST /v1/service/gc``.
+
+    The stable top-level fields are documented; the full GC payload
+    (``candidates``, ``preserved``, ``delete_errors``, ...) is carried through
+    via ``extra="allow"`` so the CLI can render it without a server round-trip.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    reason_code: str
+    dry_run: bool
+    candidate_count: int = 0
+    preserved_count: int = 0
+    deleted_path_count: int = 0
+    total_estimated_bytes: int = 0
+
+
 _merge_log_stream_ref_value = merge_log_stream_ref_value
 _log_stream_ids = log_stream_ids

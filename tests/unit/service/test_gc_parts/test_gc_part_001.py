@@ -23,6 +23,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
+    COMPLETED_PR_NOT_MERGED,
     COMPLETED_PR_RETENTION_EXPIRED,
     FAILED_WORKSPACE_NO_WORK,
     FAILED_WORKSPACE_TRIAGE_PRESERVED,
@@ -1101,6 +1102,125 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
         workspace = await session.get(Workspace, target_id)
         assert workspace is not None
         assert workspace.status == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_ignore_retention_reclaims_recent_merged_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A freshly-merged workspace whose ``updated_at`` is well within the
+    # retention window is reclaimed immediately when ignore_retention=True; the
+    # durable DB row + events survive (only pressure dirs go).
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        ignore_retention=True,
+        now=now,
+    )
+
+    assert result.dry_run is False
+    assert [candidate.workspace_id for candidate in result.plan.candidates] == [workspace_id]
+    assert result.plan.candidates[0].reason_code == COMPLETED_PR_RETENTION_EXPIRED
+    assert not worktree.exists()
+    assert not auth.exists()
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            limit=50,
+        )
+    assert events  # the durable audit log is preserved
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_default_retention_defers_recent_merged_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Regression guard: with ignore_retention left at its default, the same
+    # recently-merged workspace is still deferred within the retention window.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        WORKSPACE_WITHIN_RETENTION,
+    ]
+    assert worktree.exists()
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_ignore_retention_still_preserves_unmerged_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # ignore_retention only releases merged PRs early; a completed workspace
+    # whose PR has not merged is still preserved for inspection.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha=None,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        ignore_retention=True,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        COMPLETED_PR_NOT_MERGED,
+    ]
+    assert worktree.exists()
 
 
 @pytest.mark.unit

@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from functools import partial
 from pathlib import Path
 
 import typer
 
 from awf.cli.common import (
     OutputFormat,
+    _api_token_headers,
+    _api_token_option,
+    _base_url,
+    _call,
     _emit,
-    _run_companion_image_prune,
-    _run_terminal_workspace_compose_teardown,
-    _run_terminal_workspace_worktree_remove,
+    _handle_response,
 )
 from awf.cli.init_ops import (
     _resolve_service_compose_paths,
@@ -441,52 +442,39 @@ def service_gc(
         "--exclude-status",
         help="Repeatable status filter to remove from the eligible terminal set.",
     ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
-    """Plan or execute filesystem GC for terminal service workspaces."""
-    from awf.db.session import make_engine, make_session_factory
-    from awf.service.config import resolve_service_settings
-    from awf.service.gc import run_terminal_workspace_gc
+    """Plan or execute filesystem GC for terminal service workspaces.
 
-    settings = resolve_service_settings()
-    engine = make_engine(settings.database_url)
-    session_factory = make_session_factory(engine)
-    retention_hours = (
-        settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
+    This is a thin trigger over ``POST /v1/service/gc``: the root control-plane
+    (the api container) runs the deletion in-container with correct ownership, so
+    a running API is required (``awf serve`` / control-plane up). Defaults for
+    retention and batch limit are applied server-side.
+    """
+    body: dict[str, object] = {"execute": execute}
+    if min_age_hours is not None:
+        body["min_age_hours"] = min_age_hours
+    if limit is not None:
+        body["limit"] = limit
+    if status:
+        body["statuses"] = [item.value for item in status]
+    if exclude_status:
+        body["exclude_statuses"] = [item.value for item in exclude_status]
+
+    response = _call(
+        "POST",
+        "/v1/service/gc",
+        base_url=_base_url(base_url),
+        json=body,
+        headers=_api_token_headers(api_token),
     )
-    candidate_limit = limit if limit is not None else settings.workspace_cleanup_batch_limit
-
-    async def _run() -> object:
-        """Execute run."""
-        try:
-            result = await run_terminal_workspace_gc(
-                session_factory,
-                work_dir=Path(settings.work_dir).expanduser().resolve(),
-                min_age_hours=retention_hours,
-                limit=candidate_limit,
-                include_statuses=status or None,
-                exclude_statuses=exclude_status or None,
-                execute=execute,
-                cleanup_enabled=settings.workspace_cleanup_enabled,
-                compose_teardown=_run_terminal_workspace_compose_teardown,
-                worktree_remover=partial(
-                    _run_terminal_workspace_worktree_remove,
-                    session_factory=session_factory,
-                ),
-                companion_image_prune=(
-                    partial(
-                        _run_companion_image_prune,
-                        settings.companion_image_retention_hours,
-                    )
-                    if settings.companion_image_cache_enabled
-                    else None
-                ),
-            )
-            return result.to_dict()
-        finally:
-            await engine.dispose()
-
-    payload = asyncio.run(_run())
+    if response.status_code >= 400:
+        # ``_handle_response`` prints the error envelope and exits non-zero.
+        _handle_response(response, fmt)
+        return
+    payload = response.json()
     _emit(payload, fmt)
     if isinstance(payload, dict) and payload.get("status") == "partial":
         raise typer.Exit(code=1)

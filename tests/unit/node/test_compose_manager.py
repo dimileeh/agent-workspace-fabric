@@ -878,6 +878,180 @@ class TestRender:
         assert event["volumes"] == 0
 
     @pytest.mark.unit
+    async def test_teardown_project_removes_volumes_via_down(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A normal teardown drives ``down -v`` and reports success."""
+        compose_file = tmp_path / "work" / "compose" / "ws_ok" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, list[str]]] = []
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                self.calls.append((operation, args))
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_ok",
+            compose_file=compose_file,
+            workspace_id="ws_ok",
+            remove_volumes=True,
+        )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+        assert result.ok is True
+        assert manager.calls == [("down", ["down", "--remove-orphans", "-v"])]
+
+    @pytest.mark.unit
+    async def test_teardown_project_falls_back_to_label_removal(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When ``down`` fails, teardown reaps volumes via label removal."""
+        compose_file = tmp_path / "work" / "compose" / "ws_fb" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.label_calls: list[tuple[str, ...]] = []
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=1,
+                    stdout="",
+                    stderr="compose file unusable",
+                )
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.label_calls.append((operation, *args))
+                if operation == "volume ls":
+                    return "awf-ws_fb-dind_data\n"
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.label_calls.append((operation, *args))
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_fb",
+            compose_file=compose_file,
+            workspace_id="ws_fb",
+            remove_volumes=True,
+        )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_PROJECT_LABEL_REMOVED"
+        # Volume removal was attempted on the label-scoped fallback path.
+        assert ("volume rm", "volume", "rm", "-f", "awf-ws_fb-dind_data") in manager.label_calls
+
+    @pytest.mark.unit
+    async def test_teardown_project_reports_failure_when_fallback_also_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Both ``down`` and label removal failing yields a loud failure."""
+        compose_file = tmp_path / "work" / "compose" / "ws_fail" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                raise ComposeOperationError(
+                    operation=operation, returncode=1, stdout="", stderr="down boom"
+                )
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=1,
+                    stdout="",
+                    stderr="daemon unreachable",
+                    reason_code="DOCKER_UNAVAILABLE",
+                )
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_fail",
+            compose_file=compose_file,
+            workspace_id="ws_fail",
+            remove_volumes=True,
+        )
+
+        assert result.status == "failed"
+        assert result.reason_code == "DOCKER_COMPOSE_DOWN_FAILED"
+        assert result.error is not None
+        assert result.ok is False
+
+    @pytest.mark.unit
+    async def test_teardown_project_is_idempotent_when_compose_file_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An already-down stack (no compose file) is a skipped no-op, not a failure."""
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[str] = []
+
+            async def _compose(self, *args: object, **kwargs: object) -> None:
+                self.calls.append("compose")
+
+            async def _docker_capture(self, *args: object, **kwargs: object) -> str:
+                self.calls.append("docker")
+                return ""
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_gone",
+            compose_file=tmp_path / "work" / "compose" / "ws_gone" / "compose.yml",
+            workspace_id="ws_gone",
+            remove_volumes=True,
+        )
+
+        assert result.status == "skipped"
+        assert result.reason_code == "NO_COMPOSE_STACK"
+        assert result.ok is True
+        assert manager.calls == []
+
+    @pytest.mark.unit
     async def test_compose_command_reports_missing_docker_binary(
         self,
         manager: ComposeManager,

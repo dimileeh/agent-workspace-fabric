@@ -1,0 +1,154 @@
+"""``awf service gc`` thin-client tests.
+
+The command is a thin trigger over ``POST /v1/service/gc``: the root
+control-plane runs the deletion in-container. These tests assert the CLI maps
+its flags to the request body, renders the response, and exits non-zero on a
+``partial`` result -- they mock ``httpx.request`` rather than spinning an API.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
+from typer.testing import CliRunner
+
+from awf.cli.main import app
+
+_runner = CliRunner()
+
+
+def _mock_response(*, status_code: int = 200, payload: object = None) -> MagicMock:
+    response = MagicMock(spec=httpx.Response)
+    response.status_code = status_code
+    response.content = b"ok" if payload is not None else b""
+    response.text = json.dumps(payload) if payload is not None else ""
+    response.json.return_value = payload
+    response.request = httpx.Request("POST", "http://localhost:8000/v1/service/gc")
+    return response
+
+
+def _dry_run_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "dry_run": True,
+        "status": "dry_run",
+        "reason_code": "CLEANUP_DRY_RUN",
+        "candidate_count": 0,
+        "preserved_count": 0,
+        "deleted_path_count": 0,
+        "total_estimated_bytes": 0,
+        "candidates": [],
+        "preserved": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.unit
+def test_service_gc_defaults_to_json_dry_run_post() -> None:
+    response = _mock_response(payload=_dry_run_payload(candidate_count=1))
+    with patch("awf.cli.common.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 0, result.output
+    method, url = mock.call_args.args
+    assert method == "POST"
+    assert url.endswith("/v1/service/gc")
+    assert mock.call_args.kwargs["json"] == {"execute": False}
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["candidate_count"] == 1
+
+
+@pytest.mark.unit
+def test_service_gc_maps_flags_to_request_body() -> None:
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(
+            app,
+            [
+                "service",
+                "gc",
+                "--execute",
+                "--min-age-hours",
+                "12",
+                "--limit",
+                "5",
+                "--status",
+                "completed",
+                "--exclude-status",
+                "failed",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock.call_args.kwargs["json"] == {
+        "execute": True,
+        "min_age_hours": 12.0,
+        "limit": 5,
+        "statuses": ["completed"],
+        "exclude_statuses": ["failed"],
+    }
+
+
+@pytest.mark.unit
+def test_service_gc_partial_status_exits_nonzero() -> None:
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "delete_errors": [{"reason_code": "PATH_DELETE_PERMISSION_DENIED"}],
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "partial"
+    assert payload["delete_errors"][0]["reason_code"] == "PATH_DELETE_PERMISSION_DENIED"
+
+
+@pytest.mark.unit
+def test_service_gc_http_error_exits_nonzero() -> None:
+    response = _mock_response(
+        status_code=401,
+        payload={"detail": {"error_code": "UNAUTHORIZED", "message": "Invalid AWF API token."}},
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 1
+    assert "UNAUTHORIZED" in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_gc_supports_pretty_output() -> None:
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+            "candidate_count": 1,
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute", "--format", "pretty"])
+
+    assert result.exit_code == 0, result.output
+    assert "status: succeeded" in result.stdout
+    assert "candidate_count: 1" in result.stdout
+
+
+def _combined_output(result: Any) -> str:
+    return f"{result.stdout}{getattr(result, 'stderr', '')}"
