@@ -466,6 +466,7 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     (host_gemini / "settings.json").write_text('{"token": "gemini"}\n')
     (host_opencode / "opencode.json").write_text('{"token": "opencode"}\n')
     (host_grok / "auth.json").write_text('{"token": "grok"}\n')
+    (host_grok / "config.toml").write_text("auto_update = false\n")
     (host_ollama / "config.json").write_text('{"token": "ollama"}\n')
     (host_ollama / "id_ed25519").write_text("private-key\n")
     (host_home / ".gitconfig").write_text("[user]\n  name = Host\n")
@@ -500,6 +501,7 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
         Path(by_target["/home/agent/.config/opencode"].source) / "opencode.json",
         Path(by_target["/home/agent/.grok"].source),
         Path(by_target["/home/agent/.grok"].source) / "auth.json",
+        Path(by_target["/home/agent/.grok"].source) / "config.toml",
         Path(by_target["/home/agent/.ollama"].source),
         Path(by_target["/home/agent/.ollama"].source) / "config.json",
         Path(by_target["/home/agent/.ollama"].source) / "id_ed25519",
