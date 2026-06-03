@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.host_setup.config import HostSetupConfig, ProviderConfig
 from awf.host_setup.credentials import (
@@ -679,6 +680,10 @@ def test_captured_secret_degrades_to_env_ref_without_reinjecting(tmp_path: Path)
     assert codex.status == "ready"
     assert codex.backend == "env_ref"
     assert config.providers["codex"].credential_ref == "env://OPENAI_API_KEY"
+    # The captured raw secret must not be reinjected into the serialized summary
+    # or the stored config when the env-ref fallback takes over.
+    dumped = json.dumps(summary.model_dump()) + json.dumps(config.providers["codex"].model_dump())
+    assert _FAKE_TOKEN not in dumped
 
 
 # --- All-provider run -----------------------------------------------------
@@ -700,3 +705,31 @@ def test_all_provider_run_labels_all_providers_mode(tmp_path: Path) -> None:
 
     assert summary.mode == "all_providers"
     assert {result.name for result in summary.providers} == set(KNOWN_SETUP_PROVIDERS)
+
+
+@pytest.mark.unit
+def test_unknown_selected_provider_names_emit_warning(tmp_path: Path) -> None:
+    """Unknown provider names are filtered but logged so callers spot typos.
+
+    A mix of a valid and an unknown name still runs a targeted recheck of the
+    valid one, but the unknown name is surfaced via a warning rather than being
+    silently dropped (which would flip an all-typo selection to all_providers).
+    """
+    with structlog.testing.capture_logs() as captured:
+        summary, _config = orchestrate_provider_setup(
+            _settings(tmp_path),
+            selected_providers=["github", "typo_provider"],
+            config=HostSetupConfig(),
+            allow_plain_secrets=False,
+            non_interactive=True,
+            environ={},
+            run_subprocess=_SubprocessSpy(returncode=0),
+            http_get=_unexpected_http,
+        )
+
+    assert summary.mode == "targeted_recheck"
+    assert summary.selected == ("github",)
+    warnings = [
+        entry for entry in captured if entry.get("event") == "host_setup.unknown_providers_ignored"
+    ]
+    assert warnings and warnings[0]["providers"] == ["typo_provider"]

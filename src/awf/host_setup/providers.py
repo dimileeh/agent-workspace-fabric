@@ -241,6 +241,11 @@ def orchestrate_provider_setup(
     """
     env = dict(os.environ if environ is None else environ)
     selected = [name for name in selected_providers if name in _SPEC_BY_NAME]
+    unknown = [name for name in selected_providers if name not in _SPEC_BY_NAME]
+    if unknown:
+        # Surface typos: filtering unknown names silently would flip an
+        # all-typo selection to a full all-providers run, surprising the caller.
+        logger.warning("host_setup.unknown_providers_ignored", providers=unknown)
     mode: ProviderSetupMode = "targeted_recheck" if selected else "all_providers"
     target_names = set(selected) if selected else set(_SPEC_BY_NAME)
     capabilities = detect_host_credential_capabilities(environ=env)
