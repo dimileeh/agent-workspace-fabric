@@ -474,6 +474,47 @@ async def test_gc_path_construction_runs_off_event_loop(
     assert observed_threads[0] != loop_thread
 
 
+@pytest.mark.usefixtures("engine")
+async def test_gc_path_construction_permission_denied_is_loud(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permission refusal while *building* the GC path must not abort the sweep.
+
+    Regression: ``_gc_path`` runs ``exists()`` plus a recursive ``_estimate_bytes``
+    walk before ``_delete_gc_path``'s permission-aware handling. When the process
+    cannot stat or traverse an orphan candidate, that construction raised and the
+    exception escaped ``_reap_target``, aborting the run as
+    ``ORPHAN_DIR_RECONCILE_FAILED`` instead of producing the documented partial
+    result with ``PATH_DELETE_PERMISSION_DENIED``.
+    """
+    from awf.service import gc_reconcile
+
+    now = 12_500_000.0
+    _make_dir(tmp_path / "auth" / "ws_unstatable", age_seconds=0.0, now=now)
+
+    def _denied_gc_path(kind: str, path: Path) -> object:
+        raise PermissionError("[Errno 13] Permission denied")
+
+    monkeypatch.setattr("awf.service.gc_reconcile._gc_path", _denied_gc_path)
+
+    result = await gc_reconcile.reconcile_orphaned_workspace_dirs(
+        session_factory,
+        work_dir=tmp_path,
+        now=now,
+        min_age_hours=0,
+        execute=True,
+    )
+
+    assert result.status == "partial"
+    assert result.reason_code == ORPHAN_DIR_REAP_PARTIAL
+    assert result.reaped_count == 0
+    assert len(result.errors) == 1
+    assert result.errors[0].reason_code == PATH_DELETE_PERMISSION_DENIED
+    assert result.errors[0].status == "failed"
+
+
 async def test_build_default_compose_teardown_invokes_manager() -> None:
     from awf.service.gc_reconcile import build_default_compose_teardown
 

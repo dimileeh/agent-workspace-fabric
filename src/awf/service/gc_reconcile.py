@@ -35,6 +35,7 @@ multi-node sweep (mirroring the terminal-runtime release sweep) is future work.
 from __future__ import annotations
 
 import asyncio
+import errno
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -50,7 +51,10 @@ from awf.db.models import Workspace
 from awf.db.session import session_scope
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.gc_classify import (
+    _PERMISSION_DENIED_ERRNOS,
     PATH_ALREADY_REMOVED,
+    PATH_DELETE_FAILED,
+    PATH_DELETE_PERMISSION_DENIED,
     PATH_DELETED,
     _delete_gc_path,
     _gc_path,
@@ -394,8 +398,31 @@ def _build_and_delete_gc_path(
     orphaned git worktree, walks a full code checkout. Keeping that construction
     inside the worker thread alongside ``_delete_gc_path`` ensures the recursive
     filesystem scan never blocks the worker's event loop.
+
+    The construction itself probes the filesystem (``exists`` plus the recursive
+    estimate), so for an orphan candidate the process cannot stat or traverse it
+    raises before ``_delete_gc_path`` runs. Wrap it in the *same* permission-aware
+    translation ``_delete_gc_path`` uses so such a refusal becomes a documented
+    ``PATH_DELETE_PERMISSION_DENIED`` partial result rather than an exception that
+    escapes ``_reap_target`` and aborts the whole sweep as
+    ``ORPHAN_DIR_RECONCILE_FAILED``.
     """
-    return _delete_gc_path(_gc_path(kind, path), work_dir=work_dir)
+    try:
+        target = _gc_path(kind, path)
+    except PermissionError as exc:
+        return False, str(exc), PATH_DELETE_PERMISSION_DENIED
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            # The candidate vanished between the scan and the estimate probe --
+            # an idempotent no-op, not a failure (matches ``_delete_gc_path``).
+            return False, None, PATH_ALREADY_REMOVED
+        reason_code = (
+            PATH_DELETE_PERMISSION_DENIED
+            if exc.errno in _PERMISSION_DENIED_ERRNOS
+            else PATH_DELETE_FAILED
+        )
+        return False, str(exc), reason_code
+    return _delete_gc_path(target, work_dir=work_dir)
 
 
 async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirReapOutcome:
