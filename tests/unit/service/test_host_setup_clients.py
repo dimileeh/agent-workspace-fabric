@@ -176,15 +176,16 @@ def test_build_plan_claude_identical_entry_is_no_change(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_build_plan_codex_matching_command_args_is_no_change(tmp_path: Path) -> None:
-    """Verify a Codex entry with matching command/args plans no_change."""
+def test_build_plan_codex_full_matching_entry_is_no_change(tmp_path: Path) -> None:
+    """Verify a Codex entry matching command/args and bounded timeouts is no_change."""
     codex_path = _codex_config_path(tmp_path)
     codex_path.parent.mkdir(parents=True)
     codex_path.write_text(
         "[mcp_servers.awf]\n"
         'command = "awf"\n'
         f'args = ["mcp", "serve", "--env-file", "{_ENV_FILE}"]\n'
-        "startup_timeout_sec = 99\n",
+        "startup_timeout_sec = 20\n"
+        "tool_timeout_sec = 120\n",
         encoding="utf-8",
     )
 
@@ -194,6 +195,60 @@ def test_build_plan_codex_matching_command_args_is_no_change(tmp_path: Path) -> 
 
     assert plan.action == "no_change"
     assert plan.diff == ""
+
+
+@pytest.mark.unit
+def test_build_plan_codex_missing_timeouts_plans_update(tmp_path: Path) -> None:
+    """Verify a Codex entry matching command/args but lacking AWF's bounded
+    startup/tool timeouts plans an update that writes them, rather than a no_change.
+
+    An ``awf`` entry created by ``codex mcp add`` (or by an AWF setup predating
+    the direct file-write path) has the right command/args but no timeouts; the
+    file write must add the bounded timeouts AWF requires.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        "[mcp_servers.awf]\n"
+        'command = "awf"\n'
+        f'args = ["mcp", "serve", "--env-file", "{_ENV_FILE}"]\n',
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert plan.method == "file"
+    assert "startup_timeout_sec = 20" in plan.diff
+    assert "tool_timeout_sec = 120" in plan.diff
+    assert plan.merged_config is not None
+    assert plan.merged_config["mcp_servers"][AWF_MCP_SERVER_KEY]["startup_timeout_sec"] == 20
+    assert plan.merged_config["mcp_servers"][AWF_MCP_SERVER_KEY]["tool_timeout_sec"] == 120
+
+
+@pytest.mark.unit
+def test_build_plan_codex_stale_timeout_plans_update(tmp_path: Path) -> None:
+    """Verify a Codex entry with a stale bounded timeout is refreshed via update."""
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        "[mcp_servers.awf]\n"
+        'command = "awf"\n'
+        f'args = ["mcp", "serve", "--env-file", "{_ENV_FILE}"]\n'
+        "startup_timeout_sec = 99\n"
+        "tool_timeout_sec = 120\n",
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert plan.merged_config is not None
+    assert plan.merged_config["mcp_servers"][AWF_MCP_SERVER_KEY]["startup_timeout_sec"] == 20
 
 
 # --- build_client_config_plan: conflict -----------------------------------

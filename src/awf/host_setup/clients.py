@@ -108,6 +108,12 @@ class ClientDescriptor:
     # structured file write is used even when the CLI is on ``PATH`` — otherwise
     # the applied config would silently diverge from the dry-run/file plan.
     cli_applies_full_entry: bool = True
+    # Entry fields beyond command/args that AWF must persist exactly. An existing
+    # entry whose command/args match but that is missing or stale on one of these
+    # (Codex's bounded ``startup_timeout_sec``/``tool_timeout_sec``, which ``codex
+    # mcp add`` and pre-file-write AWF setups leave unset) is refreshed via an
+    # ``update`` rather than reported as a ``no_change`` that never writes them.
+    required_entry_fields: tuple[str, ...] = ()
 
     def config_path(self, home: Path, env: Mapping[str, str]) -> Path:
         """Return the absolute client config path under ``home``.
@@ -187,6 +193,9 @@ CLIENT_DESCRIPTORS: Mapping[str, ClientDescriptor] = {
         # Codex's ``mcp add`` ignores the bounded startup/tool timeouts AWF
         # registers, so write the config file directly to honor them.
         cli_applies_full_entry=False,
+        # These bounded timeouts must be present on a matching entry; an entry
+        # created without them is refreshed rather than treated as a no-op.
+        required_entry_fields=("startup_timeout_sec", "tool_timeout_sec"),
     ),
 }
 
@@ -362,8 +371,12 @@ def build_client_config_plan(
             descriptor=descriptor,
         )
 
-    if existing_entry is not None:
-        # Command/args already match; leave any auxiliary fields untouched.
+    if existing_entry is not None and _entry_has_required_fields(
+        existing_entry, desired_entry, descriptor.required_entry_fields
+    ):
+        # Command/args match and every required field (e.g. Codex's bounded
+        # startup/tool timeouts) is already present and current; leave the rest
+        # of the entry untouched.
         return ClientConfigPlan(
             client=client,
             method=method,
@@ -374,6 +387,10 @@ def build_client_config_plan(
             cli_command=descriptor.add_command(env_file_str) if method == "official_cli" else None,
             descriptor=descriptor,
         )
+    # Either no existing entry (create) or an entry whose command/args match but
+    # that lacks a required field — a Codex entry written by ``codex mcp add`` or
+    # a pre-file-write AWF setup carries no bounded timeouts. Fall through to an
+    # ``update`` so the file write adds them instead of a misleading no-op.
 
     merged = _merged_config(existing, descriptor, desired_entry)
     try:
@@ -599,8 +616,11 @@ def _entries_match(existing: Mapping[str, Any], desired: Mapping[str, Any]) -> b
     """Return whether an existing server entry matches the desired command/args.
 
     The meaningful identity of an MCP server entry is its launch command and
-    args; matching those means the client already points at AWF, so auxiliary
-    fields (timeouts, ``type``) are left untouched rather than treated as drift.
+    args; matching those means the client already points at AWF, so a difference
+    here is *not* a drift conflict. Required auxiliary fields the planner must
+    still persist (Codex's bounded timeouts) are checked separately by
+    :func:`_entry_has_required_fields`, while purely cosmetic fields (``type``)
+    are left untouched.
 
     An existing ``args`` that is not a list (e.g. Claude JSON ``"args": null``
     or Codex TOML ``args = 1``) cannot match the desired list args, so it
@@ -614,6 +634,24 @@ def _entries_match(existing: Mapping[str, Any], desired: Mapping[str, Any]) -> b
     if not isinstance(existing_args, (list, tuple)) or not isinstance(desired_args, (list, tuple)):
         return False
     return list(existing_args) == list(desired_args)
+
+
+def _entry_has_required_fields(
+    existing: Mapping[str, Any],
+    desired: Mapping[str, Any],
+    required_fields: tuple[str, ...],
+) -> bool:
+    """Return whether ``existing`` already carries every required desired field.
+
+    ``_entries_match`` compares only command/args, but some clients need extra
+    fields persisted that their official CLI cannot write — Codex's bounded
+    ``startup_timeout_sec``/``tool_timeout_sec``. An ``awf`` entry created by
+    ``codex mcp add`` (or by an AWF setup predating the direct file-write path)
+    has the right command/args yet lacks those bounded timeouts; reporting it as
+    a no-op would leave them unset. This returns ``False`` for such an entry so
+    the planner routes it to ``update`` and the file write adds them.
+    """
+    return all(existing.get(field) == desired.get(field) for field in required_fields)
 
 
 def _merged_config(
