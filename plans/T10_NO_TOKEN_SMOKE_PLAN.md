@@ -12,21 +12,26 @@ paid LLM provider token. Point first-run output at it. Close four gaps:
 1. False-green in mocked mode: `--mocked-local` downgrades an unreachable/unhealthy
    local Core from `fail`→`warn`. Remove that downgrade; local Core health stays a
    hard signal. Only provider/PR (token + GitHub) requirements are relaxed.
-2. Liveness ≠ readiness: default probe hits only `/healthz`. Add a real worker
-   health signal via `/readyz` `checks.db.ok` (token-free; readable even on 503).
+2. Liveness ≠ readiness: default probe hits only `/healthz`. Add a token-free
+   worker **DB-substrate** signal via `/readyz` `checks.db.ok` (readable even on
+   503). This proves the worker's required DB dependency is reachable — it is
+   *not* worker-process liveness (a provider-free HTTP probe cannot observe the
+   worker container; the real worker-container probe lives in `awf service doctor`
+   and is Docker-dependent, outside this proof).
 3. First-run output doesn't point at the proof: `awf start` `next_steps` must lead
    with `awf smoke run --mocked-local`.
 4. Output must prove health, not print a URL: enrich service phase evidence with
-   `api` and `worker` sub-statuses.
+   `api` and `worker_db_substrate` sub-statuses.
 
 ## Requirements checklist
 
 - [ ] `_phase_service_readiness`: remove `mocked_local` warn-downgrade — unreachable
-      Core is always `fail`. Interpret richer collector result (`api`/`worker`
+      Core is always `fail`. Interpret richer collector result (`api`/`worker_db_substrate`
       sub-signals); enrich evidence. Backward compatible: plain `{"status":"ok"}` ⇒ ok.
 - [ ] New reason code `SMOKE_WORKER_UNAVAILABLE` (API up, worker DB substrate down).
 - [ ] `_default_service_collector`: probe `/healthz` AND `/readyz` (parse JSON
-      regardless of status), read `checks.db.ok` as worker signal; degrade gracefully.
+      regardless of status), read `checks.db.ok` as the worker DB-substrate signal
+      (not worker-process liveness); degrade gracefully.
 - [ ] `_start_success_payload`: lead `next_steps` with provider-free proof.
 - [ ] `smoke run` `--help` / `--mocked-local` help text: describe no-token local proof.
 - [ ] Tests first (TDD): regression fail-not-warn, mocked success keeps health real,

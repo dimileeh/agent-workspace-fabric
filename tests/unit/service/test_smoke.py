@@ -579,7 +579,7 @@ class TestCollectSmokeReportExceptionPaths:
         """Mocked success keeps Core health real and proves it via sub-statuses."""
 
         async def _healthy_svc(settings, *, http_client=None):
-            return {"status": "ok", "api": "ok", "worker": "ok"}
+            return {"status": "ok", "api": "ok", "worker_db_substrate": "ok"}
 
         report = await collect_smoke_report(
             project=tmp_path,
@@ -595,7 +595,7 @@ class TestCollectSmokeReportExceptionPaths:
         assert service_phase["status"] == "ok"
         assert service_phase["reason_code"] == "SMOKE_SERVICE_READY"
         assert service_phase["evidence"]["api"] == "ok"
-        assert service_phase["evidence"]["worker"] == "ok"
+        assert service_phase["evidence"]["worker_db_substrate"] == "ok"
         # PR path is mocked (no GitHub authority handed over); overall not fail.
         pr_phase = next(p for p in report["phases"] if p["name"] == "pr_monitor")
         assert pr_phase["reason_code"] == "SMOKE_PR_MOCKED_LOCAL"
@@ -607,7 +607,7 @@ class TestCollectSmokeReportExceptionPaths:
         """API up but worker DB substrate down is a hard fail even in mocked mode."""
 
         async def _worker_down_svc(settings, *, http_client=None):
-            return {"status": "degraded", "api": "ok", "worker": "fail"}
+            return {"status": "degraded", "api": "ok", "worker_db_substrate": "fail"}
 
         report = await collect_smoke_report(
             project=tmp_path,
@@ -623,11 +623,11 @@ class TestCollectSmokeReportExceptionPaths:
         assert service_phase["status"] == "fail"
         assert service_phase["reason_code"] == "SMOKE_WORKER_UNAVAILABLE"
         assert service_phase["evidence"]["api"] == "ok"
-        assert service_phase["evidence"]["worker"] == "fail"
+        assert service_phase["evidence"]["worker_db_substrate"] == "fail"
         assert report["status"] == "fail"
 
     async def test_service_readiness_plain_ok_collector_stays_ok(self, tmp_path: Path) -> None:
-        """Backward compat: a plain ``{"status": "ok"}`` collector (no worker key) is ok."""
+        """Backward compat: a plain ``{"status": "ok"}`` collector (no substrate key) is ok."""
 
         async def _plain_ok_svc(settings, *, http_client=None):
             return {"status": "ok"}
@@ -649,7 +649,7 @@ class TestCollectSmokeReportExceptionPaths:
     async def test_default_service_collector_returns_ok_when_db_ready(
         self,
     ) -> None:
-        """`/healthz` 200 + `/readyz` `checks.db.ok=true` ⇒ api + worker both ok."""
+        """`/healthz` 200 + `/readyz` `checks.db.ok=true` ⇒ api + worker_db_substrate both ok."""
 
         async def _get(url: str):
             if url.endswith("/healthz"):
@@ -667,15 +667,15 @@ class TestCollectSmokeReportExceptionPaths:
             result = await _default_service_collector(_settings())
         assert result["status"] == "ok"
         assert result["api"] == "ok"
-        assert result["worker"] == "ok"
+        assert result["worker_db_substrate"] == "ok"
 
     async def test_default_service_collector_worker_fail_when_db_down_even_on_503(
         self,
     ) -> None:
-        """`/readyz` 503 (providers missing) but readable body ⇒ api ok, worker fail.
+        """`/readyz` 503 (providers missing) but readable body ⇒ api ok, substrate fail.
 
-        Proves the provider-free worker signal works while the overall /readyz
-        status is 503 because no provider token is configured.
+        Proves the provider-free worker-DB-substrate signal works while the overall
+        /readyz status is 503 because no provider token is configured.
         """
 
         async def _get(url: str):
@@ -694,7 +694,7 @@ class TestCollectSmokeReportExceptionPaths:
             result = await _default_service_collector(_settings())
         assert result["status"] == "degraded"
         assert result["api"] == "ok"
-        assert result["worker"] == "fail"
+        assert result["worker_db_substrate"] == "fail"
 
     async def test_default_service_collector_returns_unreachable_on_503_healthz(
         self,
@@ -716,7 +716,7 @@ class TestCollectSmokeReportExceptionPaths:
     async def test_default_service_collector_worker_fail_when_readyz_raises(
         self,
     ) -> None:
-        """`/readyz` failing while `/healthz` is up still yields a real (fail) signal."""
+        """`/readyz` failing while `/healthz` is up still yields a real (fail) substrate signal."""
         import httpx
 
         async def _get(url: str):
@@ -732,7 +732,7 @@ class TestCollectSmokeReportExceptionPaths:
             result = await _default_service_collector(_settings())
         assert result["status"] == "degraded"
         assert result["api"] == "ok"
-        assert result["worker"] == "fail"
+        assert result["worker_db_substrate"] == "fail"
 
     async def test_default_service_collector_error_bubbles_to_phase_handler(
         self,

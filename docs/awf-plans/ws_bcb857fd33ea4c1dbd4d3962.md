@@ -20,15 +20,20 @@ acceptance criteria:
    *provider/PR (token + GitHub)* requirements.
 2. **Liveness ≠ readiness.** The default service probe hits only `/healthz`
    (dependency-free liveness). That proves "the API process answered," not
-   "Core is healthy." The proof must consult a **real API + worker health
-   signal** (the worker's DB substrate via `/readyz`) without requiring provider
-   tokens, since `/readyz` overall returns 503 when providers are unconfigured.
+   "Core is healthy." The proof must consult a **real API + worker-DB-substrate
+   signal** (the worker's required DB dependency via `/readyz`) without requiring
+   provider tokens, since `/readyz` overall returns 503 when providers are
+   unconfigured. This proves the worker's substrate is reachable, **not**
+   worker-process liveness — a provider-free HTTP probe cannot observe the worker
+   container, and the real worker-container probe (`awf service doctor`'s
+   `docker compose ps worker`) is Docker-dependent and outside this proof.
 3. **First-run output doesn't point to the proof.** `awf start` success
    `next_steps` currently lead with `awf init` / `awf service status`. After
    `awf start`, first-run output must point at the **provider-free** proof
    (`awf smoke run --mocked-local`).
 4. **Output must prove health, not print a URL.** Enrich the smoke service phase
-   evidence so the report visibly demonstrates Core/worker health.
+   evidence so the report visibly demonstrates Core health (API up + worker DB
+   substrate reachable).
 
 Preserve the existing live (real-provider) smoke path and the existing console
 "false-green" coverage unchanged.
@@ -81,21 +86,23 @@ Source:
     `worker` sub-signal that is not healthy, fail with a worker-specific reason.
     Backward compatible: a plain `{"status": "ok"}` (no `worker` key) stays `ok`
     so existing injected collectors keep passing. Enrich `evidence` with `api`
-    and `worker` sub-statuses so the report proves health rather than a URL.
+    and `worker_db_substrate` sub-statuses so the report proves health rather than
+    a URL. The `worker_db_substrate` signal is the worker's DB *dependency*, not
+    worker-process liveness.
   - New reason code `SMOKE_WORKER_UNAVAILABLE` (API reachable, worker DB
     substrate not). Keep `SMOKE_SERVICE_READY` / `SMOKE_SERVICE_UNREACHABLE`.
   - `_default_service_collector`: probe `GET /healthz` (API liveness) **and**
     `GET /readyz` (parse JSON regardless of status code), reading `checks.db.ok`
-    as the worker-substrate signal. Return e.g.
-    `{"status":"ok","api":"ok","worker":"ok"}` when both succeed;
-    `{"status":"degraded","api":"ok","worker":"fail", "reason": ...}` when the
-    API is up but the DB sub-check is down/unreachable;
+    as the worker-DB-substrate signal. Return e.g.
+    `{"status":"ok","api":"ok","worker_db_substrate":"ok"}` when both succeed;
+    `{"status":"degraded","api":"ok","worker_db_substrate":"fail", "reason": ...}`
+    when the API is up but the DB sub-check is down/unreachable;
     `{"status":"unreachable", ...}` when `/healthz` is non-200 or raises.
     Provider/`agent_readiness` parts of `/readyz` are intentionally ignored
     (token-gated) so the probe stays provider-free. Keep the bounded httpx
-    timeouts; `/readyz` failures degrade gracefully (worker→`unknown`/`fail`,
+    timeouts; `/readyz` failures degrade gracefully (substrate→`unknown`/`fail`,
     never a crash). Document that docker-dependent `/readyz` checks are *not*
-    required for the no-token proof (the worker substrate proven here is the DB;
+    required for the no-token proof (the substrate proven here is the DB;
     the live path covers docker/provisioning).
 - `src/awf/cli/start_commands.py`
   - `_start_success_payload`: lead `next_steps` with the provider-free proof,
@@ -125,21 +132,22 @@ Tests (written/updated first — see TDD order below):
    health signal.
 2. **Mocked-local success keeps Core health real (AC#1/#2).** With
    `mocked_local=True`, a collector returning `{"status":"ok","api":"ok",
-   "worker":"ok"}` → `service_readiness` `ok` / `SMOKE_SERVICE_READY`, evidence
-   exposes `api` and `worker` sub-statuses; PR phase still
+   "worker_db_substrate":"ok"}` → `service_readiness` `ok` / `SMOKE_SERVICE_READY`,
+   evidence exposes `api` and `worker_db_substrate` sub-statuses; PR phase still
    `SMOKE_PR_MOCKED_LOCAL`; provider phase may warn — overall not `fail`.
 3. **Worker substrate down fails even in mocked mode (AC#4).** Collector returns
-   `{"status":"degraded","api":"ok","worker":"fail"}` → `service_readiness`
-   `fail` / `SMOKE_WORKER_UNAVAILABLE`; overall `fail`.
+   `{"status":"degraded","api":"ok","worker_db_substrate":"fail"}` →
+   `service_readiness` `fail` / `SMOKE_WORKER_UNAVAILABLE`; overall `fail`.
 4. **Default collector unit tests** (patch `httpx.AsyncClient`, mirroring the
    existing `_default_service_collector` tests):
    - `/healthz` 200 + `/readyz` body `{"checks":{"db":{"ok":true}}}` → `ok`,
-     `worker == "ok"`.
+     `worker_db_substrate == "ok"`.
    - `/healthz` 200 + `/readyz` body `{"checks":{"db":{"ok":false}}}` (overall
-     503, providers missing) → `degraded`, `worker == "fail"`, `api == "ok"`
-     (proves provider-free worker signal works while overall /readyz is 503).
+     503, providers missing) → `degraded`, `worker_db_substrate == "fail"`,
+     `api == "ok"` (proves the provider-free substrate signal works while overall
+     /readyz is 503).
    - `/healthz` non-200 → `unreachable` (no readyz dependence).
-   - `/readyz` raises/unreachable but `/healthz` ok → worker `fail`/`unknown`,
+   - `/readyz` raises/unreachable but `/healthz` ok → substrate `fail`/`unknown`,
      still a real (non-green) signal.
 5. **Backward compatibility.** Existing tests passing `{"status":"ok"}` plain
    collectors must stay green (assert in-place; no `worker` key ⇒ `ok`).
@@ -184,11 +192,14 @@ uv run --python 3.12 --extra dev pytest \
   the intended T10 fix (AC#4). Only one existing test encodes the old behavior;
   it is updated, not silently broken. No other caller depends on the warn
   downgrade (verified: `_phase_service_readiness` warn path has no other test).
-- **Assumption: DB readiness is the right token-free worker signal.** The worker
-  is a DB poll/claim loop; `/readyz.checks.db` is reachable without provider
-  tokens and degrades gracefully. Docker/provisioning health remains the live
-  path's job (documented in code), so the no-token proof is not coupled to docker
-  availability (the workspace notes docker may be absent).
+- **Assumption: DB readiness is the right token-free worker *substrate* signal.**
+  The worker is a DB poll/claim loop; `/readyz.checks.db` is reachable without
+  provider tokens and degrades gracefully. It proves the worker's DB dependency,
+  not worker-process liveness (the real worker-container probe lives in
+  `awf service doctor` and is Docker-dependent, outside this provider-free proof).
+  Docker/provisioning health remains the live path's job (documented in code), so
+  the no-token proof is not coupled to docker availability (the workspace notes
+  docker may be absent).
 - **Assumption: `/readyz` JSON is readable on 503.** Confirmed in
   `routes/health.py` — the body is returned with the 503 status, so the collector
   reads sub-checks regardless of the status line.
