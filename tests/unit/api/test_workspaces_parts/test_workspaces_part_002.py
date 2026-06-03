@@ -816,7 +816,7 @@ class TestCreateWorkspacePart001:
         monkeypatch.setattr(workspaces_route, "admit_request_async", denied_admission)
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", replay_after_denial)
-        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row_checked", fail_create)
 
         response = await workspaces_route.create_workspace(
             payload,
@@ -907,7 +907,7 @@ class TestCreateWorkspacePart001:
         monkeypatch.setattr(workspaces_route, "admit_request_async", fail_admit)
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", missing_replay)
-        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row_checked", fail_create)
 
         response = await workspaces_route.create_workspace(
             payload,
@@ -1480,7 +1480,7 @@ class TestCreateWorkspacePart001:
 
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
-        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row_checked", fail_create)
 
         session = SimpleNamespace(info={}, bind=None)
         response = await workspaces_route.create_workspace(

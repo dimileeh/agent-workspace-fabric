@@ -99,12 +99,10 @@ from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceRetryNotFoundError,
     _egress_audit_response,
-    check_host_port_conflicts,
-    create_workspace_row,
+    create_workspace_row_checked,
     owned_path_overlap_warnings,
     retry_workspace_row,
     workspace_create_payload_matches,
-    workspace_create_profile_snapshots,
     workspace_provider_readiness_preflight,
     workspace_response,
     workspace_retry_response,
@@ -321,23 +319,15 @@ async def create_workspace(
         return _insufficient_disk_response(disk_check)
 
     try:
-        _req_profile, _resolved_profile = workspace_create_profile_snapshots(payload)
-        await check_host_port_conflicts(
-            repo,
-            payload.companions,
-            resolved_profile=_resolved_profile,
-            excluding_workspace_id=None,
-            node_id=effective_worker_node_id(settings),
-        )
-
-        ws = await create_workspace_row(
+        ws = await create_workspace_row_checked(
             session,
+            repo,
             payload,
             idempotency_key=idempotency_key,
             settings=settings,
             disk_check=disk_check,
-            requested_profile=_req_profile,
-            resolved_profile=_resolved_profile,
+            node_id=effective_worker_node_id(settings),
+            excluding_workspace_id=None,
         )
     except ProfileResolutionError as exc:
         await session.rollback()

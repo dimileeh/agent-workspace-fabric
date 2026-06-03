@@ -231,6 +231,50 @@ async def create_workspace_row(
     return ws
 
 
+async def create_workspace_row_checked(
+    session: AsyncSession,
+    repo: WorkspaceRepository,
+    payload: WorkspaceCreateRequest,
+    *,
+    idempotency_key: str | None = None,
+    settings: Settings | None = None,
+    disk_check: DiskCheck | None = None,
+    node_id: str | None = None,
+    excluding_workspace_id: str | None = None,
+) -> Workspace:
+    """Resolve profile snapshots once, guard host-port conflicts, and persist the row.
+
+    Shared core of the REST route handler and ``WorkspaceService.create``. The
+    profile snapshot is resolved a single time and forwarded to both
+    ``check_host_port_conflicts`` and ``create_workspace_row`` so it is not
+    recomputed. Raises exactly the exceptions the inline code did
+    (``check_host_port_conflicts`` / ``create_workspace_row``); callers keep
+    their own HTTP/exception mapping.
+    """
+    requested_profile, resolved_profile = workspace_create_profile_snapshots(payload)
+    # Lazy import: ``awf.service.workspaces`` imports this module at load time, so a
+    # top-level import would be a cycle (matches the existing lazy-import pattern
+    # used throughout this file).
+    from awf.service.workspaces import check_host_port_conflicts  # noqa: E402
+
+    await check_host_port_conflicts(
+        repo,
+        payload.companions,
+        resolved_profile=resolved_profile,
+        excluding_workspace_id=excluding_workspace_id,
+        node_id=node_id,
+    )
+    return await create_workspace_row(
+        session,
+        payload,
+        idempotency_key=idempotency_key,
+        settings=settings,
+        disk_check=disk_check,
+        requested_profile=requested_profile,
+        resolved_profile=resolved_profile,
+    )
+
+
 def workspace_create_payload_matches(
     existing: Workspace,
     payload: WorkspaceCreateRequest,
