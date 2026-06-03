@@ -1625,6 +1625,27 @@ def test_resolve_client_env_file_defaults_to_compose_paths(
 
 
 @pytest.mark.unit
+def test_resolve_client_env_file_fallback_is_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6GyLKV: the packaged/default fallback may be a
+    relative ``Path(".env")``, but ``awf mcp serve`` resolves the registered
+    ``--env-file`` against the client process cwd. Persist an absolute path so
+    Claude/Codex sessions launched from any directory still find the env file."""
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: HostSetupConfig())
+    monkeypatch.setattr(
+        setup_commands,
+        "resolve_service_compose_paths",
+        lambda: (Path("compose.yml"), Path(".env"), Path(".env.example")),
+    )
+
+    resolved = setup_commands._resolve_client_env_file(None)
+
+    assert resolved.is_absolute()
+    assert resolved == Path(".env").resolve()
+
+
+@pytest.mark.unit
 def test_resolve_client_env_file_honors_persisted_source_checkout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

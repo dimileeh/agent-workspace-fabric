@@ -393,7 +393,13 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     if persisted is not None:
         return persisted.root / "docker" / "compose" / ".env"
     _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
-    return raw_env_file
+    # The packaged/default fallback may be a relative ``Path(".env")``. The
+    # explicit and persisted checkout branches above already pin absolute paths;
+    # the registered ``--env-file`` is read later by ``awf mcp serve``, which
+    # resolves it against the client process cwd (mcp_commands._resolve_mcp_settings),
+    # so a relative path would break Claude/Codex sessions launched from any other
+    # directory. Pin the fallback to an absolute path here as well.
+    return raw_env_file.resolve()
 
 
 def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
