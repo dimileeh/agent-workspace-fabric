@@ -61,6 +61,7 @@ _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
 _PROC_SELF_STATUS = Path("/proc/self/status")
+_PROC_MOUNTS = Path("/proc/mounts")
 _CAP_SYS_ADMIN_BIT = 21
 _ISOLATION_OVERLAY = "per_workspace_overlay"
 _ISOLATION_COPY = "per_workspace_copy"
@@ -94,6 +95,44 @@ def _has_cap_sys_admin(proc_status: Path = _PROC_SELF_STATUS) -> bool:
     return False
 
 
+def _unescape_proc_mount_field(field: str) -> str:
+    """Decode the octal escapes ``/proc/mounts`` uses for space/tab/newline/backslash."""
+
+    return (
+        field.replace("\\134", "\\")
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+    )
+
+
+def _overlay_lowerdir_from_proc_mounts(proc_mounts: Path, merged: Path) -> Path | None:
+    """Return the ``lowerdir`` of the overlay mounted at ``merged`` per ``/proc/mounts``.
+
+    ``None`` when ``merged`` is not a live overlay there, the file is unreadable, or
+    the entry carries no ``lowerdir=`` option. Lets a retry that reuses a still-live
+    overlay recover the base it is *actually* mounted against instead of guessing
+    from the current host content.
+    """
+
+    try:
+        contents = proc_mounts.read_text()
+    except OSError:
+        return None
+    target = os.fspath(merged)
+    for line in contents.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 4 or fields[2] != "overlay":
+            continue
+        if _unescape_proc_mount_field(fields[1]) != target:
+            continue
+        for option in fields[3].split(","):
+            if option.startswith("lowerdir="):
+                return Path(_unescape_proc_mount_field(option[len("lowerdir=") :]))
+        return None
+    return None
+
+
 class OverlayMounter(Protocol):
     """Set up and tear down the per-workspace ``~/.claude`` overlay mount.
 
@@ -117,12 +156,22 @@ class OverlayMounter(Protocol):
         """Return whether ``target`` is currently an overlay mountpoint."""
         ...  # pragma: no cover - Protocol method declaration only.
 
+    def active_lowerdir(self, merged: Path) -> Path | None:
+        """Return the ``lowerdir`` the overlay live-mounted at ``merged`` uses.
+
+        ``None`` when ``merged`` is not a live overlay or its lowerdir cannot be
+        determined. Lets a retry that reuses a live mount pin the surviving upper
+        to the base it is *actually* mounted against rather than a recomputed guess.
+        """
+        ...  # pragma: no cover - Protocol method declaration only.
+
 
 @dataclass(frozen=True)
 class _SubprocessOverlayMounter:
     """Default :class:`OverlayMounter` backed by ``mount(8)``/``umount(8)``."""
 
     timeout_seconds: float = 30.0
+    proc_mounts: Path = _PROC_MOUNTS
 
     def supported(self) -> bool:
         return _overlay_filesystem_available() and _has_cap_sys_admin()
@@ -148,6 +197,9 @@ class _SubprocessOverlayMounter:
 
     def is_mounted(self, target: Path) -> bool:
         return os.path.ismount(target)
+
+    def active_lowerdir(self, merged: Path) -> Path | None:
+        return _overlay_lowerdir_from_proc_mounts(self.proc_mounts, merged)
 
 
 def default_overlay_mounter() -> OverlayMounter:
@@ -757,6 +809,35 @@ def _record_overlay_base_pin(sig_marker: Path, signature: str, claude_root: Path
         )
 
 
+def _live_overlay_pin_signature(
+    overlay_mounter: OverlayMounter, merged: Path, work_dir: Path
+) -> str | None:
+    """Resolve the base signature to pin for a *reused* live overlay.
+
+    A retry reaches the live-mount reuse branch when the prior provision was
+    killed after ``mount()`` succeeded but before it recorded ``base.signature``:
+    ``upper`` exists yet the marker is missing. The signature recomputed from the
+    current host is only correct if ``~/.claude`` is unchanged — if the operator
+    edited it since the kill, that value names a *different* base than the one this
+    still-live overlay is actually mounted against, and persisting it would later
+    remount the surviving upper over the wrong base (the exact mismatch whose
+    failure path ``rmtree``s the agent's mutations). So recover the ``lowerdir``
+    the live mount really uses and map it back to its shared-base signature.
+
+    Returns ``None`` — meaning write no pin, leaving a later teardown+retry to
+    recompute from the host — when the live lowerdir cannot be recovered or does
+    not resolve to a shared base under ``work_dir``: no pin is safer than a guess.
+    """
+
+    live_lowerdir = overlay_mounter.active_lowerdir(merged)
+    if live_lowerdir is None:
+        return None
+    signature = live_lowerdir.parent.name
+    if _shared_claude_base_dir(work_dir, signature) != live_lowerdir:
+        return None
+    return signature
+
+
 def _prepare_claude_overlay_mount(
     *,
     host_home: Path,
@@ -848,12 +929,16 @@ def _prepare_claude_overlay_mount(
             # after ``mount()`` succeeded but before it recorded the pin (or the
             # marker write failed): ``upper`` exists yet ``base.signature`` is
             # missing, so ``_pinned_overlay_base`` returned None and a fresh
-            # signature was computed above. Persist it now — for this unchanged-
-            # host retry it matches the base the live overlay was mounted against
-            # — so a later teardown + host ``~/.claude`` change remounts this
-            # surviving upper over that exact base instead of recomputing it and
-            # tripping the upper/base mismatch that would rmtree the agent's data.
-            _record_overlay_base_pin(sig_marker, fresh_signature, claude_root)
+            # signature was computed above. That fresh value matches the live
+            # overlay's base only if the host is unchanged; if the operator edited
+            # ``~/.claude`` since the kill it names a different base, and pinning it
+            # would later remount the surviving upper over the wrong base. So pin
+            # the base the live mount is *actually* using — recovered from the mount
+            # itself — and write nothing if it cannot be recovered (a later
+            # teardown + retry then recomputes), never a guess from the changed host.
+            pin_signature = _live_overlay_pin_signature(overlay_mounter, merged, work_dir)
+            if pin_signature is not None:
+                _record_overlay_base_pin(sig_marker, pin_signature, claude_root)
         return (
             AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
             upper,

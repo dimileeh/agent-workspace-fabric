@@ -72,6 +72,16 @@ class FakeOverlayMounter:
     def is_mounted(self, target: Path) -> bool:
         return Path(target) in self.mounted
 
+    def active_lowerdir(self, merged: Path) -> Path | None:
+        # Mirror the kernel: only a live mountpoint has a lowerdir, recovered here
+        # from the most recent recorded mount onto ``merged``.
+        if Path(merged) not in self.mounted:
+            return None
+        for call in reversed(self.mounts):
+            if call["merged"] == Path(merged):
+                return call["lowerdir"]
+        return None
+
 
 def _seed_host_claude(host_home: Path) -> None:
     claude = host_home / ".claude"
@@ -609,6 +619,133 @@ def test_live_mount_reuse_records_pin_when_marker_missing(tmp_path: Path) -> Non
     # The pin is now recorded, matching the base the live overlay runs against.
     assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
     assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
+def test_live_mount_reuse_pins_actual_base_when_host_changed(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_killpin",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_killpin" / "claude"
+    signature_a = _host_claude_signature(host_home)
+    base_a = _shared_claude_base_dir(work_dir, signature_a)
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    # Worker killed after ``mount()`` (against base A) but before the pin: the
+    # overlay stays live on disk while ``base.signature`` is missing.
+    (claude_root / "base.signature").unlink()
+
+    # The operator edits ``~/.claude`` before the retry, so a signature recomputed
+    # from the host now names a *different* base than the one the live overlay is
+    # actually mounted against.
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+    signature_b = _host_claude_signature(host_home)
+    assert signature_b != signature_a
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_killpin",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The live mount was reused — no remount onto the busy mountpoint.
+    assert len(mounter.mounts) == 1
+    # The pin records the base the live overlay is *actually* mounted against
+    # (the original base A recovered from the live mount), never the guessed base B
+    # recomputed from the changed host. A later teardown + remount therefore reuses
+    # the correct lowerdir instead of tripping an upper/base mismatch.
+    assert (claude_root / "base.signature").read_text() == signature_a
+    assert base_a != _shared_claude_base_dir(work_dir, signature_b)
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
+def test_live_mount_reuse_skips_pin_when_lowerdir_unrecoverable(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    class UnrecoverableLowerdirMounter(FakeOverlayMounter):
+        """A live overlay whose lowerdir cannot be recovered from the mount table."""
+
+        def active_lowerdir(self, merged: Path) -> Path | None:
+            return None
+
+    mounter = UnrecoverableLowerdirMounter(supported=True)
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_norecover",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_norecover" / "claude"
+    (claude_root / "base.signature").unlink()
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_norecover",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # No pin is guessed when the live overlay's base cannot be recovered; a later
+    # teardown + retry recomputes from the host instead of locking to a guess.
+    assert not (claude_root / "base.signature").exists()
+
+
+@pytest.mark.unit
+def test_live_mount_reuse_skips_pin_when_lowerdir_not_a_shared_base(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    class StrayLowerdirMounter(FakeOverlayMounter):
+        """A live overlay reporting a lowerdir outside the shared-base layout."""
+
+        def active_lowerdir(self, merged: Path) -> Path | None:
+            return Path("/somewhere/unexpected/.claude")
+
+    mounter = StrayLowerdirMounter(supported=True)
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_stray",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_stray" / "claude"
+    (claude_root / "base.signature").unlink()
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_stray",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # A recovered lowerdir that does not resolve to a shared base under ``work_dir``
+    # is not trusted as a pin: write nothing rather than a path we cannot verify.
+    assert not (claude_root / "base.signature").exists()
 
 
 @pytest.mark.unit
@@ -1568,3 +1705,60 @@ def test_subprocess_overlay_mounter_supported_combines_capabilities(
     assert _SubprocessOverlayMounter().supported() is True
     monkeypatch.setattr(auth_mounts_mod, "_has_cap_sys_admin", lambda: False)
     assert _SubprocessOverlayMounter().supported() is False
+
+
+@pytest.mark.unit
+def test_subprocess_overlay_mounter_active_lowerdir_parses_proc_mounts(
+    tmp_path: Path,
+) -> None:
+    # Use paths containing a space so the octal-escaped form ``\040`` in
+    # ``/proc/mounts`` must be decoded back to a real space.
+    merged = tmp_path / "auth space" / "ws" / "claude" / "merged"
+    base = tmp_path / "auth space" / "_shared" / "base" / "sig" / ".claude"
+    other = tmp_path / "auth space" / "other" / "merged"
+    escaped_merged = str(merged).replace(" ", "\\040")
+    escaped_base = str(base).replace(" ", "\\040")
+    proc_mounts = tmp_path / "mounts"
+    # A non-overlay line, an overlay at a different mountpoint, then the target
+    # overlay — the parser must skip the first two and read *our* lowerdir.
+    proc_mounts.write_text(
+        "proc /proc proc rw,nosuid 0 0\n"
+        f"overlay {other} overlay rw,lowerdir={tmp_path / 'other-base'} 0 0\n"
+        f"overlay {escaped_merged} overlay "
+        f"rw,lowerdir={escaped_base},upperdir=/u,workdir=/w 0 0\n"
+    )
+
+    mounter = _SubprocessOverlayMounter(proc_mounts=proc_mounts)
+    assert mounter.active_lowerdir(merged) == base
+
+
+@pytest.mark.unit
+def test_subprocess_overlay_mounter_active_lowerdir_missing_file_returns_none(
+    tmp_path: Path,
+) -> None:
+    mounter = _SubprocessOverlayMounter(proc_mounts=tmp_path / "absent")
+    assert mounter.active_lowerdir(tmp_path / "merged") is None
+
+
+@pytest.mark.unit
+def test_subprocess_overlay_mounter_active_lowerdir_no_lowerdir_option(
+    tmp_path: Path,
+) -> None:
+    merged = tmp_path / "merged"
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(f"overlay {merged} overlay rw,upperdir=/u,workdir=/w 0 0\n")
+    mounter = _SubprocessOverlayMounter(proc_mounts=proc_mounts)
+    # An overlay line for ``merged`` that carries no ``lowerdir=`` option yields
+    # ``None`` rather than a malformed guess.
+    assert mounter.active_lowerdir(merged) is None
+
+
+@pytest.mark.unit
+def test_subprocess_overlay_mounter_active_lowerdir_unmounted_target_returns_none(
+    tmp_path: Path,
+) -> None:
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(f"overlay {tmp_path / 'elsewhere'} overlay rw,lowerdir=/b 0 0\n")
+    mounter = _SubprocessOverlayMounter(proc_mounts=proc_mounts)
+    # No overlay line matches the requested mountpoint, so there is nothing to pin.
+    assert mounter.active_lowerdir(tmp_path / "merged") is None
