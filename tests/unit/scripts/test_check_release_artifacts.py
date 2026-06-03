@@ -214,6 +214,40 @@ def test_drift_gate_fails_when_manifest_has_extra_artifact(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_drift_gate_fails_on_duplicate_artifact_name(tmp_path: Path) -> None:
+    """A duplicated wheel entry with a stale URL is drift, not silently collapsed.
+
+    Indexing artifacts by name would otherwise keep only the last entry, letting an
+    extra earlier wheel object with a stale/broken URL escape the comparison.
+    """
+    dist_dir, checksums_file, manifest_path = _build_release(tmp_path)
+
+    def _mutate(manifest: dict[str, object]) -> None:
+        artifacts = manifest["artifacts"]
+        assert isinstance(artifacts, list)
+        for artifact in artifacts:
+            if artifact["kind"] == "wheel":
+                stale = dict(artifact)
+                stale["url"] = f"{REPOSITORY_URL}/releases/download/v0.0.1/{stale['name']}"
+                artifacts.insert(0, stale)
+                break
+
+    _tamper(manifest_path, _mutate)
+
+    result = _run_check(
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        manifest_path=manifest_path,
+        version="0.1.0",
+        tag="v0.1.0",
+    )
+
+    assert result.returncode != 0
+    assert "agent_workspace_fabric-0.1.0-py3-none-any.whl" in result.stderr
+    assert "duplicate" in result.stderr.lower()
+
+
+@pytest.mark.unit
 def test_drift_gate_fails_when_checksum_file_digest_edited(tmp_path: Path) -> None:
     """An edited checksum digest fails independently of the manifest."""
     dist_dir, checksums_file, manifest_path = _build_release(tmp_path)

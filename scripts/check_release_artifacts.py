@@ -158,6 +158,7 @@ def _manifest_differences(published: dict[str, Any], expected: dict[str, Any]) -
     _scalar_differences(
         "", _without_artifacts(published), _without_artifacts(expected), differences
     )
+    _duplicate_name_differences(published, differences)
     _artifact_differences(
         _artifacts_by_name(published),
         _artifacts_by_name(expected),
@@ -186,6 +187,30 @@ def _scalar_differences(
             _scalar_differences(f"{path}.", published_value, expected_value, differences)
         elif published_value != expected_value:
             differences.append(f"{path}: published={published_value!r} expected={expected_value!r}")
+
+
+def _duplicate_name_differences(manifest: dict[str, Any], differences: list[str]) -> None:
+    """Record drift for any artifact name that appears more than once.
+
+    The re-derived ``expected`` manifest has one entry per built dist file, so a
+    repeated name in the published manifest is always drift. Indexing by name
+    (``_artifacts_by_name``) would otherwise silently collapse duplicates to the
+    last entry, letting an extra earlier wheel object with a stale/broken URL
+    escape the comparison entirely.
+    """
+    artifacts = manifest.get("artifacts", [])
+    if not isinstance(artifacts, list):
+        return
+    counts: dict[str, int] = {}
+    for index, artifact in enumerate(artifacts):
+        if isinstance(artifact, dict):
+            name = str(artifact.get("name", f"<artifact {index}>"))
+            counts[name] = counts.get(name, 0) + 1
+    for name in sorted(counts):
+        if counts[name] > 1:
+            differences.append(
+                f"artifact {name}: appears {counts[name]} times in manifest (duplicate entries)"
+            )
 
 
 def _artifacts_by_name(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
