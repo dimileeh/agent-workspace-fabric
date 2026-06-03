@@ -642,6 +642,37 @@ def test_delete_gc_path_classifies_eperm_oserror_as_permission_denied(
 
 
 @pytest.mark.unit
+def test_delete_gc_path_records_permission_denied_from_preflight_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A root-owned 0700 parent dir makes the preflight stat probes
+    # (exists/is_symlink/is_dir) raise PermissionError -- pathlib only swallows
+    # ENOENT/ENOTDIR/EBADF/ELOOP, not EACCES. Such a refusal must be recorded as
+    # PATH_DELETE_PERMISSION_DENIED, never escape the GC run.
+    import errno
+
+    target = tmp_path / "service" / "auth" / "ws_root_owned_parent"
+    target.mkdir(parents=True)
+    gc_path = WorkspaceGCPath(
+        kind="auth",
+        path=target,
+        exists=True,
+        estimated_bytes=0,
+    )
+
+    def _raise_eacces(_self: object, *_args: object, **_kwargs: object) -> bool:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(Path, "exists", _raise_eacces)
+
+    deleted, error, reason_code = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+
+    assert deleted is False
+    assert reason_code == "PATH_DELETE_PERMISSION_DENIED"
+    assert error is not None
+
+
+@pytest.mark.unit
 def test_estimate_bytes_treats_stat_races_as_zero_or_skipped() -> None:
     class _RacyFile:
         def exists(self) -> bool:

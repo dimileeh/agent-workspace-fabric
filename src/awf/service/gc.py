@@ -1595,16 +1595,23 @@ def _delete_gc_path(
     (``PATH_DELETE_FAILED``) so a root-owned dir the caller cannot remove is
     reported loudly instead of being mistaken for an absent path. It is ``None``
     on success and on the genuine not-exists case (nothing to reclaim).
+
+    The preflight probes (``exists``/``is_symlink``/``is_dir``) share the same
+    permission-aware handling as the ``rmtree`` call: ``pathlib`` only swallows
+    ``ENOENT``/``ENOTDIR``/``EBADF``/``ELOOP``, so a ``stat`` that fails because
+    the process cannot traverse a root-owned ``0700`` parent raises instead of
+    returning ``False``. Without this guard such a failure would escape the GC
+    run rather than being recorded as ``PATH_DELETE_PERMISSION_DENIED``.
     """
-    if not target.path.exists():
-        return False, None, None
-    if not _is_safe_gc_path(target, work_dir=work_dir):
-        return False, "path is outside the expected service GC roots", PATH_DELETE_FAILED
-    if target.path.is_symlink():
-        return False, "refusing to delete symlink", PATH_DELETE_FAILED
-    if not target.path.is_dir():
-        return False, "refusing to delete non-directory path", PATH_DELETE_FAILED
     try:
+        if not target.path.exists():
+            return False, None, None
+        if not _is_safe_gc_path(target, work_dir=work_dir):
+            return False, "path is outside the expected service GC roots", PATH_DELETE_FAILED
+        if target.path.is_symlink():
+            return False, "refusing to delete symlink", PATH_DELETE_FAILED
+        if not target.path.is_dir():
+            return False, "refusing to delete non-directory path", PATH_DELETE_FAILED
         shutil.rmtree(target.path)
     except PermissionError as exc:
         return False, str(exc), PATH_DELETE_PERMISSION_DENIED
