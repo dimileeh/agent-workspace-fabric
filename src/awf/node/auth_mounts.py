@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -146,17 +146,30 @@ def default_overlay_mounter() -> OverlayMounter:
     return _SubprocessOverlayMounter()
 
 
-def claude_auth_isolation_label(*, overlay_mounter: OverlayMounter | None = None) -> str:
+def claude_auth_isolation_label(
+    *, overlay_filesystem_available: Callable[[], bool] | None = None
+) -> str:
     """Return the isolation posture label for Claude file auth on this host.
 
     ``per_workspace_overlay`` when overlayfs is usable (shared read-only base +
     per-workspace writable upper), else ``per_workspace_copy`` (full per-workspace
-    copy fallback). Best effort: reflects host capability; an individual mount can
-    still fall back to copy, which keeps provisioning correct either way.
+    copy fallback).
+
+    This describes the **worker's** posture, not the calling process's. The worker
+    is the only service that provisions workspaces and mounts the overlay, and it
+    alone is granted ``CAP_SYS_ADMIN`` (see ``docker/compose/local-service.yml``);
+    readiness, however, is usually collected from the API/status/MCP path, which
+    deliberately runs without that capability. Probing the *caller's* own
+    ``CAP_SYS_ADMIN`` there would surface ``per_workspace_copy`` even though the
+    worker uses ``per_workspace_overlay``, so the label keys off kernel overlayfs
+    availability — the one host fact shared across services — and treats the
+    worker's ``CAP_SYS_ADMIN`` as the deployment invariant it is. Best effort: an
+    individual mount can still fall back to copy, which keeps provisioning correct
+    either way.
     """
 
-    mounter = overlay_mounter or default_overlay_mounter()
-    return _ISOLATION_OVERLAY if mounter.supported() else _ISOLATION_COPY
+    probe = overlay_filesystem_available or _overlay_filesystem_available
+    return _ISOLATION_OVERLAY if probe() else _ISOLATION_COPY
 
 
 def _shared_claude_base_dir(work_dir: Path, signature: str) -> Path:

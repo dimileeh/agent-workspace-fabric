@@ -440,13 +440,18 @@ def test_shared_base_is_never_under_a_workspace_auth_dir(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
-def test_isolation_label_reflects_overlay_support() -> None:
+def test_isolation_label_reflects_worker_overlay_capability() -> None:
+    # The label reports the worker's posture from kernel overlayfs availability —
+    # the one host fact shared across services — and must NOT depend on the
+    # calling process's CAP_SYS_ADMIN. Otherwise the API/status path (which lacks
+    # the capability the worker is granted) would misreport per_workspace_copy
+    # even though the worker provisions with per_workspace_overlay.
     assert (
-        claude_auth_isolation_label(overlay_mounter=FakeOverlayMounter(supported=True))
+        claude_auth_isolation_label(overlay_filesystem_available=lambda: True)
         == "per_workspace_overlay"
     )
     assert (
-        claude_auth_isolation_label(overlay_mounter=FakeOverlayMounter(supported=False))
+        claude_auth_isolation_label(overlay_filesystem_available=lambda: False)
         == "per_workspace_copy"
     )
 
