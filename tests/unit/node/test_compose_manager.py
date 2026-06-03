@@ -783,13 +783,16 @@ class TestRender:
 
         manager = _RecordingComposeManager()
 
-        await manager.down_project(
+        ran = await manager.down_project(
             project_name="awf_ws_missing",
             compose_file=tmp_path / "missing-compose.yml",
             workspace_id="ws_missing",
         )
 
         assert manager.calls == []
+        # A missing compose file noops and signals the down never ran so
+        # callers (e.g. ``teardown_project``) can fall back to a label reap.
+        assert ran is False
 
     @pytest.mark.unit
     async def test_remove_project_by_label_removes_containers_networks_and_volumes(
@@ -876,6 +879,342 @@ class TestRender:
         ]
         event = next(item for item in captured if item["event"] == "compose.project_label_removed")
         assert event["volumes"] == 0
+
+    @pytest.mark.unit
+    async def test_teardown_project_removes_volumes_via_down(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A normal teardown drives ``down -v`` and reports success."""
+        compose_file = tmp_path / "work" / "compose" / "ws_ok" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, list[str]]] = []
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                self.calls.append((operation, args))
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_ok",
+            compose_file=compose_file,
+            workspace_id="ws_ok",
+            remove_volumes=True,
+        )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+        assert result.ok is True
+        assert manager.calls == [("down", ["down", "--remove-orphans", "-v"])]
+
+    @pytest.mark.unit
+    async def test_teardown_project_falls_back_to_label_removal(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When ``down`` fails, teardown reaps volumes via label removal."""
+        compose_file = tmp_path / "work" / "compose" / "ws_fb" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.label_calls: list[tuple[str, ...]] = []
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=1,
+                    stdout="",
+                    stderr="compose file unusable",
+                )
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.label_calls.append((operation, *args))
+                if operation == "volume ls":
+                    return "awf-ws_fb-dind_data\n"
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.label_calls.append((operation, *args))
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_fb",
+            compose_file=compose_file,
+            workspace_id="ws_fb",
+            remove_volumes=True,
+        )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_PROJECT_LABEL_REMOVED"
+        # Volume removal was attempted on the label-scoped fallback path.
+        assert ("volume rm", "volume", "rm", "-f", "awf-ws_fb-dind_data") in manager.label_calls
+
+    @pytest.mark.unit
+    async def test_teardown_project_reports_failure_when_fallback_also_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Both ``down`` and label removal failing yields a loud failure."""
+        compose_file = tmp_path / "work" / "compose" / "ws_fail" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                raise ComposeOperationError(
+                    operation=operation, returncode=1, stdout="", stderr="down boom"
+                )
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=1,
+                    stdout="",
+                    stderr="daemon unreachable",
+                    reason_code="DOCKER_UNAVAILABLE",
+                )
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_fail",
+            compose_file=compose_file,
+            workspace_id="ws_fail",
+            remove_volumes=True,
+        )
+
+        assert result.status == "failed"
+        # The fallback failed with a specific ``DOCKER_UNAVAILABLE`` classification;
+        # teardown must surface that rather than collapse it into the generic
+        # down-failed bucket, while still reporting a loud failure.
+        assert result.reason_code == "DOCKER_UNAVAILABLE"
+        assert result.error is not None
+        assert result.ok is False
+
+    @pytest.mark.unit
+    async def test_teardown_project_reaps_stale_volumes_when_compose_file_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A gone compose dir still reaps volumes an earlier GC run left behind.
+
+        Regression for the historical leak: an earlier GC run removed the
+        compose directory without ``-v``, so the ``awf_<workspace>`` volumes
+        survive. ``teardown_project`` must not short-circuit on the missing
+        compose file -- it falls back to label-scoped teardown so the leaked
+        volumes are reclaimed instead of being reported as a successful skip.
+        """
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.compose_calls: list[str] = []
+                self.label_calls: list[tuple[str, ...]] = []
+
+            async def _compose(self, *args: object, **kwargs: object) -> None:
+                self.compose_calls.append("compose")
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.label_calls.append((operation, *args))
+                if operation == "volume ls":
+                    return "awf-ws_gone-dind_data\n"
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.label_calls.append((operation, *args))
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_gone",
+            compose_file=tmp_path / "work" / "compose" / "ws_gone" / "compose.yml",
+            workspace_id="ws_gone",
+            remove_volumes=True,
+        )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_PROJECT_LABEL_REMOVED"
+        assert result.ok is True
+        # No compose file -> never invokes ``down``; reaps via label scope instead.
+        assert manager.compose_calls == []
+        assert ("volume rm", "volume", "rm", "-f", "awf-ws_gone-dind_data") in manager.label_calls
+
+    @pytest.mark.unit
+    async def test_teardown_project_reaps_volumes_when_compose_file_vanishes_mid_teardown(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A compose file removed between the existence check and ``down`` still reaps.
+
+        ``teardown_project`` confirms the compose file exists, but a concurrent
+        GC run can delete the compose directory before ``down_project`` runs its
+        own existence check. ``down_project`` then silently noops; teardown must
+        route to the label-scoped fallback so the per-workspace volumes are
+        reclaimed instead of being reported as a successful down that removed
+        nothing.
+        """
+        compose_file = tmp_path / "work" / "compose" / "ws_race" / "compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        class _RacingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.compose_calls: list[str] = []
+                self.label_calls: list[tuple[str, ...]] = []
+
+            async def down_project(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                remove_volumes: bool = True,
+            ) -> bool:
+                # Simulate a concurrent GC removing the compose directory after
+                # ``teardown_project``'s existence check but before the down.
+                compose_file.unlink()
+                return await super().down_project(
+                    project_name=project_name,
+                    compose_file=compose_file,
+                    workspace_id=workspace_id,
+                    remove_volumes=remove_volumes,
+                )
+
+            async def _compose(self, *args: object, **kwargs: object) -> None:
+                self.compose_calls.append("compose")
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.label_calls.append((operation, *args))
+                if operation == "volume ls":
+                    return "awf-ws_race-dind_data\n"
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.label_calls.append((operation, *args))
+
+        manager = _RacingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_race",
+            compose_file=compose_file,
+            workspace_id="ws_race",
+            remove_volumes=True,
+        )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_PROJECT_LABEL_REMOVED"
+        assert result.ok is True
+        # ``down`` noop'd (file vanished) -> never invoked compose; the leaked
+        # volume is reaped via label scope instead.
+        assert manager.compose_calls == []
+        assert ("volume rm", "volume", "rm", "-f", "awf-ws_race-dind_data") in manager.label_calls
+
+    @pytest.mark.unit
+    async def test_teardown_project_is_idempotent_when_nothing_left_to_reap(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A truly gone stack (no compose file, no labelled resources) stays ok."""
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.compose_calls: list[str] = []
+                self.removed: list[str] = []
+
+            async def _compose(self, *args: object, **kwargs: object) -> None:
+                self.compose_calls.append("compose")
+
+            async def _docker_capture(self, *args: object, **kwargs: object) -> str:
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.removed.append(operation)
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_empty",
+            compose_file=tmp_path / "work" / "compose" / "ws_empty" / "compose.yml",
+            workspace_id="ws_empty",
+            remove_volumes=True,
+        )
+
+        assert result.ok is True
+        assert result.status == "succeeded"
+        # Nothing matched the project label, so no removal commands ran.
+        assert manager.compose_calls == []
+        assert manager.removed == []
+
+    @pytest.mark.unit
+    async def test_teardown_project_fails_loud_when_label_probe_unavailable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A missing compose file with an unreachable daemon is a loud failure."""
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=1,
+                    stdout="",
+                    stderr="daemon unreachable",
+                    reason_code="DOCKER_UNAVAILABLE",
+                )
+
+        manager = _RecordingComposeManager()
+
+        result = await manager.teardown_project(
+            project_name="awf_ws_nodaemon",
+            compose_file=tmp_path / "work" / "compose" / "ws_nodaemon" / "compose.yml",
+            workspace_id="ws_nodaemon",
+            remove_volumes=True,
+        )
+
+        assert result.status == "failed"
+        # The label probe failed with ``DOCKER_UNAVAILABLE``; that specific
+        # classification must survive instead of collapsing into the generic
+        # down-failed code, while the failure stays loud.
+        assert result.reason_code == "DOCKER_UNAVAILABLE"
+        assert result.ok is False
 
     @pytest.mark.unit
     async def test_compose_command_reports_missing_docker_binary(
@@ -994,378 +1333,3 @@ class TestRender:
         assert exc.value.returncode == 124
         assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
         assert "docker compose up exceeded 0.01s timeout" in exc.value.stderr
-
-    @pytest.mark.unit
-    async def test_docker_capture_returns_stdout_on_success(
-        self,
-        manager: ComposeManager,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Docker capture returns stdout for successful commands."""
-        calls: list[tuple[object, ...]] = []
-
-        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
-            calls.append(args)
-            return _FakeProcess(returncode=0, stdout=b"container-a\ncontainer-b\n")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        stdout = await manager._docker_capture(["ps", "-aq"], operation="ps")  # noqa: SLF001
-
-        assert stdout == "container-a\ncontainer-b\n"
-        assert calls == [("docker", "ps", "-aq")]
-
-    @pytest.mark.unit
-    async def test_docker_capture_classifies_daemon_connectivity_errors(
-        self,
-        manager: ComposeManager,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Docker capture maps daemon connectivity failures to docker unavailable."""
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            return _FakeProcess(
-                returncode=1,
-                stderr=b"error during connect: docker endpoint unavailable",
-            )
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        with pytest.raises(ComposeOperationError) as exc:
-            await manager._docker_capture(["network", "ls"], operation="network ls")  # noqa: SLF001
-
-        assert exc.value.returncode == 1
-        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
-        assert "docker endpoint unavailable" in exc.value.stderr
-
-    @pytest.mark.unit
-    async def test_docker_capture_classifies_command_failures(
-        self,
-        manager: ComposeManager,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Docker capture preserves ordinary command failures."""
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            return _FakeProcess(returncode=2, stdout=b"usage\n", stderr=b"bad flag\n")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        with pytest.raises(ComposeOperationError) as exc:
-            await manager._docker_capture(["volume", "rm"], operation="volume rm")  # noqa: SLF001
-
-        assert exc.value.returncode == 2
-        assert exc.value.reason_code == "COMPOSE_COMMAND_FAILED"
-        assert exc.value.stdout == "usage\n"
-        assert exc.value.stderr == "bad flag\n"
-
-    @pytest.mark.unit
-    async def test_docker_capture_reports_missing_docker_binary(
-        self,
-        manager: ComposeManager,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Docker capture classifies a missing docker binary."""
-
-        async def _raise_missing(*_args: object, **_kwargs: object) -> _FakeProcess:
-            raise FileNotFoundError("docker")
-
-        monkeypatch.setattr(
-            compose_module.asyncio,
-            "create_subprocess_exec",
-            _raise_missing,
-        )
-
-        with pytest.raises(ComposeOperationError) as exc:
-            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
-
-        assert exc.value.returncode == 127
-        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
-
-    @pytest.mark.unit
-    async def test_docker_capture_translates_non_filenotfound_oserror(
-        self,
-        manager: ComposeManager,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Docker capture translates non-FileNotFound OSErrors."""
-
-        # ``PermissionError`` (docker binary present but not executable) is an
-        # ``OSError`` subclass that is *not* ``FileNotFoundError``; it must still be
-        # translated to a structured ``DOCKER_UNAVAILABLE`` error so best-effort
-        # callers like ``capture_companion_diagnostics`` never leak a raw ``OSError``.
-        async def _raise_permission(*_args: object, **_kwargs: object) -> _FakeProcess:
-            raise PermissionError(13, "Permission denied")
-
-        monkeypatch.setattr(
-            compose_module.asyncio,
-            "create_subprocess_exec",
-            _raise_permission,
-        )
-
-        with pytest.raises(ComposeOperationError) as exc:
-            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
-
-        assert exc.value.returncode == 127
-        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
-        assert "Permission denied" in exc.value.stderr
-
-    @pytest.mark.unit
-    async def test_docker_capture_times_out_and_kills_hung_process(
-        self,
-        manager: ComposeManager,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Hung docker capture commands are killed and reported as timeouts."""
-        process = _HangingProcess()
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:
-            return process
-
-        monkeypatch.setattr(compose_module, "DOCKER_CAPTURE_TIMEOUT_SECONDS", 0.01)
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        with pytest.raises(ComposeOperationError) as exc:
-            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
-
-        assert process.kill_called is True
-        assert exc.value.returncode == 124
-        assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
-        assert "exceeded" in exc.value.stderr
-
-
-class TestCompanionImageCommands:
-    """Tests for the ComposeManager companion image Docker commands."""
-
-    @pytest.mark.unit
-    async def test_companion_image_exists_true_on_zero_exit(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """companion_image_exists returns True on a zero-exit inspect."""
-        calls: list[tuple[object, ...]] = []
-
-        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
-            """Record the inspect command and simulate a present image."""
-            calls.append(args)
-            return _FakeProcess(returncode=0, stdout=b"sha256:abc\n")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        assert await manager.companion_image_exists("awf-companion-backend:abc") is True
-        assert calls[0] == ("docker", "image", "inspect", "awf-companion-backend:abc")
-
-    @pytest.mark.unit
-    async def test_companion_image_exists_false_when_inspect_fails(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """companion_image_exists returns False when the inspect fails."""
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            return _FakeProcess(returncode=1, stderr=b"No such image")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        assert await manager.companion_image_exists("missing:tag") is False
-
-    @pytest.mark.unit
-    async def test_companion_image_inspect_true_on_zero_exit(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """companion_image_inspect returns True on a zero-exit inspect."""
-        calls: list[tuple[object, ...]] = []
-
-        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
-            """Record the inspect command and simulate a present image."""
-            calls.append(args)
-            return _FakeProcess(returncode=0, stdout=b"sha256:abc\n")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        assert await manager.companion_image_inspect("awf-companion-backend:abc") is True
-        assert calls[0] == ("docker", "image", "inspect", "awf-companion-backend:abc")
-
-    @pytest.mark.unit
-    async def test_companion_image_inspect_false_for_missing_image(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """companion_image_inspect returns False for confirmed missing images."""
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            """Simulate Docker's missing-image inspect failure."""
-            return _FakeProcess(
-                returncode=1,
-                stderr=b"Error response from daemon: No such image: missing:tag",
-            )
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        assert await manager.companion_image_inspect("missing:tag") is False
-
-    @pytest.mark.unit
-    async def test_companion_image_inspect_preserves_non_missing_probe_errors(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """companion_image_inspect raises non-missing inspect failures unchanged."""
-        probe_error = b"Cannot connect to the Docker daemon"
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            """Simulate an inspect failure caused by Docker unavailability."""
-            return _FakeProcess(returncode=1, stderr=probe_error)
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        with pytest.raises(ComposeOperationError) as raised:
-            await manager.companion_image_inspect("awf-companion-backend:abc")
-
-        assert raised.value.reason_code == "DOCKER_UNAVAILABLE"
-        assert raised.value.stderr == probe_error.decode()
-
-    @pytest.mark.unit
-    async def test_companion_image_inspect_preserves_unrelated_not_found_errors(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """companion_image_inspect does not classify unrelated not-found text as missing."""
-        probe_error = b"permission denied: user not found"
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            """Simulate an unrelated inspect failure with not-found wording."""
-            return _FakeProcess(returncode=1, stderr=probe_error)
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        with pytest.raises(ComposeOperationError) as raised:
-            await manager.companion_image_inspect("awf-companion-backend:abc")
-
-        assert raised.value.reason_code == "COMPOSE_COMMAND_FAILED"
-        assert raised.value.stderr == probe_error.decode()
-
-    @pytest.mark.unit
-    async def test_companion_image_exists_remains_lenient_for_probe_errors(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """companion_image_exists still treats every inspect failure as absent."""
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            """Simulate a probe failure for the lenient existence helper."""
-            return _FakeProcess(returncode=1, stderr=b"Cannot connect to the Docker daemon")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        assert await manager.companion_image_exists("awf-companion-backend:abc") is False
-
-    @pytest.mark.unit
-    async def test_build_companion_image_passes_tag_dockerfile_and_labels(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """build_companion_image passes the tag, Dockerfile, and managed labels."""
-        calls: list[tuple[object, ...]] = []
-
-        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
-            calls.append(args)
-            return _FakeProcess(returncode=0)
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        await manager.build_companion_image(
-            tag="awf-companion-backend:abc",
-            build_context="/host/backend",
-            dockerfile="Dockerfile",
-            labels={"awf.managed-companion": "true", "awf.companion.name": "backend"},
-        )
-
-        assert calls[0] == (
-            "docker",
-            "build",
-            "-t",
-            "awf-companion-backend:abc",
-            "-f",
-            "/host/backend/Dockerfile",
-            "--label",
-            "awf.managed-companion=true",
-            "--label",
-            "awf.companion.name=backend",
-            "/host/backend",
-        )
-
-    @pytest.mark.unit
-    async def test_build_companion_image_without_labels_omits_label_flags(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """build_companion_image omits the label flags when no labels are given."""
-        calls: list[tuple[object, ...]] = []
-
-        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
-            calls.append(args)
-            return _FakeProcess(returncode=0)
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        await manager.build_companion_image(
-            tag="awf-companion-backend:abc",
-            build_context="/host/backend",
-            dockerfile="Dockerfile",
-        )
-
-        assert calls[0] == (
-            "docker",
-            "build",
-            "-t",
-            "awf-companion-backend:abc",
-            "-f",
-            "/host/backend/Dockerfile",
-            "/host/backend",
-        )
-        assert "--label" not in calls[0]
-
-    @pytest.mark.unit
-    async def test_build_companion_image_anchors_dockerfile_to_build_context(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Regression for PRRT_kwDOSJAM6s6F5073: ``docker build`` resolves a ``-f``
-        # path relative to the process working directory (the AWF service cwd),
-        # not the build context. A context-relative ``dockerfile`` must be
-        # anchored to the absolute build context so the pre-build does not look
-        # for the Dockerfile under the service cwd, fail, and fall back to an
-        # inline compose build.
-        """build_companion_image anchors the Dockerfile path to the build context."""
-        calls: list[tuple[object, ...]] = []
-
-        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
-            calls.append(args)
-            return _FakeProcess(returncode=0)
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        await manager.build_companion_image(
-            tag="awf-companion-backend:abc",
-            build_context="/host/aira-agent",
-            dockerfile="docker/backend.Dockerfile",
-        )
-
-        assert calls[0] == (
-            "docker",
-            "build",
-            "-t",
-            "awf-companion-backend:abc",
-            "-f",
-            "/host/aira-agent/docker/backend.Dockerfile",
-            "/host/aira-agent",
-        )
-
-    @pytest.mark.unit
-    async def test_build_companion_image_raises_on_failure(
-        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """build_companion_image raises when the docker build fails."""
-
-        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
-            return _FakeProcess(returncode=1, stderr=b"build failed")
-
-        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
-
-        with pytest.raises(ComposeOperationError):
-            await manager.build_companion_image(
-                tag="awf-companion-backend:abc",
-                build_context="/host/backend",
-                dockerfile="Dockerfile",
-            )

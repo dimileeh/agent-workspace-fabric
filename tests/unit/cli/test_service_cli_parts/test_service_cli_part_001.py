@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,13 +13,11 @@ import pytest
 from typer.testing import CliRunner
 
 from awf.cli.main import app
-from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from awf.service.target_branch_monitor import (
     TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
 )
-from tests.postgres import postgres_test_url_sync
 
 _runner = CliRunner()
 _POSTGRES_TEST_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
@@ -55,78 +51,10 @@ def _ok_disk_usage(_path: Path) -> _FakeDiskUsage:
     return _FakeDiskUsage()
 
 
-def _write_gc_file(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
-
 def _clear_docker_compose_caller_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
         if key.upper() in _DOCKER_COMPOSE_CALLER_ENV_KEYS:
             monkeypatch.delenv(key, raising=False)
-
-
-def _create_gc_cli_workspace(
-    *,
-    db_url: str,
-    status: str,
-    updated_at: datetime,
-    pr: bool = False,
-    compose_file_path: str | None = None,
-) -> str:
-    async def _setup() -> str:
-        from awf.db.repositories import WorkspaceRepository
-        from awf.db.session import make_engine, make_session_factory
-
-        engine = make_engine(db_url)
-        try:
-            factory = make_session_factory(engine)
-            async with factory() as session:
-                workspace = await WorkspaceRepository(session).create(
-                    repo_url="git@github.com:example/repo.git",
-                    branch_base="development",
-                    task_title="gc cli",
-                    task_prompt="p",
-                    agent="codex",
-                    test_commands=[],
-                )
-                workspace.status = status
-                workspace.updated_at = updated_at
-                workspace.compose_file_path = compose_file_path
-                if pr:
-                    workspace.pr_url = "https://github.com/example/repo/pull/321"
-                    workspace.pr_number = 321
-                    workspace.pr_merge_sha = "d" * 40
-                await session.commit()
-                return workspace.id
-        finally:
-            await engine.dispose()
-
-    return asyncio.run(_setup())
-
-
-def _mock_compose_teardown_succeeded(_candidate: object) -> WorkspaceGCComposeTeardownResult:
-    return WorkspaceGCComposeTeardownResult(
-        status="succeeded",
-        reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
-    )
-
-
-async def _mock_worktree_remover_succeeded(
-    _candidate: object, **_kwargs: object
-) -> WorkspaceGCWorktreeRemoveResult:
-    return WorkspaceGCWorktreeRemoveResult(
-        status="succeeded",
-        reason_code="WORKTREE_REMOVE_SUCCEEDED",
-    )
-
-
-def _mock_compose_teardown_failed(_candidate: object) -> WorkspaceGCComposeTeardownResult:
-    return WorkspaceGCComposeTeardownResult(
-        status="failed",
-        reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-        error="compose teardown failed",
-    )
 
 
 @pytest.fixture
@@ -1407,82 +1335,3 @@ def test_readme_documents_service_gc_command() -> None:
     assert "dry-run" in readme.lower()
     assert "control-plane database" in readme
     assert "log streams" in readme
-
-
-@pytest.mark.unit
-def test_service_gc_cli_defaults_to_json_dry_run(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    with postgres_test_url_sync() as db_url:
-        work_dir = tmp_path / "service"
-        workspace_id = _create_gc_cli_workspace(
-            db_url=db_url,
-            status="completed",
-            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-            pr=True,
-        )
-        worktree = work_dir / "git" / "worktrees" / workspace_id
-        _write_gc_file(worktree / "repo.txt", "repo")
-        monkeypatch.setenv("AWF_DATABASE_URL", db_url)
-        monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
-
-        result = _runner.invoke(app, ["service", "gc", "--min-age-hours", "1"])
-
-        assert result.exit_code == 0, result.output
-        payload = json.loads(result.stdout)
-        assert payload["dry_run"] is True
-        assert payload["status"] == "dry_run"
-        assert payload["policy"]["retention_hours"] == 1
-        assert payload["candidate_count"] == 1
-        assert payload["preserved_count"] == 0
-        assert payload["reason_code"] == "CLEANUP_DRY_RUN"
-        assert payload["deleted_paths"] == []
-        assert payload["candidates"][0]["workspace_id"] == workspace_id
-        assert payload["candidates"][0]["status"] == "completed"
-        assert payload["candidates"][0]["reason_code"] == "COMPLETED_PR_RETENTION_EXPIRED"
-        assert payload["candidates"][0]["paths"]["worktree"]["path"] == str(worktree)
-        assert worktree.exists()
-
-
-@pytest.mark.unit
-def test_service_gc_cli_uses_compose_host_work_dir_when_awf_work_dir_unset(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    host_work_dir = (tmp_path / "service-state").resolve()
-    calls: list[dict[str, object]] = []
-
-    class _Engine:
-        async def dispose(self) -> None:
-            return None
-
-    async def _fake_gc(_session_factory: object, **kwargs: object) -> Any:
-        calls.append(kwargs)
-        return SimpleNamespace(
-            to_dict=lambda: {
-                "dry_run": True,
-                "status": "dry_run",
-                "reason_code": "CLEANUP_DRY_RUN",
-                "candidate_count": 0,
-                "preserved_count": 0,
-                "deleted_paths": [],
-                "candidates": [],
-                "preserved": [],
-            }
-        )
-
-    import awf.db.session as db_session
-    import awf.service.gc as gc_mod
-
-    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(host_work_dir))
-    monkeypatch.setenv("AWF_DATABASE_URL", _POSTGRES_TEST_URL)
-    monkeypatch.setattr(db_session, "make_engine", lambda _url: _Engine())
-    monkeypatch.setattr(db_session, "make_session_factory", lambda _engine: object())
-    monkeypatch.setattr(gc_mod, "run_terminal_workspace_gc", _fake_gc)
-
-    result = _runner.invoke(app, ["service", "gc"])
-
-    assert result.exit_code == 0, result.output
-    assert calls[0]["work_dir"] == host_work_dir

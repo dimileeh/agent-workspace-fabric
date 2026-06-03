@@ -24,7 +24,7 @@ import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
@@ -87,6 +87,24 @@ class ComposeOperationError(Exception):
             f"(exit={returncode}, reason={reason_code}): "
             f"{stderr.strip() or stdout.strip() or '<no output>'}"
         )
+
+
+@dataclass(frozen=True)
+class ComposeTeardownResult:
+    """Structured outcome of a best-effort, volume-removing stack teardown.
+
+    ``ok`` covers both a successful teardown and an idempotent skip (nothing
+    left to tear down), so a caller can treat an already-down stack as success
+    rather than a partial failure.
+    """
+
+    status: Literal["succeeded", "failed", "skipped"]
+    reason_code: str
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {"succeeded", "skipped"}
 
 
 def _is_missing_image_inspect_failure(exc: ComposeOperationError) -> bool:
@@ -441,17 +459,24 @@ class ComposeManager:
         compose_file: Path,
         workspace_id: str,
         remove_volumes: bool = True,
-    ) -> None:
-        """Stop + remove a stack using an already-rendered compose file path."""
+    ) -> bool:
+        """Stop + remove a stack using an already-rendered compose file path.
+
+        Returns ``True`` when the compose ``down`` actually ran, ``False`` when
+        the compose file was absent and the call short-circuited as a noop. The
+        flag lets ``teardown_project`` detect a compose file that vanished after
+        its own existence check and fall back to a label-scoped volume reap.
+        """
         if not compose_file.exists():
             # Nothing rendered; assume never launched.
             _log.info("compose.down.noop", workspace_id=workspace_id)
-            return
+            return False
 
         args = ["down", "--remove-orphans"]
         if remove_volumes:
             args.append("-v")
         await self._compose(project_name, compose_file, args, operation="down")
+        return True
 
     async def remove_project_by_label(
         self,
@@ -492,6 +517,115 @@ class ComposeManager:
             containers=len(container_ids),
             networks=len(network_ids),
             volumes=len(volume_names),
+        )
+
+    async def teardown_project(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool = True,
+    ) -> ComposeTeardownResult:
+        """Tear down a per-workspace stack, reaping its volumes by default.
+
+        Used by terminal GC to reclaim the per-workspace Docker volumes
+        (``awf-<project>-dind_data`` / ``-postgres_data``) that otherwise leak.
+        Prefers ``down_project`` (compose-file driven); if that fails (e.g. an
+        unusable compose file), falls back to label-scoped
+        ``remove_project_by_label`` so volumes are still removed. An absent
+        compose file does **not** short-circuit: an earlier GC run may have
+        removed the compose directory without reaping the project's volumes (the
+        historical leak this reclaim path exists to recover), so a gone compose
+        file also falls back to label-scoped teardown. With nothing left to
+        remove that fallback is an idempotent success, never a failure.
+        """
+        if not compose_file.exists():
+            # The compose file is gone, but the Docker project (and its
+            # ``awf-<workspace>`` volumes) may still exist if an earlier GC run
+            # deleted the compose directory without a volume-removing teardown.
+            # Reap via label scope rather than reporting a successful skip that
+            # would leave the historical volume leak behind.
+            _log.info(
+                "compose.teardown_project.compose_missing_label_fallback",
+                workspace_id=workspace_id,
+                project_name=project_name,
+            )
+            return await self._reap_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        try:
+            down_ran = await self.down_project(
+                project_name=project_name,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        except ComposeOperationError as down_exc:
+            _log.warning(
+                "compose.teardown_project.down_failed",
+                workspace_id=workspace_id,
+                project_name=project_name,
+                reason_code=down_exc.reason_code,
+                error=redact_secrets(str(down_exc))[:1000],
+            )
+            return await self._reap_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        if not down_ran:
+            # The compose file existed at the check above but vanished before
+            # ``down`` ran its own existence check (e.g. a concurrent GC removed
+            # the compose directory). ``down_project`` silently noops in that
+            # case, which would skip the volume reap, so fall back to the
+            # label-scoped teardown instead of reporting a successful down that
+            # never removed the project's volumes.
+            _log.info(
+                "compose.teardown_project.compose_vanished_label_fallback",
+                workspace_id=workspace_id,
+                project_name=project_name,
+            )
+            return await self._reap_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        return ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    async def _reap_project_by_label(
+        self,
+        *,
+        project_name: str,
+        workspace_id: str,
+        remove_volumes: bool,
+    ) -> ComposeTeardownResult:
+        """Label-scoped reap fallback, mapped to a :class:`ComposeTeardownResult`.
+
+        On failure, preserve the fallback's structured classification (e.g.
+        ``DOCKER_UNAVAILABLE``) rather than collapsing it into the generic
+        down-failed code so operators see the real cause.
+        """
+        try:
+            await self.remove_project_by_label(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                remove_volumes=remove_volumes,
+            )
+        except ComposeOperationError as label_exc:
+            return ComposeTeardownResult(
+                status="failed",
+                reason_code=label_exc.reason_code,
+                error=redact_secrets(str(label_exc))[:1000],
+            )
+        return ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_PROJECT_LABEL_REMOVED",
         )
 
     async def companion_image_inspect(self, tag: str) -> bool:
@@ -737,15 +871,11 @@ class ComposeManager:
                     proc.communicate(),
                     timeout=capture_timeout_seconds,
                 )
-            except FileNotFoundError as e:
-                raise ComposeOperationError(
-                    operation=operation,
-                    returncode=127,
-                    stdout="",
-                    stderr=str(e),
-                    reason_code="DOCKER_UNAVAILABLE",
-                ) from e
             except TimeoutError as e:
+                # ``TimeoutError`` is itself an ``OSError`` subclass, so this clause
+                # must stay *above* the broad ``except OSError`` below or timeouts
+                # would be misclassified as ``DOCKER_UNAVAILABLE`` and skip the
+                # kill/reap cleanup.
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
                 with contextlib.suppress(ProcessLookupError, TimeoutError):
@@ -761,6 +891,22 @@ class ComposeManager:
                         f"docker compose {operation} exceeded {capture_timeout_seconds:g}s timeout"
                     ),
                     reason_code="DOCKER_COMMAND_TIMEOUT",
+                ) from e
+            except OSError as e:
+                # ``FileNotFoundError`` (docker binary absent) is the common case,
+                # but ``create_subprocess_exec`` can raise other ``OSError`` subclasses
+                # too -- notably ``PermissionError`` (docker present but not
+                # executable). They all mean docker is unusable here, so translate
+                # them to a structured ``DOCKER_UNAVAILABLE`` error rather than letting
+                # a raw ``OSError`` escape: callers like ``teardown_project`` catch only
+                # ``ComposeOperationError`` and would otherwise abort the whole
+                # ``awf service gc`` request instead of falling back to label cleanup.
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=127,
+                    stdout="",
+                    stderr=str(e),
+                    reason_code="DOCKER_UNAVAILABLE",
                 ) from e
 
             stdout = stdout_bytes.decode("utf-8", errors="replace")
