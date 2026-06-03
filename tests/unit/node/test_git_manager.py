@@ -911,6 +911,10 @@ class TestRemoveWorktree:
         await manager.remove_worktree(workspace_id="ws_stale", repo_url=str(origin_repo))
         # ``git worktree prune`` still ran to clear stale metadata.
         assert pruned == ["worktree.prune"]
+        # The leftover directory and its contents must be physically reclaimed —
+        # ``git worktree remove`` never ran, so GC would otherwise silently
+        # retain the disk space it reports as freed.
+        assert not worktree_path.exists()
 
     @pytest.mark.unit
     async def test_genuine_remove_error_still_raises(

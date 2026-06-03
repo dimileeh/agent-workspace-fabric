@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import os
 import re
+import shutil
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -396,11 +397,17 @@ class GitManager:
                     # Idempotent removal: a directory left behind with stale git
                     # metadata makes ``git worktree remove`` fail with
                     # ``fatal: '<path>' is not a working tree``. That is an
-                    # already-removed condition, not a failure — the
-                    # ``worktree prune`` below clears the stale entry. Re-raise
-                    # any genuine removal error (we match only this condition).
+                    # already-removed condition from git's point of view, not a
+                    # failure. Re-raise any genuine removal error (we match only
+                    # this condition).
                     if "is not a working tree" not in exc.stderr.lower():
                         raise
+                    # ``git worktree remove`` never ran, so the physical
+                    # directory and its contents are still on disk; ``worktree
+                    # prune`` below only clears metadata for *missing* dirs and
+                    # would leave the disk space behind. Reclaim it ourselves so
+                    # GC actually frees the space it reports as reclaimed.
+                    await asyncio.to_thread(shutil.rmtree, worktree_path, ignore_errors=True)
                     _log.info(
                         "worktree.remove.already_gone",
                         workspace_id=workspace_id,
