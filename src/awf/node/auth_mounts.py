@@ -975,6 +975,16 @@ def _reap_stale_claude_base_staging(base_root: Path) -> None:
     concurrent provision's in-progress staging dir (mtime ~build start, well under
     the bound) is never clobbered. A staging dir that vanishes from under us (a
     concurrent reap or its winning ``replace``) is skipped rather than fatal.
+
+    Assumption: this keys off the staging dir's *mtime*, which ``mkdtemp`` sets at
+    creation and ``copytree`` bumps again to ~copy start when it creates the
+    ``.claude`` child — so the age below is measured from roughly when the copy
+    began, not when it finished. The bound (1h) assumes a full ``~/.claude`` copy
+    (~1.7 GB) completes far inside that window, which holds for local disks (well
+    under a minute). On pathologically slow I/O (e.g. a network-mounted host
+    ``~/.claude``) a single copy running over an hour would have its own
+    in-progress staging dir reaped by a concurrent provision; raise the bound (or
+    switch to a liveness marker) if that ever becomes a real deployment.
     """
 
     now = time.time()
