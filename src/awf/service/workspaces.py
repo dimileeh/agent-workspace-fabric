@@ -590,23 +590,14 @@ class WorkspaceService:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
             resolved_settings = self._settings or get_settings()
-            req_profile, resolved_profile = workspace_create_profile_snapshots(req)
-            node_id = effective_worker_node_id(resolved_settings)
-            await check_host_port_conflicts(
-                repo,
-                req.companions,
-                resolved_profile=resolved_profile,
-                node_id=node_id,
-            )
-
-            ws = await create_workspace_row(
+            ws = await create_workspace_row_checked(
                 s,
+                repo,
                 req,
                 idempotency_key=idempotency_key,
                 settings=resolved_settings,
                 disk_check=disk_check,
-                requested_profile=req_profile,
-                resolved_profile=resolved_profile,
+                node_id=effective_worker_node_id(resolved_settings),
             )
             await s.commit()
             return workspace_response(ws)
@@ -1146,6 +1137,7 @@ from awf.service.workspaces_create import (  # noqa: E402
     _task_provider_readiness_override_matches,
     computed_priority,
     create_workspace_row,
+    create_workspace_row_checked,
     overlap_risk_summary,
     owned_path_overlap_warning_payload,
     owned_path_overlap_warnings,
@@ -1321,6 +1313,7 @@ __all__ = [
     "WorkspaceCreateInsufficientDiskError",
     "WorkspaceRetryResult",
     "create_workspace_row",
+    "create_workspace_row_checked",
     "workspace_create_payload_matches",
     "_stored_auto_merge_matches",
     "_release_sync_source_branch_matches",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog.testing
@@ -18,6 +19,7 @@ from awf.db.session import make_session_factory
 from awf.profiles.models import DockerMode, ProfileDocker, ProfileResolution, WorkspaceProfile
 from awf.service import workspaces, workspaces_create
 from awf.service.disk import DiskCheck
+from awf.service.node_identity import effective_worker_node_id
 from awf.service.workspaces import WorkspaceCreateIdempotencyConflictError, WorkspaceService
 from tests.postgres import postgres_test_engine
 
@@ -1363,3 +1365,43 @@ async def test_create_named_profile_replay_uses_stored_resource_snapshot(
     )
 
     assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_delegates_row_creation_to_shared_helper(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``WorkspaceService.create`` routes row creation through the shared
+    ``create_workspace_row_checked`` helper (the same de-duplicated core the REST
+    route uses), forwarding the per-call inputs and node-id parity (issue #347).
+
+    This guards against a future refactor that bypasses the helper or reverts to an
+    inline persistence path: such a regression would silently diverge the service
+    create path from the route path without this service-layer wiring assertion.
+    """
+    created_row = object()
+    sentinel_response = object()
+    helper = AsyncMock(return_value=created_row)
+    monkeypatch.setattr(workspaces, "create_workspace_row_checked", helper)
+
+    def _response_spy(ws: object) -> object:
+        assert ws is created_row
+        return sentinel_response
+
+    monkeypatch.setattr(workspaces, "workspace_response", _response_spy)
+
+    service = WorkspaceService(factory)
+    request = _v1_request()
+    result = await service.create(request)
+
+    assert result is sentinel_response
+    helper.assert_awaited_once()
+    args, kwargs = helper.await_args
+    # positional: (session, repo, request)
+    assert isinstance(args[1], WorkspaceRepository)
+    assert args[2] is request
+    assert kwargs["idempotency_key"] is None
+    assert kwargs["disk_check"] is None
+    # node_id is derived from the same resolved settings forwarded to the helper.
+    assert kwargs["node_id"] == effective_worker_node_id(kwargs["settings"])

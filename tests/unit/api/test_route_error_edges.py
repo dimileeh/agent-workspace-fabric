@@ -88,7 +88,7 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_flat
         )
 
     monkeypatch.setattr(workspace_routes, "WorkspaceRepository", _Repository)
-    monkeypatch.setattr(workspace_routes, "create_workspace_row", create_row)
+    monkeypatch.setattr(workspace_routes, "create_workspace_row_checked", create_row)
     monkeypatch.setattr(workspace_routes, "owned_path_overlap_warnings", lambda _ws: [])
     monkeypatch.setattr(
         workspace_routes,
@@ -145,7 +145,7 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_rich
         )
 
     monkeypatch.setattr(workspace_routes, "WorkspaceRepository", _Repository)
-    monkeypatch.setattr(workspace_routes, "create_workspace_row", create_row)
+    monkeypatch.setattr(workspace_routes, "create_workspace_row_checked", create_row)
     monkeypatch.setattr(workspace_routes, "owned_path_overlap_warnings", lambda _ws: [])
     monkeypatch.setattr(
         workspace_routes,
@@ -292,7 +292,7 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
             return None
 
     monkeypatch.setattr(workspace_routes, "WorkspaceRepository", _Repository)
-    monkeypatch.setattr(workspace_routes, "create_workspace_row", raise_conflict)
+    monkeypatch.setattr(workspace_routes, "create_workspace_row_checked", raise_conflict)
     monkeypatch.setattr(
         workspace_routes,
         "_workspace_admission_disk_check",
