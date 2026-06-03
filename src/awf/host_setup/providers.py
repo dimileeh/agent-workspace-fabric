@@ -382,7 +382,7 @@ def _orchestrate_github(
     env_var = _first_present(environ, spec.env_ref_vars)
     outcome = _probe_gh_auth(run_subprocess, _gh_probe_environ(environ, env_var))
 
-    if outcome == "ok":
+    if outcome == "ok" and env_var is not None:
         provider_config = _env_ref_config(spec, env_var, capabilities, backends, source="gh")
         return (
             _ready_result(
@@ -394,6 +394,19 @@ def _orchestrate_github(
             ),
             provider_config,
         )
+
+    if outcome == "ok":
+        # ``gh auth status`` succeeds but no service-visible token
+        # (AWF_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN) is present: the credential lives
+        # only in the host ``gh`` keychain. Local service containers cannot use that
+        # keychain, so the runtime readiness path rejects keychain-only auth with
+        # ``GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE`` (see
+        # :func:`awf.service.provider_readiness._check_github`). Persisting ``ready``
+        # here would let ``awf setup --provider github`` pass while ``awf start``/PR
+        # monitoring fail. Prompt the operator to export a token instead of recording
+        # an unusable ready state, and degrade any prior ready entry so the two paths
+        # agree.
+        return _github_gh_keychain_only_result(spec, config)
 
     if env_var is not None and outcome == "absent":
         # ``gh`` is not installed to verify, but a service-visible token reference
@@ -720,6 +733,57 @@ def _preserved_existing_result(
             rechecked=False,
         ),
         existing,
+    )
+
+
+def _github_gh_keychain_only_result(
+    spec: ProviderSpec,
+    config: HostSetupConfig,
+) -> tuple[ProviderSetupResult, ProviderConfig | None]:
+    """Reject keychain-only ``gh`` auth, prompting for a service-visible token.
+
+    ``gh auth status`` confirmed an interactive ``gh`` login, but no
+    AWF_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN is visible, so the credential lives only
+    in the host ``gh`` keychain. The runtime readiness path
+    (:func:`awf.service.provider_readiness._check_github`) cannot use that keychain
+    from inside the local service containers and returns
+    ``GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE``; recording ``ready`` here would
+    make ``awf setup`` disagree with ``awf start``. Surface an actionable result and
+    degrade any prior ready entry so first-run setup and runtime agree.
+    """
+    summary = (
+        "gh CLI is authenticated, but no service-visible GitHub token is set. Local "
+        "service containers cannot use keychain-only gh auth, so export "
+        'AWF_GITHUB_TOKEN (e.g. `export AWF_GITHUB_TOKEN="$(gh auth token)"`) before '
+        "starting AWF so it can create PRs, comment, and merge."
+    )
+    existing = config.providers.get(spec.name)
+    if existing is not None and _as_setup_status(existing.status) == "ready":
+        # A prior run persisted a ready GitHub entry, but this recheck found only
+        # keychain-only auth. Overwrite it to unavailable (and re-persist) so the old
+        # ready entry cannot linger on disk while the summary shows it unusable.
+        degraded = existing.model_copy(update={"status": "unavailable"})
+        return (
+            ProviderSetupResult(
+                name=spec.name,
+                status="unavailable",
+                reason_code="GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE",
+                summary=summary,
+                backend=existing.backend,
+                credential_ref=existing.credential_ref,
+                configured=True,
+                rechecked=True,
+            ),
+            degraded,
+        )
+    return (
+        ProviderSetupResult(
+            name=spec.name,
+            status="not_configured",
+            reason_code="GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE",
+            summary=summary,
+        ),
+        None,
     )
 
 

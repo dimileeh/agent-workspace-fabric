@@ -598,8 +598,15 @@ def test_selected_github_recheck_probes_only_github(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_github_ready_via_gh_without_token(tmp_path: Path) -> None:
-    """``gh auth status`` success marks GitHub ready with no stored token."""
+def test_github_gh_keychain_only_prompts_for_env_token(tmp_path: Path) -> None:
+    """Keychain-only ``gh`` auth (no env token) must not persist a ready provider.
+
+    Regression for PRRT_kwDOSJAM6s6GyS60: when ``gh auth status`` succeeds but no
+    AWF_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN is service-visible, the credential lives
+    only in the host ``gh`` keychain. The runtime readiness path rejects that with
+    ``GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE``, so ``awf setup`` must prompt for
+    an env token instead of recording an unusable ready state.
+    """
     summary, config = orchestrate_provider_setup(
         _settings(tmp_path),
         selected_providers=["github"],
@@ -613,11 +620,40 @@ def test_github_ready_via_gh_without_token(tmp_path: Path) -> None:
 
     github = summary.result_for("github")
     assert github is not None
-    assert github.status == "ready"
+    assert github.status == "not_configured"
+    assert github.reason_code == "GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE"
+    assert "AWF_GITHUB_TOKEN" in github.summary
     assert github.credential_ref is None
     assert github.backend is None
-    assert config.providers["github"].status == "ready"
-    assert config.providers["github"].source == "gh"
+    # No ready entry is persisted for an unusable keychain-only login.
+    assert "github" not in config.providers
+
+
+@pytest.mark.unit
+def test_github_gh_keychain_only_degrades_prior_ready_config(tmp_path: Path) -> None:
+    """Keychain-only ``gh`` auth must overwrite a prior ready GitHub entry.
+
+    Regression for PRRT_kwDOSJAM6s6GyS60: a prior run may have persisted a ready
+    GitHub entry, but a recheck that finds only keychain-only ``gh`` auth must not
+    leave that stale ready entry on disk while the summary reports it unusable.
+    """
+    prior = HostSetupConfig(providers={"github": ProviderConfig(status="ready", source="gh")})
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["github"],
+        config=prior,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_unexpected_http,
+    )
+
+    github = summary.result_for("github")
+    assert github is not None
+    assert github.status == "unavailable"
+    assert github.reason_code == "GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE"
+    assert config.providers["github"].status == "unavailable"
 
 
 @pytest.mark.unit
