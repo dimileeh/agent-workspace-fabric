@@ -49,6 +49,7 @@ _LEGACY_PROVIDER_TARGETS: Mapping[str, frozenset[str]] = {
 _SHARED_AUTH_DIRNAME = "_shared"
 _CLAUDE_BASE_DIRNAME = "claude-base"
 _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
+_CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
 _PROC_SELF_STATUS = Path("/proc/self/status")
 _CAP_SYS_ADMIN_BIT = 21
@@ -598,12 +599,25 @@ def _prepare_claude_overlay_mount(
         )
         return None
 
-    base = _ensure_shared_claude_base(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_owner_uid=workspace_owner_uid,
-        workspace_owner_gid=workspace_owner_gid,
-    )
+    try:
+        base = _ensure_shared_claude_base(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_owner_uid=workspace_owner_uid,
+            workspace_owner_gid=workspace_owner_gid,
+        )
+    except OSError as exc:
+        # Building the shared base (copytree/chown) can fail with OSError (disk
+        # full, permissions). Degrade to the legacy full copy rather than
+        # hard-failing provisioning — the same resilience contract honored when
+        # overlayfs is unsupported or the mount itself fails.
+        _log.warning(
+            "claude_auth_shared_base_failed",
+            reason_code=_CLAUDE_AUTH_SHARED_BASE_FAILED,
+            workspace_auth_root=str(claude_root),
+            error=str(exc),
+        )
+        return None
     upper = claude_root / "upper"
     work = claude_root / "work"
     merged = claude_root / "merged"

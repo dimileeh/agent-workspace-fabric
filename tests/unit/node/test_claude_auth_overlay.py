@@ -309,6 +309,39 @@ def test_overlay_unavailable_falls_back_to_legacy_copy(
 
 
 @pytest.mark.unit
+def test_shared_base_build_oserror_falls_back_to_legacy_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    def _disk_full(**_kwargs: object) -> Path:
+        raise OSError("No space left on device")
+
+    # Building the shared base can fail with OSError (disk full, permissions).
+    # That must degrade to the legacy copy, not hard-fail provisioning.
+    monkeypatch.setattr(auth_mounts_mod, "_ensure_shared_claude_base", _disk_full)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_base_fail",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_base_fail" / "claude"
+    # Legacy full copy took over: the mount source is the copied ``.claude`` tree.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert not (claude_root / "merged").exists()
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_SHARED_BASE_FAILED" for entry in logs)
+
+
+@pytest.mark.unit
 def test_overlay_reprovision_reuses_live_mount_without_data_loss(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
