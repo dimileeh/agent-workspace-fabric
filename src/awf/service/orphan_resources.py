@@ -56,7 +56,7 @@ ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 # ``(project_name, compose_file, workspace_id)`` triple. The differing name
 # makes the incompatibility explicit rather than letting a same-named alias
 # imply the closures are swappable.
-OrphanResourceComposeTeardown = Callable[[str, Path, str], Awaitable[ComposeTeardownOutcome]]
+OrphanResourceComposeTeardown = Callable[[str, Path, str, bool], Awaitable[ComposeTeardownOutcome]]
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "terminal", "missing", "unknown"]
@@ -706,16 +706,25 @@ class OrphanReapResult:
 
 
 def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanResourceComposeTeardown:
-    """Volume-removing compose-teardown closure over a ``ComposeManager`` (WS-B1 path)."""
+    """Compose-teardown closure over a ``ComposeManager`` (WS-B1 path).
+
+    The caller decides ``remove_volumes`` per workspace: a terminal workspace
+    that is still within its retention window has its live containers/networks
+    classified ``terminal`` (reapable leaked runtime) while its volumes stay
+    ``expected`` salvage evidence, so tearing the stack down must not pass
+    ``--volumes`` and delete those protected volumes. This mirrors the worker
+    terminal-runtime release path (:mod:`awf.control.worker.cleanup`), which
+    tears down retained-terminal runtime with ``remove_volumes=False``.
+    """
 
     async def _teardown(
-        project_name: str, compose_file: Path, workspace_id: str
+        project_name: str, compose_file: Path, workspace_id: str, remove_volumes: bool
     ) -> ComposeTeardownOutcome:
         return await manager.teardown_project(
             project_name=project_name,
             compose_file=compose_file,
             workspace_id=workspace_id,
-            remove_volumes=True,
+            remove_volumes=remove_volumes,
         )
 
     return _teardown
@@ -830,10 +839,19 @@ async def reap_classified_orphans(
     # same stack do not trigger redundant downs.
     compose_projects: dict[tuple[str, str], None] = {}
     worktree_records: list[ClassifiedResource] = []
+    # A workspace's volumes are only torn down (``docker compose down --volumes``)
+    # when a volume record for it is itself cleanup-ready. A terminal workspace
+    # still inside its retention window keeps volumes classified ``expected``
+    # (salvage evidence) while only its live containers/networks are reaped, so
+    # removing volumes here would delete the very evidence _classify protected --
+    # matching the worker terminal-runtime release path's ``remove_volumes=False``.
+    volume_ready_workspace_ids: set[str] = set()
     for record in orphan_records:
         if record.kind == "worktree":
             worktree_records.append(record)
             continue
+        if record.kind == "volume":
+            volume_ready_workspace_ids.add(record.workspace_id)
         project = record.compose_project or f"awf_{record.workspace_id}"
         compose_projects[(project, record.workspace_id)] = None
 
@@ -842,7 +860,8 @@ async def reap_classified_orphans(
 
     for project_name, workspace_id in sorted(compose_projects):
         compose_file = resolved_work_dir / "compose" / workspace_id / "compose.yml"
-        teardown = await compose_teardown(project_name, compose_file, workspace_id)
+        remove_volumes = workspace_id in volume_ready_workspace_ids
+        teardown = await compose_teardown(project_name, compose_file, workspace_id, remove_volumes)
         outcome = OrphanReapOutcome(
             kind="compose",
             workspace_id=workspace_id,
