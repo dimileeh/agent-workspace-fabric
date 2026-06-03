@@ -405,6 +405,15 @@ def build_client_config_plan(
     # a pre-file-write AWF setup carries no bounded timeouts. Fall through to an
     # ``update`` so the file write adds them instead of a misleading no-op.
 
+    if existing_entry is not None and method == "official_cli":
+        # The official ``mcp add`` CLI only *adds* a fresh server entry; it cannot
+        # rewrite an existing 'awf' entry whose required field drifted (e.g.
+        # Claude's stale non-stdio transport ``type``). Running it would either
+        # fail ("already exists") or no-op while leaving the broken entry on disk,
+        # ignoring the merged_config computed below. Force the structured file
+        # write so the update actually repairs the entry.
+        method = "file"
+
     if existing is not None and existing_has_comments:
         # ``tomllib`` dropped the file's comments on parse, so rewriting it would
         # delete hand-written documentation the comment-free scoped diff cannot

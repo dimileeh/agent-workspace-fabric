@@ -213,6 +213,49 @@ def test_build_plan_claude_stale_transport_type_plans_update(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("stale_type", ["http", "sse"])
+def test_apply_claude_stale_type_update_writes_file_even_with_cli(
+    tmp_path: Path, stale_type: str
+) -> None:
+    """Verify repairing an existing Claude awf entry uses the file write, not the CLI.
+
+    Regression for PRRT_kwDOSJAM6s6G30y2: when the ``claude`` CLI is on PATH the
+    method defaulted to ``official_cli``, so applying an ``update`` that only fixes
+    a drifted required field (the stale non-stdio transport ``type``) shelled out
+    to ``claude mcp add`` — an *add*, which cannot rewrite an existing 'awf' entry —
+    and ignored the corrected ``merged_config``. The fix forces the structured file
+    write for an existing-entry update, so the broken ``type`` is actually repaired
+    and the CLI is never invoked.
+    """
+    config = {
+        "mcpServers": {
+            AWF_MCP_SERVER_KEY: {
+                "type": stale_type,
+                "command": "awf",
+                "args": _desired_args(),
+            }
+        }
+    }
+    _claude_config_path(tmp_path).write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_found, now=_now
+    )
+
+    assert plan.action == "update"
+    assert plan.method == "file"
+    assert plan.cli_command is None
+
+    # ``_never_run`` asserts the official CLI is not invoked; the file write must
+    # repair the on-disk transport ``type`` instead of leaving it broken.
+    result = apply_client_config_plan(plan, run=_never_run)
+
+    assert result.wrote is True
+    written = json.loads(_claude_config_path(tmp_path).read_text(encoding="utf-8"))
+    assert written["mcpServers"][AWF_MCP_SERVER_KEY]["type"] == "stdio"
+
+
+@pytest.mark.unit
 def test_build_plan_codex_full_matching_entry_is_no_change(tmp_path: Path) -> None:
     """Verify a Codex entry matching command/args and bounded timeouts is no_change."""
     codex_path = _codex_config_path(tmp_path)
