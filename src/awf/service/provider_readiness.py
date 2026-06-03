@@ -1249,12 +1249,16 @@ def _check_grok(
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
-    file_sources = _existing_credential_sources(
-        ((host_home / ".grok" / "auth.json", "~/.grok/auth.json"),),
-        credential_scope="isolated_workspace",
-        isolation="per_workspace_copy",
-    )
-    if file_sources:
+    auth_json = host_home / ".grok" / "auth.json"
+    if auth_json.is_file():
+        file_sources = [
+            _credential_source(
+                type_="path",
+                signal="~/.grok/auth.json",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+        ]
         return _provider_result(
             ok=True,
             strict=strict,

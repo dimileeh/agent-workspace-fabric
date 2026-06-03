@@ -303,6 +303,50 @@ def test_provider_readiness_grok_file_present_before_env(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_provider_readiness_grok_ignores_non_file_auth_json(tmp_path: Path) -> None:
+    """Non-regular-file at ~/.grok/auth.json must not mark file auth present.
+
+    _check_grok must use is_file (to match _prepare_isolated_grok_auth) so a
+    directory, symlink-to-dir, or other non-file does not report
+    GROK_FILE_AUTH_PRESENT. Otherwise preflight can pass while no .grok mount
+    is created and XAI_API_KEY env fallback may be skipped by the caller.
+    Regression test for GitHub PR review thread PRRT_kwDOSJAM6s6G0PEp.
+    """
+    home = tmp_path / "home"
+    grok_dir = home / ".grok"
+    grok_dir.mkdir(parents=True)
+    # Exists but not a regular file (a dir with the auth.json name).
+    (grok_dir / "auth.json").mkdir()
+
+    # With XAI env present: must prefer env path, not claim file auth.
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"XAI_API_KEY": "xai_env_secret"},
+        run_subprocess=_runtime_cli_ok("grok"),
+    )
+
+    grok = payload["providers"]["grok"]
+    assert grok["ok"] is True
+    assert grok["reason"] == "GROK_ENV_AUTH_PRESENT"
+    assert grok["signals"] == ["XAI_API_KEY"]
+    assert grok["credential_scope"] == "static_env_token"
+    assert grok["isolation"] == "service_env"
+    assert grok["warnings"] != []
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "xai_env_secret" not in serialized
+
+    # No env: must report missing (never file present from non-file path).
+    payload2 = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+    grok2 = payload2["providers"]["grok"]
+    assert grok2["ok"] is False
+    assert grok2["reason"] == "GROK_AUTH_MISSING"
+
+
+@pytest.mark.unit
 def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
     """Cursor env auth appears as a static service-env token."""
     payload = collect_agent_readiness(
