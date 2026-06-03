@@ -306,6 +306,52 @@ def test_recheck_preserves_existing_unavailable_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_recheck_env_ref_ready_without_env_var_marks_unavailable(tmp_path: Path) -> None:
+    """A prior ready ``env://`` ref degrades to unavailable when its var is gone.
+
+    A targeted recheck of a provider persisted as ready via an ``env://NAME`` ref
+    must not carry that readiness forward once the operator removed the backing
+    env var: the credential is no longer visible, so reporting it ready would
+    disagree with the service readiness path. It is marked unavailable instead.
+    """
+    existing = ProviderConfig(
+        credential_ref="env://OPENAI_API_KEY",
+        backend="env_ref",
+        status="ready",
+        source="env",
+    )
+    base = HostSetupConfig(providers={"codex": existing})
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=base,
+        allow_plain_secrets=False,
+        non_interactive=False,
+        environ={},
+        capture=lambda _provider: None,
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    assert result.status == "unavailable"
+    assert result.configured is True
+    # The env-var absence is a current determination, not a stale carry-over.
+    assert result.rechecked is True
+    assert result.reason_code == "CODEX_ENV_REF_MISSING"
+    assert result.backend == "env_ref"
+    assert result.credential_ref == "env://OPENAI_API_KEY"
+    # The persisted config is degraded to unavailable so it cannot silently
+    # disagree with the summary; the safe ref itself is retained.
+    assert config.providers["codex"].status == "unavailable"
+    assert config.providers["codex"].credential_ref == "env://OPENAI_API_KEY"
+    assert config.providers["codex"].backend == "env_ref"
+
+
+@pytest.mark.unit
 def test_provider_invalid_credential_marks_unavailable(tmp_path: Path) -> None:
     """A GitHub token the ``gh`` probe cannot confirm is reported unavailable.
 

@@ -646,8 +646,34 @@ def _preserved_existing_result(
     persisted config still holds a ready ref. Report the last-known state verbatim
     with ``rechecked=False`` (it was not re-probed this run) and return the existing
     config unchanged.
+
+    An ``env_ref``-backed entry is the exception: its readiness depends entirely on
+    the backing environment variable being visible, and this branch is only reached
+    when no such variable is present (``_first_present`` returned ``None``). Carrying
+    a prior ``ready`` ``env://`` ref forward would report stale readiness after an
+    operator removed the token (e.g. ``OPENAI_API_KEY``), while the service readiness
+    path would fail because no token is visible. Degrade such an entry to
+    ``unavailable`` so ``awf setup`` and runtime agree.
     """
     backend_label = existing.backend or "stored"
+    if existing.backend == "env_ref" and _as_setup_status(existing.status) == "ready":
+        degraded = existing.model_copy(update={"status": "unavailable"})
+        return (
+            ProviderSetupResult(
+                name=spec.name,
+                status="unavailable",
+                reason_code=f"{spec.name.upper()}_ENV_REF_MISSING",
+                summary=(
+                    f"Previously ready {spec.name} {backend_label} reference is no longer "
+                    "backed by a visible environment variable; marking unavailable."
+                ),
+                backend=existing.backend,
+                credential_ref=existing.credential_ref,
+                configured=True,
+                rechecked=True,
+            ),
+            degraded,
+        )
     return (
         ProviderSetupResult(
             name=spec.name,
