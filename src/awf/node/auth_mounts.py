@@ -550,13 +550,23 @@ def _prepare_isolated_claude_auth(
         # mutations. The legacy branch deliberately reuses such a copy (``if not
         # target_dir.exists()``) to preserve retry state; mounting a fresh
         # shared-base overlay over it would silently drop those mutations (empty
-        # ``upper``, lower seeded from the current host). So only reach for the
-        # overlay when no legacy copy exists — otherwise keep using that copy.
-        # (Overlay→overlay retries are unaffected: they never write ``.claude``,
-        # and a remount reuses the surviving on-disk ``upper``/``work``.)
+        # ``upper``, lower seeded from the current host). So normally only reach
+        # for the overlay when no legacy copy exists — otherwise keep using that
+        # copy.
+        #
+        # Exception: a surviving overlay ``upper`` overrides that guard. A
+        # transient remount failure preserves ``upper``/``work`` on disk but still
+        # degrades this provision to a *fresh* legacy copy (no mutations). Without
+        # this override the next retry would see that fresh copy, skip the overlay
+        # forever, and strand the agent's real mutations in the unremounted
+        # ``upper``. ``upper`` exists only for overlay-backed workspaces (a pure
+        # legacy copy never has one), so its presence safely distinguishes "remount
+        # the surviving overlay" from "preserve a real legacy copy". The overlay
+        # mount, when it succeeds, takes precedence over the stale legacy copy.
+        overlay_upper = target_root / "upper"
         overlay = (
             None
-            if legacy_claude_copy.exists()
+            if legacy_claude_copy.exists() and not overlay_upper.exists()
             else _prepare_claude_overlay_mount(
                 host_home=host_home,
                 claude_root=target_root,

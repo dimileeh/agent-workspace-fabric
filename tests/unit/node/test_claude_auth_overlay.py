@@ -755,6 +755,62 @@ def test_transient_mount_failure_preserves_surviving_upper(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_retry_after_transient_fallback_remounts_surviving_upper(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    # Provision 1: overlay succeeds and the agent mutates the writable ``upper``.
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_recover",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_recover" / "claude"
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+
+    # Provision 2: teardown leaves ``upper``/``work`` on disk, then a transient
+    # remount failure degrades to a *fresh* legacy ``.claude`` copy (no mutations).
+    mounter.mounted.clear()
+    mounter._mount_error = OSError("transient remount failure")
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_recover",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    # The fresh legacy copy now exists alongside the surviving overlay ``upper``.
+    assert (claude_root / ".claude").is_dir()
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+    # Provision 3: the mount works again. The surviving overlay ``upper`` must be
+    # remounted (recovering the agent's mutations) rather than skipped in favor of
+    # the stale fresh legacy copy created by the transient failure.
+    mounter.mounted.clear()
+    mounter._mount_error = None
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_recover",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    # Auth is served from the live overlay (``merged``), not the stale legacy copy.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The remount reused the surviving ``upper`` carrying the agent's mutations.
+    call = mounter.mounts[-1]
+    assert call["upperdir"] == claude_root / "upper"
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
 def test_teardown_unmounts_merged_before_removal(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     merged = work_dir / "auth" / "ws_t" / "claude" / "merged"
