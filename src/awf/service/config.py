@@ -98,6 +98,10 @@ class ServiceSettings:
     workspace_cleanup_enabled: bool = True
     workspace_cleanup_scan_interval_seconds: float = DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS
     workspace_cleanup_batch_limit: int = DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT
+    auto_cleanup_orphans: bool = False
+    orphan_reconcile_scan_interval_seconds: float = 3600.0
+    orphan_reconcile_max_per_scan: int = 50
+    orphan_reconcile_min_age_hours: float = 168.0
     network_posture_open_legacy_cutoff: datetime | None = None
     local_capacity_cpu_cores: float | None = None
     local_capacity_memory_gb: float | None = None
@@ -231,6 +235,10 @@ def resolve_service_settings(
         workspace_cleanup_enabled=settings.workspace_cleanup_enabled,
         workspace_cleanup_scan_interval_seconds=settings.workspace_cleanup_scan_interval_seconds,
         workspace_cleanup_batch_limit=settings.workspace_cleanup_batch_limit,
+        auto_cleanup_orphans=settings.auto_cleanup_orphans,
+        orphan_reconcile_scan_interval_seconds=settings.orphan_reconcile_scan_interval_seconds,
+        orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
+        orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,
         network_posture_open_legacy_cutoff=settings.network_posture_open_legacy_cutoff,
         local_capacity_cpu_cores=settings.local_capacity_cpu_cores,
         local_capacity_memory_gb=settings.local_capacity_memory_gb,

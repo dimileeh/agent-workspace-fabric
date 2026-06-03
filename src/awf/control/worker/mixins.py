@@ -32,6 +32,7 @@ class WorkerDelegatesMixin:
     _maybe_expire_due_secret_leases = _cleanup._maybe_expire_due_secret_leases
     _expire_due_secret_leases = _cleanup._expire_due_secret_leases
     _maybe_release_terminal_runtime = _cleanup._maybe_release_terminal_runtime
+    _maybe_reconcile_orphan_dirs = _cleanup._maybe_reconcile_orphan_dirs
     _release_terminal_runtime_resources = _cleanup._release_terminal_runtime_resources
     _resume_pending_planning_scope_auto_retries_after_terminal_release = (
         _cleanup._resume_pending_planning_scope_auto_retries_after_terminal_release

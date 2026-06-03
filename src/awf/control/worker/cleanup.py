@@ -150,6 +150,47 @@ async def _maybe_release_terminal_runtime(self: Any) -> None:
     self._next_terminal_runtime_release_scan_at = monotonic() + interval
 
 
+async def _maybe_reconcile_orphan_dirs(self: Any) -> None:
+    """Periodically reap orphaned per-workspace dirs whose DB row is gone (WS-B2).
+
+    No-op when no reconciler callback is wired. The callback already decides
+    report-only vs execute based on the ``auto_cleanup_orphans`` flag; this
+    method only handles interval gating and transient-DB resilience, mirroring
+    :func:`_maybe_release_terminal_runtime`.
+    """
+    if self._orphan_dir_reconciler is None:
+        return
+
+    now = monotonic()
+    if now < self._next_orphan_reconcile_scan_at:
+        return
+
+    try:
+        await self._orphan_dir_reconciler()
+    except Exception as exc:
+        if _worker_exception_is_transient_db_connection(exc):
+            _log.warning(
+                "worker.orphan_dir_reconcile_db_connection_closed",
+                reason_code=DB_CONNECTION_CLOSED_REASON,
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+        else:
+            _log.exception(
+                "worker.orphan_dir_reconcile_failed",
+                reason_code="ORPHAN_DIR_RECONCILE_FAILED",
+                error_type=type(exc).__name__,
+            )
+        interval = max(0.0, self._config.orphan_reconcile_scan_interval_seconds)
+        self._next_orphan_reconcile_scan_at = monotonic() + interval
+        if _worker_exception_is_transient_db_connection(exc):
+            return
+        raise
+
+    interval = max(0.0, self._config.orphan_reconcile_scan_interval_seconds)
+    self._next_orphan_reconcile_scan_at = monotonic() + interval
+
+
 async def _release_terminal_runtime_resources(self: Any) -> None:
     """Run the terminal-runtime cleaner for all eligible candidates, raising on first failure."""
     limit = self._config.terminal_runtime_release_max_per_scan

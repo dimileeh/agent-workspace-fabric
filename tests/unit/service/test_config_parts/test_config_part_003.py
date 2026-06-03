@@ -303,3 +303,31 @@ def test_local_service_config_resolves_stable_worker_node_id_in_payload() -> Non
 
     assert settings.node_id == "local"
     assert payload["node_id"] == "local"
+
+
+@pytest.mark.unit
+def test_orphan_reconcile_defaults_are_off_and_sane() -> None:
+    settings = resolve_service_settings(Settings(_env_file=None), environ={})
+
+    assert settings.auto_cleanup_orphans is False
+    assert settings.orphan_reconcile_scan_interval_seconds == 3600.0
+    assert settings.orphan_reconcile_max_per_scan == 50
+    assert settings.orphan_reconcile_min_age_hours == 168.0
+
+
+@pytest.mark.unit
+def test_orphan_reconcile_settings_flow_from_environment() -> None:
+    base = Settings(
+        _env_file=None,
+        auto_cleanup_orphans=True,
+        orphan_reconcile_scan_interval_seconds=900.0,
+        orphan_reconcile_max_per_scan=7,
+        orphan_reconcile_min_age_hours=12.0,
+    )
+
+    settings = resolve_service_settings(base, environ={})
+
+    assert settings.auto_cleanup_orphans is True
+    assert settings.orphan_reconcile_scan_interval_seconds == 900.0
+    assert settings.orphan_reconcile_max_per_scan == 7
+    assert settings.orphan_reconcile_min_age_hours == 12.0

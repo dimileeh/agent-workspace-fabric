@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID as DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
 )
+from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,10 @@ class WorkerConfig:
     secret_lease_expiration_scan_interval_seconds: float = 60.0
     terminal_runtime_release_scan_interval_seconds: float = 300.0
     terminal_runtime_release_max_per_scan: int = 5
+    orphan_reconcile_scan_interval_seconds: float = 3600.0
+    orphan_reconcile_max_per_scan: int = 50
+    orphan_reconcile_min_age_hours: float = DEFAULT_MIN_AGE_HOURS
+    auto_cleanup_orphans: bool = False
     node_id: str | None = None
     local_capacity_cpu_cores: float | None = None
     local_capacity_memory_gb: float | None = None

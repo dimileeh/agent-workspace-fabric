@@ -6,25 +6,47 @@ import asyncio
 import json
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.companions import parent_workspace_id_from_companion_worktree_id
+from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
+from awf.service.gc_classify import (
+    PATH_ALREADY_REMOVED,
+    PATH_DELETED,
+    _delete_gc_path,
+    _gc_path,
+)
+from awf.service.gc_reconcile import _ComposeTeardownOutcome
+
+if TYPE_CHECKING:
+    from awf.node.compose_manager import ComposeManager
+
+_log = get_logger(__name__)
 
 CHECK_TIMEOUT_SECONDS = 5.0
 ORPHAN_EXAMPLE_LIMIT = 5
 AWF_PROJECT_PREFIXES = ("awf_", "awf-")
+
+# Reason codes for the flag-gated readiness-driven reaper.
+ORPHAN_REAP_DISABLED = "ORPHAN_REAP_DISABLED"
+ORPHAN_REAP_SKIPPED_UNKNOWN = "ORPHAN_REAP_SKIPPED_UNKNOWN"
+ORPHAN_REAP_OK = "ORPHAN_REAP_OK"
+ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
+
+# (project_name, compose_file, workspace_id) -> teardown outcome.
+OrphanComposeTeardown = Callable[[str, Path, str], Awaitable[_ComposeTeardownOutcome]]
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "terminal", "missing", "unknown"]
@@ -488,6 +510,7 @@ def build_orphan_resource_summary(
     worktree_scan: ResourceScan,
     workspace_view: WorkspaceIdView,
     example_limit: int = ORPHAN_EXAMPLE_LIMIT,
+    auto_cleanup_orphans: bool = False,
 ) -> OrphanResourceSummary:
     resources = (*docker_scan.resources, *worktree_scan.resources)
     records = tuple(_classify(resource, workspace_view=workspace_view) for resource in resources)
@@ -512,14 +535,23 @@ def build_orphan_resource_summary(
 
     if orphan_records:
         examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
+        action = (
+            (
+                "Reaping is enabled (auto_cleanup_orphans): the worker will tear down "
+                "the listed AWF stacks and remove their orphaned worktrees."
+            )
+            if auto_cleanup_orphans
+            else (
+                "Review the listed AWF resources and run a non-destructive cleanup plan; "
+                "this check does not remove containers, networks, volumes, or worktrees."
+            )
+        )
         readiness = CleanupReadiness(
             ready=False,
             status="blocked",
             reason="ORPHAN_RESOURCES_PRESENT",
-            action=(
-                "Review the listed AWF resources and run a non-destructive cleanup plan; "
-                "this check does not remove containers, networks, volumes, or worktrees."
-            ),
+            action=action,
+            dry_run_only=not auto_cleanup_orphans,
         )
         return OrphanResourceSummary(
             ok=False,
@@ -618,6 +650,182 @@ def build_orphan_resource_summary(
         cleanup_readiness=readiness,
         scanners=scanners,
         records=records,
+    )
+
+
+@dataclass(frozen=True)
+class OrphanReapOutcome:
+    """Outcome of reaping one classified orphan (a compose stack or a worktree)."""
+
+    kind: Literal["compose", "worktree"]
+    workspace_id: str
+    status: Literal["reaped", "already_removed", "failed"]
+    reason_code: str
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": self.kind,
+            "workspace_id": self.workspace_id,
+            "status": self.status,
+            "reason_code": self.reason_code,
+        }
+        if self.error is not None:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(frozen=True)
+class OrphanReapResult:
+    """Result of a flag-gated readiness-driven reap pass over a summary."""
+
+    enabled: bool
+    status: Literal["disabled", "skipped", "ok", "partial"]
+    reason_code: str
+    reaped: tuple[OrphanReapOutcome, ...] = ()
+    errors: tuple[OrphanReapOutcome, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "reaped": [outcome.to_dict() for outcome in self.reaped],
+            "errors": [outcome.to_dict() for outcome in self.errors],
+        }
+
+
+def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanComposeTeardown:
+    """Volume-removing compose-teardown closure over a ``ComposeManager`` (WS-B1 path)."""
+
+    async def _teardown(
+        project_name: str, compose_file: Path, workspace_id: str
+    ) -> _ComposeTeardownOutcome:
+        return await manager.teardown_project(
+            project_name=project_name,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            remove_volumes=True,
+        )
+
+    return _teardown
+
+
+async def reap_classified_orphans(
+    summary: OrphanResourceSummary,
+    *,
+    work_dir: Path | str,
+    compose_teardown: OrphanComposeTeardown,
+    enabled: bool,
+) -> OrphanReapResult:
+    """Reap ``terminal`` / ``missing`` classified orphans when ``enabled``.
+
+    Off by default: with ``enabled=False`` this is a pure no-op (report only),
+    preserving the historical ``dry_run_only`` behavior. With ``enabled=True``
+    it tears down each orphaned compose stack (containers/networks/volumes) via
+    WS-B1's :meth:`ComposeManager.teardown_project` and removes orphaned worktree
+    directories via WS-B1's :func:`_delete_gc_path`. Records classified
+    ``expected`` / ``unknown`` are left untouched, and a permission refusal
+    surfaces loudly (``PATH_DELETE_PERMISSION_DENIED``) as a ``partial`` run --
+    never a silent success. When classification is unreliable (DB/scanner
+    unavailable) it skips entirely rather than reaping on guesswork.
+    """
+    if not enabled:
+        return OrphanReapResult(
+            enabled=False,
+            status="disabled",
+            reason_code=ORPHAN_REAP_DISABLED,
+        )
+    if summary.cleanup_readiness.status == "unknown":
+        _log.warning(
+            "orphan_resources.reap_skipped_unknown",
+            reason_code=ORPHAN_REAP_SKIPPED_UNKNOWN,
+            summary_reason=summary.reason,
+        )
+        return OrphanReapResult(
+            enabled=True,
+            status="skipped",
+            reason_code=ORPHAN_REAP_SKIPPED_UNKNOWN,
+        )
+
+    resolved_work_dir = Path(work_dir).expanduser().resolve()
+    orphan_records = [
+        record for record in summary.records if record.classification in {"terminal", "missing"}
+    ]
+    # One teardown per (project, workspace) so multiple docker resources from the
+    # same stack do not trigger redundant downs.
+    compose_projects: dict[tuple[str, str], None] = {}
+    worktree_records: list[ClassifiedResource] = []
+    for record in orphan_records:
+        if record.kind == "worktree":
+            worktree_records.append(record)
+            continue
+        project = record.compose_project or f"awf_{record.workspace_id}"
+        compose_projects[(project, record.workspace_id)] = None
+
+    reaped: list[OrphanReapOutcome] = []
+    errors: list[OrphanReapOutcome] = []
+
+    for project_name, workspace_id in sorted(compose_projects):
+        compose_file = resolved_work_dir / "compose" / workspace_id / "compose.yml"
+        teardown = await compose_teardown(project_name, compose_file, workspace_id)
+        outcome = OrphanReapOutcome(
+            kind="compose",
+            workspace_id=workspace_id,
+            status="reaped" if teardown.ok else "failed",
+            reason_code=teardown.reason_code,
+            error=teardown.error,
+        )
+        if teardown.ok:
+            reaped.append(outcome)
+            _log.info("orphan_resources.reaped_compose", **outcome.to_dict())
+        else:
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_compose_failed", **outcome.to_dict())
+
+    for record in worktree_records:
+        path_text = record.resource.path
+        if not path_text:  # pragma: no cover - worktree records always carry a path.
+            continue
+        gc_path = _gc_path("worktree", Path(path_text))
+        deleted, error, reason_code = await asyncio.to_thread(
+            _delete_gc_path, gc_path, work_dir=resolved_work_dir
+        )
+        if deleted:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="reaped",
+                reason_code=PATH_DELETED,
+            )
+            reaped.append(outcome)
+            _log.info("orphan_resources.reaped_worktree", **outcome.to_dict())
+        elif reason_code is None or reason_code == PATH_ALREADY_REMOVED:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="already_removed",
+                reason_code=PATH_ALREADY_REMOVED,
+            )
+            reaped.append(outcome)
+        else:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=reason_code,
+                error=error,
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+
+    status: Literal["ok", "partial"] = "partial" if errors else "ok"
+    return OrphanReapResult(
+        enabled=True,
+        status=status,
+        reason_code=ORPHAN_REAP_PARTIAL if errors else ORPHAN_REAP_OK,
+        reaped=tuple(reaped),
+        errors=tuple(errors),
     )
 
 
