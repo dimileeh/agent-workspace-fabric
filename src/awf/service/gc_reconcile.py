@@ -311,7 +311,8 @@ async def reconcile_orphaned_workspace_dirs(
     resolved_now = time.time() if now is None else now
     known_ids = await _load_known_workspace_ids(session_factory)
 
-    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+    targets, scanned, dropped, young_orphan = await asyncio.to_thread(
+        scan_orphan_workspace_dirs,
         normalized_work_dir,
         known_ids,
         now=resolved_now,
