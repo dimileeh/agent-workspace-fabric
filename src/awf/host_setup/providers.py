@@ -253,14 +253,17 @@ def orchestrate_provider_setup(
     every network probe is bounded.
     """
     env = dict(os.environ if environ is None else environ)
+    # The mode is decided by the *input* selection, not the filtered list: a
+    # non-empty selection is always a targeted recheck even when every name is a
+    # typo, so an all-typo selection does no targeted work instead of silently
+    # flipping to a full all-providers run that mutates unrelated provider config.
+    is_targeted = bool(selected_providers)
     selected = [name for name in selected_providers if name in _SPEC_BY_NAME]
     unknown = [name for name in selected_providers if name not in _SPEC_BY_NAME]
     if unknown:
-        # Surface typos: filtering unknown names silently would flip an
-        # all-typo selection to a full all-providers run, surprising the caller.
         logger.warning("host_setup.unknown_providers_ignored", providers=unknown)
-    mode: ProviderSetupMode = "targeted_recheck" if selected else "all_providers"
-    target_names = set(selected) if selected else set(_SPEC_BY_NAME)
+    mode: ProviderSetupMode = "targeted_recheck" if is_targeted else "all_providers"
+    target_names = set(selected) if is_targeted else set(_SPEC_BY_NAME)
     capabilities = detect_host_credential_capabilities(environ=env)
     resolved_run = run_subprocess or default_subprocess_runner()
     backends = _CredentialBackends(

@@ -1008,3 +1008,37 @@ def test_unknown_selected_provider_names_emit_warning(tmp_path: Path) -> None:
         entry for entry in captured if entry.get("event") == "host_setup.unknown_providers_ignored"
     ]
     assert warnings and warnings[0]["providers"] == ["typo_provider"]
+
+
+@pytest.mark.unit
+def test_all_unknown_selection_does_no_targeted_work(tmp_path: Path) -> None:
+    """A non-empty all-typo selection stays targeted and probes nothing.
+
+    The public orchestration contract documents a non-empty ``selected_providers``
+    as a targeted recheck. When every name is unknown the run must do no targeted
+    work rather than flip to a full ``all_providers`` run that would probe and
+    persist config for unrelated providers.
+    """
+    config = HostSetupConfig()
+    with structlog.testing.capture_logs() as captured:
+        summary, updated_config = orchestrate_provider_setup(
+            _settings(tmp_path),
+            selected_providers=["typo_provider", "another_typo"],
+            config=config,
+            allow_plain_secrets=False,
+            non_interactive=True,
+            environ={},
+            run_subprocess=_unexpected_subprocess,
+            http_get=_unexpected_http,
+        )
+
+    assert summary.mode == "targeted_recheck"
+    assert summary.selected == ()
+    assert summary.providers == ()
+    assert summary.overall_status == "not_ready"
+    # No provider was orchestrated, so unrelated config is left untouched.
+    assert updated_config == config
+    warnings = [
+        entry for entry in captured if entry.get("event") == "host_setup.unknown_providers_ignored"
+    ]
+    assert warnings and warnings[0]["providers"] == ["typo_provider", "another_typo"]
