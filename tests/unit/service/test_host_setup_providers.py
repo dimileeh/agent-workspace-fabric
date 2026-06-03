@@ -125,6 +125,59 @@ def test_registry_covers_every_known_setup_provider() -> None:
 
 
 @pytest.mark.unit
+def test_unmapped_non_stub_provider_degrades_without_aborting_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-stub spec with no readiness provider degrades, never aborting the loop.
+
+    The registry invariant guarantees this never happens in practice, but if it
+    were ever violated the orchestration must stay non-blocking: the unmapped
+    provider becomes ``unavailable`` with a reason code while every later provider
+    is still configured. An ``assert`` here would instead raise ``AssertionError``,
+    escape the ``CredentialError`` containment, and abort the remaining providers.
+    """
+    from awf.host_setup import providers as providers_mod
+
+    broken = providers_mod.ProviderSpec(
+        name="broken",
+        readiness_provider=None,
+        env_ref_vars=("BROKEN_TOKEN",),
+    )
+    codex = next(spec for spec in PROVIDER_REGISTRY if spec.name == "codex")
+    # Order matters: the broken spec is probed first, so a non-isolated failure
+    # would prevent codex from ever being configured.
+    patched = (broken, codex)
+    monkeypatch.setattr(providers_mod, "PROVIDER_REGISTRY", patched)
+    monkeypatch.setattr(providers_mod, "_SPEC_BY_NAME", {spec.name: spec for spec in patched})
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=[],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"BROKEN_TOKEN": _FAKE_TOKEN, "CODEX_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    broken_result = summary.result_for("broken")
+    assert broken_result is not None
+    assert broken_result.status == "unavailable"
+    assert broken_result.reason_code == "PROVIDER_READINESS_UNMAPPED"
+    assert broken_result.configured is False
+    assert "broken" not in config.providers
+    assert _FAKE_TOKEN not in json.dumps(broken_result.model_dump())
+
+    # Isolation held: the provider after the unmapped one was still configured.
+    codex_result = summary.result_for("codex")
+    assert codex_result is not None
+    assert codex_result.status == "ready"
+    assert config.providers["codex"].credential_ref == "env://CODEX_API_KEY"
+
+
+@pytest.mark.unit
 def test_registry_env_ref_vars_mirror_readiness() -> None:
     """Setup must discover every alternate env var runtime readiness accepts.
 

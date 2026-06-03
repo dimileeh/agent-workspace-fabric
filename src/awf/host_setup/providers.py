@@ -488,10 +488,33 @@ def _orchestrate_agent_provider(
         source = "env"
         recheck_environ = dict(environ)
 
-    assert spec.readiness_provider is not None  # non-stub providers always map.
+    readiness_provider = spec.readiness_provider
+    if readiness_provider is None:
+        # Non-stub providers always map to a readiness provider — the registry
+        # invariant guarded by ``test_registry_covers_every_known_setup_provider``.
+        # Degrade to an unavailable result rather than ``assert``: an
+        # ``AssertionError`` would escape the ``CredentialError`` containment in
+        # ``_orchestrate_one`` and abort every remaining provider (breaking the
+        # non-blocking contract), and ``assert`` is stripped entirely under
+        # ``python -O``. An explicit return keeps per-provider isolation intact and
+        # surfaces the misconfiguration as a reason-coded, secret-free result.
+        return (
+            ProviderSetupResult(
+                name=spec.name,
+                status="unavailable",
+                reason_code="PROVIDER_READINESS_UNMAPPED",
+                summary=(
+                    f"No readiness provider is mapped for {spec.name}; "
+                    "cannot recheck this provider."
+                ),
+                configured=False,
+                rechecked=False,
+            ),
+            None,
+        )
     readiness = check_single_provider_readiness(
         settings,
-        provider=spec.readiness_provider,
+        provider=readiness_provider,
         environ=recheck_environ,
         run_subprocess=run_subprocess,
         http_get=http_get,
