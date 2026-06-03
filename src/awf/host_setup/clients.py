@@ -385,14 +385,15 @@ def apply_client_config_plan(
     plan: ClientConfigPlan,
     *,
     run: CommandRunner,
-    now: NowFn = lambda: datetime.now(UTC),
 ) -> ClientWriteResult:
     """Apply a client MCP integration plan (never called under dry-run).
 
     Refuses conflicts, no-ops on ``no_change``, prefers the official CLI when the
     plan selected it, else backs up the existing file before an atomic structured
-    write. Raises reason-coded ``SetupCheckError`` for conflicts and write
-    failures; never reads or handles provider tokens.
+    write. The backup path is taken from the plan (stamped once at plan time), so
+    a dry-run preview never diverges from the file actually written. Raises
+    reason-coded ``SetupCheckError`` for conflicts and write failures; never reads
+    or handles provider tokens.
     """
     if plan.action == "conflict":
         raise SetupCheckError(
@@ -410,7 +411,7 @@ def apply_client_config_plan(
         )
     if plan.method == "official_cli":
         return _apply_official_cli(plan, run=run)
-    return _apply_file(plan, now=now)
+    return _apply_file(plan)
 
 
 def setup_client(
@@ -433,7 +434,7 @@ def setup_client(
     plan = build_client_config_plan(client, env_file=env_file, home=home, which=which, now=now)
     if dry_run:
         return _dry_run_payload(plan)
-    return _apply_plan_payload(plan, run=run, now=now)
+    return _apply_plan_payload(plan, run=run)
 
 
 def setup_clients(
@@ -468,15 +469,13 @@ def setup_clients(
         return [_dry_run_payload(plan) for plan in plans]
     if any(plan.action == "conflict" for plan in plans):
         return [_plan_only_payload(plan) for plan in plans]
-    return [_apply_plan_payload(plan, run=run, now=now) for plan in plans]
+    return [_apply_plan_payload(plan, run=run) for plan in plans]
 
 
-def _apply_plan_payload(
-    plan: ClientConfigPlan, *, run: CommandRunner, now: NowFn
-) -> FirstRunPayload:
+def _apply_plan_payload(plan: ClientConfigPlan, *, run: CommandRunner) -> FirstRunPayload:
     """Apply a non-dry-run plan and render its success/blocked payload."""
     try:
-        result = apply_client_config_plan(plan, run=run, now=now)
+        result = apply_client_config_plan(plan, run=run)
     except SetupCheckError as error:
         return first_run_failure_payload(
             command=SETUP_COMMAND,
@@ -693,7 +692,7 @@ def _apply_official_cli(plan: ClientConfigPlan, *, run: CommandRunner) -> Client
     )
 
 
-def _apply_file(plan: ClientConfigPlan, *, now: NowFn) -> ClientWriteResult:
+def _apply_file(plan: ClientConfigPlan) -> ClientWriteResult:
     """Back up any existing file, then atomically write the merged config."""
     descriptor = plan.descriptor
     if descriptor is None or plan.merged_config is None:  # pragma: no cover - defensive
@@ -703,7 +702,10 @@ def _apply_file(plan: ClientConfigPlan, *, now: NowFn) -> ClientWriteResult:
             details={"client": plan.client, "config_path": str(plan.config_path)},
         )
     text = _serialize_config(plan.merged_config, descriptor.config_format)
-    backup_path = _backup_path(plan.config_path, now()) if plan.action == "update" else None
+    # Reuse the plan's already-stamped backup path rather than re-stamping with a
+    # fresh now(): a second boundary between plan and apply would otherwise make
+    # the dry-run path (from _plan_details) diverge from the file on disk.
+    backup_path = plan.backup_path if plan.action == "update" else None
     try:
         _write_config_atomic(plan.config_path, text, backup_path=backup_path)
     except OSError as exc:

@@ -410,7 +410,7 @@ def test_apply_file_create_writes_without_backup(tmp_path: Path) -> None:
         "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
     )
 
-    result = apply_client_config_plan(plan, run=_never_run, now=_now)
+    result = apply_client_config_plan(plan, run=_never_run)
 
     assert result.wrote is True
     assert result.backup_path is None
@@ -432,7 +432,7 @@ def test_apply_file_update_backs_up_and_preserves(tmp_path: Path) -> None:
     plan = build_client_config_plan(
         "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
     )
-    result = apply_client_config_plan(plan, run=_never_run, now=_now)
+    result = apply_client_config_plan(plan, run=_never_run)
 
     assert result.action == "update"
     assert result.backup_path == config_path.with_name(".claude.json.awf-backup-20260603123045")
@@ -446,6 +446,30 @@ def test_apply_file_update_backs_up_and_preserves(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_apply_file_uses_plan_backup_path_not_recomputed(tmp_path: Path) -> None:
+    """Verify apply writes the plan's stamped backup path, never re-stamping now().
+
+    Regression: the apply path used to call now() a second time to derive the
+    backup filename, so a second boundary between plan and apply would make the
+    file on disk diverge from the dry-run preview (which reports plan.backup_path).
+    Apply must consume plan.backup_path verbatim.
+    """
+    config_path = _claude_config_path(tmp_path)
+    config_path.write_text(json.dumps({"telemetry": True}), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+    assert plan.backup_path is not None
+
+    result = apply_client_config_plan(plan, run=_never_run)
+
+    assert result.backup_path == plan.backup_path
+    assert plan.backup_path.exists()
+    assert not [p for p in tmp_path.glob(".claude.json.awf-backup-*") if p != plan.backup_path]
+
+
+@pytest.mark.unit
 @pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX permissions only")
 def test_apply_file_write_leaves_owner_private_permissions(tmp_path: Path) -> None:
     """Verify the written config and its parent dir are owner-private."""
@@ -453,7 +477,7 @@ def test_apply_file_write_leaves_owner_private_permissions(tmp_path: Path) -> No
         "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
     )
 
-    apply_client_config_plan(plan, run=_never_run, now=_now)
+    apply_client_config_plan(plan, run=_never_run)
 
     codex_path = _codex_config_path(tmp_path)
     assert (codex_path.stat().st_mode & 0o777) == 0o600
@@ -474,7 +498,7 @@ def test_apply_conflict_raises_and_leaves_file_untouched(tmp_path: Path) -> None
         "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
     )
     with pytest.raises(SetupCheckError) as excinfo:
-        apply_client_config_plan(plan, run=_never_run, now=_now)
+        apply_client_config_plan(plan, run=_never_run)
 
     assert excinfo.value.reason_code == CLIENT_CONFIG_CONFLICT
     assert config_path.read_text(encoding="utf-8") == original
@@ -496,7 +520,7 @@ def test_apply_no_change_does_not_write(tmp_path: Path) -> None:
     plan = build_client_config_plan(
         "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
     )
-    result = apply_client_config_plan(plan, run=_never_run, now=_now)
+    result = apply_client_config_plan(plan, run=_never_run)
 
     assert result.wrote is False
     assert config_path.read_text(encoding="utf-8") == original
@@ -518,7 +542,7 @@ def test_apply_file_write_failure_is_reason_coded(tmp_path: Path) -> None:
     object.__setattr__(plan, "config_path", config_path)
 
     with pytest.raises(SetupCheckError) as excinfo:
-        apply_client_config_plan(plan, run=_never_run, now=_now)
+        apply_client_config_plan(plan, run=_never_run)
 
     assert excinfo.value.reason_code == CLIENT_CONFIG_WRITE_FAILED
     assert not list(blocker.parent.glob("*.tmp"))
@@ -536,7 +560,7 @@ def test_apply_official_cli_invokes_expected_argv(tmp_path: Path) -> None:
         "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_found, now=_now
     )
 
-    result = apply_client_config_plan(plan, run=runner, now=_now)
+    result = apply_client_config_plan(plan, run=runner)
 
     assert result.wrote is True
     assert runner.calls == [
@@ -572,7 +596,7 @@ def test_apply_official_cli_failure_is_reason_coded(
     )
 
     with pytest.raises(SetupCheckError) as excinfo:
-        apply_client_config_plan(plan, run=runner, now=_now)
+        apply_client_config_plan(plan, run=runner)
 
     assert excinfo.value.reason_code == CLIENT_CONFIG_WRITE_FAILED
     assert not _codex_config_path(tmp_path).exists()
@@ -721,7 +745,7 @@ def test_codex_update_emits_bool_and_quoted_keys(tmp_path: Path) -> None:
     plan = build_client_config_plan(
         "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
     )
-    apply_client_config_plan(plan, run=_never_run, now=_now)
+    apply_client_config_plan(plan, run=_never_run)
 
     reparsed = tomllib.loads(codex_path.read_text(encoding="utf-8"))
     assert reparsed["ui"]["dark_mode"] is True
@@ -746,7 +770,7 @@ def test_codex_update_quotes_non_ascii_keys(tmp_path: Path) -> None:
     plan = build_client_config_plan(
         "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
     )
-    apply_client_config_plan(plan, run=_never_run, now=_now)
+    apply_client_config_plan(plan, run=_never_run)
 
     rendered = codex_path.read_text(encoding="utf-8")
     # The bare (unquoted) spelling would be invalid TOML; it must be quoted.
@@ -982,7 +1006,7 @@ def test_apply_conflict_without_detail_omits_conflict_detail(tmp_path: Path) -> 
     )
 
     with pytest.raises(SetupCheckError) as excinfo:
-        apply_client_config_plan(detailless, run=_never_run, now=_now)
+        apply_client_config_plan(detailless, run=_never_run)
 
     assert excinfo.value.reason_code == CLIENT_CONFIG_CONFLICT
     assert "conflict_detail" not in excinfo.value.details
