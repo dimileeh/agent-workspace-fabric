@@ -461,6 +461,47 @@ def test_shared_base_build_loses_race_and_reuses_existing(
 
 
 @pytest.mark.unit
+def test_shared_base_build_copytree_failure_cleans_staging_and_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+
+    real_copytree = auth_mounts_mod.shutil.copytree
+
+    def _copytree_fails(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        # Only the shared-base build copies into a ``.claude-base-*`` staging
+        # dir; let the legacy full-copy fallback's copytree run normally.
+        if ".claude-base-" in str(dst):
+            raise OSError("No space left on device")
+        return real_copytree(src, dst, *args, **kwargs)
+
+    # A copytree (or chown) failure raises before the ``replace`` block, so the
+    # mkdtemp staging dir must still be reclaimed rather than orphaned under the
+    # shared root, and provisioning degrades to the legacy full copy.
+    monkeypatch.setattr(auth_mounts_mod.shutil, "copytree", _copytree_fails)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_copy_fail",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_copy_fail" / "claude"
+    # Legacy full copy took over after the shared-base build failed.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_SHARED_BASE_FAILED" for entry in logs)
+    # No orphaned staging dir remains under the shared root.
+    assert list(base.parent.glob(".claude-base-*")) == []
+
+
+@pytest.mark.unit
 def test_shared_base_is_never_under_a_workspace_auth_dir(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     base = _shared_claude_base_dir(work_dir, "sig0")

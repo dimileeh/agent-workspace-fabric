@@ -683,21 +683,27 @@ def _ensure_shared_claude_base(
     shared_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".claude-base-", dir=shared_root))
     staged_base = staging / ".claude"
-    shutil.copytree(
-        host_home / ".claude",
-        staged_base,
-        ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
-        ignore_dangling_symlinks=True,
-    )
-    if workspace_owner_uid is not None and workspace_owner_gid is not None:
-        _chown_tree(staged_base, workspace_owner_uid, workspace_owner_gid)
+    # ``finally`` guarantees the staging dir is reclaimed on every exit: a
+    # copytree/chown OSError (disk full, permissions) that propagates to the
+    # caller's legacy-copy fallback, a lost build race, or the success path
+    # (where ``replace`` has already moved ``staged_base`` out). Without it a
+    # failed copy/chown would orphan the staging tree under the shared root.
     try:
-        staged_base.replace(base)
-    except OSError:
-        # Lost the build race against a concurrent provision; reuse its base.
+        shutil.copytree(
+            host_home / ".claude",
+            staged_base,
+            ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
+            ignore_dangling_symlinks=True,
+        )
+        if workspace_owner_uid is not None and workspace_owner_gid is not None:
+            _chown_tree(staged_base, workspace_owner_uid, workspace_owner_gid)
+        try:
+            staged_base.replace(base)
+        except OSError:
+            # Lost the build race against a concurrent provision; reuse its base.
+            return base
+    finally:
         shutil.rmtree(staging, ignore_errors=True)
-        return base
-    shutil.rmtree(staging, ignore_errors=True)
     return base
 
 
