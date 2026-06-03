@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1724,3 +1725,26 @@ def test_client_seams_resolve_real_home_and_clock() -> None:
     assert setup_commands._client_home() == Path.home()
     now = setup_commands._client_now()
     assert now.tzinfo is UTC
+    assert setup_commands._client_env() is os.environ
+
+
+@pytest.mark.unit
+def test_setup_client_codex_honors_codex_home(
+    client_harness: _ClientHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify the CLI threads CODEX_HOME so Codex config writes under it.
+
+    Regression for PRRT_kwDOSJAM6s6GyZ1U: with CODEX_HOME set, the file-fallback
+    apply must target ``$CODEX_HOME/config.toml`` (where the Codex CLI reads),
+    not the hard-coded ``~/.codex/config.toml``.
+    """
+    codex_home = client_harness.home / "xdg-codex"
+    monkeypatch.setattr(setup_commands, "_client_env", lambda: {"CODEX_HOME": str(codex_home)})
+
+    result = _runner.invoke(app, ["setup", "--client", "codex", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["details"]["config_path"] == str(codex_home / "config.toml")
+    assert (codex_home / "config.toml").exists()
+    assert not (client_harness.home / ".codex" / "config.toml").exists()

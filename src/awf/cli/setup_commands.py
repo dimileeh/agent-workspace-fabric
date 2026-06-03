@@ -10,7 +10,9 @@ gate are validated and forwarded for later setup slices (T06/T07).
 
 from __future__ import annotations
 
+import os
 import shutil
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -86,6 +88,16 @@ def _client_home() -> Path:
 def _client_now() -> datetime:
     """Return the current UTC time used to stamp config backups."""
     return datetime.now(UTC)
+
+
+def _client_env() -> Mapping[str, str]:
+    """Return the process environment used to resolve client config home overrides.
+
+    Threaded into ``setup_clients`` so a client that relocates its config via an
+    environment variable (Codex's ``CODEX_HOME``) is planned/written at the path
+    its official CLI actually loads, not the hard-coded home-anchored default.
+    """
+    return os.environ
 
 
 _DRY_RUN_HELP = "Run read-only checks only; never write config and never start Core."
@@ -362,6 +374,7 @@ def _run_client_setup(
         which=_client_which,
         run=_client_run,
         now=_client_now,
+        env=_client_env(),
     )
     if len(payloads) == 1:
         return payloads[0]

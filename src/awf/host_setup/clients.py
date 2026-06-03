@@ -95,9 +95,26 @@ class ClientDescriptor:
     config_relative_path: tuple[str, ...]
     # The top-level mapping key that holds named MCP server entries.
     servers_key: str
+    # An environment variable that, when set, overrides the *directory* the
+    # client reads/writes its config under (Codex honors ``CODEX_HOME`` over
+    # ``~/.codex``). ``None`` for clients with no such override (Claude Code).
+    config_home_env: str | None = None
 
-    def config_path(self, home: Path) -> Path:
-        """Return the absolute client config path under ``home``."""
+    def config_path(self, home: Path, env: Mapping[str, str]) -> Path:
+        """Return the absolute client config path under ``home``.
+
+        When ``config_home_env`` is set and that variable holds a non-empty
+        value, the client (e.g. Codex via ``CODEX_HOME``) reads and writes its
+        config under that directory — and its official CLI mutates the file
+        there — so the planned/written path must follow the override rather than
+        the hard-coded ``home``-anchored path the client would never load. The
+        override replaces the first relative segment (the home-anchored config
+        dir), keeping the config filename.
+        """
+        if self.config_home_env is not None:
+            override = env.get(self.config_home_env, "").strip()
+            if override:
+                return Path(override).joinpath(*self.config_relative_path[1:])
         return home.joinpath(*self.config_relative_path)
 
     def desired_entry(self, env_file: str) -> dict[str, Any]:
@@ -162,6 +179,7 @@ CLIENT_DESCRIPTORS: Mapping[str, ClientDescriptor] = {
         cli_binary="codex",
         config_relative_path=(".codex", "config.toml"),
         servers_key="mcp_servers",
+        config_home_env="CODEX_HOME",
     ),
 }
 
@@ -237,16 +255,19 @@ def build_client_config_plan(
     home: Path,
     which: WhichFn,
     now: NowFn = lambda: datetime.now(UTC),
+    env: Mapping[str, str] = os.environ,
 ) -> ClientConfigPlan:
     """Compute a read-only plan for registering AWF's MCP server into ``client``.
 
     Reads only the single known client config path (no home-dir scanning) via a
     structured parse; an unparseable or non-mapping existing config is an
     ambiguous ``conflict`` that refuses to write. The env-file path is used only
-    as a string; the file's contents are never read.
+    as a string; the file's contents are never read. ``env`` resolves any
+    home-override variable (e.g. Codex's ``CODEX_HOME``) so the planned path
+    matches the file the client and its official CLI actually load.
     """
     descriptor = CLIENT_DESCRIPTORS[client]
-    config_path = descriptor.config_path(home)
+    config_path = descriptor.config_path(home, env)
     env_file_str = str(env_file)
     desired_entry = descriptor.desired_entry(env_file_str)
     method: ClientConfigMethod = "official_cli" if which(descriptor.cli_binary) else "file"
@@ -355,7 +376,7 @@ def build_client_config_plan(
             action="conflict",
             conflict_detail=(
                 "Existing Codex config contains values AWF cannot safely round-trip "
-                f"({exc}); edit ~/.codex/config.toml manually or use the codex CLI."
+                f"({exc}); edit {config_path} manually or use the codex CLI."
             ),
             desired_entry=desired_entry,
             cli_command=descriptor.add_command(env_file_str) if method == "official_cli" else None,
@@ -423,6 +444,7 @@ def setup_client(
     which: WhichFn,
     run: CommandRunner,
     now: NowFn = lambda: datetime.now(UTC),
+    env: Mapping[str, str] = os.environ,
 ) -> FirstRunPayload:
     """Build (and, unless ``dry_run``, apply) the client MCP integration.
 
@@ -431,7 +453,9 @@ def setup_client(
     payload for conflicts and write failures (folded via the T03 builders). No
     provider token is ever read, accepted, stored, or returned.
     """
-    plan = build_client_config_plan(client, env_file=env_file, home=home, which=which, now=now)
+    plan = build_client_config_plan(
+        client, env_file=env_file, home=home, which=which, now=now, env=env
+    )
     if dry_run:
         return _dry_run_payload(plan)
     return _apply_plan_payload(plan, run=run)
@@ -446,6 +470,7 @@ def setup_clients(
     which: WhichFn,
     run: CommandRunner,
     now: NowFn = lambda: datetime.now(UTC),
+    env: Mapping[str, str] = os.environ,
 ) -> list[FirstRunPayload]:
     """Plan every selected client first, then apply only if none conflict.
 
@@ -462,7 +487,9 @@ def setup_clients(
     given order, for the caller to fold into a combined report.
     """
     plans = [
-        build_client_config_plan(client, env_file=env_file, home=home, which=which, now=now)
+        build_client_config_plan(
+            client, env_file=env_file, home=home, which=which, now=now, env=env
+        )
         for client in clients
     ]
     if dry_run:

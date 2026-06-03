@@ -752,6 +752,85 @@ def test_build_plan_never_reads_env_file_contents(tmp_path: Path) -> None:
     assert "AWF_GITHUB_TOKEN=" not in rendered
 
 
+# --- CODEX_HOME override --------------------------------------------------
+
+
+@pytest.mark.unit
+def test_build_plan_codex_honors_codex_home_override(tmp_path: Path) -> None:
+    """Verify a set CODEX_HOME pins the Codex config under it, not home/.codex.
+
+    Regression for PRRT_kwDOSJAM6s6GyZ1U: the official Codex CLI resolves
+    ``$CODEX_HOME/config.toml`` (CODEX_HOME overrides ~/.codex), so the
+    file-fallback write and the plan/conflict-check must target that same file
+    instead of the hard-coded ``home/.codex/config.toml`` the client never loads.
+    """
+    codex_home = tmp_path / "xdg-codex"
+
+    plan = build_client_config_plan(
+        "codex",
+        env_file=_ENV_FILE,
+        home=tmp_path,
+        which=_which_missing,
+        now=_now,
+        env={"CODEX_HOME": str(codex_home)},
+    )
+
+    assert plan.config_path == codex_home / "config.toml"
+    assert plan.config_path != _codex_config_path(tmp_path)
+
+
+@pytest.mark.unit
+def test_apply_file_codex_writes_under_codex_home(tmp_path: Path) -> None:
+    """Verify the file fallback writes the Codex config under CODEX_HOME."""
+    codex_home = tmp_path / "xdg-codex"
+
+    plan = build_client_config_plan(
+        "codex",
+        env_file=_ENV_FILE,
+        home=tmp_path,
+        which=_which_missing,
+        now=_now,
+        env={"CODEX_HOME": str(codex_home)},
+    )
+    apply_client_config_plan(plan, run=_never_run)
+
+    written = (codex_home / "config.toml").read_text(encoding="utf-8")
+    reparsed = tomllib.loads(written)
+    assert reparsed["mcp_servers"][AWF_MCP_SERVER_KEY]["args"] == _desired_args()
+    # The hard-coded home/.codex path is never created.
+    assert not _codex_config_path(tmp_path).exists()
+
+
+@pytest.mark.unit
+def test_build_plan_codex_blank_codex_home_falls_back_to_home(tmp_path: Path) -> None:
+    """Verify a blank/whitespace CODEX_HOME falls back to home/.codex/config.toml."""
+    plan = build_client_config_plan(
+        "codex",
+        env_file=_ENV_FILE,
+        home=tmp_path,
+        which=_which_missing,
+        now=_now,
+        env={"CODEX_HOME": "   "},
+    )
+
+    assert plan.config_path == _codex_config_path(tmp_path)
+
+
+@pytest.mark.unit
+def test_build_plan_claude_ignores_codex_home(tmp_path: Path) -> None:
+    """Verify CODEX_HOME never affects the Claude config path (no home override)."""
+    plan = build_client_config_plan(
+        "claude",
+        env_file=_ENV_FILE,
+        home=tmp_path,
+        which=_which_missing,
+        now=_now,
+        env={"CODEX_HOME": str(tmp_path / "xdg-codex")},
+    )
+
+    assert plan.config_path == _claude_config_path(tmp_path)
+
+
 # --- additional edge coverage ---------------------------------------------
 
 
