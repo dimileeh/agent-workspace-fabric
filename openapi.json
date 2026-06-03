@@ -5044,7 +5044,15 @@
           "exclude_statuses": {
             "description": "Status filter to remove from the eligible terminal set.",
             "items": {
-              "$ref": "#/components/schemas/WorkspaceStatus"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WorkspaceStatus"
+                },
+                {
+                  "const": "superseded",
+                  "type": "string"
+                }
+              ]
             },
             "title": "Exclude Statuses",
             "type": "array"
@@ -5084,7 +5092,15 @@
           "statuses": {
             "description": "Terminal status filter. Active statuses are always protected.",
             "items": {
-              "$ref": "#/components/schemas/WorkspaceStatus"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WorkspaceStatus"
+                },
+                {
+                  "const": "superseded",
+                  "type": "string"
+                }
+              ]
             },
             "title": "Statuses",
             "type": "array"

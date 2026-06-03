@@ -142,6 +142,49 @@ async def test_service_gc_maps_request_params_to_entrypoint(
 
 
 @pytest.mark.unit
+async def test_service_gc_accepts_superseded_status_filter(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``superseded`` is a terminal GC status even though it is not a
+    ``WorkspaceStatus`` enum value; the request schema must accept it for both
+    include and exclude filters so API clients can target/exclude that class."""
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    captured: dict[str, object] = {}
+
+    async def _fake_entrypoint(_session_factory: object, **kwargs: object) -> _FakeGCResult:
+        captured.update(kwargs)
+        return _FakeGCResult(
+            {
+                "dry_run": True,
+                "status": "dry_run",
+                "reason_code": "CLEANUP_DRY_RUN",
+                "candidate_count": 0,
+                "preserved_count": 0,
+                "deleted_path_count": 0,
+                "total_estimated_bytes": 0,
+            }
+        )
+
+    with patch(
+        "awf.api.routes.service.run_service_workspace_gc",
+        new=AsyncMock(side_effect=_fake_entrypoint),
+    ):
+        response = await client.post(
+            "/v1/service/gc",
+            json={
+                "statuses": ["superseded"],
+                "exclude_statuses": ["superseded"],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert list(captured["include_statuses"]) == ["superseded"]
+    assert list(captured["exclude_statuses"]) == ["superseded"]
+
+
+@pytest.mark.unit
 async def test_service_gc_returns_partial_envelope(
     client: AsyncClient,
     tmp_path: Path,

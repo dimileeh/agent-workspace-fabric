@@ -1496,6 +1496,12 @@ class HttpExceptionErrorResponse(BaseModel):
     detail: ErrorResponse
 
 
+# ``superseded`` is a terminal GC status (see ``TERMINAL_WORKSPACE_GC_STATUSES``
+# in ``service/gc.py``) but is not a ``WorkspaceStatus`` enum member, so GC status
+# filters must accept it as a literal alongside the enum values.
+GCTerminalStatus = WorkspaceStatus | Literal["superseded"]
+
+
 class ServiceGCRequest(BaseModel):
     """Trigger payload for ``POST /v1/service/gc``.
 
@@ -1523,11 +1529,11 @@ class ServiceGCRequest(BaseModel):
         ge=1,
         description="Maximum number of candidates to plan, oldest first.",
     )
-    statuses: list[WorkspaceStatus] = Field(
+    statuses: list[GCTerminalStatus] = Field(
         default_factory=list,
         description="Terminal status filter. Active statuses are always protected.",
     )
-    exclude_statuses: list[WorkspaceStatus] = Field(
+    exclude_statuses: list[GCTerminalStatus] = Field(
         default_factory=list,
         description="Status filter to remove from the eligible terminal set.",
     )
