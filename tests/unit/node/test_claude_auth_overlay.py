@@ -1247,6 +1247,47 @@ def test_shared_base_build_reaps_orphan_staging_under_superseded_signature(
 
 
 @pytest.mark.unit
+def test_shared_base_reuse_still_reaps_stale_orphan_staging(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    # The shared base for the current signature already exists, so provisioning
+    # takes the existing-base early return rather than the build path. On a host
+    # whose ``~/.claude`` signature never changes, every later provision reuses
+    # this base, so the staging sweep must run before (not after) that early
+    # return — otherwise an orphan stranded next to a reused base is never
+    # revisited (GC never enters ``_shared``).
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    shared_root = base.parent
+    base.mkdir(parents=True)
+    (base / "marker").write_text("prebuilt")
+
+    # A crash-orphaned staging dir stranded next to the existing base, old enough
+    # that GC would never reap it.
+    stale = shared_root / ".claude-base-orphan"
+    (stale / ".claude").mkdir(parents=True)
+    (stale / ".claude" / "blob").write_text("x" * 4096)
+    old = time.time() - (auth_mounts_mod._STALE_STAGING_MAX_AGE_SECONDS + 60)
+    os.utime(stale, (old, old))
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reuse_reap",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=True),
+    )
+
+    # The pre-existing base was reused unchanged (marker intact, still mounted
+    # read-write as the overlay lowerdir), yet the stale orphan was still reaped.
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].mode == "rw"
+    assert (base / "marker").read_text() == "prebuilt"
+    assert not stale.exists()
+
+
+@pytest.mark.unit
 def test_shared_base_is_never_under_a_workspace_auth_dir(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     base = _shared_claude_base_dir(work_dir, "sig0")

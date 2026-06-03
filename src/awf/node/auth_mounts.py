@@ -878,18 +878,22 @@ def _ensure_shared_claude_base(
     """
 
     base = _shared_claude_base_dir(work_dir, signature)
+    # Sweep crash-orphaned staging on *every* provision — before the existing-base
+    # early return below, not only on the build path. Once the base for a
+    # signature exists every later call returns early, so an orphan that outlived
+    # its build window (too young to reap when the base was built, then later
+    # stale) — or one stranded under a now-superseded signature on a host whose
+    # ``~/.claude`` stopped changing — would never be revisited, and GC never
+    # enters ``_shared``, permanently stranding the ~1.7 GB copy. Sweep from the
+    # signature-root (``base.parent.parent``, parent of every ``<signature>``
+    # dir): a crash strands an orphan under whatever signature was current then,
+    # so a per-signature sweep would never revisit an old signature's orphan.
+    _reap_stale_claude_base_staging(base.parent.parent)
     if base.is_dir():
         return base
 
     shared_root = base.parent
     shared_root.mkdir(parents=True, exist_ok=True)
-    # Sweep from the signature-root (parent of every ``<signature>`` dir), not
-    # just the current signature's dir: a crash before staging cleanup strands an
-    # orphan under whatever signature was current then, and if the host
-    # ``~/.claude`` changes before the next provision the current signature moves,
-    # so a per-signature sweep would never revisit the old signature's orphan
-    # (and GC never enters ``_shared``). Sweeping all signatures reaps it.
-    _reap_stale_claude_base_staging(shared_root.parent)
     staging = Path(tempfile.mkdtemp(prefix=".claude-base-", dir=shared_root))
     staged_base = staging / ".claude"
     # ``finally`` guarantees the staging dir is reclaimed on every exit: a
