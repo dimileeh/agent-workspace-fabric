@@ -1139,8 +1139,19 @@ def _write_config_atomic(config_path: Path, text: str, *, backup_path: Path | No
         backup_text = target_path.read_text(encoding="utf-8")
         backup_fd = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            with os.fdopen(backup_fd, "w", encoding="utf-8") as bfh:
-                bfh.write(backup_text)
+            backup_handle = os.fdopen(backup_fd, "w", encoding="utf-8")
+        except Exception:  # pragma: no cover - defensive: fdopen failure not portably reproducible
+            # ``fdopen`` never took ownership of ``backup_fd``, so close it ourselves
+            # before unlinking to avoid leaking the descriptor — mirroring the
+            # temp-file open guard below.
+            with suppress(OSError):
+                os.close(backup_fd)
+            with suppress(OSError):
+                backup_path.unlink()
+            raise
+        try:
+            with backup_handle:
+                backup_handle.write(backup_text)
         except Exception:  # pragma: no cover - defensive backup cleanup
             with suppress(OSError):
                 backup_path.unlink()
