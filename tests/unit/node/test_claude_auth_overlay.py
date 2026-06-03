@@ -9,7 +9,9 @@ routing, fallback, and unmount-before-remove.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -499,6 +501,49 @@ def test_shared_base_build_copytree_failure_cleans_staging_and_falls_back(
     assert any(entry.get("reason_code") == "CLAUDE_AUTH_SHARED_BASE_FAILED" for entry in logs)
     # No orphaned staging dir remains under the shared root.
     assert list(base.parent.glob(".claude-base-*")) == []
+
+
+@pytest.mark.unit
+def test_shared_base_build_reaps_stale_orphan_staging_dirs(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    shared_root = base.parent
+    shared_root.mkdir(parents=True)
+
+    # A crash-orphaned staging dir from a killed provision: a full copy stranded
+    # under ``_shared`` with an old mtime that GC would never reap.
+    stale = shared_root / ".claude-base-orphan"
+    (stale / ".claude").mkdir(parents=True)
+    (stale / ".claude" / "blob").write_text("x" * 4096)
+    old = time.time() - (auth_mounts_mod._STALE_STAGING_MAX_AGE_SECONDS + 60)
+    os.utime(stale, (old, old))
+    # A concurrent provision's in-progress staging dir (fresh mtime) must survive.
+    live = shared_root / ".claude-base-live"
+    live.mkdir()
+    # A staging entry that stat() cannot resolve (vanished/dangling) is skipped,
+    # never fatal.
+    dangling = shared_root / ".claude-base-dangle"
+    dangling.symlink_to(shared_root / "missing-target")
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reap",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=True),
+    )
+
+    # The base built normally (overlay mount uses it as lowerdir) and the stale
+    # orphan is gone, while the live staging dir and the unresolvable symlink are
+    # left untouched.
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].mode == "rw"
+    assert base.is_dir()
+    assert not stale.exists()
+    assert live.exists()
+    assert dangling.is_symlink()
 
 
 @pytest.mark.unit

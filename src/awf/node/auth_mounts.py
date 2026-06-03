@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,12 @@ _LEGACY_PROVIDER_TARGETS: Mapping[str, frozenset[str]] = {
 # workspace rows) can never reap it.
 _SHARED_AUTH_DIRNAME = "_shared"
 _CLAUDE_BASE_DIRNAME = "claude-base"
+# A hard kill (OOM, SIGKILL) between ``mkdtemp`` and the ``finally`` cleanup in
+# ``_ensure_shared_claude_base`` strands a ``.claude-base-*`` staging dir (a full
+# ~1.7 GB copy of ``~/.claude``) under ``_shared``, which GC never reaps. The next
+# provision sweeps staging dirs older than this; the bound is far above how long a
+# live copy takes so a concurrent provision's in-progress staging dir is never hit.
+_STALE_STAGING_MAX_AGE_SECONDS = 3600.0
 _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
@@ -681,6 +688,7 @@ def _ensure_shared_claude_base(
 
     shared_root = base.parent
     shared_root.mkdir(parents=True, exist_ok=True)
+    _reap_stale_claude_base_staging(shared_root)
     staging = Path(tempfile.mkdtemp(prefix=".claude-base-", dir=shared_root))
     staged_base = staging / ".claude"
     # ``finally`` guarantees the staging dir is reclaimed on every exit: a
@@ -705,6 +713,31 @@ def _ensure_shared_claude_base(
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return base
+
+
+def _reap_stale_claude_base_staging(shared_root: Path) -> None:
+    """Remove crash-orphaned ``.claude-base-*`` staging dirs under ``shared_root``.
+
+    ``_ensure_shared_claude_base`` builds the base in a ``mkdtemp`` staging dir and
+    its ``finally`` reclaims it on every normal exit, but a hard kill (OOM, SIGKILL,
+    crash) before that cleanup strands the staging tree — a full ~1.7 GB copy of
+    ``~/.claude`` — under ``_shared``, which GC deliberately never reaps. Sweeping
+    here on the next provision keeps those orphans from accumulating indefinitely.
+
+    Only staging dirs older than ``_STALE_STAGING_MAX_AGE_SECONDS`` are removed so a
+    concurrent provision's in-progress staging dir (mtime ~build start, well under
+    the bound) is never clobbered. A staging dir that vanishes from under us (a
+    concurrent reap or its winning ``replace``) is skipped rather than fatal.
+    """
+
+    now = time.time()
+    for staging in shared_root.glob(".claude-base-*"):
+        try:
+            age = now - staging.stat().st_mtime
+        except OSError:
+            continue
+        if age >= _STALE_STAGING_MAX_AGE_SECONDS:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def teardown_workspace_auth_overlay(
