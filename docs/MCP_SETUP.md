@@ -67,7 +67,7 @@ repository's `.awf/workspace.yml`.
 Register AWF as a local stdio MCP server:
 
 ```bash
-claude mcp add --transport stdio --scope local awf -- \
+claude mcp add --transport stdio --scope user awf -- \
   awf mcp serve --env-file /absolute/path/to/docker/compose/.env
 ```
 
@@ -87,6 +87,26 @@ tool_timeout_sec = 120
 ```
 
 Restart the Codex session after editing the configuration.
+
+## Assisted client setup
+
+Instead of editing the client config by hand, `awf setup --client claude` and
+`awf setup --client codex` register the AWF MCP server for you. The assisted
+path prefers the official client CLI (`claude` / `codex`) when it is on `PATH`
+and otherwise edits the structured config file directly. It:
+
+- prints a diff of the change before writing,
+- writes a timestamped backup of any existing config file before replacing it,
+- refuses ambiguous conflicts (an existing `awf` server entry that points
+  somewhere else) instead of overwriting them,
+- supports `--dry-run` to preview the diff without mutating anything, and
+- never reads, accepts, or stores provider tokens — it only records the
+  `--env-file` path the server should read.
+
+```bash
+awf setup --client claude --dry-run   # preview the change
+awf setup --client claude             # apply it (writes a backup first)
+```
 
 ## Supported Tools
 
