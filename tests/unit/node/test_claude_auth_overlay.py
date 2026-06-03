@@ -10,6 +10,7 @@ routing, fallback, and unmount-before-remove.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -428,6 +429,126 @@ def test_overlay_reprovision_reuses_live_mount_without_data_loss(tmp_path: Path)
     # full-copy fallback tree was written.
     assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
     assert not (claude_root / ".claude").exists()
+
+
+@pytest.mark.unit
+def test_overlay_retry_after_teardown_pins_original_base_when_host_changed(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reboot",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    claude_root = work_dir / "auth" / "ws_reboot" / "claude"
+    # The agent accumulated writable overlay data in ``upper`` during the run.
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+
+    # The merged mount is gone (e.g. a host reboot) but ``upper``/``work`` survive
+    # on disk, and the operator updated ``~/.claude`` before the retry.
+    mounter.mounted.clear()
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+    base_b = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert base_b != base_a
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reboot",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The remount pins the *original* base the surviving upper was built against,
+    # never the recomputed base from the changed host — so no config leak and no
+    # upper/work mismatch that would rmtree the agent's mutations.
+    assert mounter.mounts[-1]["lowerdir"] == base_a
+    assert mounter.mounts[-1]["lowerdir"] != base_b
+    # The changed-host base is never even built on the pinned retry.
+    assert not base_b.is_dir()
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+    assert not (claude_root / ".claude").exists()
+
+
+@pytest.mark.unit
+def test_overlay_retry_rebuilds_when_pinned_base_missing(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_basegone",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    claude_root = work_dir / "auth" / "ws_basegone" / "claude"
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+
+    # The overlay is torn down and the pinned base no longer exists on disk (a
+    # future reaper removed it). With nothing to pin to, the retry must rebuild a
+    # fresh base from the current host rather than failing.
+    mounter.mounted.clear()
+    shutil.rmtree(base_a)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_basegone",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # A fresh base (current signature, same content) is rebuilt and used.
+    assert mounter.mounts[-1]["lowerdir"] == base_a
+    assert base_a.is_dir()
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
+def test_overlay_retry_without_pin_marker_recomputes_base(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    # An overlay left behind by a pre-pin build: ``upper``/``work`` exist but no
+    # base-signature marker was recorded, so the original base is unknowable.
+    claude_root = work_dir / "auth" / "ws_nomarker" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    (claude_root / "work").mkdir(parents=True)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_nomarker",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # Falls back to the current-host base and records the marker for next time.
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert mounter.mounts[-1]["lowerdir"] == base
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
 
 
 @pytest.mark.unit

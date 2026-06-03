@@ -610,6 +610,25 @@ def _prepare_isolated_claude_auth(
     )
 
 
+def _pinned_overlay_base(work_dir: Path, sig_marker: Path) -> Path | None:
+    """Return the base an existing overlay ``upper``/``work`` were built against.
+
+    Reads the ``base.signature`` marker written when the overlay was first
+    created and resolves it back to the shared base dir. Returns ``None`` when no
+    marker exists (a pre-pin overlay, or none at all) or the recorded base is no
+    longer on disk — the caller then rebuilds from the current host. The recorded
+    base normally persists because shared bases are immutable and old signatures
+    are left intact for exactly this case (a still-relevant lowerdir).
+    """
+
+    try:
+        signature = sig_marker.read_text().strip()
+    except OSError:
+        return None
+    base = _shared_claude_base_dir(work_dir, signature)
+    return base if base.is_dir() else None
+
+
 def _prepare_claude_overlay_mount(
     *,
     host_home: Path,
@@ -635,30 +654,50 @@ def _prepare_claude_overlay_mount(
         )
         return None
 
-    try:
-        base = _ensure_shared_claude_base(
-            host_home=host_home,
-            work_dir=work_dir,
-            workspace_owner_uid=workspace_owner_uid,
-            workspace_owner_gid=workspace_owner_gid,
-        )
-    except OSError as exc:
-        # Building the shared base (copytree/chown) can fail with OSError (disk
-        # full, permissions). Degrade to the legacy full copy rather than
-        # hard-failing provisioning — the same resilience contract honored when
-        # overlayfs is unsupported or the mount itself fails.
-        _log.warning(
-            "claude_auth_shared_base_failed",
-            reason_code=_CLAUDE_AUTH_SHARED_BASE_FAILED,
-            workspace_auth_root=str(claude_root),
-            error=str(exc),
-        )
-        return None
     upper = claude_root / "upper"
     work = claude_root / "work"
     merged = claude_root / "merged"
+    sig_marker = claude_root / "base.signature"
+
+    # Pin the lowerdir for retries over an existing overlay. If ``upper``/``work``
+    # survived a torn-down mount (e.g. a host reboot) they must be remounted over
+    # the *original* base they were created against. Recomputing the base from a
+    # since-changed host ``~/.claude`` would either expose the changed host config
+    # through the surviving upper or trip an overlayfs upper/work mismatch — and
+    # that failure path ``rmtree``s upper/work, destroying the agent's Claude
+    # mutations. ``base.signature`` records which base each upper belongs to.
+    base = _pinned_overlay_base(work_dir, sig_marker) if upper.exists() else None
+    fresh_signature: str | None = None
+    if base is None:
+        fresh_signature = _host_claude_signature(host_home)
+        try:
+            base = _ensure_shared_claude_base(
+                host_home=host_home,
+                work_dir=work_dir,
+                signature=fresh_signature,
+                workspace_owner_uid=workspace_owner_uid,
+                workspace_owner_gid=workspace_owner_gid,
+            )
+        except OSError as exc:
+            # Building the shared base (copytree/chown) can fail with OSError (disk
+            # full, permissions). Degrade to the legacy full copy rather than
+            # hard-failing provisioning — the same resilience contract honored when
+            # overlayfs is unsupported or the mount itself fails.
+            _log.warning(
+                "claude_auth_shared_base_failed",
+                reason_code=_CLAUDE_AUTH_SHARED_BASE_FAILED,
+                workspace_auth_root=str(claude_root),
+                error=str(exc),
+            )
+            return None
     for directory in (upper, work, merged):
         directory.mkdir(parents=True, exist_ok=True)
+
+    if fresh_signature is not None:
+        # Record the base signature so a later retry over this upper/work pins to
+        # this exact base instead of recomputing it from a changed host. (Pinned
+        # retries leave ``fresh_signature`` None — the marker already exists.)
+        sig_marker.write_text(fresh_signature)
 
     if overlay_mounter.is_mounted(merged):
         # Idempotent retry: a prior provision already mounted this overlay (e.g.
@@ -709,6 +748,7 @@ def _ensure_shared_claude_base(
     *,
     host_home: Path,
     work_dir: Path,
+    signature: str,
     workspace_owner_uid: int | None,
     workspace_owner_gid: int | None,
 ) -> Path:
@@ -735,7 +775,7 @@ def _ensure_shared_claude_base(
     by an ``lowerdir=`` in ``/proc/mounts`` before removing it.
     """
 
-    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    base = _shared_claude_base_dir(work_dir, signature)
     if base.is_dir():
         return base
 
