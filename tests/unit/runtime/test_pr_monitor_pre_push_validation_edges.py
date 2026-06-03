@@ -66,39 +66,6 @@ def test_pre_push_side_effect_failure_result_preserves_result_when_artifact_writ
 
 
 @pytest.mark.unit
-def test_pre_push_validation_ignored_entries_drifted_rejects_changed_roots() -> None:
-    """Ignored root changes should be treated as drift even when snapshots are empty."""
-
-    assert pre_push_validation._pre_push_validation_ignored_entries_drifted(
-        baseline_ignored_roots=(".venv/",),
-        baseline_ignored_snapshot=(),
-        baseline_ignored_snapshot_signatures=(),
-        current_ignored_roots=("node_modules/",),
-        current_ignored_snapshot=(),
-        current_ignored_snapshot_signatures=(),
-    )
-
-
-@pytest.mark.unit
-def test_pre_push_validation_ignored_entries_drifted_accepts_matching_signatures() -> None:
-    """Matching ignored snapshots and signatures should not be treated as drift."""
-
-    signatures = (
-        (".venv/a.log", "sig-a"),
-        (".venv/b.log", "sig-b"),
-    )
-
-    assert not pre_push_validation._pre_push_validation_ignored_entries_drifted(
-        baseline_ignored_roots=(".venv/",),
-        baseline_ignored_snapshot=(".venv/a.log", ".venv/b.log"),
-        baseline_ignored_snapshot_signatures=signatures,
-        current_ignored_roots=(".venv/",),
-        current_ignored_snapshot=(".venv/a.log", ".venv/b.log"),
-        current_ignored_snapshot_signatures=signatures,
-    )
-
-
-@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_returns_without_head_capture(
     tmp_path: Path,
 ) -> None:
