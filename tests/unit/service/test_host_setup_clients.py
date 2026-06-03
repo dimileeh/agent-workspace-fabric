@@ -547,6 +547,33 @@ def test_apply_file_write_leaves_owner_private_permissions(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX permissions only")
+def test_apply_file_leaves_existing_parent_permissions_untouched(tmp_path: Path) -> None:
+    """Verify the file fallback never chmods an already-existing parent dir.
+
+    Regression: Claude's file fallback writes ``~/.claude.json`` whose parent is
+    ``$HOME``. Tightening a pre-existing parent to 0o700 would clobber
+    intentionally shared home-directory permissions, so only a parent AWF
+    actually created (e.g. ``~/.codex``) may be tightened.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    home.chmod(0o755)
+    assert (home.stat().st_mode & 0o777) == 0o755
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=home, which=_which_missing, now=_now
+    )
+
+    apply_client_config_plan(plan, run=_never_run)
+
+    config_path = _claude_config_path(home)
+    assert config_path.exists()
+    assert (config_path.stat().st_mode & 0o777) == 0o600
+    assert (home.stat().st_mode & 0o777) == 0o755
+
+
+@pytest.mark.unit
 def test_apply_conflict_raises_and_leaves_file_untouched(tmp_path: Path) -> None:
     """Verify applying a conflict plan raises and never mutates the file."""
     config = {"mcpServers": {AWF_MCP_SERVER_KEY: {"command": "other", "args": []}}}

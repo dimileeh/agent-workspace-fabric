@@ -780,13 +780,17 @@ def _apply_file(plan: ClientConfigPlan) -> ClientWriteResult:
 def _write_config_atomic(config_path: Path, text: str, *, backup_path: Path | None) -> None:
     """Atomically write ``text`` to ``config_path`` after an optional backup.
 
-    Parent directories are created ``0o700`` and the file lands ``0o600`` (it may
-    point at an env-file path, so keep it owner-private). The backup of an
-    existing file is taken before the replacement so an interrupted run never
-    destroys the prior config.
+    A client config dir AWF creates is tightened to ``0o700`` and the file lands
+    ``0o600`` (it may point at an env-file path, so keep it owner-private). An
+    already-existing parent is left untouched: for Claude's file fallback the
+    parent is ``$HOME``, so chmodding it would clobber intentionally shared
+    home-directory permissions. The backup of an existing file is taken before
+    the replacement so an interrupted run never destroys the prior config.
     """
+    parent_existed = config_path.parent.exists()
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    _chmod_best_effort(config_path.parent, 0o700)
+    if not parent_existed:
+        _chmod_best_effort(config_path.parent, 0o700)
     if backup_path is not None and config_path.exists():
         backup_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
         _chmod_best_effort(backup_path, 0o600)
