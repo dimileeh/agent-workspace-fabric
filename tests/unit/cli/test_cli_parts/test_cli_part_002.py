@@ -229,14 +229,14 @@ class TestWorkspaceAdoptPr:
                     "--agent",
                     "grok",
                     "--model",
-                    "grok-build-0.1",
+                    "grok-build",
                 ],
             )
 
         assert result.exit_code == 0
         body = mock.call_args.kwargs["json"]
         assert body["agent"] == "grok"
-        assert body["model"] == "grok-build-0.1"
+        assert body["model"] == "grok-build"
 
     @pytest.mark.unit
     def test_posts_owned_paths_when_requested(self) -> None:

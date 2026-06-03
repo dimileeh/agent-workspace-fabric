@@ -15,6 +15,8 @@ shadow the Linux runtime `grok` binary.
   `auth.json` and optional `config.toml`.
 - Keep Cursor unchanged; Cursor continues to use `CURSOR_API_KEY` until a
   portable OAuth token source is proven.
+- Use the model ID reported by the authenticated Grok CLI (`grok-build`), not
+  the stale `grok-build-0.1` ID rejected by the installed runtime.
 - Avoid logging or serializing secret values.
 
 ## Requirements
@@ -29,6 +31,8 @@ shadow the Linux runtime `grok` binary.
 - The filtered copy excludes non-portable runtime/cache/session files such as
   `bin`, `downloads`, `sessions`, logs, and platform-specific managed binaries.
 - Existing `XAI_API_KEY` environment propagation remains unchanged.
+- Grok defaults select `grok-build` so monitor launches do not fail with
+  `unknown model id`.
 
 ## Implementation Steps
 1. Add failing tests for Grok file readiness, env fallback, and file precedence.
@@ -39,7 +43,8 @@ shadow the Linux runtime `grok` binary.
    Grok and check file auth before env auth.
 5. Add the local-service `.grok` read-only mount to API/worker containers so
    Docker service mode can resolve the same file auth as local readiness checks.
-6. Update docs/reason text only if test expectations or operator clarity
+6. Update Grok defaults and tests to the model ID returned by `grok models`.
+7. Update docs/reason text only if test expectations or operator clarity
    require it.
 
 ## Verification

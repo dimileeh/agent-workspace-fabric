@@ -1214,14 +1214,14 @@ class TestGrokAdapter:
     def test_reports_xai_provider(self) -> None:
         adapter = GrokAdapter(runner=FakeCommandRunner())
 
-        assert adapter.get_provider("grok-build-0.1") == "xai"
+        assert adapter.get_provider("grok-build") == "xai"
 
     @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
         runner = FakeCommandRunner()
         adapter = GrokAdapter(
             runner=runner,
-            default_model="grok-build-0.1",
+            default_model="grok-build",
             default_effort="xhigh",
         )
 
@@ -1247,7 +1247,7 @@ class TestGrokAdapter:
             "--output-format",
             "plain",
             "-m",
-            "grok-build-0.1",
+            "grok-build",
         ]
         _assert_prompt_not_in_argv(args)
         _assert_prompt_sent_on_stdin(runner)
@@ -1278,7 +1278,7 @@ class TestGrokAdapter:
     @pytest.mark.unit
     def test_effort_mapping_keeps_selected_model_without_undocumented_flags(self) -> None:
         for effort in (None, "low", "medium", "high", "xhigh", "max"):
-            assert _model_for_effort(model="grok-build-0.1", effort=effort) == "grok-build-0.1"
+            assert _model_for_effort(model="grok-build", effort=effort) == "grok-build"
         assert _model_for_effort(model=None, effort="xhigh") is None
 
     @pytest.mark.unit
@@ -1312,7 +1312,7 @@ class TestGrokAdapter:
             "--output-format",
             "plain",
             "-m",
-            "grok-build-0.1",
+            "grok-build",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1337,7 +1337,7 @@ class TestGrokAdapter:
             "--output-format",
             "plain",
             "-m",
-            "grok-build-0.1",
+            "grok-build",
         ]
 
 
@@ -1401,7 +1401,7 @@ class TestCentralDefaults:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor].model == "sonnet-4-thinking"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build-0.1"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
         assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
 
     @pytest.mark.unit

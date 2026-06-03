@@ -262,7 +262,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         ("cursor", "cursor", "sonnet-4-thinking", "ok"),
         ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
-        ("grok", "grok", "grok-build-0.1", "ok"),
+        ("grok", "grok", "grok-build", "ok"),
     ]
     for agent, provider, expected_model, expected_probe_status in cases:
         task_policy = {"agent_model": expected_model} if agent == "codex" else {}
@@ -979,7 +979,7 @@ def test_selected_grok_preflight_requires_xai_api_key_and_runtime_cli(
 
     assert result["provider"] == "grok"
     assert result["agent"] == "grok"
-    assert result["model"] == "grok-build-0.1"
+    assert result["model"] == "grok-build"
     assert result["readiness_status"] == "ready"
     assert result["auth_status"] == "ok"
     assert result["auth_source"] == "XAI_API_KEY"

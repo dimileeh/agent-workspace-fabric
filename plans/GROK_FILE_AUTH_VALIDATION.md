@@ -19,6 +19,9 @@ files into each workspace auth directory. Cursor remains API-key based and uncha
 - Existing per-workspace Grok auth files are preserved on later resolver runs.
 - Grok auth is skipped when `auth.json` is absent, even if host `config.toml`
   exists.
+- The authenticated Grok CLI in the runtime reports `grok-build` as the default
+  model, and AWF defaults use that model rather than the rejected
+  `grok-build-0.1` ID.
 - Cursor auth behavior was not changed.
 
 ## Validation Commands
@@ -42,16 +45,28 @@ uv run --python 3.12 --extra dev pytest tests/integration/test_local_service_com
 Result: `1 passed`.
 
 ```bash
-uv run --python 3.12 --extra dev ruff check src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py tests/unit/node/test_service_auth_mounts.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py tests/integration/test_local_service_compose.py
+uv run --python 3.12 --extra dev pytest tests/unit/adapters/test_adapters.py::TestGrokAdapter tests/unit/adapters/test_adapters.py::TestCentralDefaults tests/unit/adapters/test_provider_failures.py tests/unit/service/test_provider_recovery_coverage_gaps.py -q
+```
+
+Result: `63 passed`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_cli_parts/test_cli_part_001.py::TestWorkspaceCreate::test_workspace_create_accepts_grok_agent tests/unit/cli/test_cli_parts/test_cli_part_002.py::TestWorkspaceAdoptPr::test_posts_grok_agent_when_adopting_pr -q
+```
+
+Result: `2 passed`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf/adapters/defaults.py src/awf/adapters/grok.py src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py tests/unit/adapters/test_adapters.py tests/unit/adapters/test_provider_failures.py tests/unit/service/test_provider_recovery_coverage_gaps.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_002.py tests/unit/node/test_service_auth_mounts.py tests/unit/cli/test_cli_parts/test_cli_part_001.py tests/unit/cli/test_cli_parts/test_cli_part_002.py tests/integration/test_local_service_compose.py
 ```
 
 Result: `All checks passed`.
 
 ```bash
-uv run --python 3.12 --extra dev mypy src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py
+uv run --python 3.12 --extra dev mypy src/awf/adapters/defaults.py src/awf/adapters/grok.py src/awf/node/auth_mounts.py src/awf/service/provider_readiness.py
 ```
 
-Result: `Success: no issues found in 2 source files`.
+Result: `Success: no issues found in 4 source files`.
 
 ```bash
 docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml config --quiet
