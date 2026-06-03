@@ -295,6 +295,44 @@ def test_resolve_client_env_file_uses_source_checkout_when_given(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_resolve_client_env_file_explicit_checkout_falls_back_to_root_env(
+    tmp_path: Path,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6G0gfq: a not-yet-bootstrapped source checkout
+    can lack ``docker/compose/.env`` while the checkout root ``.env`` exists. ``awf
+    start`` reads that root fallback via ``_resolve_start_bootstrap_inputs``; the
+    MCP client ``--env-file`` must do the same instead of pinning the absent
+    compose path, which would make ``awf mcp serve`` reject the env file."""
+    root = _make_source_checkout(tmp_path / "awf")
+    root_env = root / ".env"
+    root_env.write_text("AWF_API_TOKEN=x\n", encoding="utf-8")
+    assert not (root / "docker" / "compose" / ".env").exists()
+
+    resolved = setup_commands._resolve_client_env_file(root)
+
+    assert resolved == root_env
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_persisted_checkout_falls_back_to_root_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6G0gfq: the persisted-checkout branch applies
+    the same root ``.env`` fallback as the explicit branch and ``awf start`` so a
+    first-run persisted checkout (compose ``.env`` absent, root ``.env`` present)
+    registers an MCP ``--env-file`` ``awf mcp serve`` can actually read."""
+    root = _make_source_checkout(tmp_path / "awf")
+    root_env = root / ".env"
+    root_env.write_text("AWF_API_TOKEN=x\n", encoding="utf-8")
+    persisted = HostSetupConfig(source_checkout=validate_source_checkout(root).to_metadata())
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: persisted)
+
+    resolved = setup_commands._resolve_client_env_file(None)
+
+    assert resolved == root_env
+
+
+@pytest.mark.unit
 def test_resolve_client_env_file_invalid_source_checkout_raises(tmp_path: Path) -> None:
     """Regression for PRRT_kwDOSJAM6s6GxEYa: an explicit ``--source-checkout`` is
     validated like the readiness flow, so an invalid path raises instead of pinning

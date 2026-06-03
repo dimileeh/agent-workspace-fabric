@@ -392,7 +392,12 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     ``docker/compose/.env``; otherwise a previously persisted, still-valid source
     checkout (revalidated like ``awf start``'s ``_resolve_start_source_checkout``)
     pins *its* compose env; only with neither does it fall back to the
-    packaged/default ``.env`` from ``resolve_service_compose_paths``. Validating
+    packaged/default ``.env`` from ``resolve_service_compose_paths``. Both
+    source-checkout branches resolve through ``resolve_existing_service_env_file``
+    so a not-yet-bootstrapped checkout (``docker/compose/.env`` absent but the
+    checkout root ``.env`` present) pins the same root ``.env`` ``awf start`` reads
+    via ``_resolve_start_bootstrap_inputs`` -- otherwise ``awf mcp serve`` would
+    reject the registered ``--env-file`` with "env file does not exist". Validating
     the explicit checkout keeps an invalid or stale path from registering an MCP
     ``--env-file`` that points at a non-checkout env file ``awf start`` would
     itself reject; the failure raises ``SourceCheckoutError`` for the caller to
@@ -401,10 +406,11 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     disk and no provider token is ever read.
     """
     if source_checkout is not None:
-        return validate_source_checkout(source_checkout).root / "docker" / "compose" / ".env"
+        compose_env = validate_source_checkout(source_checkout).root / "docker" / "compose" / ".env"
+        return resolve_existing_service_env_file(compose_env)
     persisted = _persisted_client_source_checkout()
     if persisted is not None:
-        return persisted.root / "docker" / "compose" / ".env"
+        return resolve_existing_service_env_file(persisted.root / "docker" / "compose" / ".env")
     _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
     # The packaged/default fallback may be a relative ``Path(".env")``. The
     # explicit and persisted checkout branches above already pin absolute paths;
