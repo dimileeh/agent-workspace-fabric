@@ -30,6 +30,21 @@ def test_releasing_docs_explain_manifest_inspection_and_verification() -> None:
 
 
 @pytest.mark.unit
+def test_releasing_docs_explain_manual_artifact_drift_and_installer_smoke() -> None:
+    """Release docs explain how to verify artifacts manually (drift + installer smoke)."""
+    docs = RELEASING_PATH.read_text(encoding="utf-8")
+
+    assert "scripts/check_release_artifacts.py" in docs
+    assert "scripts/release_smoke.py" in docs
+    assert "before install" in docs
+    assert "Checksum verified" in docs
+    # release_smoke.py is stdlib-only; the docs example must match the CI step
+    # (publish.yml) and pass --no-project so following the docs locally does not
+    # sync the full project virtualenv just to run it.
+    assert "uv run --no-project --python 3.12 python scripts/release_smoke.py" in docs
+
+
+@pytest.mark.unit
 def test_releasing_docs_require_release_asset_publication_before_manifest_use() -> None:
     """Manifest docs require published GitHub Release assets before consumption."""
     docs = RELEASING_PATH.read_text(encoding="utf-8")

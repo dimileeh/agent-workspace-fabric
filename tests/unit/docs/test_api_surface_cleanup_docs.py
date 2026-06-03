@@ -31,10 +31,12 @@ RETIRED_OPERATOR_SCRIPTS = (
     "scripts/salvage_workspace.py",
 )
 
-SUPPORTED_GENERATOR_SCRIPTS = {
+SUPPORTED_SCRIPTS = {
     "generate_install_manifest.py",
     "generate_openapi.py",
     "generate_reason_catalog.py",
+    "check_release_artifacts.py",
+    "release_smoke.py",
 }
 
 
@@ -80,11 +82,11 @@ def test_public_docs_do_not_recommend_retired_operator_scripts() -> None:
 
 @pytest.mark.unit
 def test_scripts_directory_contains_only_supported_generators() -> None:
-    """The scripts directory keeps only supported generator entrypoints."""
+    """The scripts directory keeps only supported entrypoints."""
     scripts = {
         path.name
         for path in (REPO_ROOT / "scripts").iterdir()
         if path.is_file() and path.name != "__init__.py"
     }
 
-    assert scripts == SUPPORTED_GENERATOR_SCRIPTS
+    assert scripts == SUPPORTED_SCRIPTS
