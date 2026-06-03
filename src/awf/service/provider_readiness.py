@@ -202,6 +202,38 @@ def collect_agent_readiness(
     }
 
 
+def check_single_provider_readiness(
+    settings: ServiceSettings,
+    *,
+    provider: ProviderName,
+    environ: Mapping[str, str] | None = None,
+    run_subprocess: SubprocessRun | None = None,
+    http_get: HttpGet | None = None,
+) -> dict[str, Any]:
+    """Return the redacted, strict readiness result for a single provider.
+
+    This is an additive integration seam for provider setup orchestration (T07):
+    it probes exactly one provider with the same bounded, secret-redacting checks
+    ``collect_agent_readiness`` runs, but without touching the other providers, so
+    a targeted recheck never invokes an unselected provider's subprocess/HTTP
+    probe. Existing readiness callers are unchanged.
+    """
+
+    env = os.environ if environ is None else environ
+    host_home = Path(settings.host_home or "~").expanduser()
+    secrets = _secret_values(settings, env)
+    return _check_provider_readiness(
+        provider,
+        settings,
+        environ=env,
+        host_home=host_home,
+        strict=True,
+        run_subprocess=run_subprocess or _run_subprocess,
+        http_get=http_get or _http_get,
+        secrets=secrets,
+    )
+
+
 def selected_provider_readiness_preflight(
     settings: ServiceSettings,
     *,
@@ -1456,6 +1488,7 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
 __all__ = [
     "ProviderName",
     "ProviderReadinessError",
+    "check_single_provider_readiness",
     "collect_agent_readiness",
     "provider_readiness_preflight_from_task_policy",
     "redact_launch_preflight_text",

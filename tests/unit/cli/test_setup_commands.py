@@ -14,7 +14,15 @@ from typer.testing import CliRunner
 from awf.cli import setup_commands
 from awf.cli.main import app
 from awf.host_setup.config import HostSetupConfig, HostSetupConfigError
-from awf.host_setup.rendering import SETUP_READINESS_FAILED, START_COMPOSE_ASSETS_MISSING
+from awf.host_setup.providers import (
+    ProviderSetupResult,
+    ProviderSetupSummary,
+)
+from awf.host_setup.rendering import (
+    INTERACTIVE_INPUT_REQUIRED,
+    SETUP_READINESS_FAILED,
+    START_COMPOSE_ASSETS_MISSING,
+)
 from awf.host_setup.source_assets import (
     SOURCE_CHECKOUT_INVALID,
     SOURCE_CHECKOUT_MARKERS,
@@ -79,6 +87,39 @@ class _Harness:
     writes: list[HostSetupConfig] = field(default_factory=list)
 
 
+def _fake_orchestrate(
+    _settings: object,
+    *,
+    selected_providers: list[str],
+    config: HostSetupConfig,
+    non_interactive: bool,
+    **_kwargs: object,
+) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+    """Hermetic default orchestration: never probes, never mutates config.
+
+    Selected providers report ``not_configured`` (interactive input required under
+    ``--non-interactive``) so the existing provider-guard regression tests stay
+    deterministic; an all-provider run reports ``all_providers`` with no
+    interactive requirement. New tests override this with their own stub.
+    """
+    results = tuple(
+        ProviderSetupResult(
+            name=name,
+            status="not_configured",
+            reason_code=(INTERACTIVE_INPUT_REQUIRED if non_interactive else f"{name.upper()}_NA"),
+            summary=f"{name} not configured in this hermetic run.",
+        )
+        for name in selected_providers
+    )
+    summary = ProviderSetupSummary(
+        mode="targeted_recheck" if selected_providers else "all_providers",
+        selected=tuple(selected_providers),
+        providers=results,
+        overall_status="not_ready",
+    )
+    return summary, config
+
+
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     """Isolate config IO and default the host checks to all-OK."""
@@ -90,6 +131,11 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
 
     monkeypatch.setattr(setup_commands, "write_host_setup_config", fake_write)
     monkeypatch.setattr(setup_commands, "run_system_checks", _all_ok)
+    # Keep provider orchestration hermetic by default: never resolve real service
+    # settings or probe gh/network. Tests that exercise orchestration override
+    # ``orchestrate_provider_setup`` with their own fake summary.
+    monkeypatch.setattr(setup_commands, "_resolve_provider_settings", lambda _environ: None)
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _fake_orchestrate)
     # Default to a hermetic, no-IO readiness environ. The real ``_readiness_environ``
     # resolves the bootstrap asset root and reads ``docker/compose/.env`` from disk on
     # every harness-based test, even though the stubbed ``run_system_checks`` ignores
@@ -948,6 +994,139 @@ def test_setup_non_interactive_provider_surfaces_readiness_warnings(
     assert "SETUP_READINESS_FAILED" in reason_codes
     # The host-check provenance is surfaced rather than discarded.
     assert payload["details"]["checks"]
+
+
+# --- Provider orchestration integration (T07) -----------------------------
+
+
+def _ready_github_summary(
+    _settings: object,
+    *,
+    selected_providers: list[str],
+    config: HostSetupConfig,
+    **_kwargs: object,
+) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+    """Fake orchestration that marks GitHub ready via gh (no token stored)."""
+    summary = ProviderSetupSummary(
+        mode="targeted_recheck" if selected_providers else "all_providers",
+        selected=tuple(selected_providers),
+        providers=(
+            ProviderSetupResult(
+                name="github",
+                status="ready",
+                reason_code="GITHUB_GH_AUTH_OK",
+                summary="GitHub is ready via gh CLI authentication.",
+                configured=True,
+                rechecked=True,
+            ),
+        ),
+        overall_status="ready",
+    )
+    return summary, config
+
+
+def _failed_provider_summary(
+    _settings: object,
+    *,
+    selected_providers: list[str],
+    config: HostSetupConfig,
+    **_kwargs: object,
+) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+    """Fake orchestration where the selected provider auth failed (non-blocking)."""
+    summary = ProviderSetupSummary(
+        mode="targeted_recheck",
+        selected=tuple(selected_providers),
+        providers=(
+            ProviderSetupResult(
+                name="github",
+                status="unavailable",
+                reason_code="PROVIDER_SETUP_AUTH_INVALID",
+                summary="GitHub auth via GH_TOKEN is not usable.",
+            ),
+        ),
+        overall_status="not_ready",
+    )
+    return summary, config
+
+
+@pytest.mark.unit
+def test_setup_provider_github_targeted_recheck_summary(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-dry-run ``--provider github`` folds a targeted-recheck provider summary."""
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _ready_github_summary)
+    result = _runner.invoke(app, ["setup", "--provider", "github", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    providers = payload["details"]["providers"]
+    assert providers["mode"] == "targeted_recheck"
+    assert providers["providers"]["github"]["status"] == "ready"
+
+
+@pytest.mark.unit
+def test_setup_provider_github_pretty_prints_no_token(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pretty (stderr) output for a provider run never prints a raw token."""
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _ready_github_summary)
+    result = _runner.invoke(app, ["setup", "--provider", "github"])
+
+    assert result.exit_code == 0, result.output
+    assert "ghp_" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.unit
+def test_setup_failed_provider_is_non_blocking(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed provider marks itself unavailable without blocking the process."""
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _failed_provider_summary)
+    result = _runner.invoke(app, ["setup", "--provider", "github", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    providers = payload["details"]["providers"]["providers"]
+    assert providers["github"]["status"] == "unavailable"
+
+
+@pytest.mark.unit
+def test_setup_all_provider_run_labels_all_providers(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-dry-run run with no selector labels the summary all_providers."""
+
+    def _all_summary(
+        _settings: object,
+        *,
+        selected_providers: list[str],
+        config: HostSetupConfig,
+        **_kwargs: object,
+    ) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+        summary = ProviderSetupSummary(
+            mode="all_providers",
+            selected=(),
+            providers=(),
+            overall_status="not_ready",
+        )
+        return summary, config
+
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _all_summary)
+    result = _runner.invoke(app, ["setup", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["details"]["providers"]["mode"] == "all_providers"
+
+
+@pytest.mark.unit
+def test_resolve_provider_settings_builds_service_settings() -> None:
+    """The provider settings helper resolves real service settings from an environ."""
+    settings = setup_commands._resolve_provider_settings({})
+    assert settings is not None
+    assert hasattr(settings, "host_home")
 
 
 # --- Corrupt config defensive handling ------------------------------------
