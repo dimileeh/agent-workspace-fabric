@@ -8,13 +8,12 @@ log streams.
 from __future__ import annotations
 
 import asyncio
-import shutil
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,8 +22,29 @@ from sqlalchemy.sql.elements import ColumnElement
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
+from awf.runtime.inspection import RuntimeInspector
 from awf.service import gc_worktrees as _gc_worktrees
+from awf.service.gc_classify import (
+    PATH_ALREADY_REMOVED,
+    PATH_DELETE_FAILED,
+    PATH_DELETED,
+    _compose_project_name_for_workspace,
+    _delete_gc_path,
+    _gc_path,
+    _has_pr_metadata,
+    _path_payload_for_candidate,
+    _pr_has_merged,
+    _snapshot_has_no_work,
+)
+
+# Re-exported for backward-compatible import surface (referenced via
+# ``awf.service.gc.<name>`` by callers/tests, not used inside this module).
+from awf.service.gc_classify import PATH_DELETE_PERMISSION_DENIED as PATH_DELETE_PERMISSION_DENIED
+from awf.service.gc_classify import WorkspaceGCPath as WorkspaceGCPath
+from awf.service.gc_classify import _agent_service_has_no_work as _agent_service_has_no_work
+from awf.service.gc_classify import _container_command_is_idle as _container_command_is_idle
+from awf.service.gc_classify import _estimate_bytes as _estimate_bytes
+from awf.service.gc_classify import _is_safe_gc_path as _is_safe_gc_path
 from awf.service.gc_companions import companion_worktree_paths_for_gc
 from awf.service.gc_time import normalize_statuses as _normalize_statuses
 from awf.service.gc_time import to_utc as _to_utc
@@ -33,6 +53,9 @@ from awf.service.secret_leases import (
     SecretLeaseService,
     secret_lease_revocation_summary,
 )
+
+if TYPE_CHECKING:
+    from awf.node.compose_manager import ComposeManager
 
 WorkspaceGCWorktreeRemoveResult = _gc_worktrees.WorkspaceGCWorktreeRemoveResult
 WorkspaceGCWorktreeRemoveTargetResult = _gc_worktrees.WorkspaceGCWorktreeRemoveTargetResult
@@ -45,6 +68,7 @@ _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 DEFAULT_MIN_AGE_HOURS = 168
 
 COMPLETED_PR_RETENTION_EXPIRED = "COMPLETED_PR_RETENTION_EXPIRED"
+COMPLETED_PR_IMMEDIATE_RECLAIM = "COMPLETED_PR_IMMEDIATE_RECLAIM"
 TERMINAL_WORKSPACE_RETENTION_EXPIRED = "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
 WORKSPACE_WITHIN_RETENTION = "WORKSPACE_WITHIN_RETENTION"
 FAILED_WORKSPACE_TRIAGE_PRESERVED = "FAILED_WORKSPACE_TRIAGE_PRESERVED"
@@ -52,10 +76,6 @@ FAILED_WORKSPACE_NO_WORK = "FAILED_WORKSPACE_NO_WORK"
 COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
 COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
-
-PATH_DELETED = "PATH_DELETED"
-PATH_ALREADY_REMOVED = "PATH_ALREADY_REMOVED"
-PATH_DELETE_FAILED = "PATH_DELETE_FAILED"
 
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
@@ -75,7 +95,6 @@ TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
 )
 
 _FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "superseded"})
-_FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
 
 _RUNTIME_INSPECTOR = RuntimeInspector()
 
@@ -91,40 +110,6 @@ PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
         WorkspaceStatus.destroying.value,
     }
 )
-
-
-@dataclass(frozen=True)
-class WorkspaceGCPath:
-    """One filesystem target considered for workspace GC."""
-
-    kind: str
-    path: Path
-    exists: bool
-    estimated_bytes: int
-
-    def to_dict(
-        self,
-        *,
-        deleted: bool = False,
-        error: str | None = None,
-        status: str | None = None,
-        reason_code: str | None = None,
-    ) -> dict[str, object]:
-        resolved_status = status or ("already_removed" if not self.exists else "planned")
-        resolved_reason = reason_code or (
-            PATH_ALREADY_REMOVED if not self.exists else "PATH_PLANNED"
-        )
-        payload: dict[str, object] = {
-            "path": str(self.path),
-            "exists": self.exists,
-            "estimated_bytes": self.estimated_bytes,
-            "deleted": deleted,
-            "status": resolved_status,
-            "reason_code": resolved_reason,
-        }
-        if error is not None:
-            payload["error"] = error
-        return payload
 
 
 @dataclass(frozen=True)
@@ -730,6 +715,113 @@ async def run_terminal_workspace_gc(
     )
 
 
+def _candidate_compose_file(candidate: WorkspaceGCCandidate) -> Path:
+    """Resolve the per-workspace ``compose.yml`` for a GC candidate.
+
+    Prefers the persisted compose-file path; otherwise falls back to the
+    standard ``<work_dir>/compose/<workspace_id>/compose.yml`` location (the
+    candidate's ``compose`` directory already encodes the work dir).
+    """
+    if candidate.compose_file_path:
+        return Path(candidate.compose_file_path).expanduser()
+    return candidate.compose.path / "compose.yml"
+
+
+def _service_gc_compose_teardown(
+    manager: ComposeManager,
+) -> WorkspaceGCComposeTeardown:
+    """Build a volume-removing compose-teardown callback for terminal GC.
+
+    Reaps the per-workspace Docker volumes (``awf-<project>-dind_data`` /
+    ``-postgres_data``) that otherwise leak because GC never tore the stack
+    down. Idempotent: an already-down stack yields an ``ok`` skip, not a
+    ``partial``.
+    """
+
+    async def _teardown(candidate: WorkspaceGCCandidate) -> WorkspaceGCComposeTeardownResult:
+        project_name = candidate.compose_project_name or f"awf_{candidate.workspace_id}"
+        result = await manager.teardown_project(
+            project_name=project_name,
+            compose_file=_candidate_compose_file(candidate),
+            workspace_id=candidate.workspace_id,
+            remove_volumes=True,
+        )
+        return WorkspaceGCComposeTeardownResult(
+            status=result.status,
+            reason_code=result.reason_code,
+            error=result.error,
+        )
+
+    return _teardown
+
+
+def _default_workspace_compose_template() -> Path:
+    """Resolve the repo's workspace compose template (mirrors ``worker.py``)."""
+    return Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+async def run_service_workspace_gc(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    work_dir: Path | str,
+    template_path: Path | str | None = None,
+    execute: bool = False,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    limit: int | None = None,
+    include_statuses: Iterable[WorkspaceStatus | str] | None = None,
+    exclude_statuses: Iterable[WorkspaceStatus | str] | None = None,
+    cleanup_enabled: bool = True,
+    companion_image_cache_enabled: bool = False,
+    companion_image_retention_hours: int = DEFAULT_MIN_AGE_HOURS,
+    compose_manager: ComposeManager | None = None,
+    now: datetime | None = None,
+) -> WorkspaceGCResult:
+    """Run terminal-workspace GC inside the root control-plane.
+
+    This is the entrypoint the ``POST /v1/service/gc`` route delegates to. The
+    api/worker containers run as **root** and own the per-workspace state, so
+    deletion here actually removes root-owned auth dirs (the host CLI, running as
+    uid 1000, silently could not) and a volume-removing compose teardown reaps
+    the per-workspace Docker volumes that GC previously leaked.
+    """
+    normalized_work_dir = Path(work_dir).expanduser().resolve()
+    manager = compose_manager
+    if manager is None:
+        from awf.node.compose_manager import ComposeManager as _ComposeManager
+
+        resolved_template = (
+            _default_workspace_compose_template()
+            if template_path is None
+            else Path(template_path).expanduser()
+        )
+        manager = _ComposeManager(
+            work_dir=normalized_work_dir,
+            template_path=resolved_template,
+        )
+    compose_teardown = _service_gc_compose_teardown(manager)
+    companion_image_prune: CompanionImagePrune | None = None
+    if companion_image_cache_enabled:
+        from awf.node.companion_images import run_companion_image_prune
+
+        async def _prune() -> dict[str, object]:
+            return await run_companion_image_prune(companion_image_retention_hours)
+
+        companion_image_prune = _prune
+    return await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=normalized_work_dir,
+        min_age_hours=min_age_hours,
+        limit=limit,
+        include_statuses=include_statuses,
+        exclude_statuses=exclude_statuses,
+        execute=execute,
+        cleanup_enabled=cleanup_enabled,
+        compose_teardown=compose_teardown,
+        companion_image_prune=companion_image_prune,
+        now=now,
+    )
+
+
 def _resolve_worktree_remover(
     worktree_remover: WorkspaceGCWorktreeRemove | None,
     session_factory: async_sessionmaker[AsyncSession],
@@ -755,6 +847,7 @@ async def run_workspace_filesystem_gc(
     execute: bool = False,
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
     cleanup_enabled: bool = True,
+    ignore_retention: bool = False,
     compose_teardown: WorkspaceGCComposeTeardown | None = None,
     worktree_remover: WorkspaceGCWorktreeRemove | None = None,
     now: datetime | None = None,
@@ -765,6 +858,11 @@ async def run_workspace_filesystem_gc(
     durable workspace row, events, logs, and artifacts intact while removing
     the checkout/auth/compose pressure directories for the single completed
     workspace.
+
+    With ``ignore_retention=True`` a completed, PR-merged workspace is reclaimed
+    immediately regardless of the retention window -- its pressure dirs are
+    disposable once the PR has merged. Failed / superseded / without-PR /
+    not-merged workspaces are still preserved by the retention policy.
     """
 
     current_time = _to_utc(now or datetime.now(UTC))
@@ -789,6 +887,7 @@ async def run_workspace_filesystem_gc(
             cutoff_at=cutoff_at,
             default_policy=True,
             cleanup_enabled=cleanup_enabled,
+            ignore_retention=ignore_retention,
         )
         if isinstance(classification, WorkspaceGCCandidate):
             candidates.append(classification)
@@ -1085,16 +1184,14 @@ def _delete_gc_path_outcome(
     *,
     work_dir: Path,
 ) -> WorkspaceGCPathOutcome:
-    if not target.path.exists():
-        return WorkspaceGCPathOutcome(
-            workspace_id=candidate.workspace_id,
-            kind=target.kind,
-            path=target.path,
-            status="already_removed",
-            reason_code=PATH_ALREADY_REMOVED,
-            estimated_bytes=target.estimated_bytes,
-        )
-    deleted, error = _delete_gc_path(target, work_dir=work_dir)
+    # Route the not-exists preflight through ``_delete_gc_path`` rather than a
+    # bare ``target.path.exists()`` here: an unguarded probe would raise (and
+    # abort the whole execute run) when a root-owned ``0700`` parent cannot be
+    # stat'ed, instead of being recorded as ``PATH_DELETE_PERMISSION_DENIED``.
+    # ``_delete_gc_path`` already wraps the same probe in permission-aware
+    # handling, so let it own that path. It returns ``(False, None, None)`` for a
+    # genuinely absent path.
+    deleted, error, failure_reason_code = _delete_gc_path(target, work_dir=work_dir)
     if deleted:
         return WorkspaceGCPathOutcome(
             workspace_id=candidate.workspace_id,
@@ -1105,12 +1202,24 @@ def _delete_gc_path_outcome(
             deleted=True,
             estimated_bytes=target.estimated_bytes,
         )
+    if error is None and failure_reason_code in (None, PATH_ALREADY_REMOVED):
+        # The path was already absent (``None``) or vanished mid-delete during a
+        # concurrent GC run (``PATH_ALREADY_REMOVED``). Both are idempotent
+        # no-ops, not partial-run failures.
+        return WorkspaceGCPathOutcome(
+            workspace_id=candidate.workspace_id,
+            kind=target.kind,
+            path=target.path,
+            status="already_removed",
+            reason_code=PATH_ALREADY_REMOVED,
+            estimated_bytes=target.estimated_bytes,
+        )
     return WorkspaceGCPathOutcome(
         workspace_id=candidate.workspace_id,
         kind=target.kind,
         path=target.path,
         status="failed",
-        reason_code=PATH_DELETE_FAILED,
+        reason_code=failure_reason_code or PATH_DELETE_FAILED,
         error=error or "path was not deleted",
         estimated_bytes=target.estimated_bytes,
     )
@@ -1214,7 +1323,20 @@ def _classify_workspace_for_gc(
     cutoff_at: datetime,
     default_policy: bool,
     cleanup_enabled: bool,
+    ignore_retention: bool = False,
 ) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
+    """Classify one workspace for GC into candidate / preserved / skip.
+
+    ``ignore_retention`` is only consulted on the ``default_policy=True`` →
+    ``completed`` + merged-PR branch, where it bypasses the retention window for
+    a workspace whose pressure dirs are already disposable. It is a no-op on
+    every other branch, so passing ``ignore_retention=True`` with
+    ``default_policy=False`` would silently apply normal retention. That is a
+    programming error rather than a supported mode, so it is rejected loudly
+    instead of being ignored.
+    """
+    if ignore_retention and not default_policy:
+        raise ValueError("ignore_retention=True requires default_policy=True")
     if workspace.status in PROTECTED_WORKSPACE_GC_STATUSES:
         return None
     if workspace.status not in TERMINAL_WORKSPACE_GC_STATUSES:
@@ -1296,7 +1418,11 @@ def _classify_workspace_for_gc(
                 age_hours=age_hours,
                 reason_code=COMPLETED_PR_NOT_MERGED,
             )
-        if updated_at > cutoff_at:
+        # A merged PR's pressure dirs are disposable the moment it lands. With
+        # ``ignore_retention`` the post-merge caller reclaims them immediately
+        # instead of waiting out the retention window; the durable record (DB
+        # row, events, logs) is preserved either way (GC never deletes it).
+        if updated_at > cutoff_at and not ignore_retention:
             return WorkspaceGCPreserved(
                 workspace_id=workspace.id,
                 status=workspace.status,
@@ -1304,11 +1430,19 @@ def _classify_workspace_for_gc(
                 age_hours=age_hours,
                 reason_code=WORKSPACE_WITHIN_RETENTION,
             )
+        # Distinguish an immediate post-merge reclaim (``ignore_retention``
+        # bypassed the window) from one that naturally aged out, so audit logs
+        # and ``WorkspaceEvent`` trails do not mislabel a minutes-old workspace
+        # as "retention expired".
         return _candidate_for_workspace(
             workspace,
             work_dir=work_dir,
             now=now,
-            reason_code=COMPLETED_PR_RETENTION_EXPIRED,
+            reason_code=(
+                COMPLETED_PR_IMMEDIATE_RECLAIM
+                if ignore_retention
+                else COMPLETED_PR_RETENTION_EXPIRED
+            ),
         )
 
     if updated_at > cutoff_at:
@@ -1364,126 +1498,3 @@ def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
     except Exception:
         return False
     return _snapshot_has_no_work(snapshot)
-
-
-def _compose_project_name_for_workspace(workspace: Workspace) -> str | None:
-    return workspace.compose_project_name or None
-
-
-def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
-    if snapshot.stack_state == "unavailable":
-        return False
-    if not snapshot.services:
-        return False
-
-    agent_services = [
-        service for service in snapshot.services if (service.name or "").lower() == "agent"
-    ]
-    if not agent_services:
-        return False
-    return _agent_service_has_no_work(agent_services[0])
-
-
-def _agent_service_has_no_work(service: RuntimeService) -> bool:
-    if (service.state or "").lower() != "running":
-        return False
-    return bool(_container_command_is_idle(service.command))
-
-
-def _container_command_is_idle(command: str | None) -> bool:
-    if not command:
-        return False
-    command_text = command.lower()
-    return any(pattern in command_text for pattern in _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS)
-
-
-def _has_pr_metadata(workspace: Workspace) -> bool:
-    return bool(workspace.pr_url or workspace.pr_number)
-
-
-def _pr_has_merged(workspace: Workspace) -> bool:
-    return workspace.pr_merge_sha is not None
-
-
-def _path_payload_for_candidate(
-    item: WorkspaceGCPath,
-    *,
-    deleted_paths: set[Path],
-    delete_errors: dict[tuple[str, Path], str],
-    path_outcomes: dict[tuple[str, Path], WorkspaceGCPathOutcome],
-) -> dict[str, object]:
-    outcome = path_outcomes.get((item.kind, item.path))
-    if outcome is not None:
-        return item.to_dict(
-            deleted=outcome.deleted,
-            error=outcome.error,
-            status=outcome.status,
-            reason_code=outcome.reason_code,
-        )
-    error = delete_errors.get((item.kind, item.path))
-    return item.to_dict(
-        deleted=item.path in deleted_paths,
-        error=error,
-        status="failed" if error else None,
-        reason_code=PATH_DELETE_FAILED if error else None,
-    )
-
-
-def _gc_path(kind: str, path: Path) -> WorkspaceGCPath:
-    return WorkspaceGCPath(
-        kind=kind,
-        path=path,
-        exists=path.exists(),
-        estimated_bytes=_estimate_bytes(path),
-    )
-
-
-def _estimate_bytes(path: Path) -> int:
-    if not path.exists():
-        return 0
-    if path.is_file():
-        try:
-            return path.stat().st_size
-        except OSError:
-            return 0
-    total = 0
-    for child in path.rglob("*"):
-        try:
-            if child.is_file():
-                total += child.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def _delete_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> tuple[bool, str | None]:
-    if not target.path.exists():
-        return False, None
-    if not _is_safe_gc_path(target, work_dir=work_dir):
-        return False, "path is outside the expected service GC roots"
-    if target.path.is_symlink():
-        return False, "refusing to delete symlink"
-    if not target.path.is_dir():
-        return False, "refusing to delete non-directory path"
-    try:
-        shutil.rmtree(target.path)
-    except OSError as exc:
-        return False, str(exc)
-    return True, None
-
-
-def _is_safe_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> bool:
-    roots = {
-        "worktree": work_dir / "git" / "worktrees",
-        "companion_worktree": work_dir / "git" / "worktrees",
-        "compose": work_dir / "compose",
-        "auth": work_dir / "auth",
-    }
-    root = roots.get(target.kind.split(":", maxsplit=1)[0])
-    if root is None:
-        return False
-    try:
-        target.path.resolve(strict=False).relative_to(root.resolve(strict=False))
-    except ValueError:
-        return False
-    return True

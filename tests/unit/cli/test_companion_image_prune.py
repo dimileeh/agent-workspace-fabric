@@ -8,6 +8,7 @@ import threading
 import pytest
 
 from awf.cli import common as cli_common
+from awf.node import companion_images
 
 
 class _Result:
@@ -26,7 +27,7 @@ async def test_prune_success_reports_reclaimed_output(monkeypatch: pytest.Monkey
         captured["cmd"] = cmd
         return _Result(0, stdout="Total reclaimed space: 2GB\n")
 
-    monkeypatch.setattr(cli_common.subprocess, "run", _run)
+    monkeypatch.setattr(companion_images.subprocess, "run", _run)
 
     result = await cli_common._run_companion_image_prune(168)
 
@@ -49,7 +50,7 @@ async def test_prune_runs_subprocess_off_the_event_loop_thread(
         observed["thread"] = threading.get_ident()
         return _Result(0, stdout="Total reclaimed space: 0B\n")
 
-    monkeypatch.setattr(cli_common.subprocess, "run", _run)
+    monkeypatch.setattr(companion_images.subprocess, "run", _run)
 
     result = await cli_common._run_companion_image_prune(24)
 
@@ -61,7 +62,7 @@ async def test_prune_runs_subprocess_off_the_event_loop_thread(
 async def test_prune_nonzero_exit_is_reported_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-zero docker exit is surfaced as a failed prune result."""
     monkeypatch.setattr(
-        cli_common.subprocess,
+        companion_images.subprocess,
         "run",
         lambda *_a, **_k: _Result(1, stderr="permission denied"),
     )
@@ -80,7 +81,7 @@ async def test_prune_timeout_is_reported_as_failed(monkeypatch: pytest.MonkeyPat
     def _run(*_a: object, **_k: object) -> _Result:
         raise subprocess.TimeoutExpired(cmd="docker image prune", timeout=120)
 
-    monkeypatch.setattr(cli_common.subprocess, "run", _run)
+    monkeypatch.setattr(companion_images.subprocess, "run", _run)
 
     result = await cli_common._run_companion_image_prune(24)
 
@@ -96,7 +97,7 @@ async def test_prune_os_error_is_reported_as_failed(monkeypatch: pytest.MonkeyPa
     def _run(*_a: object, **_k: object) -> _Result:
         raise OSError("docker binary not found")
 
-    monkeypatch.setattr(cli_common.subprocess, "run", _run)
+    monkeypatch.setattr(companion_images.subprocess, "run", _run)
 
     result = await cli_common._run_companion_image_prune(24)
 
