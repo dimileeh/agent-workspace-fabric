@@ -15,14 +15,14 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.sql.elements import ColumnElement
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector
+from awf.service import gc_predicates as _gc_predicates
 from awf.service import gc_worktrees as _gc_worktrees
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
@@ -64,6 +64,15 @@ _default_worktree_remover = _gc_worktrees.default_worktree_remover
 _run_worktree_remove = _gc_worktrees.run_worktree_remove
 _worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
 _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
+
+# SQL predicate builders live in ``gc_predicates`` (file-size budget); re-aliased
+# under their historical ``_workspace_*`` names for callers/tests.
+_workspace_gc_candidate_predicate = _gc_predicates.workspace_gc_candidate_predicate
+_workspace_gc_preserved_predicate = _gc_predicates.workspace_gc_preserved_predicate
+_workspace_has_pr_metadata_predicate = _gc_predicates.workspace_has_pr_metadata_predicate
+_workspace_lacks_pr_metadata_predicate = _gc_predicates.workspace_lacks_pr_metadata_predicate
+_workspace_has_pr_merge_predicate = _gc_predicates.workspace_has_pr_merge_predicate
+_workspace_pr_not_merged_predicate = _gc_predicates.workspace_pr_not_merged_predicate
 
 DEFAULT_MIN_AGE_HOURS = 168
 # Preserved-failed workspaces (work was kept for triage) are otherwise retained
@@ -558,90 +567,6 @@ async def plan_terminal_workspace_gc(
         preserved=preserved,
         cleanup_enabled=cleanup_enabled,
         default_policy=default_policy,
-    )
-
-
-def _workspace_gc_candidate_predicate(
-    *,
-    eligible_statuses: set[str],
-    cutoff_at: datetime,
-    default_policy: bool,
-    cleanup_enabled: bool,
-) -> ColumnElement[bool] | None:
-    if not cleanup_enabled:
-        return None
-    if default_policy:
-        if WorkspaceStatus.completed.value not in eligible_statuses:
-            return None
-        return and_(
-            Workspace.status == WorkspaceStatus.completed.value,
-            Workspace.updated_at <= cutoff_at,
-            _workspace_has_pr_metadata_predicate(),
-            _workspace_has_pr_merge_predicate(),
-        )
-    return and_(
-        Workspace.status.in_(sorted(eligible_statuses)),
-        Workspace.updated_at <= cutoff_at,
-    )
-
-
-def _workspace_gc_preserved_predicate(
-    *,
-    eligible_statuses: set[str],
-    cutoff_at: datetime,
-    default_policy: bool,
-    cleanup_enabled: bool,
-) -> ColumnElement[bool] | None:
-    if not cleanup_enabled:
-        return Workspace.status.in_(sorted(eligible_statuses))
-    if default_policy:
-        clauses: list[ColumnElement[bool]] = []
-        if WorkspaceStatus.failed.value in eligible_statuses:
-            clauses.append(Workspace.status == WorkspaceStatus.failed.value)
-        if "superseded" in eligible_statuses:
-            clauses.append(Workspace.status == "superseded")
-        if WorkspaceStatus.completed.value in eligible_statuses:
-            clauses.append(
-                and_(
-                    Workspace.status == WorkspaceStatus.completed.value,
-                    or_(
-                        _workspace_lacks_pr_metadata_predicate(),
-                        _workspace_pr_not_merged_predicate(),
-                        Workspace.updated_at > cutoff_at,
-                    ),
-                )
-            )
-        if not clauses:
-            return None
-        return or_(*clauses)
-    return and_(
-        Workspace.status.in_(sorted(eligible_statuses)),
-        Workspace.updated_at > cutoff_at,
-    )
-
-
-def _workspace_has_pr_metadata_predicate() -> ColumnElement[bool]:
-    return or_(
-        Workspace.pr_number.is_not(None),
-        and_(Workspace.pr_url.is_not(None), Workspace.pr_url != ""),
-    )
-
-
-def _workspace_lacks_pr_metadata_predicate() -> ColumnElement[bool]:
-    return and_(
-        Workspace.pr_number.is_(None),
-        or_(Workspace.pr_url.is_(None), Workspace.pr_url == ""),
-    )
-
-
-def _workspace_has_pr_merge_predicate() -> ColumnElement[bool]:
-    return Workspace.pr_merge_sha.is_not(None)
-
-
-def _workspace_pr_not_merged_predicate() -> ColumnElement[bool]:
-    return and_(
-        _workspace_has_pr_metadata_predicate(),
-        Workspace.pr_merge_sha.is_(None),
     )
 
 
