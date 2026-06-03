@@ -285,6 +285,74 @@ def test_provider_readiness_claude_file_reports_overlay_isolation(
 
 
 @pytest.mark.unit
+def test_provider_readiness_claude_json_only_reports_copy_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``.claude.json``-only hosts must not claim overlay isolation.
+
+    The resolver always copies ``~/.claude.json`` per workspace (never overlays
+    it), so even when overlayfs is available the file source — and the provider
+    posture when it is the only credential source — stays ``per_workspace_copy``.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude.json").write_text('{"token":"claude_file_secret"}')
+    monkeypatch.setattr(
+        provider_readiness, "claude_auth_isolation_label", lambda: "per_workspace_overlay"
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["ok"] is True
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["isolation"] == "per_workspace_copy"
+    assert claude["credential_sources"] == [
+        {
+            "type": "path",
+            "signal": "~/.claude.json",
+            "credential_scope": "isolated_workspace",
+            "isolation": "per_workspace_copy",
+        }
+    ]
+    assert "claude_file_secret" not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_claude_dir_keeps_overlay_json_stays_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a ``~/.claude`` dir present the dir keeps overlay; the file stays copy."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text('{"token":"claude_dir_secret"}')
+    (home / ".claude.json").write_text('{"token":"claude_json_secret"}')
+    monkeypatch.setattr(
+        provider_readiness, "claude_auth_isolation_label", lambda: "per_workspace_overlay"
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["isolation"] == "per_workspace_overlay"
+    isolation_by_signal = {
+        source["signal"]: source["isolation"] for source in claude["credential_sources"]
+    }
+    assert isolation_by_signal == {
+        "~/.claude": "per_workspace_overlay",
+        "~/.claude.json": "per_workspace_copy",
+    }
+
+
+@pytest.mark.unit
 def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".gemini").mkdir(parents=True)

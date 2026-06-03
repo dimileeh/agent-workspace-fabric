@@ -909,16 +909,30 @@ def _check_claude(
 ) -> dict[str, Any]:
     # ``~/.claude`` is isolated per workspace via a shared read-only overlay base
     # + per-workspace writable upper when overlayfs is available, else a full
-    # per-workspace copy. Surface whichever posture this host will actually use.
-    isolation = claude_auth_isolation_label()
-    file_sources = _existing_credential_sources(
-        (
-            (host_home / ".claude", "~/.claude"),
-            (host_home / ".claude.json", "~/.claude.json"),
-        ),
-        credential_scope="isolated_workspace",
-        isolation=isolation,
-    )
+    # per-workspace copy. ``~/.claude.json`` is *always* a per-workspace copy
+    # (the resolver never overlays it), so the overlay posture applies only to
+    # the directory source — labelling the file source with the overlay label
+    # would overstate its isolation/disk posture on ``.claude.json``-only hosts.
+    directory_isolation = claude_auth_isolation_label()
+    file_sources: list[dict[str, str]] = []
+    if (host_home / ".claude").exists():
+        file_sources.append(
+            _credential_source(
+                type_="path",
+                signal="~/.claude",
+                credential_scope="isolated_workspace",
+                isolation=directory_isolation,
+            )
+        )
+    if (host_home / ".claude.json").exists():
+        file_sources.append(
+            _credential_source(
+                type_="path",
+                signal="~/.claude.json",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+        )
     if file_sources:
         return _provider_result(
             ok=True,
@@ -929,7 +943,7 @@ def _check_claude(
             secrets=secrets,
             credential_sources=file_sources,
             credential_scope="isolated_workspace",
-            isolation=isolation,
+            isolation=file_sources[0]["isolation"],
             warnings=[],
         )
 
