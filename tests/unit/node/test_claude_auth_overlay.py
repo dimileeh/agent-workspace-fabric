@@ -620,6 +620,42 @@ def test_shared_base_build_reaps_stale_orphan_staging_dirs(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_shared_base_build_reaps_orphan_staging_under_superseded_signature(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    # A crash-orphaned staging dir stranded under a *different* (now superseded)
+    # signature: the host ``~/.claude`` changed since, so the current provision's
+    # signature dir is not where this orphan lives. A per-signature sweep would
+    # never revisit it; GC never enters ``_shared``. It must still be reaped.
+    superseded_root = _shared_claude_base_dir(work_dir, "supersededsig0").parent
+    superseded_root.mkdir(parents=True)
+    stale = superseded_root / ".claude-base-orphan"
+    (stale / ".claude").mkdir(parents=True)
+    (stale / ".claude" / "blob").write_text("x" * 4096)
+    old = time.time() - (auth_mounts_mod._STALE_STAGING_MAX_AGE_SECONDS + 60)
+    os.utime(stale, (old, old))
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reap_super",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=True),
+    )
+
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].mode == "rw"
+    assert base.is_dir()
+    assert base.parent.name != "supersededsig0"
+    assert not stale.exists()
+
+
+@pytest.mark.unit
 def test_shared_base_is_never_under_a_workspace_auth_dir(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     base = _shared_claude_base_dir(work_dir, "sig0")

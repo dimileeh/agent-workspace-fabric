@@ -708,7 +708,13 @@ def _ensure_shared_claude_base(
 
     shared_root = base.parent
     shared_root.mkdir(parents=True, exist_ok=True)
-    _reap_stale_claude_base_staging(shared_root)
+    # Sweep from the signature-root (parent of every ``<signature>`` dir), not
+    # just the current signature's dir: a crash before staging cleanup strands an
+    # orphan under whatever signature was current then, and if the host
+    # ``~/.claude`` changes before the next provision the current signature moves,
+    # so a per-signature sweep would never revisit the old signature's orphan
+    # (and GC never enters ``_shared``). Sweeping all signatures reaps it.
+    _reap_stale_claude_base_staging(shared_root.parent)
     staging = Path(tempfile.mkdtemp(prefix=".claude-base-", dir=shared_root))
     staged_base = staging / ".claude"
     # ``finally`` guarantees the staging dir is reclaimed on every exit: a
@@ -751,14 +757,22 @@ def _ensure_shared_claude_base(
     return base
 
 
-def _reap_stale_claude_base_staging(shared_root: Path) -> None:
-    """Remove crash-orphaned ``.claude-base-*`` staging dirs under ``shared_root``.
+def _reap_stale_claude_base_staging(base_root: Path) -> None:
+    """Remove crash-orphaned ``.claude-base-*`` staging dirs under ``base_root``.
 
-    ``_ensure_shared_claude_base`` builds the base in a ``mkdtemp`` staging dir and
-    its ``finally`` reclaims it on every normal exit, but a hard kill (OOM, SIGKILL,
-    crash) before that cleanup strands the staging tree — a full ~1.7 GB copy of
-    ``~/.claude`` — under ``_shared``, which GC deliberately never reaps. Sweeping
-    here on the next provision keeps those orphans from accumulating indefinitely.
+    ``_ensure_shared_claude_base`` builds the base in a ``mkdtemp`` staging dir
+    (under the current ``<signature>`` dir) and its ``finally`` reclaims it on
+    every normal exit, but a hard kill (OOM, SIGKILL, crash) before that cleanup
+    strands the staging tree — a full ~1.7 GB copy of ``~/.claude`` — under
+    ``_shared``, which GC deliberately never reaps. Sweeping here on the next
+    provision keeps those orphans from accumulating indefinitely.
+
+    ``base_root`` is the parent of every ``<signature>`` dir, so the sweep covers
+    *all* signatures (``*/.claude-base-*``), not just the one current now. A crash
+    orphans staging under whatever signature was current at the time; if the host
+    ``~/.claude`` changes before the next provision the current signature moves,
+    and a sweep scoped to only the new signature's dir would never revisit — and
+    so never reap — the old signature's orphan.
 
     Only staging dirs older than ``_STALE_STAGING_MAX_AGE_SECONDS`` are removed so a
     concurrent provision's in-progress staging dir (mtime ~build start, well under
@@ -767,7 +781,7 @@ def _reap_stale_claude_base_staging(shared_root: Path) -> None:
     """
 
     now = time.time()
-    for staging in shared_root.glob(".claude-base-*"):
+    for staging in base_root.glob("*/.claude-base-*"):
         try:
             age = now - staging.stat().st_mtime
         except OSError:
