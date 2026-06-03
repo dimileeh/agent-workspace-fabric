@@ -261,6 +261,30 @@ def test_provider_readiness_claude_file_present(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("label", ["per_workspace_overlay", "per_workspace_copy"])
+def test_provider_readiness_claude_file_reports_overlay_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str
+) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
+    monkeypatch.setattr(provider_readiness, "claude_auth_isolation_label", lambda: label)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["ok"] is True
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["credential_scope"] == "isolated_workspace"
+    assert claude["isolation"] == label
+    assert all(source["isolation"] == label for source in claude["credential_sources"])
+
+
+@pytest.mark.unit
 def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".gemini").mkdir(parents=True)

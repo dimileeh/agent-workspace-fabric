@@ -19,8 +19,11 @@ import typer
 import typer.rich_utils as typer_rich_utils
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.logging import get_logger
 from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
+
+_log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
 _DEPRECATED_CLI_BASE_URL_NOTICE = "AWF_CLI_BASE_URL is deprecated; use AWF_BASE_URL"
@@ -166,8 +169,42 @@ def _run_terminal_workspace_compose_teardown(
     """Tear down the compose stack for a terminal workspace candidate.
 
     This keeps the `service gc` cleanup command consistent with operational
-    expectations when a terminal workspace is being removed.
+    expectations when a terminal workspace is being removed. When the stack is
+    down (or there is none), the workspace's Claude auth overlay is unmounted
+    *before* GC removes the auth dir — a busy overlay mount would otherwise make
+    GC's ``rmtree`` fail with ``EBUSY`` and strand the per-workspace upper.
     """
+    result = _compose_down_for_terminal_workspace(candidate)
+    if result.ok:
+        _teardown_terminal_workspace_auth_overlay(candidate)
+    return result
+
+
+def _teardown_terminal_workspace_auth_overlay(candidate: Any) -> None:
+    """Unmount the candidate's Claude auth overlay before GC removes its dir."""
+    from awf.node.auth_mounts import teardown_workspace_auth_overlay
+    from awf.service.config import resolve_service_settings
+
+    workspace_id = getattr(candidate, "workspace_id", None)
+    if not isinstance(workspace_id, str):
+        return
+    work_dir = Path(resolve_service_settings().work_dir).expanduser()
+    try:
+        teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=workspace_id)
+    except (OSError, subprocess.SubprocessError):
+        # The overlay unmount logged and re-raised the real busy/umount error;
+        # keep the compose-down result shape intact so GC reports compose
+        # outcome unchanged (GC's own rmtree will surface any residual EBUSY).
+        _log.warning(
+            "gc.auth_overlay_teardown_failed",
+            workspace_id=workspace_id,
+        )
+
+
+def _compose_down_for_terminal_workspace(
+    candidate: Any,
+) -> WorkspaceGCComposeTeardownResult:
+    """Run ``docker compose down`` for a terminal workspace candidate."""
     compose_file = getattr(candidate, "compose", None)
     compose_path = None if compose_file is None else getattr(compose_file, "path", None)
     candidate_compose_file_path = getattr(candidate, "compose_file_path", None)

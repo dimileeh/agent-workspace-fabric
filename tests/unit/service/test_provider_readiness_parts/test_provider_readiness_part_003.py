@@ -135,7 +135,13 @@ def test_provider_readiness_security_summary_collects_provider_warnings(
 @pytest.mark.unit
 def test_provider_readiness_existing_file_providers_report_credential_scope(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Pin the Claude isolation posture so this assertion does not depend on
+    # whether the test host happens to support overlayfs + CAP_SYS_ADMIN.
+    monkeypatch.setattr(
+        provider_readiness, "claude_auth_isolation_label", lambda: "per_workspace_copy"
+    )
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')

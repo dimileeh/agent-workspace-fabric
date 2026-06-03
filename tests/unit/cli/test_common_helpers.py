@@ -129,11 +129,29 @@ def test_compose_teardown_surfaces_timeouts(monkeypatch, tmp_path) -> None:
 
 @pytest.mark.unit
 def test_compose_teardown_covers_skipped_and_success_paths(monkeypatch, tmp_path) -> None:
+    overlay_teardowns: list[tuple[object, str]] = []
+
+    class FakeSettings:
+        work_dir = tmp_path / "service"
+
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: FakeSettings(),
+    )
+    monkeypatch.setattr(
+        "awf.node.auth_mounts.teardown_workspace_auth_overlay",
+        lambda *, work_dir, workspace_id: overlay_teardowns.append((work_dir, workspace_id)),
+    )
+
     missing = SimpleNamespace(
         compose_file_path=tmp_path / "missing.yml",
         workspace_id="ws_missing",
     )
+    # An ``ok`` (skipped, no compose stack) outcome still unmounts the overlay
+    # before GC removes the auth dir.
     assert cli_common._run_terminal_workspace_compose_teardown(missing).status == "skipped"
+    assert overlay_teardowns == [(tmp_path / "service", "ws_missing")]
+    overlay_teardowns.clear()
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("services: {}\n", encoding="utf-8")
@@ -156,6 +174,8 @@ def test_compose_teardown_covers_skipped_and_success_paths(monkeypatch, tmp_path
 
     assert result.status == "succeeded"
     assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    # The overlay is unmounted after a successful compose down, before removal.
+    assert overlay_teardowns == [(tmp_path / "service", "ws_success")]
     assert seen["args"] == [
         "docker",
         "compose",
@@ -172,6 +192,47 @@ def test_compose_teardown_covers_skipped_and_success_paths(monkeypatch, tmp_path
         "text": True,
         "timeout": 60,
     }
+
+
+@pytest.mark.unit
+def test_compose_teardown_keeps_result_when_overlay_unmount_raises(monkeypatch, tmp_path) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    class FakeSettings:
+        work_dir = tmp_path / "service"
+
+    def _raise(*, work_dir: object, workspace_id: str) -> None:
+        raise OSError("device busy")
+
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: FakeSettings(),
+    )
+    monkeypatch.setattr("awf.node.auth_mounts.teardown_workspace_auth_overlay", _raise)
+    monkeypatch.setattr(
+        cli_common.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, returncode=0),
+    )
+
+    # A failed overlay unmount is logged but never alters the compose-down result.
+    result = cli_common._run_terminal_workspace_compose_teardown(
+        SimpleNamespace(compose_file_path=str(compose_file), workspace_id="ws_busy")
+    )
+    assert result.status == "succeeded"
+    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+
+
+@pytest.mark.unit
+def test_teardown_overlay_skips_when_workspace_id_missing(monkeypatch) -> None:
+    def _unexpected_settings() -> object:
+        raise AssertionError("settings must not be resolved without a workspace id")
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", _unexpected_settings)
+
+    # No workspace_id → short-circuit before resolving settings or unmounting.
+    cli_common._teardown_terminal_workspace_auth_overlay(SimpleNamespace())
 
 
 class _FakeSession:
