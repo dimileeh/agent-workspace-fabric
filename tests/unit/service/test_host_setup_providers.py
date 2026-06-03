@@ -192,7 +192,10 @@ def test_provider_invalid_credential_marks_unavailable(tmp_path: Path) -> None:
     assert result.status == "unavailable"
     assert result.reason_code == PROVIDER_SETUP_AUTH_INVALID
     assert _FAKE_GH_TOKEN not in json.dumps(result.model_dump())
-    assert "github" not in config.providers
+    # The persisted config records the unavailable state (never a ready ref) so it
+    # cannot silently disagree with the summary; the raw token never leaks into it.
+    assert config.providers["github"].status == "unavailable"
+    assert _FAKE_GH_TOKEN not in json.dumps(config.providers["github"].model_dump())
 
 
 @pytest.mark.unit
@@ -339,6 +342,31 @@ def test_github_ready_via_env_ref_when_gh_absent(tmp_path: Path) -> None:
     assert github.backend == "env_ref"
     assert _FAKE_GH_TOKEN not in json.dumps(github.model_dump())
     assert config.providers["github"].credential_ref == "env://GH_TOKEN"
+
+
+@pytest.mark.unit
+def test_github_invalid_env_token_overwrites_prior_ready_config(tmp_path: Path) -> None:
+    """A rejected GitHub token must not leave a prior ready config entry stale."""
+    prior = HostSetupConfig(providers={"github": ProviderConfig(status="ready", source="gh")})
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["github"],
+        config=prior,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"GH_TOKEN": _FAKE_GH_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=1),
+        http_get=_unexpected_http,
+    )
+
+    github = summary.result_for("github")
+    assert github is not None
+    assert github.status == "unavailable"
+    assert github.reason_code == PROVIDER_SETUP_AUTH_INVALID
+    # The persisted config must agree with the summary, not retain the stale entry.
+    assert config.providers["github"].status == "unavailable"
+    assert config.providers["github"].credential_ref == "env://GH_TOKEN"
+    assert _FAKE_GH_TOKEN not in json.dumps(config.providers["github"].model_dump())
 
 
 # --- AWF Cloud stub -------------------------------------------------------

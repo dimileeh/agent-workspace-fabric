@@ -379,18 +379,24 @@ def _orchestrate_github(
 
     if env_var is not None:
         # A token reference is configured but ``gh auth status`` reports it
-        # unusable: the credential is invalid. Stay non-blocking for other
-        # providers and do not record a ready ref.
+        # unusable: the credential is invalid. Record an *unavailable* config
+        # (never a ready ref) so a prior ready GitHub entry cannot persist as
+        # ready while the summary shows unavailable; stay non-blocking for others.
+        provider_config = _env_ref_config(
+            spec, env_var, capabilities, backends, source="env", status="unavailable"
+        )
         return (
             ProviderSetupResult(
                 name=spec.name,
                 status="unavailable",
                 reason_code=PROVIDER_SETUP_AUTH_INVALID,
                 summary=(f"GitHub auth via {env_var} is not usable; `gh auth status` rejected it."),
+                backend=provider_config.backend,
+                credential_ref=provider_config.credential_ref,
                 configured=False,
                 rechecked=True,
             ),
-            None,
+            provider_config,
         )
 
     return _not_configured_result(spec, non_interactive=non_interactive)
@@ -520,14 +526,15 @@ def _env_ref_config(
     backends: _CredentialBackends,
     *,
     source: str,
+    status: str = "ready",
 ) -> ProviderConfig:
-    """Build a ready ``ProviderConfig`` for GitHub (gh-managed or env-ref)."""
+    """Build a ``ProviderConfig`` for GitHub (gh-managed or env-ref)."""
     if env_var is None:
         # gh-managed auth with no service-visible token: ready, but there is no
         # reference to store (the credential lives in the gh keychain).
-        return ProviderConfig(status="ready", source=source)
+        return ProviderConfig(status=status, source=source)
     ref = _build_env_ref(spec, env_var, capabilities, backends)
-    return ProviderConfig(**ref.to_provider_config_fields(status="ready"), source=source)
+    return ProviderConfig(**ref.to_provider_config_fields(status=status), source=source)
 
 
 def _ready_result(
