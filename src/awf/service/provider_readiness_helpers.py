@@ -16,6 +16,71 @@ from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
 from awf.service.config import ServiceSettings
 
 
+def _credential_source(
+    *,
+    type_: str,
+    signal: str,
+    credential_scope: str,
+    isolation: str,
+) -> dict[str, str]:
+    return {
+        "type": type_,
+        "signal": signal,
+        "credential_scope": credential_scope,
+        "isolation": isolation,
+    }
+
+
+def _provider_result(
+    *,
+    ok: bool,
+    strict: bool,
+    reason: str,
+    message: str,
+    secrets: frozenset[str],
+    signals: Iterable[str] | None = None,
+    capabilities: Iterable[str] | None = None,
+    detail: str | None = None,
+    action: str | None = None,
+    credential_sources: Iterable[Mapping[str, str]] | None = None,
+    credential_scope: str | None = None,
+    isolation: str | None = None,
+    warnings: Iterable[Mapping[str, str]] | None = None,
+) -> dict[str, Any]:
+    status_value = "ok" if ok else "fail" if strict else "warn"
+    severity_value = "ok" if ok else "error" if strict else "warning"
+    source_list = [dict(source) for source in credential_sources or ()]
+    warning_list = [_redacted_warning(warning, secrets) for warning in warnings or ()]
+    if not ok and not warning_list:
+        warning_list.append(
+            _security_warning(
+                reason,
+                _redact(message, secrets),
+                severity=severity_value,
+            )
+        )
+    payload: dict[str, Any] = {
+        "ok": ok,
+        "status": status_value,
+        "severity": severity_value,
+        "reason": reason,
+        "message": _redact(message, secrets),
+        "credential_sources": source_list,
+        "credential_scope": credential_scope or _primary_credential_scope(source_list),
+        "isolation": isolation or _primary_isolation(source_list),
+        "warnings": warning_list,
+    }
+    if signals:
+        payload["signals"] = list(signals)
+    if capabilities:
+        payload["capabilities"] = list(capabilities)
+    if detail:
+        payload["detail"] = _redact(_truncate(detail), secrets)
+    if action:
+        payload["action"] = _redact(action, secrets)
+    return payload
+
+
 def _codex_file_sources(host_home: Path) -> list[dict[str, str]]:
     source = host_home / ".codex"
     if not source.exists():
@@ -880,7 +945,6 @@ from awf.service.provider_readiness import (  # noqa: E402
     HttpResponseLike,
     ProviderName,
     SubprocessRun,
-    _credential_source,
     _log,
     _RedactionSegment,
 )

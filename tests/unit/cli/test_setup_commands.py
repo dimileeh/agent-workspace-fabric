@@ -11,8 +11,16 @@ import pytest
 
 from awf.cli import setup_commands
 from awf.cli.main import app
-from awf.host_setup.config import HostSetupConfig, HostSetupConfigError
-from awf.host_setup.rendering import SETUP_READINESS_FAILED, START_COMPOSE_ASSETS_MISSING
+from awf.host_setup.config import HostSetupConfig, HostSetupConfigError, ProviderConfig
+from awf.host_setup.providers import (
+    ProviderSetupResult,
+    ProviderSetupSummary,
+)
+from awf.host_setup.rendering import (
+    INTERACTIVE_INPUT_REQUIRED,
+    SETUP_READINESS_FAILED,
+    START_COMPOSE_ASSETS_MISSING,
+)
 from awf.host_setup.source_assets import (
     SOURCE_CHECKOUT_INVALID,
     SourceCheckoutAssetMetadata,
@@ -813,6 +821,81 @@ def test_setup_non_interactive_provider_persists_source_checkout(
 
 
 @pytest.mark.unit
+def test_setup_non_interactive_persists_resolved_refs_before_guard(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Safe provider refs survive the interactive guard without explicit consent.
+
+    Regression for review comment 4419120368: a ``--provider github --provider
+    codex --non-interactive`` run where GitHub resolves a safe env ref but codex
+    still needs an uncollectable secret must persist GitHub's resolved ref before
+    raising INTERACTIVE_INPUT_REQUIRED. Previously the guard aborted ahead of the
+    write (no explicit consent flags), silently dropping the safe ref.
+    """
+
+    def _github_ref_codex_interactive(
+        _settings: object,
+        *,
+        selected_providers: list[str],
+        config: HostSetupConfig,
+        **_kwargs: object,
+    ) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+        updated = config.model_copy(
+            update={
+                "providers": {
+                    **dict(config.providers),
+                    "github": ProviderConfig(backend="env_ref", credential_ref="env://GH_TOKEN"),
+                }
+            }
+        )
+        summary = ProviderSetupSummary(
+            mode="targeted_recheck",
+            selected=tuple(selected_providers),
+            providers=(
+                ProviderSetupResult(
+                    name="github",
+                    status="ready",
+                    reason_code="GITHUB_ENV_REF_OK",
+                    summary="GitHub configured from env ref.",
+                    backend="env_ref",
+                    credential_ref="env://GH_TOKEN",
+                    configured=True,
+                    rechecked=True,
+                ),
+                ProviderSetupResult(
+                    name="codex",
+                    status="not_configured",
+                    reason_code=INTERACTIVE_INPUT_REQUIRED,
+                    summary="codex needs interactive credential entry.",
+                ),
+            ),
+            overall_status="not_ready",
+        )
+        return summary, updated
+
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _github_ref_codex_interactive)
+    result = _runner.invoke(
+        app,
+        [
+            "setup",
+            "--provider",
+            "github",
+            "--provider",
+            "codex",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "INTERACTIVE_INPUT_REQUIRED"
+    written = harness.writes[-1]
+    assert written.providers["github"].credential_ref == "env://GH_TOKEN"
+
+
+@pytest.mark.unit
 def test_setup_non_interactive_provider_surfaces_readiness_blockers(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -865,6 +948,148 @@ def test_setup_non_interactive_provider_surfaces_readiness_warnings(
     assert "SETUP_READINESS_FAILED" in reason_codes
     # The host-check provenance is surfaced rather than discarded.
     assert payload["details"]["checks"]
+
+
+# --- Provider orchestration integration (T07) -----------------------------
+
+
+def _ready_github_summary(
+    _settings: object,
+    *,
+    selected_providers: list[str],
+    config: HostSetupConfig,
+    **_kwargs: object,
+) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+    """Fake orchestration that marks GitHub ready via gh (no token stored).
+
+    The per-provider ``summary`` text embeds a token-shaped value so the
+    no-token assertion in ``test_setup_provider_github_pretty_prints_no_token``
+    exercises pretty (stderr) rendering rather than passing vacuously against
+    secret-free text. ``ProviderSetupSummary.to_details()`` already drops the
+    per-provider ``summary`` field, so the token never reaches the JSON payload;
+    the value therefore only guards that the pretty renderer redacts known token
+    shapes instead of leaking them.
+    """
+    summary = ProviderSetupSummary(
+        mode="targeted_recheck" if selected_providers else "all_providers",
+        selected=tuple(selected_providers),
+        providers=(
+            ProviderSetupResult(
+                name="github",
+                status="ready",
+                reason_code="GITHUB_GH_AUTH_OK",
+                summary="GitHub is ready via gh CLI authentication (ghp_should_be_redacted).",
+                configured=True,
+                rechecked=True,
+            ),
+        ),
+        overall_status="ready",
+    )
+    return summary, config
+
+
+def _failed_provider_summary(
+    _settings: object,
+    *,
+    selected_providers: list[str],
+    config: HostSetupConfig,
+    **_kwargs: object,
+) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+    """Fake orchestration where the selected provider auth failed (non-blocking)."""
+    summary = ProviderSetupSummary(
+        mode="targeted_recheck",
+        selected=tuple(selected_providers),
+        providers=(
+            ProviderSetupResult(
+                name="github",
+                status="unavailable",
+                reason_code="PROVIDER_SETUP_AUTH_INVALID",
+                summary="GitHub auth via GH_TOKEN is not usable.",
+            ),
+        ),
+        overall_status="not_ready",
+    )
+    return summary, config
+
+
+@pytest.mark.unit
+def test_setup_provider_github_targeted_recheck_summary(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-dry-run ``--provider github`` folds a targeted-recheck provider summary."""
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _ready_github_summary)
+    result = _runner.invoke(app, ["setup", "--provider", "github", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    providers = payload["details"]["providers"]
+    assert providers["mode"] == "targeted_recheck"
+    assert providers["providers"]["github"]["status"] == "ready"
+
+
+@pytest.mark.unit
+def test_setup_provider_github_pretty_prints_no_token(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pretty (stderr) output for a provider run never prints a raw token."""
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _ready_github_summary)
+    result = _runner.invoke(app, ["setup", "--provider", "github"])
+
+    assert result.exit_code == 0, result.output
+    assert "ghp_" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.unit
+def test_setup_failed_provider_is_non_blocking(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed provider marks itself unavailable without blocking the process."""
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _failed_provider_summary)
+    result = _runner.invoke(app, ["setup", "--provider", "github", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    providers = payload["details"]["providers"]["providers"]
+    assert providers["github"]["status"] == "unavailable"
+
+
+@pytest.mark.unit
+def test_setup_all_provider_run_labels_all_providers(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-dry-run run with no selector labels the summary all_providers."""
+
+    def _all_summary(
+        _settings: object,
+        *,
+        selected_providers: list[str],
+        config: HostSetupConfig,
+        **_kwargs: object,
+    ) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+        summary = ProviderSetupSummary(
+            mode="all_providers",
+            selected=(),
+            providers=(),
+            overall_status="not_ready",
+        )
+        return summary, config
+
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _all_summary)
+    result = _runner.invoke(app, ["setup", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["details"]["providers"]["mode"] == "all_providers"
+
+
+@pytest.mark.unit
+def test_resolve_provider_settings_builds_service_settings() -> None:
+    """The provider settings helper resolves real service settings from an environ."""
+    settings = setup_commands._resolve_provider_settings({})
+    assert settings is not None
+    assert hasattr(settings, "host_home")
 
 
 # --- Corrupt config defensive handling ------------------------------------

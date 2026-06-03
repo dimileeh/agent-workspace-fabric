@@ -36,6 +36,10 @@ from awf.host_setup.config import (
     read_host_setup_config,
     write_host_setup_config,
 )
+from awf.host_setup.providers import (
+    ProviderSetupSummary,
+    orchestrate_provider_setup,
+)
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_CLIENT_UNKNOWN,
@@ -291,8 +295,9 @@ def _run_setup(
     # the ``--source-checkout`` selection or the revalidated persisted checkout)
     # so setup probes the same values ``awf start`` will honor instead of the
     # default 8000/work dir.
+    environ = _readiness_environ(probe_source)
     results = run_system_checks(
-        environ=_readiness_environ(probe_source),
+        environ=environ,
     )
     payload = build_setup_readiness_payload(
         results,
@@ -309,47 +314,62 @@ def _run_setup(
         # (it skips the read only for explicit-checkout dry-run), so the safe write
         # below can rely on it.
         assert config is not None
-        # Readiness blockers win over the interactive-input guard. When the host
-        # checks already failed (e.g. missing Docker), raising
-        # INTERACTIVE_INPUT_REQUIRED here would mask the SETUP_READINESS_FAILED
-        # issues the operator must fix first behind a misleading input-required
-        # exit, so only demand interactive provider input when the host is
-        # otherwise ready to proceed.
-        provider_needs_input = bool(selected_providers) and payload.status not in (
-            "blocked",
-            "failed",
-        )
+        # Readiness blockers win over provider orchestration. When the host checks
+        # already failed (e.g. missing Docker), probing providers or raising
+        # INTERACTIVE_INPUT_REQUIRED would mask the SETUP_READINESS_FAILED issues
+        # the operator must fix first, so only orchestrate when the host is ready.
+        host_ready = payload.status not in ("blocked", "failed")
         # ``--allow-plain-secrets`` and the ``--source-checkout`` selection are
-        # explicit, non-secret CLI flags -- not interactive prompts -- so
-        # persisting them never needs input and must survive the provider
-        # interactive guard. Otherwise a ready-host
-        # ``--provider X --non-interactive --allow-plain-secrets`` run aborts
-        # with INTERACTIVE_INPUT_REQUIRED before the safe write, silently
-        # discarding consent the operator passed explicitly. When no such
-        # explicit consent was given there is nothing to record ahead of the
-        # guard, so its original no-write early abort is preserved.
+        # explicit, non-secret CLI flags -- not interactive prompts -- and
+        # orchestration can resolve safe provider refs (gh/env) for some selected
+        # providers without any input. All of that is safe to persist and must
+        # survive the provider interactive guard: a ready-host
+        # ``--provider X --provider Y --non-interactive`` run where only Y needs a
+        # secret must still record X's resolved ref (and any explicit consent)
+        # before raising INTERACTIVE_INPUT_REQUIRED for Y, rather than discarding
+        # it. Only when the guard fires and there is genuinely nothing safe to
+        # record (no explicit consent and orchestration mutated nothing) is the
+        # original no-write early abort preserved.
         explicit_consent = allow_plain_secrets or explicit_source is not None
-        if provider_needs_input and not explicit_consent:
-            # Configuring a selected provider needs interactive credential entry,
-            # which T04 forwards to provider setup (T07). Under --non-interactive
-            # there is no way to collect it, so surface the machine-readable signal.
-            _require_provider_interactive(non_interactive, payload)
-        try:
-            _persist_safe_config(
-                config,
-                source_checkout=explicit_source,
+        updated_config = config
+        needs_interactive = False
+        if host_ready:
+            # Configure and recheck the requested providers (or every configurable
+            # provider for an all-provider run), folding the renderable, secret-free
+            # summary into the payload. Orchestration completes from gh/env refs
+            # alone where possible and stays non-blocking per provider; it only
+            # signals interactive input when a *selected* provider needs a secret
+            # that cannot be captured under --non-interactive.
+            summary, updated_config = orchestrate_provider_setup(
+                _resolve_provider_settings(environ),
+                selected_providers=selected_providers,
+                config=config,
                 allow_plain_secrets=allow_plain_secrets,
+                non_interactive=non_interactive,
+                environ=environ,
             )
-        except HostSetupConfigError as error:
-            # The safe-config write happens after the host checks finish. Folding
-            # the failure into the readiness payload keeps the check blockers and
-            # warnings the operator ran setup to see, rather than dropping them in
-            # favour of a config-write-only diagnostic.
-            return _readiness_with_config_write_failure(payload, error)
-        if provider_needs_input and explicit_consent:
-            # Explicit non-secret consent is now persisted; still surface the
-            # interactive-input signal for the provider credential step (T07)
-            # that cannot run under --non-interactive.
+            payload = _readiness_with_provider_summary(payload, summary)
+            needs_interactive = (
+                bool(selected_providers) and non_interactive and summary.requires_interactive_input
+            )
+        has_safe_state = explicit_consent or updated_config != config
+        if not needs_interactive or has_safe_state:
+            try:
+                _persist_safe_config(
+                    updated_config,
+                    source_checkout=explicit_source,
+                    allow_plain_secrets=allow_plain_secrets,
+                )
+            except HostSetupConfigError as error:
+                # The safe-config write happens after the host checks finish. Folding
+                # the failure into the readiness payload keeps the check blockers and
+                # warnings the operator ran setup to see, rather than dropping them in
+                # favour of a config-write-only diagnostic.
+                return _readiness_with_config_write_failure(payload, error)
+        if needs_interactive:
+            # A selected provider needs interactive credential entry that
+            # --non-interactive cannot collect; surface the machine-readable signal.
+            # Any safe consent or resolved provider refs were already persisted above.
             _require_provider_interactive(non_interactive, payload)
 
     return payload
@@ -536,6 +556,27 @@ def _combine_client_payloads(
         details={"clients": clients_detail},
         next_steps=next_steps,
     )
+
+
+def _resolve_provider_settings(environ: dict[str, str]) -> Any:
+    """Resolve service settings for provider orchestration from a merged environ."""
+    from awf.service.config import resolve_service_settings
+
+    return resolve_service_settings(environ=dict(environ))
+
+
+def _readiness_with_provider_summary(
+    payload: FirstRunPayload,
+    summary: ProviderSetupSummary,
+) -> FirstRunPayload:
+    """Fold the secret-free provider setup summary into the readiness payload.
+
+    The summary is recorded under ``details["providers"]`` (status-only, no refs
+    or tokens), labelled ``targeted_recheck`` vs ``all_providers`` by the summary
+    ``mode``, so the host-check issues and provenance are preserved alongside it.
+    """
+    details = {**dict(payload.details), "providers": summary.to_details()}
+    return payload.model_copy(update={"details": details})
 
 
 def _resolve_setup_source_checkout(
