@@ -158,7 +158,11 @@ jobs:
           # in --dry-run so the manifest-pinned sha256 is verified against the real
           # wheel bytes BEFORE any install mutation. Fails if the checksum is not
           # verified or the installer mutates anything.
-          uv run --python 3.12 python scripts/release_smoke.py \
+          # --no-project: release_smoke.py is stdlib-only, so skip syncing the
+          # full project virtualenv (awf + all runtime deps) just to run it.
+          # Avoids needless resolution/install time and a network/uv-cache
+          # dependency; the build job likewise uses an explicit, minimal venv.
+          uv run --no-project --python 3.12 python scripts/release_smoke.py \
             --dist-dir dist \
             --manifest artifacts/release/awf-install-manifest.json \
             --smoke-manifest-out artifacts/release/awf-install-manifest.smoke.json \
