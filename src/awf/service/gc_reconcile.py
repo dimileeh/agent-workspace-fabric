@@ -82,7 +82,7 @@ _ORPHAN_DIR_ROOTS: tuple[tuple[OrphanDirKind, tuple[str, ...]], ...] = (
 )
 
 
-class _ComposeTeardownOutcome(Protocol):
+class ComposeTeardownOutcome(Protocol):
     """Structural type for a compose teardown result (e.g. ``ComposeTeardownResult``).
 
     All members are read-only properties so a frozen dataclass with narrower
@@ -102,7 +102,7 @@ class _ComposeTeardownOutcome(Protocol):
     def ok(self) -> bool: ...  # pragma: no cover - Protocol declaration only.
 
 
-OrphanComposeTeardown = Callable[["OrphanDirTarget"], Awaitable[_ComposeTeardownOutcome]]
+OrphanComposeTeardown = Callable[["OrphanDirTarget"], Awaitable[ComposeTeardownOutcome]]
 
 
 @dataclass(frozen=True)
@@ -255,7 +255,7 @@ def build_default_compose_teardown(manager: ComposeManager) -> OrphanComposeTear
     ``teardown_project`` (idempotent), so an already-removed stack is a safe skip.
     """
 
-    async def _teardown(target: OrphanDirTarget) -> _ComposeTeardownOutcome:
+    async def _teardown(target: OrphanDirTarget) -> ComposeTeardownOutcome:
         return await manager.teardown_project(
             project_name=f"awf_{target.workspace_id}",
             compose_file=target.path / "compose.yml",

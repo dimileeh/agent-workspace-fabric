@@ -29,7 +29,7 @@ from awf.service.gc_classify import (
     _delete_gc_path,
     _gc_path,
 )
-from awf.service.gc_reconcile import _ComposeTeardownOutcome
+from awf.service.gc_reconcile import ComposeTeardownOutcome
 
 if TYPE_CHECKING:
     from awf.node.compose_manager import ComposeManager
@@ -48,7 +48,7 @@ ORPHAN_REAP_OK = "ORPHAN_REAP_OK"
 ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 
 # (project_name, compose_file, workspace_id) -> teardown outcome.
-OrphanComposeTeardown = Callable[[str, Path, str], Awaitable[_ComposeTeardownOutcome]]
+OrphanComposeTeardown = Callable[[str, Path, str], Awaitable[ComposeTeardownOutcome]]
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "terminal", "missing", "unknown"]
@@ -702,7 +702,7 @@ def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanComposeTeard
 
     async def _teardown(
         project_name: str, compose_file: Path, workspace_id: str
-    ) -> _ComposeTeardownOutcome:
+    ) -> ComposeTeardownOutcome:
         return await manager.teardown_project(
             project_name=project_name,
             compose_file=compose_file,
