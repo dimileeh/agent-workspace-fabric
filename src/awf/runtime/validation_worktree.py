@@ -42,6 +42,13 @@ GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 
+# Removing (or restoring) a validation-authored ``.gitignore`` changes the ignore
+# rules and can expose previously-ignored untracked files. After the first
+# cleanup pass we re-clean those newly exposed paths until the worktree settles.
+# A small cap keeps a pathological input (e.g. a `.gitignore` that re-ignores a
+# `.gitignore`) from looping forever.
+_MAX_CLEANUP_RECLEAN_PASSES = 5
+
 
 def _first_output_line(stdout: str | None) -> str:
     """Return the first status-free output line from a git command."""
@@ -675,6 +682,80 @@ async def cleanup_validation_worktree_side_effects(
                     cleanup_command="rmdir",
                 )
             )
+
+        # Removing or restoring a validation-authored ``.gitignore`` can change
+        # the ignore rules and expose files that the first pass saw as IGNORED
+        # (so they were excluded from the cleanup set). Re-clean those newly
+        # exposed untracked, non-ignored paths until the worktree settles. The
+        # gate keeps the common case (no ``.gitignore`` touched) byte-for-byte
+        # unchanged: no extra status call, no loop.
+        ignore_rules_changed = restored_a_gitignore or any(
+            path == ".gitignore" or path.endswith("/.gitignore") for path in cleanup_untracked_paths
+        )
+        if ignore_rules_changed and restore_ref is not None:
+            reclean_paths: list[str] = []
+            for _pass in range(_MAX_CLEANUP_RECLEAN_PASSES):
+                recheck = await check_validation_worktree_clean(
+                    run_git=run_git,
+                    worktree_path=worktree_path,
+                    ignore_all_ignored=True,
+                )
+                if recheck.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+                    return await _return_after_head_verification(
+                        ValidationWorktreeCleanup(
+                            cleaned=False,
+                            check=check,
+                            restore_ref=restore_ref,
+                            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+                            message=recheck.message,
+                            verify_check=recheck,
+                        )
+                    )
+                exposed = _collapse_descendant_cleanup_paths(list(recheck.untracked_paths))
+                if not exposed:
+                    break
+                reclean = await run_git(["--literal-pathspecs", "clean", "-ffd", "--", *exposed])
+                if not reclean.ok:
+                    return await _return_after_head_verification(
+                        ValidationWorktreeCleanup(
+                            cleaned=False,
+                            check=check,
+                            restore_ref=restore_ref,
+                            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                            message=(
+                                "AWF validation left untracked files and `git clean` "
+                                "could not remove them."
+                            ),
+                            cleanup_command="git clean",
+                            cleanup_stderr=(reclean.stderr or "")[:1000],
+                        )
+                    )
+                # ``exposed`` came from an ``ignore_all_ignored=True`` status, so
+                # it never includes ignored paths; an empty ignored set is correct.
+                failed_reclean_dirs = _cleanup_empty_untracked_parent_dirs(
+                    worktree_path=worktree_path,
+                    cleanup_paths=tuple(exposed),
+                    ignored_paths=set(),
+                )
+                if failed_reclean_dirs:
+                    return await _return_after_head_verification(
+                        ValidationWorktreeCleanup(
+                            cleaned=False,
+                            check=check,
+                            restore_ref=restore_ref,
+                            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                            message=(
+                                "AWF validation left empty untracked directories and cleanup "
+                                f"could not remove them: {', '.join(failed_reclean_dirs)}"
+                            ),
+                            cleanup_command="rmdir",
+                        )
+                    )
+                reclean_paths.extend(exposed)
+            if reclean_paths:
+                cleaned_paths = tuple(
+                    dict.fromkeys((*tracked_paths, *cleanup_untracked_paths, *reclean_paths))
+                )
 
     if check.clean:
         head_check = await _verify_head_unchanged(restore_ref=restore_ref)

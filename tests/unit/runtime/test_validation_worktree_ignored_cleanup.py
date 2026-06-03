@@ -542,6 +542,79 @@ async def test_cleanup_surfaces_status_failure_from_post_restore_recheck(
     assert cleanup.verify_check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
 
 
+# ── NEW REGRESSION: untracked `.gitignore` that exposes other files ─────────
+
+
+@pytest.mark.unit
+async def test_cleanup_removes_untracked_nested_gitignore_and_exposed_file(
+    tmp_path: Path,
+) -> None:
+    """Headline regression: validation creates an UNTRACKED nested ``.gitignore``
+    that ignores a sibling generated file. The first pass sees only the
+    ``.gitignore`` as a non-ignored side effect (the generated file is ignored by
+    it); removing the ``.gitignore`` then exposes the generated file. The gated
+    re-clean loop must remove BOTH and return ``cleaned=True``.
+    """
+    worktree = tmp_path / "worktree"
+    # Committed empty root .gitignore so the worktree starts clean.
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    sub = worktree / "sub"
+    sub.mkdir()
+    # Validation writes an untracked nested .gitignore that ignores gen.tmp ...
+    (sub / ".gitignore").write_text("gen.tmp\n", encoding="utf-8")
+    # ... plus the generated file it ignores.
+    (sub / "gen.tmp").write_text("generated\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree, commands),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert not (sub / ".gitignore").exists()
+    assert not (sub / "gen.tmp").exists()
+    assert "sub/.gitignore" in cleanup.cleaned_paths
+    assert "sub/gen.tmp" in cleanup.cleaned_paths
+
+
+@pytest.mark.unit
+async def test_cleanup_removes_chained_gitignores_within_cap(
+    tmp_path: Path,
+) -> None:
+    """Chained case: an untracked ``.gitignore`` ignores a second ``.gitignore``
+    which in turn ignores a file. Removing the first exposes the second; removing
+    the second exposes the file. All three must be removed within the re-clean cap.
+    """
+    worktree = tmp_path / "worktree"
+    restore_ref = _init_real_worktree(worktree, gitignore="")
+    sub = worktree / "sub"
+    sub.mkdir()
+    deep = sub / "deep"
+    deep.mkdir()
+    # Root-of-sub .gitignore ignores the nested deep/.gitignore.
+    (sub / ".gitignore").write_text("deep/.gitignore\n", encoding="utf-8")
+    # deep/.gitignore ignores the generated file.
+    (deep / ".gitignore").write_text("gen.tmp\n", encoding="utf-8")
+    (deep / "gen.tmp").write_text("generated\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    cleanup = await cleanup_validation_worktree_side_effects(
+        run_git=_real_run_git(worktree, commands),
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+    )
+
+    assert cleanup.reason_code is None
+    assert cleanup.cleaned is True
+    assert not (sub / ".gitignore").exists()
+    assert not (deep / ".gitignore").exists()
+    assert not (deep / "gen.tmp").exists()
+    assert not sub.exists()
+
+
 @pytest.mark.unit
 async def test_cleanup_does_not_rmdir_live_ignored_root_without_gitignore_edit(
     tmp_path: Path,
