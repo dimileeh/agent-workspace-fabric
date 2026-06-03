@@ -579,6 +579,10 @@ def test_provider_invalid_credential_marks_unavailable(tmp_path: Path) -> None:
     assert result.status == "unavailable"
     assert result.reason_code == "GITHUB_GH_PROBE_FAILED"
     assert _FAKE_GH_TOKEN not in json.dumps(result.model_dump())
+    # A provider config is persisted, so the summary must report ``configured`` (it
+    # mirrors the agent-provider unavailable path) and cannot disagree with the
+    # written ~/.awf/config.yml entry.
+    assert result.configured is True
     # The persisted config records the unavailable state (never a ready ref) so it
     # cannot silently disagree with the summary; the raw token never leaks into it.
     assert config.providers["github"].status == "unavailable"

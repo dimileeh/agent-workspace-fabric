@@ -443,7 +443,10 @@ def _orchestrate_github(
         # auth-invalid (which the latter reason code asserts). Still record an
         # *unavailable* config (never a ready ref) so a prior ready GitHub entry
         # cannot persist as ready while the summary shows unavailable; stay
-        # non-blocking for others.
+        # non-blocking for others. ``configured=True`` because a provider config is
+        # persisted here, mirroring the agent-provider unavailable path
+        # (:func:`_orchestrate_agent_provider`): a persisted entry must report
+        # ``configured`` so the setup JSON cannot disagree with ``~/.awf/config.yml``.
         provider_config = _env_ref_config(
             spec, env_var, capabilities, backends, source="env", status="unavailable"
         )
@@ -458,7 +461,7 @@ def _orchestrate_github(
                 ),
                 backend=provider_config.backend,
                 credential_ref=provider_config.credential_ref,
-                configured=False,
+                configured=True,
                 rechecked=True,
             ),
             provider_config,
