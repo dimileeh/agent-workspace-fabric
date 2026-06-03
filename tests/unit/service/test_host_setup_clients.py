@@ -634,6 +634,69 @@ def test_build_plan_codex_preserves_unrelated_tables_on_update(tmp_path: Path) -
     assert plan.merged_config["ui"]["theme"] == "dark"
 
 
+@pytest.mark.unit
+def test_build_plan_codex_update_diff_omits_bare_container_header(tmp_path: Path) -> None:
+    """Verify the dry-run diff has no spurious bare ``[mcp_servers]`` header.
+
+    Regression for issue:4613075619 (#2): when an existing Codex config holds only
+    ``[mcp_servers.<name>]`` sub-tables and no scalar keys directly under
+    ``mcp_servers``, the scoped TOML emitter must not re-emit a bare
+    ``[mcp_servers]`` section header. Doing so surfaced a spurious ``+[mcp_servers]``
+    line in the preview that read like a deliberate semantic change when it is only
+    a round-trip serialization artifact. Only the actual AWF addition belongs in
+    the added lines.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        '[mcp_servers.other]\ncommand = "other"\nargs = ["x"]\n',
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert "[mcp_servers.awf]" in plan.diff
+    # The bare container header is redundant when only sub-tables exist; it must
+    # not appear as an added line.
+    assert "+[mcp_servers]" not in plan.diff
+    # Applying still round-trips both servers despite the omitted container header.
+    apply_client_config_plan(plan, run=_never_run)
+    reparsed = tomllib.loads(codex_path.read_text(encoding="utf-8"))
+    assert reparsed["mcp_servers"]["other"]["command"] == "other"
+    assert reparsed["mcp_servers"][AWF_MCP_SERVER_KEY]["args"] == _desired_args()
+
+
+@pytest.mark.unit
+def test_build_plan_codex_update_preserves_empty_leaf_table(tmp_path: Path) -> None:
+    """Verify an empty leaf table keeps its header when re-emitted.
+
+    Skipping bare container headers (issue:4613075619 #2) must not also drop a
+    deliberately empty leaf table such as ``[tools]`` — its header is its only
+    representation, so the emitter still emits a header for a scalar-less, sub-table-
+    less node.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        '[mcp_servers.other]\ncommand = "other"\nargs = ["x"]\n\n[tools]\n',
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    apply_client_config_plan(plan, run=_never_run)
+    written = codex_path.read_text(encoding="utf-8")
+    assert "[tools]" in written
+    reparsed = tomllib.loads(written)
+    assert reparsed["tools"] == {}
+
+
 # --- build_client_config_plan: method selection ---------------------------
 
 
@@ -1274,6 +1337,13 @@ def test_setup_client_dry_run_no_change_summary(tmp_path: Path) -> None:
     assert payload.status == "success"
     assert payload.details["action"] == "no_change"
     assert "no change needed" in payload.summary
+    # Regression for issue:4613075619 (#1): a no_change dry-run has nothing to
+    # apply, so its next_steps must not tell the operator to re-run without
+    # --dry-run as create/update plans do.
+    assert payload.next_steps == (
+        "The Claude Code MCP client already registers the AWF server; no action needed.",
+    )
+    assert not any("--dry-run" in step for step in payload.next_steps)
 
 
 @pytest.mark.unit

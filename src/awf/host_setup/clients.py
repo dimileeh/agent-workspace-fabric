@@ -886,10 +886,19 @@ def _emit_toml(config: Mapping[str, Any]) -> str:
 
 
 def _emit_toml_table(table: Mapping[str, Any], path: tuple[str, ...], lines: list[str]) -> None:
-    """Emit one TOML table (scalars first, then nested sub-tables)."""
+    """Emit one TOML table (scalars first, then nested sub-tables).
+
+    A header is emitted for a non-root table only when it carries scalars or is a
+    genuine leaf (no sub-tables). A pure container node — sub-tables but no scalars,
+    e.g. ``mcp_servers`` holding only ``[mcp_servers.awf]``/``[mcp_servers.other]``
+    — is skipped: its own ``[mcp_servers]`` header would be a redundant round-trip
+    artifact that surfaces as a spurious ``+[mcp_servers]`` line in the dry-run
+    diff. Skipping ``not subtables`` rather than ``scalars`` alone still preserves a
+    deliberately empty leaf table, whose only representation is its header.
+    """
     scalars = {k: v for k, v in table.items() if not isinstance(v, Mapping)}
     subtables = {k: v for k, v in table.items() if isinstance(v, Mapping)}
-    if path:
+    if path and (scalars or not subtables):
         if lines:
             lines.append("")
         lines.append(f"[{'.'.join(_emit_toml_key(part) for part in path)}]")
@@ -1050,13 +1059,20 @@ def _dry_run_payload(plan: ClientConfigPlan) -> FirstRunPayload:
             details=_conflict_details(plan),
             next_steps=_client_next_steps(CLIENT_CONFIG_CONFLICT),
         )
+    if plan.action == "no_change":
+        next_steps: tuple[str, ...] = (
+            f"The {_label(plan.client)} MCP client already registers the AWF server; "
+            "no action needed.",
+        )
+    else:
+        next_steps = (
+            f"Re-run `awf setup --client {plan.client}` without --dry-run to apply this change.",
+        )
     return first_run_success_payload(
         command=SETUP_COMMAND,
         summary=_dry_run_summary(plan),
         details=_plan_details(plan, dry_run=True),
-        next_steps=(
-            f"Re-run `awf setup --client {plan.client}` without --dry-run to apply this change.",
-        ),
+        next_steps=next_steps,
     )
 
 
