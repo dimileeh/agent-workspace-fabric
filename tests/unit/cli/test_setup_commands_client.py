@@ -14,6 +14,7 @@ from awf.cli import setup_commands
 from awf.cli.main import app
 from awf.host_setup.config import HostSetupConfig, HostSetupConfigError
 from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_ASSETS_STALE,
     SOURCE_CHECKOUT_INVALID,
     SourceCheckoutAssetMetadata,
     SourceCheckoutError,
@@ -341,6 +342,42 @@ def test_setup_client_invalid_source_checkout_blocks(
 
 
 @pytest.mark.unit
+def test_setup_client_stale_persisted_source_checkout_blocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6G1JGM: a stale persisted checkout blocks.
+
+    With no ``--source-checkout`` flag, ``awf start`` revalidates persisted
+    metadata and exits on a moved/invalid checkout. The ``--client`` path must do
+    the same instead of swallowing the error and registering an MCP ``--env-file``
+    at the packaged ``.env`` -- otherwise the registered server points at a
+    different env than the checkout the operator is told to fix.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(setup_commands, "_client_home", lambda: home)
+    stale = HostSetupConfig(
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=tmp_path / "gone", verified_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: stale)
+
+    result = _runner.invoke(
+        app,
+        ["setup", "--client", "claude", "--dry-run", "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == SOURCE_CHECKOUT_ASSETS_STALE
+    # The stale persisted path produced no client config report/diff or write.
+    assert "clients" not in payload.get("details", {})
+    assert not list(home.rglob("*.json"))
+
+
+@pytest.mark.unit
 def test_resolve_client_env_file_uses_source_checkout_when_given(tmp_path: Path) -> None:
     """Verify an explicit, valid source checkout pins its docker/compose/.env path."""
     root = _make_source_checkout(tmp_path / "awf")
@@ -461,14 +498,17 @@ def test_resolve_client_env_file_honors_persisted_source_checkout(
 
 
 @pytest.mark.unit
-def test_resolve_client_env_file_stale_persisted_falls_back_to_compose_paths(
+def test_resolve_client_env_file_stale_persisted_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Verify stale persisted metadata falls back to default discovery.
+    """Regression for PRRT_kwDOSJAM6s6G1JGM: stale persisted metadata blocks.
 
-    A moved/invalid persisted checkout (the same failure ``awf start`` would
-    reject) must not pin a dead path into the MCP client config; the resolver
-    falls back to the packaged/default ``.env`` instead.
+    A moved/invalid persisted checkout is the same failure ``awf start``'s
+    ``_resolve_start_source_checkout`` raises on (it exits rather than defaulting).
+    The client resolver must not swallow it and silently pin the packaged ``.env``;
+    it surfaces the ``SourceCheckoutError`` so ``_run_client_setup`` renders a
+    blocked payload instead of registering an MCP ``--env-file`` that points at a
+    different env than the checkout the operator is told to fix.
     """
     stale = HostSetupConfig(
         source_checkout=SourceCheckoutAssetMetadata(
@@ -476,13 +516,9 @@ def test_resolve_client_env_file_stale_persisted_falls_back_to_compose_paths(
         )
     )
     monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: stale)
-    monkeypatch.setattr(
-        setup_commands,
-        "resolve_service_compose_paths",
-        lambda: (Path("/x/compose.yml"), Path("/x/.env"), Path("/x/.env.example")),
-    )
 
-    assert setup_commands._resolve_client_env_file(None) == Path("/x/.env")
+    with pytest.raises(SourceCheckoutError):
+        setup_commands._resolve_client_env_file(None)
 
 
 @pytest.mark.unit

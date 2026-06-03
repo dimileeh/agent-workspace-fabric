@@ -416,8 +416,11 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     reject the registered ``--env-file`` with "env file does not exist". Validating
     the explicit checkout keeps an invalid or stale path from registering an MCP
     ``--env-file`` that points at a non-checkout env file ``awf start`` would
-    itself reject; the failure raises ``SourceCheckoutError`` for the caller to
-    surface as a blocked payload. The file is never opened here -- only its path
+    itself reject; the same revalidation applies to a persisted checkout, so a
+    stale/moved persisted checkout blocks rather than defaulting (matching
+    ``awf start``, which exits on that metadata). The failure raises
+    ``SourceCheckoutError`` for the caller to surface as a blocked payload. The
+    file is never opened here -- only its path
     is threaded into the client config -- so a dry-run diff needs no env file on
     disk and no provider token is ever read.
     """
@@ -444,9 +447,14 @@ def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
     ``--env-file`` honors source-checkout metadata stored by an earlier
     ``awf setup --source-checkout`` run instead of always defaulting to the
     packaged ``.env`` while ``awf start`` runs from the checkout's compose env. A
-    missing/unreadable host config or stale metadata (the checkout moved or no
-    longer matches the asset contract) falls back to default discovery rather than
-    pinning a path ``awf start`` would itself reject.
+    missing/unreadable host config or absent metadata falls back to default
+    discovery. Stale metadata (the checkout moved or no longer matches the asset
+    contract) is **not** swallowed: ``verified_source_from_metadata`` raises
+    ``SourceCheckoutError`` exactly as ``awf start`` does, so the caller surfaces a
+    blocked client payload instead of silently registering an MCP ``--env-file``
+    at the packaged ``.env`` while ``awf start`` revalidates that same metadata and
+    exits on it -- leaving the registered server pointing at a different env than
+    the checkout the operator is told to fix.
     """
     try:
         config = read_host_setup_config()
@@ -454,10 +462,7 @@ def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
         return None
     if config.source_checkout is None:
         return None
-    try:
-        return verified_source_from_metadata(config.source_checkout)
-    except SourceCheckoutError:
-        return None
+    return verified_source_from_metadata(config.source_checkout)
 
 
 def _client_source_checkout_blocked_payload(error: SourceCheckoutError) -> FirstRunPayload:
