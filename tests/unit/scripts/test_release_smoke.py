@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from scripts.generate_install_manifest import build_manifest, write_manifest
-from scripts.release_smoke import build_smoke_manifest, smoke_invocation
+from scripts.release_smoke import _print_invocation, build_smoke_manifest, smoke_invocation
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "release_smoke.py"
@@ -115,6 +115,23 @@ def test_smoke_invocation_uses_prerelease_channel_from_manifest(tmp_path: Path) 
 
     assert "--channel" in argv
     assert argv[argv.index("--channel") + 1] == "prerelease"
+
+
+@pytest.mark.unit
+def test_print_invocation_shell_quotes_spaces_and_metacharacters(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The printed command shell-quotes env values and argv so it stays copy-pasteable."""
+    invocation = ["bash", "/path with space/install.sh", "--channel", "stable"]
+    env = {"AWF_INSTALL_MANIFEST": "/tmp/dir with space/manifest.json"}
+
+    _print_invocation(invocation, env)
+
+    printed = capsys.readouterr().out.strip()
+    assert printed == (
+        "$ AWF_INSTALL_MANIFEST='/tmp/dir with space/manifest.json' "
+        "bash '/path with space/install.sh' --channel stable"
+    )
 
 
 def _run_smoke(

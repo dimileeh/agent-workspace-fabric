@@ -22,6 +22,7 @@ import argparse
 import copy
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -154,8 +155,8 @@ def _write_smoke_manifest(manifest: dict[str, Any], output: Path) -> None:
 
 def _print_invocation(invocation: list[str], env: dict[str, str]) -> None:
     """Print a human-readable, copy-pasteable smoke command."""
-    env_prefix = " ".join(f"{key}={value}" for key, value in env.items())
-    print(f"$ {env_prefix} {' '.join(invocation)}".strip())
+    env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    print(f"$ {env_prefix} {shlex.join(invocation)}".strip())
 
 
 def _run_invocation(invocation: list[str], env: dict[str, str]) -> None:
