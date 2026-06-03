@@ -241,7 +241,7 @@ def test_setup_repeated_clients_combine_into_one_report(
 
 @pytest.mark.unit
 def test_setup_no_client_path_unchanged(harness: _Harness) -> None:
-    """Regression: the no---client path still runs the readiness pass."""
+    """Regression: the no `--client` path still runs the readiness pass."""
     result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
 
     assert result.exit_code == 0, result.output
