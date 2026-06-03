@@ -213,6 +213,16 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf setup --provider <provider>",
         _reason_catalog_link("PROVIDER_SETUP_AUTH_INVALID"),
     ),
+    "SETUP_CLIENT_UNKNOWN": _ReasonText(
+        "AWF setup was asked to configure an unsupported client integration.",
+        (
+            "Use a supported client name (claude or codex) with `awf setup "
+            "--client <client>`, or omit `--client` to run the readiness pass."
+        ),
+        "The client selector does not match a client known to this AWF build.",
+        "awf setup --client <client>",
+        _reason_catalog_link("SETUP_CLIENT_UNKNOWN"),
+    ),
     "CLIENT_CONFIG_CONFLICT": _ReasonText(
         "AWF found a client MCP configuration conflict.",
         (

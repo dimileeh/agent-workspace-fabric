@@ -21,7 +21,7 @@ from awf.host_setup.source_assets import (
     SourceCheckoutAssetMetadata,
     validate_source_checkout,
 )
-from awf.host_setup.system_checks import SetupCheckLevel, SetupCheckResult
+from awf.host_setup.system_checks import CommandResult, SetupCheckLevel, SetupCheckResult
 
 _runner = CliRunner()
 
@@ -1288,3 +1288,221 @@ def test_setup_config_error_pretty_includes_path(
 
     assert result.exit_code == 1
     assert "path: /tmp/.awf/config.yml" in result.stderr
+
+
+# --- T08: client integration dispatch -------------------------------------
+
+_CLIENT_ENV_FILE = "/srv/awf/docker/compose/.env"
+
+
+@dataclass
+class _ClientHarness:
+    """State for the client-dispatch seams the CLI reads at call time."""
+
+    home: Path
+    runner_calls: list[tuple[str, ...]] = field(default_factory=list)
+
+
+def _which_missing(_binary: str) -> None:
+    return None
+
+
+def _which_found(binary: str) -> str:
+    return f"/usr/bin/{binary}"
+
+
+@pytest.fixture
+def client_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _ClientHarness:
+    """Point the client seams at a temp home, a fixed env file, and no CLI."""
+    state = _ClientHarness(home=tmp_path)
+
+    def runner(args: object) -> CommandResult | None:
+        state.runner_calls.append(tuple(args))  # type: ignore[arg-type]
+        return CommandResult(returncode=0)
+
+    monkeypatch.setattr(setup_commands, "_client_home", lambda: state.home)
+    monkeypatch.setattr(
+        setup_commands, "_resolve_client_env_file", lambda *_a: Path(_CLIENT_ENV_FILE)
+    )
+    monkeypatch.setattr(setup_commands, "_client_which", _which_missing)
+    monkeypatch.setattr(setup_commands, "_client_run", runner)
+    return state
+
+
+@pytest.mark.unit
+def test_setup_help_describes_client_option() -> None:
+    """Verify setup help advertises the --client integration selector."""
+    result = _runner.invoke(app, ["setup", "--help"], env={"COLUMNS": "200"})
+    visible_help = click.unstyle(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "--client" in visible_help
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("client", ["claude", "codex"])
+def test_setup_client_dry_run_emits_diff_without_writing(
+    client_harness: _ClientHarness, client: str
+) -> None:
+    """Verify --client X --dry-run returns a diff payload and writes nothing."""
+    result = _runner.invoke(app, ["setup", "--client", client, "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    assert payload["details"]["action"] == "create"
+    assert _CLIENT_ENV_FILE in payload["details"]["diff"]
+    # No client config file or backup was created under the temp home.
+    assert not list(client_harness.home.rglob("*.json"))
+    assert not list(client_harness.home.rglob("config.toml"))
+    assert not list(client_harness.home.rglob("*.awf-backup-*"))
+    assert client_harness.runner_calls == []
+
+
+@pytest.mark.unit
+def test_setup_unknown_client_exits_two(client_harness: _ClientHarness) -> None:
+    """Verify an unknown --client renders SETUP_CLIENT_UNKNOWN and exits 2."""
+    result = _runner.invoke(app, ["setup", "--client", "emacs", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "SETUP_CLIENT_UNKNOWN"
+    assert payload["issues"][0]["details"]["known_clients"] == ["claude", "codex"]
+
+
+@pytest.mark.unit
+def test_setup_client_apply_writes_config_and_backup(client_harness: _ClientHarness) -> None:
+    """Verify a non-dry-run --client update writes config and a backup."""
+    config_path = client_harness.home / ".claude.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {"other": {"type": "stdio", "command": "x", "args": []}}}),
+        encoding="utf-8",
+    )
+
+    result = _runner.invoke(app, ["setup", "--client", "claude", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    assert payload["details"]["wrote"] is True
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "awf" in written["mcpServers"]
+    assert written["mcpServers"]["other"]["command"] == "x"
+    backups = list(client_harness.home.glob(".claude.json.awf-backup-*"))
+    assert len(backups) == 1
+
+
+@pytest.mark.unit
+def test_setup_client_conflict_exits_nonzero_without_mutation(
+    client_harness: _ClientHarness,
+) -> None:
+    """Verify a conflicting client config blocks with no mutation."""
+    config_path = client_harness.home / ".claude.json"
+    original = json.dumps({"mcpServers": {"awf": {"command": "other", "args": []}}})
+    config_path.write_text(original, encoding="utf-8")
+
+    result = _runner.invoke(app, ["setup", "--client", "claude", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "CLIENT_CONFIG_CONFLICT"
+    assert config_path.read_text(encoding="utf-8") == original
+    assert not list(client_harness.home.glob(".claude.json.awf-backup-*"))
+
+
+@pytest.mark.unit
+def test_setup_client_official_cli_path_invokes_cli_without_file_write(
+    client_harness: _ClientHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a resolvable client CLI is invoked and no config file is written."""
+    monkeypatch.setattr(setup_commands, "_client_which", _which_found)
+
+    result = _runner.invoke(app, ["setup", "--client", "claude", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert len(client_harness.runner_calls) == 1
+    assert client_harness.runner_calls[0][0] == "claude"
+    assert client_harness.runner_calls[0][-1] == _CLIENT_ENV_FILE
+    assert not list(client_harness.home.rglob("*.json"))
+
+
+@pytest.mark.unit
+def test_setup_repeated_clients_combine_into_one_report(
+    client_harness: _ClientHarness,
+) -> None:
+    """Verify repeated --client selectors produce one combined client report."""
+    result = _runner.invoke(
+        app,
+        ["setup", "--client", "claude", "--client", "codex", "--dry-run", "--format", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    assert set(payload["details"]["clients"]) == {"claude", "codex"}
+    assert (client_harness.home / ".claude.json").exists() is False
+    assert (client_harness.home / ".codex" / "config.toml").exists() is False
+
+
+@pytest.mark.unit
+def test_setup_no_client_path_unchanged(harness: _Harness) -> None:
+    """Regression: the no---client path still runs the readiness pass."""
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "awf setup"
+    assert payload["details"]["dry_run"] is True
+    # The readiness payload reports checks, not a client integration report.
+    assert "clients" not in payload["details"]
+
+
+@pytest.mark.unit
+def test_setup_mixed_clients_block_when_one_conflicts(client_harness: _ClientHarness) -> None:
+    """Verify a combined report blocks when one of several clients conflicts."""
+    # Claude has a conflicting awf entry; codex has no config (a clean create).
+    (client_harness.home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"awf": {"command": "other", "args": []}}}),
+        encoding="utf-8",
+    )
+
+    result = _runner.invoke(
+        app,
+        ["setup", "--client", "claude", "--client", "codex", "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "CLIENT_CONFIG_CONFLICT"
+    assert set(payload["details"]["clients"]) == {"claude", "codex"}
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_uses_source_checkout_when_given(tmp_path: Path) -> None:
+    """Verify an explicit source checkout pins its docker/compose/.env path."""
+    resolved = setup_commands._resolve_client_env_file(tmp_path)
+
+    assert resolved == tmp_path / "docker" / "compose" / ".env"
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_defaults_to_compose_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the default path comes from resolve_service_compose_paths."""
+    monkeypatch.setattr(
+        setup_commands,
+        "resolve_service_compose_paths",
+        lambda: (Path("/x/compose.yml"), Path("/x/.env"), Path("/x/.env.example")),
+    )
+
+    assert setup_commands._resolve_client_env_file(None) == Path("/x/.env")
+
+
+@pytest.mark.unit
+def test_client_seams_resolve_real_home_and_clock() -> None:
+    """Verify the production client seams resolve the host home and UTC clock."""
+    assert setup_commands._client_home() == Path.home()
+    now = setup_commands._client_now()
+    assert now.tzinfo is UTC

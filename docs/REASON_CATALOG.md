@@ -555,6 +555,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#service_status_collection_failed](#service_status_collection_failed)
 
+### SETUP_CLIENT_UNKNOWN
+**Problem:** AWF setup was asked to configure an unsupported client integration.
+**Likely Cause:** The client selector does not match a client known to this AWF build.
+**Operator Fix:** Use a supported client name (claude or codex) with `awf setup --client <client>`, or omit `--client` to run the readiness pass.
+**Related Command:** `awf setup --client <client>`
+**Docs Link:** [docs/REASON_CATALOG.md#setup_client_unknown](#setup_client_unknown)
+
 ### SETUP_PROVIDER_UNKNOWN
 **Problem:** AWF setup was asked to configure an unsupported provider.
 **Likely Cause:** The provider selector does not match a provider known to this AWF build.

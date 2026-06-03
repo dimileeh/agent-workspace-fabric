@@ -10,6 +10,8 @@ gate are validated and forwarded for later setup slices (T06/T07).
 
 from __future__ import annotations
 
+import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,11 @@ from awf.cli.init_ops import (
     resolve_service_compose_paths,
     resolve_service_runtime_env_files,
 )
+from awf.host_setup.clients import (
+    default_client_command_runner,
+    normalize_clients,
+    setup_client,
+)
 from awf.host_setup.config import (
     HostSetupConfig,
     HostSetupConfigError,
@@ -29,6 +36,7 @@ from awf.host_setup.config import (
 )
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
+    SETUP_CLIENT_UNKNOWN,
     SETUP_PROVIDER_UNKNOWN,
     FirstRunPayload,
     first_run_issue_from_reason_code,
@@ -55,6 +63,30 @@ _PROVIDER_HELP = (
     "Target a single provider (repeatable). Validated and forwarded so later "
     "provider setup can recheck just that provider."
 )
+_CLIENT_HELP = (
+    "Register AWF's MCP server into a client config (repeatable). Supported "
+    "clients: claude, codex. Shows a diff and writes a backup; --dry-run never "
+    "mutates. Never reads or stores provider tokens."
+)
+
+# Dependency-injection seams for the client-integration dispatch, mirroring the
+# hermetic readiness seams. Tests monkeypatch these to point at temp homes and
+# fake CLI detection/execution; production resolves the real host home, the
+# ``which`` detector, the bounded official-CLI runner, and the wall clock.
+_client_which = shutil.which
+_client_run = default_client_command_runner
+
+
+def _client_home() -> Path:
+    """Return the host home directory the client config paths anchor under."""
+    return Path.home()
+
+
+def _client_now() -> datetime:
+    """Return the current UTC time used to stamp config backups."""
+    return datetime.now(UTC)
+
+
 _DRY_RUN_HELP = "Run read-only checks only; never write config and never start Core."
 _NON_INTERACTIVE_HELP = "Fail with INTERACTIVE_INPUT_REQUIRED instead of prompting for input."
 _ALLOW_PLAIN_SECRETS_HELP = (
@@ -84,6 +116,7 @@ def _config_error_details(error: HostSetupConfigError) -> dict[str, Any]:
 
 def setup_command(
     provider: list[str] = typer.Option([], "--provider", help=_PROVIDER_HELP),
+    client: list[str] = typer.Option([], "--client", help=_CLIENT_HELP),
     dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help=_DRY_RUN_HELP),
     non_interactive: bool = typer.Option(False, "--non-interactive", help=_NON_INTERACTIVE_HELP),
     allow_plain_secrets: bool = typer.Option(
@@ -96,13 +129,22 @@ def setup_command(
 ) -> None:
     """Prepare this machine for AWF first-run use with read-only host checks."""
     try:
-        payload = _run_setup(
-            providers=provider,
-            dry_run=dry_run,
-            non_interactive=non_interactive,
-            allow_plain_secrets=allow_plain_secrets,
-            source_checkout=source_checkout,
-        )
+        if client:
+            # T08 owns only the client-selector dispatch; it returns before the
+            # readiness path so the no-``--client`` flow is unchanged from T04.
+            payload = _run_client_setup(
+                clients=client,
+                dry_run=dry_run,
+                source_checkout=source_checkout,
+            )
+        else:
+            payload = _run_setup(
+                providers=provider,
+                dry_run=dry_run,
+                non_interactive=non_interactive,
+                allow_plain_secrets=allow_plain_secrets,
+                source_checkout=source_checkout,
+            )
     except SetupCheckError as error:
         if isinstance(error, _ReadinessInteractiveBlockError):
             # The interactive guard fired after the host checks ran; surface the
@@ -269,6 +311,86 @@ def _run_setup(
             _require_provider_interactive(non_interactive, payload)
 
     return payload
+
+
+def _run_client_setup(
+    *,
+    clients: list[str],
+    dry_run: bool,
+    source_checkout: Path | None,
+) -> FirstRunPayload:
+    """Dispatch the selected MCP client integrations and render one payload.
+
+    Unknown client selectors raise ``SetupCheckError(SETUP_CLIENT_UNKNOWN)``
+    (handled by ``setup_command`` as an exit-2 usage error). Each selected client
+    is processed through ``setup_client`` with the injected home/which/run/now
+    seams; a single client returns its payload verbatim, multiple are folded into
+    one multi-issue report.
+    """
+    selected = normalize_clients(clients)
+    env_file = _resolve_client_env_file(source_checkout)
+    home = _client_home()
+    payloads = [
+        setup_client(
+            client,
+            env_file=env_file,
+            dry_run=dry_run,
+            home=home,
+            which=_client_which,
+            run=_client_run,
+            now=_client_now,
+        )
+        for client in selected
+    ]
+    if len(payloads) == 1:
+        return payloads[0]
+    return _combine_client_payloads(selected, payloads)
+
+
+def _resolve_client_env_file(source_checkout: Path | None) -> Path:
+    """Return the env-file path the registered MCP server should read.
+
+    Reuses the same source-checkout / packaged-asset resolution ``awf start``
+    uses (an explicit ``--source-checkout`` pins that checkout's
+    ``docker/compose/.env``; otherwise the packaged/default ``.env`` from
+    ``resolve_service_compose_paths``). The file is never opened here -- only its
+    path is threaded into the client config -- so a dry-run diff needs no env file
+    on disk and no provider token is ever read.
+    """
+    if source_checkout is not None:
+        return source_checkout.expanduser() / "docker" / "compose" / ".env"
+    _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
+    return raw_env_file
+
+
+def _combine_client_payloads(
+    clients: list[str],
+    payloads: list[FirstRunPayload],
+) -> FirstRunPayload:
+    """Fold per-client payloads into one multi-issue report payload."""
+    issues = tuple(issue for payload in payloads for issue in payload.issues)
+    clients_detail = {
+        client: {"status": payload.status, "summary": payload.summary, **dict(payload.details)}
+        for client, payload in zip(clients, payloads, strict=True)
+    }
+    blocked = [payload for payload in payloads if payload.status in ("blocked", "failed")]
+    if blocked:
+        summary = (
+            f"awf setup processed {len(clients)} MCP client(s) with {len(blocked)} blocker(s)."
+        )
+        next_steps: tuple[str, ...] = (
+            "Resolve the reported client blocker(s) above, then re-run setup for that client.",
+        )
+    else:
+        summary = f"awf setup processed {len(clients)} MCP client(s) successfully."
+        next_steps = ("Restart the client sessions to load the AWF MCP server.",)
+    return first_run_report_payload(
+        command=SETUP_COMMAND,
+        summary=summary,
+        issues=issues,
+        details={"clients": clients_detail},
+        next_steps=next_steps,
+    )
 
 
 def _resolve_setup_source_checkout(
@@ -536,5 +658,10 @@ def _reason_coded_next_steps(reason_code: str) -> tuple[str, ...]:
         return (
             "Re-run without --non-interactive to supply the required input, or pass "
             "--dry-run for a read-only readiness check.",
+        )
+    if reason_code == SETUP_CLIENT_UNKNOWN:
+        return (
+            "Re-run awf setup with a supported --client; the accepted names are "
+            "listed under known_clients in the issue details.",
         )
     return ("Fix the reported issue above, then re-run awf setup --dry-run.",)
