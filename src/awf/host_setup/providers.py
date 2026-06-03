@@ -378,7 +378,7 @@ def _orchestrate_github(
 ) -> tuple[ProviderSetupResult, ProviderConfig | None]:
     """Mark GitHub ready via ``gh`` or an env ref, never storing a raw token."""
     env_var = _first_present(environ, spec.env_ref_vars)
-    outcome = _probe_gh_auth(run_subprocess, environ)
+    outcome = _probe_gh_auth(run_subprocess, _gh_probe_environ(environ, env_var))
 
     if outcome == "ok":
         provider_config = _env_ref_config(spec, env_var, capabilities, backends, source="gh")
@@ -744,6 +744,25 @@ def _credential_failure_result(spec: ProviderSpec, exc: CredentialError) -> Prov
         configured=False,
         rechecked=False,
     )
+
+
+def _gh_probe_environ(environ: Mapping[str, str], env_var: str | None) -> Mapping[str, str]:
+    """Map a resolved env-ref token into the names ``gh`` actually reads.
+
+    GitHub CLI only honors ``GH_TOKEN``/``GITHUB_TOKEN`` for non-interactive auth,
+    but AWF documents ``AWF_GITHUB_TOKEN`` as the service token. Mirror
+    :func:`awf.service.provider_readiness._check_github`, which copies the resolved
+    token into both ``gh`` names before probing, so an operator who exports only
+    ``AWF_GITHUB_TOKEN`` is not falsely reported as GitHub-unavailable. When no
+    env ref is present the environment passes through unchanged so a keychain-only
+    ``gh`` login is still probed as-is.
+    """
+    if env_var is None:
+        return environ
+    token = environ.get(env_var)
+    if token is None or not token.strip():  # pragma: no cover - _first_present guarantees a value.
+        return environ
+    return {**dict(environ), "GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
 def _probe_gh_auth(run_subprocess: SubprocessRun, environ: Mapping[str, str]) -> _GhProbeOutcome:

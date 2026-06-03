@@ -9,6 +9,7 @@ never escapes into a ref, summary, result, or persisted config.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -71,12 +72,21 @@ class _SubprocessSpy:
     def __init__(self, *, returncode: int = 0, raise_exc: BaseException | None = None) -> None:
         self.calls: list[list[str]] = []
         self.timeouts: list[float] = []
+        self.envs: list[Mapping[str, str] | None] = []
         self._returncode = returncode
         self._raise = raise_exc
 
-    def __call__(self, args: list[str], *, timeout: float, **_kwargs: object) -> Any:
+    def __call__(
+        self,
+        args: list[str],
+        *,
+        timeout: float,
+        env: Mapping[str, str] | None = None,
+        **_kwargs: object,
+    ) -> Any:
         self.calls.append(args)
         self.timeouts.append(timeout)
+        self.envs.append(env)
         if self._raise is not None:
             raise self._raise
         return _completed(returncode=self._returncode)
@@ -659,6 +669,39 @@ def test_github_ready_via_awf_github_token_env_ref(tmp_path: Path) -> None:
     assert github.backend == "env_ref"
     assert _FAKE_GH_TOKEN not in json.dumps(github.model_dump())
     assert config.providers["github"].credential_ref == "env://AWF_GITHUB_TOKEN"
+
+
+@pytest.mark.unit
+def test_github_probe_maps_awf_token_into_gh_names(tmp_path: Path) -> None:
+    """``gh auth status`` must see the token under the names ``gh`` reads.
+
+    Regression: an operator who exports only the documented ``AWF_GITHUB_TOKEN``
+    must have the probe forward it as ``GH_TOKEN``/``GITHUB_TOKEN`` (the only
+    names ``gh`` honors), mirroring the runtime readiness path. Otherwise an
+    installed ``gh`` only sees ``AWF_GITHUB_TOKEN`` and reports GitHub unavailable.
+    """
+    spy = _SubprocessSpy(returncode=0)
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["github"],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"AWF_GITHUB_TOKEN": _FAKE_GH_TOKEN},
+        run_subprocess=spy,
+        http_get=_unexpected_http,
+    )
+
+    github = summary.result_for("github")
+    assert github is not None
+    assert github.status == "ready"
+    assert config.providers["github"].source == "gh"
+    # The probe env must expose the token under both names gh recognizes.
+    probe_env = spy.envs[0]
+    assert probe_env is not None
+    assert probe_env["GH_TOKEN"] == _FAKE_GH_TOKEN
+    assert probe_env["GITHUB_TOKEN"] == _FAKE_GH_TOKEN
+    assert probe_env["AWF_GITHUB_TOKEN"] == _FAKE_GH_TOKEN
 
 
 @pytest.mark.unit
