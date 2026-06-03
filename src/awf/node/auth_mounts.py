@@ -23,7 +23,7 @@ _GEMINI_TARGET = f"{_CONTAINER_HOME}/.gemini"
 _OPENCODE_TARGET = f"{_CONTAINER_HOME}/.config/opencode"
 _GROK_TARGET = f"{_CONTAINER_HOME}/.grok"
 _OLLAMA_TARGET = f"{_CONTAINER_HOME}/.ollama"
-_GROK_AUTH_FILES = ("auth.json", "config.toml")
+_GROK_AUTH_FILES = frozenset(("auth.json", "config.toml"))
 _OLLAMA_AUTH_FILES = frozenset(("config.json", "id_ed25519", "id_ed25519.pub"))
 # Per-workspace Claude/Gemini auth copies must exclude historical usage/transcript
 # dirs. Otherwise ``ccusage`` (which reads these local files) would attribute the
