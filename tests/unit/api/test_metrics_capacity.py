@@ -813,6 +813,36 @@ async def test_resource_saturation_orphan_provider_supports_async_and_db_failure
 
 
 @pytest.mark.unit
+async def test_default_orphan_resource_summary_propagates_auto_cleanup_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default summary builder must honour ``auto_cleanup_orphans`` so that
+    operator dashboards stop rendering dry-run-only text once reaping is enabled."""
+
+    settings = Settings(_env_file=None, work_dir=str(tmp_path), auto_cleanup_orphans=True)
+    (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
+
+    async def _terminal_view(_session: Any, *, min_retention_hours: float) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset({"ws_done"}),
+            available=True,
+        )
+
+    monkeypatch.setattr(
+        metrics_route, "scan_docker_resources", lambda **_kwargs: empty_docker_scan()
+    )
+    monkeypatch.setattr(metrics_route, "workspace_id_view_from_session", _terminal_view)
+
+    summary = await metrics_route._default_orphan_resource_summary(settings, object())
+
+    assert summary.reason == "ORPHAN_RESOURCES_PRESENT"
+    assert summary.cleanup_readiness.dry_run_only is False
+    assert "Reaping is enabled" in summary.cleanup_readiness.action
+
+
+@pytest.mark.unit
 async def test_resource_saturation_endpoint_uses_persisted_active_reservations(
     metrics_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,

@@ -1462,3 +1462,56 @@ async def test_readyz_orphan_resources_present_returns_503(
     assert orphan_check["orphan_count"] == 1
     assert orphan_check["cleanup_readiness"]["dry_run_only"] is True
     assert orphan_check["examples"][0]["workspace_id"] == workspace_id
+
+
+@pytest.mark.unit
+async def test_readyz_orphan_resources_reflect_auto_cleanup_enabled(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``AWF_AUTO_CLEANUP_ORPHANS`` enabled the readiness summary must stop
+    advertising the dry-run-only posture so dashboards reflect that the worker reaps."""
+    app, client = ready_app_and_client
+    monkeypatch.setattr(
+        health_route,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            work_dir=str(tmp_path / "work"),
+            auto_cleanup_orphans=True,
+        ),
+    )
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.completed,
+        updated_at=datetime.now(UTC) - timedelta(hours=200),
+    )
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    runner.queue_result(
+        stdout=json.dumps(
+            {
+                "id": "abc",
+                "name": f"awf_{workspace_id}-agent-1",
+                "project": f"awf_{workspace_id}",
+                "service": "agent",
+                "state": "exited",
+                "status": "Exited (0)",
+            }
+        )
+        + "\n"
+    )
+    runner.queue_result(stdout="")
+    runner.queue_result(stdout="")
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_check["cleanup_readiness"]["dry_run_only"] is False
+    assert "Reaping is enabled" in orphan_check["cleanup_readiness"]["action"]
