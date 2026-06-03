@@ -38,6 +38,10 @@ def test_releasing_docs_explain_manual_artifact_drift_and_installer_smoke() -> N
     assert "scripts/release_smoke.py" in docs
     assert "before install" in docs
     assert "Checksum verified" in docs
+    # release_smoke.py is stdlib-only; the docs example must match the CI step
+    # (publish.yml) and pass --no-project so following the docs locally does not
+    # sync the full project virtualenv just to run it.
+    assert "uv run --no-project --python 3.12 python scripts/release_smoke.py" in docs
 
 
 @pytest.mark.unit

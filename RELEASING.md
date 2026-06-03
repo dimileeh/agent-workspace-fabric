@@ -217,7 +217,7 @@ is verified against the real wheel bytes **before install**; it prints
 `Checksum verified` and never installs:
 
 ```bash
-uv run --python 3.12 python scripts/release_smoke.py \
+uv run --no-project --python 3.12 python scripts/release_smoke.py \
   --dist-dir dist \
   --manifest artifacts/release/awf-install-manifest.json \
   --smoke-manifest-out artifacts/release/awf-install-manifest.smoke.json \
