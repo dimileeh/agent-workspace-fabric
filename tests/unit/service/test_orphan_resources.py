@@ -1455,7 +1455,7 @@ def test_reaper_permission_denied_is_loud(tmp_path: Path, monkeypatch: pytest.Mo
     def _denied(kind: str, path: Path, *, work_dir: Path) -> tuple[bool, str | None, str | None]:
         return False, "permission denied", PATH_DELETE_PERMISSION_DENIED
 
-    monkeypatch.setattr("awf.service.orphan_resources._build_and_delete_gc_path", _denied)
+    monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _denied)
 
     teardown = _RecordingComposeTeardown()
     result = asyncio.run(
@@ -1492,7 +1492,7 @@ def test_reaper_worktree_already_removed_is_idempotent_success(
     def _vanished(kind: str, path: Path, *, work_dir: Path) -> tuple[bool, str | None, str | None]:
         return False, None, PATH_ALREADY_REMOVED
 
-    monkeypatch.setattr("awf.service.orphan_resources._build_and_delete_gc_path", _vanished)
+    monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _vanished)
 
     teardown = _RecordingComposeTeardown()
     result = asyncio.run(

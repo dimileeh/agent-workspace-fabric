@@ -27,7 +27,7 @@ from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
     PATH_DELETED,
 )
-from awf.service.gc_reconcile import ComposeTeardownOutcome, _build_and_delete_gc_path
+from awf.service.gc_reconcile import ComposeTeardownOutcome, build_and_delete_gc_path
 
 if TYPE_CHECKING:
     from awf.node.compose_manager import ComposeManager
@@ -783,7 +783,7 @@ async def reap_classified_orphans(
     preserving the historical ``dry_run_only`` behavior. With ``enabled=True``
     it tears down each orphaned compose stack (containers/networks/volumes) via
     WS-B1's :meth:`ComposeManager.teardown_project` and removes orphaned worktree
-    directories via WS-B1's :func:`_build_and_delete_gc_path` (which keeps the
+    directories via WS-B1's :func:`build_and_delete_gc_path` (which keeps the
     recursive byte-estimate scan off the event loop). Records classified
     ``expected`` / ``unknown`` are left untouched, and a permission refusal
     surfaces loudly (``PATH_DELETE_PERMISSION_DENIED``) as a ``partial`` run --
@@ -894,7 +894,7 @@ async def reap_classified_orphans(
         # worktree checkout) and delete it inside one ``to_thread`` so the scan
         # never blocks the worker event loop -- matching WS-B1's reconciler.
         deleted, error, reason_code = await asyncio.to_thread(
-            _build_and_delete_gc_path, "worktree", Path(path_text), work_dir=resolved_work_dir
+            build_and_delete_gc_path, "worktree", Path(path_text), work_dir=resolved_work_dir
         )
         if deleted:
             outcome = OrphanReapOutcome(

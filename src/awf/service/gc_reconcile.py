@@ -389,7 +389,7 @@ async def reconcile_orphaned_workspace_dirs(
     return result
 
 
-def _build_and_delete_gc_path(
+def build_and_delete_gc_path(
     kind: str, path: Path, *, work_dir: Path
 ) -> tuple[bool, str | None, str | None]:
     """Construct the WS-B1 GC path and delete it — entirely off the event loop.
@@ -428,7 +428,7 @@ def _build_and_delete_gc_path(
 async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirReapOutcome:
     """Delete one orphan dir via WS-B1's ``_delete_gc_path`` (off the event loop)."""
     deleted, error, reason_code = await asyncio.to_thread(
-        _build_and_delete_gc_path, target.kind, target.path, work_dir=work_dir
+        build_and_delete_gc_path, target.kind, target.path, work_dir=work_dir
     )
     if deleted:
         return OrphanDirReapOutcome(
