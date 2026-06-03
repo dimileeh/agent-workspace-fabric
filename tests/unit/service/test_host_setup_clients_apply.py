@@ -32,8 +32,7 @@ from awf.host_setup.rendering import (
     render_first_run_pretty,
 )
 from awf.host_setup.system_checks import CommandResult, SetupCheckError
-
-from ._helpers import (
+from tests.unit.service.host_setup_clients_support import (
     _ENV_FILE,
     _claude_config_path,
     _codex_config_path,
