@@ -441,6 +441,11 @@ def test_shared_base_build_loses_race_and_reuses_existing(
     base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
 
     def _lost_race(self: Path, target: Path) -> None:
+        # A concurrent provision already populated ``base``; renaming onto the
+        # now non-empty directory fails. Model that winning side so the lost
+        # race is distinguishable from a genuine (base-absent) failure.
+        Path(target).mkdir(parents=True, exist_ok=True)
+        (Path(target) / "settings.json").write_text('{"theme": "dark"}\n')
         raise OSError("base populated by a concurrent provision")
 
     monkeypatch.setattr(auth_mounts_mod.Path, "replace", _lost_race)
@@ -460,6 +465,43 @@ def test_shared_base_build_loses_race_and_reuses_existing(
     assert mounter.mounts[0]["lowerdir"] == base
     staging_dirs = list((base.parent).glob(".claude-base-*"))
     assert staging_dirs == []
+
+
+@pytest.mark.unit
+def test_shared_base_build_replace_failure_logs_and_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+
+    def _replace_fails(self: Path, target: Path) -> None:
+        # A genuine failure (e.g. permissions) leaves ``base`` absent — this is
+        # not a lost race, so it must surface log evidence rather than silently
+        # returning a non-existent base.
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(auth_mounts_mod.Path, "replace", _replace_fails)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_replace_fail",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_replace_fail" / "claude"
+    # The non-race replace failure degraded to the legacy full copy...
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    # ...with log evidence at both the replace site and the caller's fallback.
+    assert any(entry.get("event") == "claude_auth_shared_base_replace_failed" for entry in logs)
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_SHARED_BASE_FAILED" for entry in logs)
+    # No orphaned staging dir remains under the shared root.
+    assert list(base.parent.glob(".claude-base-*")) == []
 
 
 @pytest.mark.unit

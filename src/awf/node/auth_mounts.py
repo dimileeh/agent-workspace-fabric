@@ -707,9 +707,25 @@ def _ensure_shared_claude_base(
             _chown_tree(staged_base, workspace_owner_uid, workspace_owner_gid)
         try:
             staged_base.replace(base)
-        except OSError:
-            # Lost the build race against a concurrent provision; reuse its base.
-            return base
+        except OSError as exc:
+            if base.is_dir():
+                # Lost the build race against a concurrent provision; reuse its
+                # base. The winner's ``replace`` populated ``base``, so renaming
+                # onto the now non-empty directory fails — that is the race, and
+                # ``base.is_dir()`` distinguishes it from a genuine failure.
+                return base
+            # ``base`` does not exist, so this is not a lost race but a real
+            # failure (e.g. permissions). Surface it with log evidence and
+            # re-raise so the caller degrades to the legacy copy visibly rather
+            # than silently returning a non-existent base on every provision.
+            _log.warning(
+                "claude_auth_shared_base_replace_failed",
+                reason_code=_CLAUDE_AUTH_SHARED_BASE_FAILED,
+                staging=str(staging),
+                base=str(base),
+                error=str(exc),
+            )
+            raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return base
