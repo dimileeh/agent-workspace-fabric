@@ -69,6 +69,7 @@ _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 # under their historical ``_workspace_*`` names for callers/tests.
 _workspace_gc_candidate_predicate = _gc_predicates.workspace_gc_candidate_predicate
 _workspace_gc_preserved_predicate = _gc_predicates.workspace_gc_preserved_predicate
+_workspace_gc_age_capped_predicate = _gc_predicates.workspace_gc_age_capped_predicate
 _workspace_has_pr_metadata_predicate = _gc_predicates.workspace_has_pr_metadata_predicate
 _workspace_lacks_pr_metadata_predicate = _gc_predicates.workspace_lacks_pr_metadata_predicate
 _workspace_has_pr_merge_predicate = _gc_predicates.workspace_has_pr_merge_predicate
@@ -494,9 +495,16 @@ async def plan_terminal_workspace_gc(
         default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     )
+    age_capped_predicate = _workspace_gc_age_capped_predicate(
+        eligible_statuses=eligible_statuses,
+        preserved_failed_cutoff_at=preserved_failed_cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    )
 
     candidate_rows: list[Workspace] = []
     preserved_rows: list[Workspace] = []
+    age_capped_rows: list[Workspace] = []
     async with session_factory() as session:
         if candidate_predicate is not None:
             candidate_stmt = (
@@ -520,6 +528,20 @@ async def plan_terminal_workspace_gc(
                 preserved_stmt = preserved_stmt.limit(row_limit)
             preserved_rows = list((await session.execute(preserved_stmt)).scalars())
 
+        # Age-capped failed/superseded rows are fetched independently so a
+        # backlog of older indefinitely-preserved rows (e.g. completed-without-PR)
+        # cannot fill the preserved-query limit and starve the cap, leaving aged
+        # pressure dirs unreclaimed.
+        if age_capped_predicate is not None:
+            age_capped_stmt = (
+                select(Workspace)
+                .where(age_capped_predicate)
+                .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+            )
+            if row_limit is not None:
+                age_capped_stmt = age_capped_stmt.limit(row_limit)
+            age_capped_rows = list((await session.execute(age_capped_stmt)).scalars())
+
     candidates: list[WorkspaceGCCandidate] = []
     preserved: list[WorkspaceGCPreserved] = []
     candidate_ids: set[str] = set()
@@ -539,9 +561,13 @@ async def plan_terminal_workspace_gc(
             candidate_ids.add(workspace.id)
         elif classification is not None:
             preserved.append(classification)
-    for workspace in preserved_rows:
-        if workspace.id in candidate_ids:
+    classified_ids: set[str] = set()
+    # Age-capped rows may also surface in the preserved query; dedup so a row
+    # matched by both is classified exactly once.
+    for workspace in (*preserved_rows, *age_capped_rows):
+        if workspace.id in candidate_ids or workspace.id in classified_ids:
             continue
+        classified_ids.add(workspace.id)
         classification = await asyncio.to_thread(
             _classify_workspace_for_gc,
             workspace,

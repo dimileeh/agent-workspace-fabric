@@ -77,6 +77,37 @@ def workspace_gc_preserved_predicate(
     )
 
 
+def workspace_gc_age_capped_predicate(
+    *,
+    eligible_statuses: set[str],
+    preserved_failed_cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> ColumnElement[bool] | None:
+    """Failed / superseded rows aged past the preserved-failed cap.
+
+    The preserved query applies ``limit`` (ordered oldest-first) *before* the
+    age-cap classification runs, and it also matches rows that are preserved
+    indefinitely with no age cap (e.g. completed-without-PR / completed-not-
+    merged). A backlog of such rows that predate an aged failed/superseded row
+    would fill the preserved-query limit and starve the cap — the aged row would
+    never be fetched, never promoted, and its pressure dirs never reclaimed.
+
+    Fetching the age-capped rows independently guarantees they are always
+    classified regardless of the preserved-only backlog. Only meaningful under
+    ``default_policy`` (the sole branch that honours ``preserved_failed_cutoff_at``).
+    """
+    if not cleanup_enabled or not default_policy:
+        return None
+    statuses = {WorkspaceStatus.failed.value, "superseded"} & eligible_statuses
+    if not statuses:
+        return None
+    return and_(
+        Workspace.status.in_(sorted(statuses)),
+        Workspace.updated_at <= preserved_failed_cutoff_at,
+    )
+
+
 def workspace_has_pr_metadata_predicate() -> ColumnElement[bool]:
     return or_(
         Workspace.pr_number.is_not(None),

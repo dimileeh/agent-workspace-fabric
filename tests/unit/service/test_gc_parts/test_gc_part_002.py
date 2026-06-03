@@ -1164,6 +1164,43 @@ async def test_plan_limit_bounds_candidates_across_candidate_and_preserved_queri
 
 
 @pytest.mark.unit
+async def test_age_capped_failed_not_starved_by_older_preserved_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # The preserved query applies ``limit`` (oldest-first) before the age-cap
+    # classification, and it also matches rows preserved indefinitely with no
+    # age cap (completed-without-PR). An older such row must not fill the
+    # preserved limit and starve an aged failed row out of being reclaimed.
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    older_completed_no_pr_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=2000),
+    )
+    aged_failed_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=800),
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
+        plan = await plan_terminal_workspace_gc(
+            session_factory,
+            work_dir=tmp_path,
+            now=now,
+            limit=1,
+            max_preserved_failed_hours=720,
+        )
+    candidates = {c.workspace_id: c for c in plan.candidates}
+    # The age-capped failed row is fetched independently of the preserved query,
+    # so it is reclaimed despite the older indefinitely-preserved row.
+    assert aged_failed_id in candidates
+    assert candidates[aged_failed_id].reason_code == PRESERVED_FAILED_AGE_CAP_RECLAIMED
+    # The completed-without-PR row is preserved at any age (no age cap).
+    assert older_completed_no_pr_id not in candidates
+
+
+@pytest.mark.unit
 async def test_no_work_superseded_workspace_is_gc_candidate_without_recovery_metadata(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
