@@ -663,6 +663,12 @@ def _merged_config(
     merged = _deep_copy_mapping(existing) if existing is not None else {}
     servers = merged.get(descriptor.servers_key)
     servers_map: dict[str, Any] = dict(servers) if isinstance(servers, Mapping) else {}
+    # AWF fully owns its own server entry: replace it wholesale rather than
+    # deep-merging user-added fields into it. This guarantees the canonical
+    # command/args and the bounded startup/tool timeouts are exactly what AWF
+    # intends, with no stale or conflicting fields surviving an update. Any
+    # user-added fields on the prior ``awf`` entry are dropped — the dry-run
+    # diff surfaces the loss and the timestamped backup allows a rollback.
     servers_map[AWF_MCP_SERVER_KEY] = dict(desired_entry)
     merged[descriptor.servers_key] = servers_map
     return merged
@@ -683,9 +689,16 @@ def _deep_copy_value(value: Any) -> Any:
 
 
 def _serialize_config(config: Mapping[str, Any], config_format: ClientConfigFormat) -> str:
-    """Serialize a config mapping deterministically for diffing/writing."""
+    """Serialize a config mapping deterministically for diffing/writing.
+
+    Existing keys keep their on-disk order (insertion order is preserved through
+    ``_merged_config``'s deep copy), so an update mutates only the ``awf`` entry
+    and never reorders the rest of the file — consistent with the scoped-diff
+    design in ``_unified_diff``. Determinism comes from the deterministic input
+    ordering, not from ``sort_keys``.
+    """
     if config_format == "json":
-        return json.dumps(config, indent=2, sort_keys=True) + "\n"
+        return json.dumps(config, indent=2) + "\n"
     return _emit_toml(config)
 
 
@@ -844,7 +857,20 @@ def _write_config_atomic(config_path: Path, text: str, *, backup_path: Path | No
     tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:  # pragma: no cover - defensive: fdopen failure not portably reproducible
+        # ``fdopen`` never took ownership of ``fd`` (e.g. MemoryError), so close
+        # it ourselves before unlinking to avoid leaking the descriptor. This is
+        # scoped to the fdopen-failure case only: once ``fdopen`` succeeds the
+        # ``with`` below owns and closes ``fd``, so closing it here would risk
+        # double-closing a since-reused descriptor number.
+        with suppress(OSError):
+            os.close(fd)
+        with suppress(OSError):
+            tmp_path.unlink()
+        raise
+    try:
+        with handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())

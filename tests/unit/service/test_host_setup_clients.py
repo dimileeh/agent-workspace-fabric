@@ -596,6 +596,31 @@ def test_apply_file_update_backs_up_and_preserves(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_apply_file_update_preserves_existing_key_order(tmp_path: Path) -> None:
+    """Verify an update appends the AWF entry without reordering the whole file.
+
+    Regression: serializing with ``sort_keys=True`` alphabetised every key in
+    the user's config on each write, mutating far more of the file than the
+    ``awf`` entry AWF actually owns. The write must preserve the existing
+    on-disk key order and only add/refresh the ``awf`` server entry.
+    """
+    # Keys deliberately out of alphabetical order; "mcpServers" sorts before
+    # both, so a sorting serializer would hoist it to the front.
+    config = {"projects": {"/tmp/x": {}}, "userID": "abc"}
+    config_path = _claude_config_path(tmp_path)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+    apply_client_config_plan(plan, run=_never_run)
+
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert list(written.keys()) == ["projects", "userID", "mcpServers"]
+    assert AWF_MCP_SERVER_KEY in written["mcpServers"]
+
+
+@pytest.mark.unit
 def test_apply_file_uses_plan_backup_path_not_recomputed(tmp_path: Path) -> None:
     """Verify apply writes the plan's stamped backup path, never re-stamping now().
 
