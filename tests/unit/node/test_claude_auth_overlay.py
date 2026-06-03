@@ -414,6 +414,52 @@ def test_overlay_reprovision_reuses_live_mount_without_data_loss(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_mount_ebusy_after_concurrent_mount_reuses_live_overlay(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    class RacingOverlayMounter(FakeOverlayMounter):
+        """Models a concurrent provision winning the mount race.
+
+        ``is_mounted`` is false at the pre-check, then ``mount`` simulates a
+        concurrent caller having mounted the same ``merged`` path in the window
+        (the overlay becomes live) and our own attempt colliding with EBUSY.
+        """
+
+        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
+            # The racing winner's overlay is now live at ``merged`` ...
+            self.mounted.add(Path(merged))
+            # ... and our attempt onto the busy mountpoint fails.
+            raise OSError("device or resource busy")
+
+    mounter = RacingOverlayMounter(supported=True)
+    claude_root = work_dir / "auth" / "ws_race_mount" / "claude"
+    # Stand in for the writable layer the racing winner accumulated.
+    upper_data = claude_root / "upper" / "settings.json"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_race_mount",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    # The live overlay is reused rather than torn down on EBUSY ...
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    assert by_target["/home/agent/.claude"].mode == "rw"
+    # ... so the writable upper layer survives and no full-copy fallback ran.
+    assert (claude_root / "upper").is_dir()
+    assert (claude_root / "work").is_dir()
+    assert not (claude_root / ".claude").exists()
+    # Sanity: a marker written into ``upper`` would not be deleted by the handler.
+    upper_data.write_text('{"theme": "race-winner"}\n')
+    assert upper_data.read_text() == '{"theme": "race-winner"}\n'
+
+
+@pytest.mark.unit
 def test_teardown_unmounts_merged_before_removal(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     merged = work_dir / "auth" / "ws_t" / "claude" / "merged"

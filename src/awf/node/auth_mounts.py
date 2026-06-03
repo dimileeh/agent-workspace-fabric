@@ -655,6 +655,18 @@ def _prepare_claude_overlay_mount(
     try:
         overlay_mounter.mount(lowerdir=base, upperdir=upper, workdir=work, merged=merged)
     except (OSError, subprocess.SubprocessError) as exc:
+        if overlay_mounter.is_mounted(merged):
+            # A concurrent provision won the mount race in the window between the
+            # ``is_mounted`` pre-check above (then false) and this attempt, so our
+            # ``mount`` failed (EBUSY) onto a now-live overlay. Tearing down
+            # ``upper``/``work`` here would destroy the winner's writable layer
+            # while the overlay stays mounted; reuse the live mount instead,
+            # exactly as the idempotent-retry pre-check does.
+            return (
+                AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
+                upper,
+                work,
+            )
         _log.warning(
             "claude_auth_overlay_unavailable",
             reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
