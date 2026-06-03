@@ -111,6 +111,61 @@ def test_setup_client_with_provider_exits_two_without_writing(
 
 
 @pytest.mark.unit
+def test_setup_client_with_allow_plain_secrets_exits_two_without_writing(
+    client_harness: _ClientHarness,
+) -> None:
+    """Verify --client with --allow-plain-secrets rejects instead of dropping consent.
+
+    Regression for PRRT_kwDOSJAM6s6G04Qk: the client dispatch never reaches
+    ``_run_setup`` (the only path that persists the plain-file consent), so a
+    combined ``awf setup --client claude --allow-plain-secrets`` run must reject
+    the unsupported combination rather than report a successful client setup that
+    silently dropped the operator's opt-in flag — which would leave later
+    credential setup still blocked despite the flag having been accepted.
+    """
+    result = _runner.invoke(
+        app,
+        ["setup", "--client", "claude", "--allow-plain-secrets", "--format", "json"],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "SETUP_PLAIN_SECRETS_CLIENT_CONFLICT"
+    assert payload["issues"][0]["details"]["clients"] == ["claude"]
+    assert payload["next_steps"] == [
+        "Re-run awf setup --client without --allow-plain-secrets; plain-file "
+        "consent is recorded by the readiness/provider path (awf setup), not the "
+        "client path.",
+    ]
+    # No client config was written for the rejected run.
+    assert not list(client_harness.home.rglob("*.json"))
+    assert not list(client_harness.home.rglob("config.toml"))
+    assert client_harness.runner_calls == []
+
+
+@pytest.mark.unit
+def test_setup_client_with_allow_plain_secrets_dry_run_exits_two(
+    client_harness: _ClientHarness,
+) -> None:
+    """Verify the consent rejection fires even on a dry-run client invocation.
+
+    The flag is dropped on any ``--client`` invocation, so the guard rejects it
+    regardless of ``--dry-run`` rather than appearing to accept a consent the
+    dry-run client path never records.
+    """
+    result = _runner.invoke(
+        app,
+        ["setup", "--client", "claude", "--allow-plain-secrets", "--dry-run", "--format", "json"],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "SETUP_PLAIN_SECRETS_CLIENT_CONFLICT"
+    assert not list(client_harness.home.rglob("*.json"))
+    assert not list(client_harness.home.rglob("config.toml"))
+
+
+@pytest.mark.unit
 def test_setup_client_apply_writes_config_and_backup(client_harness: _ClientHarness) -> None:
     """Verify a non-dry-run --client update writes config and a backup."""
     config_path = client_harness.home / ".claude.json"

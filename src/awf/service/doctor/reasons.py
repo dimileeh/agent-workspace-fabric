@@ -233,6 +233,17 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf setup --client <client>",
         _reason_catalog_link("SETUP_PROVIDER_CLIENT_CONFLICT"),
     ),
+    "SETUP_PLAIN_SECRETS_CLIENT_CONFLICT": _ReasonText(
+        "AWF setup cannot combine --allow-plain-secrets with --client.",
+        (
+            "Re-run setup with --client to register a client MCP integration, and "
+            "record plain-file consent separately via the readiness/provider path "
+            "(awf setup --allow-plain-secrets), which is the only path that persists it."
+        ),
+        "The client dispatch never reaches the consent-persisting path, so accepting --allow-plain-secrets there would silently drop the operator's opt-in flag.",
+        "awf setup --client <client>",
+        _reason_catalog_link("SETUP_PLAIN_SECRETS_CLIENT_CONFLICT"),
+    ),
     "CLIENT_CONFIG_CONFLICT": _ReasonText(
         "AWF found a client MCP configuration conflict.",
         (

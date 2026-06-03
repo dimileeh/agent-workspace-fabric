@@ -39,6 +39,7 @@ from awf.host_setup.config import (
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_CLIENT_UNKNOWN,
+    SETUP_PLAIN_SECRETS_CLIENT_CONFLICT,
     SETUP_PROVIDER_CLIENT_CONFLICT,
     SETUP_PROVIDER_UNKNOWN,
     FirstRunPayload,
@@ -157,6 +158,21 @@ def setup_command(
                     "--provider is not supported with --client; re-run without --provider.",
                     reason_code=SETUP_PROVIDER_CLIENT_CONFLICT,
                     details={"providers": provider, "clients": client},
+                )
+            if allow_plain_secrets:
+                # The client dispatch returns before ``_run_setup``, the only path
+                # that persists plain-file consent via ``_persist_safe_config``.
+                # Accepting ``--allow-plain-secrets`` here would exit successfully
+                # while silently dropping the operator's opt-in, leaving later
+                # credential setup blocked despite the flag having been "accepted".
+                # Reject the combination (like ``--provider``) so the operator
+                # records consent on the readiness/provider path that actually
+                # persists it instead of losing it to a no-op client run.
+                raise SetupCheckError(
+                    "--allow-plain-secrets is not supported with --client; "
+                    "re-run without --allow-plain-secrets.",
+                    reason_code=SETUP_PLAIN_SECRETS_CLIENT_CONFLICT,
+                    details={"clients": client},
                 )
             payload = _run_client_setup(
                 clients=client,
@@ -780,5 +796,11 @@ def _reason_coded_next_steps(reason_code: str) -> tuple[str, ...]:
             "Re-run awf setup with either --provider or --client, not both; the "
             "rejected selectors are listed under providers and clients in the "
             "issue details.",
+        )
+    if reason_code == SETUP_PLAIN_SECRETS_CLIENT_CONFLICT:
+        return (
+            "Re-run awf setup --client without --allow-plain-secrets; plain-file "
+            "consent is recorded by the readiness/provider path (awf setup), not the "
+            "client path.",
         )
     return ("Fix the reported issue above, then re-run awf setup --dry-run.",)
