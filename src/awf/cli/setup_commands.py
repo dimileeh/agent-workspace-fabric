@@ -46,6 +46,7 @@ from awf.host_setup.rendering import (
     SETUP_PLAIN_SECRETS_CLIENT_CONFLICT,
     SETUP_PROVIDER_CLIENT_CONFLICT,
     SETUP_PROVIDER_UNKNOWN,
+    START_COMPOSE_ASSETS_MISSING,
     FirstRunPayload,
     first_run_issue_from_reason_code,
     first_run_report_payload,
@@ -392,12 +393,21 @@ def _run_client_setup(
     """
     selected = normalize_clients(clients)
     try:
-        env_file = _resolve_client_env_file(source_checkout)
+        # Require the resolved env file to exist on a non-dry-run apply: a dry-run
+        # only renders a diff and never starts the MCP server, but a real write
+        # registers an ``--env-file`` that ``awf mcp serve`` reads and rejects when
+        # absent. Passed positionally to stay compatible with the test seam.
+        env_file = _resolve_client_env_file(source_checkout, not dry_run)
     except SourceCheckoutError as error:
         # An explicit/persisted source checkout that fails validation must block
         # with the same reason the readiness flow surfaces instead of writing a
         # client config diff pointing the MCP server at a non-checkout env file.
         return _client_source_checkout_blocked_payload(error)
+    except ClientEnvFileMissingError as error:
+        # A fresh, valid source checkout resolves a docker/compose/.env that is not
+        # seeded until ``awf service bootstrap`` runs. Block the apply instead of
+        # registering an MCP server that cannot start (see the payload helper).
+        return _client_env_file_missing_payload(error.env_file)
     home = _client_home()
     # Plan all selected clients before applying any so a single conflicting
     # client cannot leave earlier/later clients partially written while the run
@@ -417,7 +427,7 @@ def _run_client_setup(
     return _combine_client_payloads(selected, payloads)
 
 
-def _resolve_client_env_file(source_checkout: Path | None) -> Path:
+def _resolve_client_env_file(source_checkout: Path | None, require_existing: bool = False) -> Path:
     """Return the env-file path the registered MCP server should read.
 
     Reuses the same source-checkout / packaged-asset resolution ``awf start``
@@ -445,13 +455,27 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     file is never opened here -- only its path
     is threaded into the client config -- so a dry-run diff needs no env file on
     disk and no provider token is ever read.
+
+    When ``require_existing`` is set (a non-dry-run apply), the resolved path must
+    exist on disk: a fresh, valid source checkout (only ``.env.example`` present)
+    resolves a ``docker/compose/.env`` that is not seeded until ``awf service
+    bootstrap`` runs, and registering that absent path as the MCP ``--env-file``
+    would let setup report success while ``awf mcp serve`` rejects it with "env
+    file does not exist". The missing path raises ``ClientEnvFileMissingError`` for
+    the caller to surface as a blocked payload; a dry-run keeps resolving the path
+    as-is because it never starts the server.
     """
     if source_checkout is not None:
         compose_env = validate_source_checkout(source_checkout).root / "docker" / "compose" / ".env"
-        return resolve_existing_service_env_file(compose_env)
+        return _client_env_file_or_block(
+            resolve_existing_service_env_file(compose_env), require_existing
+        )
     persisted = _persisted_client_source_checkout()
     if persisted is not None:
-        return resolve_existing_service_env_file(persisted.root / "docker" / "compose" / ".env")
+        return _client_env_file_or_block(
+            resolve_existing_service_env_file(persisted.root / "docker" / "compose" / ".env"),
+            require_existing,
+        )
     _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
     # ``resolve_service_compose_paths`` points the default fallback at the compose
     # ``docker/compose/.env``, which is absent until ``awf service bootstrap`` seeds
@@ -470,7 +494,37 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     # resolves it against the client process cwd (mcp_commands._resolve_mcp_settings),
     # so a relative path would break Claude/Codex sessions launched from any other
     # directory. Pin the fallback to an absolute path here as well.
-    return resolved_env_file.resolve()
+    return _client_env_file_or_block(resolved_env_file.resolve(), require_existing)
+
+
+class ClientEnvFileMissingError(Exception):
+    """Raised when a non-dry-run client setup resolves a missing MCP env file.
+
+    Carries the resolved ``env_file`` so the dispatch can render a blocked payload
+    that names the path the operator must seed (``awf service bootstrap``) before
+    the registered MCP server can start.
+    """
+
+    def __init__(self, env_file: Path) -> None:
+        super().__init__(f"MCP env file does not exist: {env_file}")
+        self.env_file = env_file
+
+
+def _client_env_file_or_block(env_file: Path, require_existing: bool) -> Path:
+    """Return ``env_file``, or raise when a non-dry-run apply needs it on disk.
+
+    ``awf mcp serve`` reads the registered ``--env-file`` and exits when it is
+    absent (``mcp_commands._resolve_mcp_settings``). ``require_existing`` is set
+    only for a non-dry-run ``awf setup --client`` apply so a not-yet-bootstrapped
+    checkout (compose ``.env`` absent, no checkout-root ``.env``) blocks instead of
+    registering an MCP server that cannot start; a dry-run never starts the server
+    and resolves the path as-is. The existence probe mirrors ``awf mcp serve``'s
+    own ``expanduser().resolve().is_file()`` check so setup blocks exactly the
+    paths that command would reject.
+    """
+    if require_existing and not env_file.expanduser().resolve().is_file():
+        raise ClientEnvFileMissingError(env_file)
+    return env_file
 
 
 def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
@@ -523,6 +577,41 @@ def _client_source_checkout_blocked_payload(error: SourceCheckoutError) -> First
         issues=(issue,),
         next_steps=(
             "Fix the reported --source-checkout path above, then re-run "
+            "awf setup --client <client>.",
+        ),
+    )
+
+
+def _client_env_file_missing_payload(env_file: Path) -> FirstRunPayload:
+    """Render a blocked client payload when the resolved MCP env file is absent.
+
+    A fresh, valid source checkout (only ``.env.example`` present) resolves a
+    ``docker/compose/.env`` that ``awf service bootstrap`` has not seeded yet, so
+    registering it as the MCP ``--env-file`` would let ``awf setup --client``
+    report success while ``awf mcp serve`` rejects the server with "env file does
+    not exist". Surface the same START_COMPOSE_ASSETS_MISSING blocker the
+    readiness/start flows use for a not-yet-bootstrapped checkout, pointing the
+    operator at the bootstrap step that creates the env file.
+    """
+    issue = first_run_issue_from_reason_code(
+        START_COMPOSE_ASSETS_MISSING,
+        severity="blocked",
+        details={"check": "client_env_file", "env_file": str(env_file)},
+        problem=(
+            f"The MCP server env file {env_file} does not exist yet, so the "
+            "registered --env-file would make awf mcp serve fail to start."
+        ),
+        fix=(
+            "Run awf service bootstrap to seed docker/compose/.env (or otherwise "
+            "create the env file), then re-run awf setup --client <client>."
+        ),
+    )
+    return first_run_report_payload(
+        command=SETUP_COMMAND,
+        summary="AWF could not register the MCP client: the env file does not exist yet.",
+        issues=(issue,),
+        next_steps=(
+            "Run awf service bootstrap to create the env file, then re-run "
             "awf setup --client <client>.",
         ),
     )
