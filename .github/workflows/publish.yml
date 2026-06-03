@@ -151,7 +151,7 @@ jobs:
 
   publish:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_target != 'none' }}
-    needs: build
+    needs: [build, installer-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

@@ -152,6 +152,18 @@ def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> 
 
 
 @pytest.mark.unit
+def test_publish_workflow_publish_job_gated_on_installer_smoke() -> None:
+    """Publishing must depend on installer-smoke so a failed smoke check blocks release."""
+    workflow = _publish_workflow()
+    publish_job = _job(workflow, "publish")
+
+    needs = publish_job.get("needs")
+    needs_set = {needs} if isinstance(needs, str) else set(needs or [])
+    assert "build" in needs_set
+    assert "installer-smoke" in needs_set
+
+
+@pytest.mark.unit
 def test_publish_workflow_does_not_treat_v_prefixed_branch_as_release_tag() -> None:
     """Manual dispatch from a v-prefixed branch must still use the version tag."""
     build_job = _job(_publish_workflow(), "build")
