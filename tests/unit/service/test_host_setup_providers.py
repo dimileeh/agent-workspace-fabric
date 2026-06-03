@@ -28,7 +28,7 @@ from awf.host_setup.providers import (
     orchestrate_provider_setup,
     render_provider_summary,
 )
-from awf.host_setup.rendering import INTERACTIVE_INPUT_REQUIRED, PROVIDER_SETUP_AUTH_INVALID
+from awf.host_setup.rendering import INTERACTIVE_INPUT_REQUIRED
 from awf.host_setup.system_checks import KNOWN_SETUP_PROVIDERS
 from awf.service.config import ServiceSettings
 from tests.unit.service.test_host_setup_credentials_parts._helpers import (
@@ -250,7 +250,12 @@ def test_recheck_preserves_existing_unavailable_config(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_provider_invalid_credential_marks_unavailable(tmp_path: Path) -> None:
-    """A configured GitHub token rejected by ``gh`` is reported unavailable."""
+    """A GitHub token the ``gh`` probe cannot confirm is reported unavailable.
+
+    A non-zero ``gh auth status`` exit cannot be attributed to the token (it is
+    equally an invalid token or a transient network failure), so it is labelled
+    GITHUB_GH_PROBE_FAILED rather than the token-blaming PROVIDER_SETUP_AUTH_INVALID.
+    """
     spy = _SubprocessSpy(returncode=1)
     summary, config = orchestrate_provider_setup(
         _settings(tmp_path),
@@ -266,7 +271,7 @@ def test_provider_invalid_credential_marks_unavailable(tmp_path: Path) -> None:
     result = summary.result_for("github")
     assert result is not None
     assert result.status == "unavailable"
-    assert result.reason_code == PROVIDER_SETUP_AUTH_INVALID
+    assert result.reason_code == "GITHUB_GH_PROBE_FAILED"
     assert _FAKE_GH_TOKEN not in json.dumps(result.model_dump())
     # The persisted config records the unavailable state (never a ready ref) so it
     # cannot silently disagree with the summary; the raw token never leaks into it.
@@ -518,7 +523,7 @@ def test_github_invalid_env_token_overwrites_prior_ready_config(tmp_path: Path) 
     github = summary.result_for("github")
     assert github is not None
     assert github.status == "unavailable"
-    assert github.reason_code == PROVIDER_SETUP_AUTH_INVALID
+    assert github.reason_code == "GITHUB_GH_PROBE_FAILED"
     # The persisted config must agree with the summary, not retain the stale entry.
     assert config.providers["github"].status == "unavailable"
     assert config.providers["github"].credential_ref == "env://GH_TOKEN"

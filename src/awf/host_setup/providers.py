@@ -391,10 +391,16 @@ def _orchestrate_github(
         )
 
     if env_var is not None:
-        # A token reference is configured but ``gh auth status`` reports it
-        # unusable: the credential is invalid. Record an *unavailable* config
-        # (never a ready ref) so a prior ready GitHub entry cannot persist as
-        # ready while the summary shows unavailable; stay non-blocking for others.
+        # A token reference is configured but ``gh auth status`` could not confirm
+        # it. A non-zero exit (or timeout/launch failure) collapses to "unusable"
+        # and cannot be attributed to the token: it is equally an invalid token or
+        # a transient ``gh``/network failure (SERVFAIL, DNS timeout). Label it
+        # ``GITHUB_GH_PROBE_FAILED`` rather than ``PROVIDER_SETUP_AUTH_INVALID`` so a
+        # transient outage at setup time does not brand a valid token as permanently
+        # auth-invalid (which the latter reason code asserts). Still record an
+        # *unavailable* config (never a ready ref) so a prior ready GitHub entry
+        # cannot persist as ready while the summary shows unavailable; stay
+        # non-blocking for others.
         provider_config = _env_ref_config(
             spec, env_var, capabilities, backends, source="env", status="unavailable"
         )
@@ -402,8 +408,11 @@ def _orchestrate_github(
             ProviderSetupResult(
                 name=spec.name,
                 status="unavailable",
-                reason_code=PROVIDER_SETUP_AUTH_INVALID,
-                summary=(f"GitHub auth via {env_var} is not usable; `gh auth status` rejected it."),
+                reason_code="GITHUB_GH_PROBE_FAILED",
+                summary=(
+                    f"`gh auth status` could not confirm GitHub auth via {env_var} "
+                    "(invalid token or a transient gh/network failure)."
+                ),
                 backend=provider_config.backend,
                 credential_ref=provider_config.credential_ref,
                 configured=False,
