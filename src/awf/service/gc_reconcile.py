@@ -165,6 +165,7 @@ class OrphanDirReconcileResult:
     cap_limit: int
     capped: bool
     dropped_count: int
+    young_orphan_count: int = 0
     reaped: tuple[OrphanDirReapOutcome, ...] = ()
     errors: tuple[OrphanDirReapOutcome, ...] = ()
     compose_teardowns: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -180,6 +181,7 @@ class OrphanDirReconcileResult:
             "cap_limit": self.cap_limit,
             "capped": self.capped,
             "dropped_count": self.dropped_count,
+            "young_orphan_count": self.young_orphan_count,
             "reaped": [outcome.to_dict() for outcome in self.reaped],
             "errors": [outcome.to_dict() for outcome in self.errors],
             "compose_teardowns": self.compose_teardowns,
@@ -194,17 +196,25 @@ def scan_orphan_workspace_dirs(
     now: float,
     min_age_hours: float,
     limit: int,
-) -> tuple[tuple[OrphanDirTarget, ...], int, int]:
-    """Return ``(targets, scanned_count, dropped_count)`` of orphan candidates.
+) -> tuple[tuple[OrphanDirTarget, ...], int, int, int]:
+    """Return ``(targets, scanned_count, dropped_count, young_orphan_count)``.
 
     Pure: lists ``ws_*`` directory entries under each per-workspace root, maps a
     companion-worktree dir name back to its parent id (so a companion of a *live*
     parent is not mis-classified as orphaned), and keeps only entries whose
     (parent) id is row-less **and** whose mtime is older than the grace window.
     Candidates are sorted oldest-first (deterministic), then capped to ``limit``.
+
+    ``scanned_count`` counts *every* ``ws_*`` dir entry, so on its own it cannot
+    distinguish dirs backed by a live row (healthy) from row-less dirs still
+    inside the grace window (orphans-in-waiting). ``young_orphan_count`` reports
+    the latter separately -- row-less dirs that fail only the age check -- so an
+    operator reading ``scanned_count=200, orphan_count=0`` can tell whether the
+    fabric is healthy or whether dirs are about to become reapable.
     """
     candidates: list[OrphanDirTarget] = []
     scanned = 0
+    young_orphan = 0
     grace_seconds = max(0.0, min_age_hours) * 3600.0
     for kind, parts in _ORPHAN_DIR_ROOTS:
         root = work_dir.joinpath(*parts)
@@ -232,6 +242,10 @@ def scan_orphan_workspace_dirs(
                 continue
             age_seconds = now - mtime
             if age_seconds < grace_seconds:
+                # Row-less but inside the grace window: a legitimate orphan-in-
+                # waiting, counted separately so it is not conflated with the
+                # live-row dirs that also pass through ``scanned``.
+                young_orphan += 1
                 continue
             candidates.append(
                 OrphanDirTarget(
@@ -247,7 +261,7 @@ def scan_orphan_workspace_dirs(
     if limit >= 0 and len(candidates) > limit:
         dropped = len(candidates) - limit
         candidates = candidates[:limit]
-    return tuple(candidates), scanned, dropped
+    return tuple(candidates), scanned, dropped, young_orphan
 
 
 def build_default_compose_teardown(manager: ComposeManager) -> OrphanComposeTeardown:
@@ -288,12 +302,16 @@ async def reconcile_orphaned_workspace_dirs(
     remaining orphan dirs as root via WS-B1's :func:`_delete_gc_path`. With
     ``execute=False`` it plans/reports only (the path used when the
     ``auto_cleanup_orphans`` kill-switch is off) so operators still see the leak.
+
+    A failed compose teardown protects only that workspace's compose dir; its
+    ``auth`` and ``worktree`` dirs are independent targets and are still reaped
+    (see the inline note at the skip below).
     """
     normalized_work_dir = Path(work_dir).expanduser().resolve()
     resolved_now = time.time() if now is None else now
     known_ids = await _load_known_workspace_ids(session_factory)
 
-    targets, scanned, dropped = scan_orphan_workspace_dirs(
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
         normalized_work_dir,
         known_ids,
         now=resolved_now,
@@ -322,6 +340,7 @@ async def reconcile_orphaned_workspace_dirs(
             cap_limit=limit,
             capped=capped,
             dropped_count=dropped,
+            young_orphan_count=young_orphan,
             planned=targets,
         )
         _log_summary(result, executed=False)
@@ -343,6 +362,14 @@ async def reconcile_orphaned_workspace_dirs(
                 **({"error": teardown.error} if teardown.error else {}),
             }
             if not teardown.ok:
+                # A failed teardown skips *only* this compose dir. The same
+                # workspace's ``auth/<id>`` and ``git/worktrees/<id>`` are
+                # independent ``OrphanDirTarget`` entries and are still reaped
+                # below. So when Docker is fully unavailable (daemon down) the
+                # auth/worktree dirs are removed while stale containers may
+                # restart against missing backing storage -- recoverable but
+                # noisy, which is why this skip is logged loudly alongside the
+                # successful reaps rather than aborting the per-workspace sweep.
                 skipped = OrphanDirReapOutcome(
                     target=target,
                     status="skipped",
@@ -381,6 +408,7 @@ async def reconcile_orphaned_workspace_dirs(
         cap_limit=limit,
         capped=capped,
         dropped_count=dropped,
+        young_orphan_count=young_orphan,
         reaped=tuple(reaped),
         errors=tuple(errors),
         compose_teardowns=compose_teardowns,
@@ -479,6 +507,7 @@ def _log_summary(result: OrphanDirReconcileResult, *, executed: bool) -> None:
         executed=executed,
         scanned_count=result.scanned_count,
         orphan_count=result.orphan_count,
+        young_orphan_count=result.young_orphan_count,
         reaped_count=result.reaped_count,
         error_count=len(result.errors),
         cap_limit=result.cap_limit,

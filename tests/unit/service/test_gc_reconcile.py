@@ -151,6 +151,9 @@ async def test_leaves_live_provisioning_young_and_companion_dirs(
 
     assert result.reaped_count == 0
     assert result.orphan_count == 0
+    # The row-less ``ws_young`` dir is reported as an orphan-in-waiting, distinct
+    # from the live-row dirs that also pass through ``scanned_count``.
+    assert result.young_orphan_count == 1
     assert teardown.calls == []
     assert live_auth.exists()
     assert live_worktree.exists()
@@ -324,7 +327,7 @@ def test_scan_is_pure_and_sorts_oldest_first(tmp_path: Path) -> None:
     _make_dir(tmp_path / "auth" / "ws_a", age_seconds=100.0, now=now)
     _make_dir(tmp_path / "auth" / "ws_b", age_seconds=5_000.0, now=now)
 
-    targets, scanned, dropped = scan_orphan_workspace_dirs(
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
         tmp_path,
         frozenset(),
         now=now,
@@ -334,7 +337,30 @@ def test_scan_is_pure_and_sorts_oldest_first(tmp_path: Path) -> None:
 
     assert scanned == 2
     assert dropped == 0
+    assert young_orphan == 0
     assert [target.workspace_id for target in targets] == ["ws_b", "ws_a"]
+
+
+def test_scan_counts_young_orphans_separately_from_live_dirs(tmp_path: Path) -> None:
+    # ``scanned_count`` alone conflates live-row dirs with row-less-but-young
+    # dirs; ``young_orphan_count`` disambiguates the metric for operators.
+    now = 13_000_000.0
+    _make_dir(tmp_path / "auth" / "ws_old", age_seconds=10_000.0, now=now)  # reapable
+    _make_dir(tmp_path / "auth" / "ws_young", age_seconds=60.0, now=now)  # orphan-in-waiting
+    _make_dir(tmp_path / "auth" / "ws_live", age_seconds=10_000.0, now=now)  # backed by a row
+
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset({"ws_live"}),
+        now=now,
+        min_age_hours=1,
+        limit=10,
+    )
+
+    assert [target.workspace_id for target in targets] == ["ws_old"]
+    assert scanned == 3
+    assert dropped == 0
+    assert young_orphan == 1
 
 
 def test_scan_ignores_non_ws_and_non_directory_entries(tmp_path: Path) -> None:
@@ -345,7 +371,7 @@ def test_scan_ignores_non_ws_and_non_directory_entries(tmp_path: Path) -> None:
     stray_file.write_text("x", encoding="utf-8")
     _stamp(stray_file, age_seconds=100.0, now=now)
 
-    targets, scanned, dropped = scan_orphan_workspace_dirs(
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
         tmp_path,
         frozenset(),
         now=now,
@@ -356,6 +382,7 @@ def test_scan_ignores_non_ws_and_non_directory_entries(tmp_path: Path) -> None:
     assert targets == ()
     assert scanned == 0
     assert dropped == 0
+    assert young_orphan == 0
 
 
 def test_scan_skips_non_directory_root_without_crashing(tmp_path: Path) -> None:
@@ -365,7 +392,7 @@ def test_scan_skips_non_directory_root_without_crashing(tmp_path: Path) -> None:
     (tmp_path / "auth").write_text("not a directory", encoding="utf-8")
     _make_dir(tmp_path / "compose" / "ws_live", age_seconds=100.0, now=now)
 
-    targets, scanned, dropped = scan_orphan_workspace_dirs(
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
         tmp_path,
         frozenset(),
         now=now,
@@ -376,6 +403,7 @@ def test_scan_skips_non_directory_root_without_crashing(tmp_path: Path) -> None:
     assert [target.workspace_id for target in targets] == ["ws_live"]
     assert scanned == 1
     assert dropped == 0
+    assert young_orphan == 0
 
 
 @pytest.mark.usefixtures("engine")
@@ -400,6 +428,7 @@ async def test_result_to_dict_round_trips(
     assert payload["status"] == "ok"
     assert payload["reason_code"] == ORPHAN_DIR_REAP_OK
     assert payload["reaped_count"] == 3
+    assert payload["young_orphan_count"] == 0
     assert "ws_todict" in payload["compose_teardowns"]
     assert isinstance(payload["reaped"], list)
 
