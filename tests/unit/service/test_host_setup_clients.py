@@ -242,6 +242,43 @@ def test_build_plan_codex_conflicting_args_is_conflict(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_build_plan_claude_scalar_args_is_conflict(tmp_path: Path) -> None:
+    """Verify a Claude awf entry whose args is a non-list scalar plans a conflict.
+
+    A table entry with ``"args": null`` is ambiguous: the old ``list(...)``
+    comparison would crash on a non-iterable; it must route to the reason-coded
+    conflict path instead.
+    """
+    config = {"mcpServers": {AWF_MCP_SERVER_KEY: {"type": "stdio", "command": "awf", "args": None}}}
+    _claude_config_path(tmp_path).write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert "different command/args" in (plan.conflict_detail or "")
+
+
+@pytest.mark.unit
+def test_build_plan_codex_scalar_args_is_conflict(tmp_path: Path) -> None:
+    """Verify a Codex awf entry whose args is a scalar plans a conflict, not a crash."""
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        '[mcp_servers.awf]\ncommand = "awf"\nargs = 1\n',
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert "different command/args" in (plan.conflict_detail or "")
+
+
+@pytest.mark.unit
 def test_build_plan_malformed_json_is_conflict(tmp_path: Path) -> None:
     """Verify unparseable existing JSON is an ambiguous conflict."""
     _claude_config_path(tmp_path).write_text("{not valid json", encoding="utf-8")

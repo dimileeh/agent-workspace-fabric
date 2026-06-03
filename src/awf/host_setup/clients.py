@@ -561,10 +561,19 @@ def _entries_match(existing: Mapping[str, Any], desired: Mapping[str, Any]) -> b
     The meaningful identity of an MCP server entry is its launch command and
     args; matching those means the client already points at AWF, so auxiliary
     fields (timeouts, ``type``) are left untouched rather than treated as drift.
+
+    An existing ``args`` that is not a list (e.g. Claude JSON ``"args": null``
+    or Codex TOML ``args = 1``) cannot match the desired list args, so it
+    reports "no match" — routing the entry to the reason-coded conflict path
+    instead of crashing on ``list()`` of a non-iterable.
     """
-    return existing.get("command") == desired.get("command") and list(
-        existing.get("args", [])
-    ) == list(desired.get("args", []))
+    if existing.get("command") != desired.get("command"):
+        return False
+    existing_args = existing.get("args", [])
+    desired_args = desired.get("args", [])
+    if not isinstance(existing_args, (list, tuple)) or not isinstance(desired_args, (list, tuple)):
+        return False
+    return list(existing_args) == list(desired_args)
 
 
 def _merged_config(
