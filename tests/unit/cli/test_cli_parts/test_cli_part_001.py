@@ -154,14 +154,14 @@ class TestWorkspaceCreate:
                     "--agent",
                     "grok",
                     "--model",
-                    "grok-build-0.1",
+                    "grok-build",
                 ],
             )
 
         assert result.exit_code == 0
         body = mock.call_args.kwargs["json"]
         assert body["task"]["agent"] == "grok"
-        assert body["task"]["model"] == "grok-build-0.1"
+        assert body["task"]["model"] == "grok-build"
 
     @pytest.mark.unit
     def test_companion_json_can_include_compose_up_timeout(self) -> None:

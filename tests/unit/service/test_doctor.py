@@ -626,6 +626,10 @@ def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
     assert diagnostics["provider.gemini"]["reason"] == "GEMINI_AUTH_MISSING"
     assert diagnostics["provider.opencode"]["reason"] == "OPENCODE_OLLAMA_AUTH_MISSING"
     assert diagnostics["provider.grok"]["reason"] == "GROK_AUTH_MISSING"
+    assert (
+        diagnostics["provider.grok"]["action"]
+        == "Mount ~/.grok or set XAI_API_KEY in the AWF service environment."
+    )
     assert diagnostics["port.api"]["reason"] == "PORT_CLOSED"
     assert diagnostics["port.db"]["reason"] == "PORT_CLOSED"
     assert diagnostics["disk"]["message"] == "Free disk is below the configured AWF threshold."
