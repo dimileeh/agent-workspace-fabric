@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 import awf.service.provider_readiness as provider_readiness
+import awf.service.provider_readiness_helpers as provider_readiness_helpers
 from awf.service.provider_readiness import collect_agent_readiness
 
 from .test_provider_readiness_part_001 import (
@@ -438,3 +439,54 @@ def test_provider_readiness_security_summary_handles_malformed_warning_payloads(
         "DOCKER_AUTH_NOT_OBSERVED",
         "GITHUB_TOKEN_ENV_MISSING",
     ]
+
+
+@pytest.mark.unit
+def test_cli_auth_probe_reports_success_and_nonzero_failure() -> None:
+    ok = provider_readiness._probe_cli_auth_status(
+        provider_label="Codex",
+        args=["codex", "auth", "status"],
+        failure_reason="CODEX_AUTH_FAILED",
+        timeout_reason="CODEX_AUTH_TIMEOUT",
+        missing_reason="CODEX_AUTH_CLI_MISSING",
+        error_reason="CODEX_AUTH_ERROR",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(stdout="ok\n"),
+        secrets=frozenset(),
+    )
+    failed = provider_readiness._probe_cli_auth_status(
+        provider_label="Codex",
+        args=["codex", "auth", "status"],
+        failure_reason="CODEX_AUTH_FAILED",
+        timeout_reason="CODEX_AUTH_TIMEOUT",
+        missing_reason="CODEX_AUTH_CLI_MISSING",
+        error_reason="CODEX_AUTH_ERROR",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(returncode=1, stderr="bad auth"),
+        secrets=frozenset(),
+    )
+
+    assert ok == {"status": "ok", "reason_code": "CODEX_AUTH_OK"}
+    assert failed["status"] == "fail"
+    assert failed["reason_code"] == "CODEX_AUTH_FAILED"
+    assert failed["detail"] == "bad auth"
+
+
+@pytest.mark.unit
+def test_redaction_parts_cover_urls_empty_secrets_existing_redactions_and_merges() -> None:
+    redacted, parts = provider_readiness._redact_with_redaction_parts(
+        "connect http://user:pass@example.test with sk-providersecret123456",
+        frozenset({""}),
+    )
+
+    assert "user:pass" not in redacted
+    assert "sk-providersecret123456" not in redacted
+    assert parts is not None
+    assert provider_readiness_helpers._slice_redaction_segments(
+        [("literal", "before"), ("redaction", ""), ("literal", "after")],
+        6,
+        16,
+    ) == [("redaction", "")]
+    assert provider_readiness_helpers._merge_literal_redaction_segments(
+        [("literal", ""), ("literal", "a"), ("literal", "b")]
+    ) == [("literal", "ab")]
