@@ -296,6 +296,38 @@ def test_build_plan_non_mapping_json_is_conflict(tmp_path: Path) -> None:
     assert plan.action == "conflict"
 
 
+@pytest.mark.unit
+def test_build_plan_non_table_servers_value_is_conflict(tmp_path: Path) -> None:
+    """Verify a non-table ``mcpServers`` value is refused, not silently erased."""
+    _claude_config_path(tmp_path).write_text(
+        json.dumps({"mcpServers": "not-a-table"}), encoding="utf-8"
+    )
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert plan.conflict_detail is not None
+    assert "mcpServers" in (plan.conflict_detail or "")
+    assert plan.merged_config is None
+
+
+@pytest.mark.unit
+def test_build_plan_non_table_awf_entry_is_conflict(tmp_path: Path) -> None:
+    """Verify a non-table ``awf`` entry is refused, not silently overwritten."""
+    config = {"mcpServers": {AWF_MCP_SERVER_KEY: "not-a-table", "other": {"command": "x"}}}
+    _claude_config_path(tmp_path).write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert plan.conflict_detail is not None
+    assert plan.merged_config is None
+
+
 # --- build_client_config_plan: update / preservation ----------------------
 
 

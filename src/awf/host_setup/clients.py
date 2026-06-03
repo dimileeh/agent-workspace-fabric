@@ -266,10 +266,49 @@ def build_client_config_plan(
 
     existing_servers = existing.get(descriptor.servers_key) if existing is not None else None
     existing_entry: Mapping[str, Any] | None = None
+    if (
+        existing is not None
+        and descriptor.servers_key in existing
+        and not isinstance(existing_servers, Mapping)
+    ):
+        # A present-but-non-table servers block is ambiguous: merging would erase
+        # it. Refuse the conflict rather than silently overwrite the value.
+        return ClientConfigPlan(
+            client=client,
+            method=method,
+            config_path=config_path,
+            action="conflict",
+            conflict_detail=(
+                f"Existing {_label(client)} config has a non-table "
+                f"'{descriptor.servers_key}' value; AWF refuses to overwrite it. "
+                "Resolve it manually, then re-run."
+            ),
+            desired_entry=desired_entry,
+            cli_command=descriptor.add_command(env_file_str) if method == "official_cli" else None,
+            descriptor=descriptor,
+        )
     if isinstance(existing_servers, Mapping):
         candidate = existing_servers.get(AWF_MCP_SERVER_KEY)
         if isinstance(candidate, Mapping):
             existing_entry = candidate
+        elif AWF_MCP_SERVER_KEY in existing_servers:
+            # An 'awf' entry that is not a table cannot be compared for drift and
+            # would be silently overwritten by the merge; refuse the conflict.
+            return ClientConfigPlan(
+                client=client,
+                method=method,
+                config_path=config_path,
+                action="conflict",
+                conflict_detail=(
+                    "An existing 'awf' MCP server entry is not a table; AWF refuses "
+                    "to overwrite it. Resolve the entry manually, then re-run."
+                ),
+                desired_entry=desired_entry,
+                cli_command=(
+                    descriptor.add_command(env_file_str) if method == "official_cli" else None
+                ),
+                descriptor=descriptor,
+            )
 
     file_missing = existing is None
 
