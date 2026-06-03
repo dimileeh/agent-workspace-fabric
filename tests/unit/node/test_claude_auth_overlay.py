@@ -495,7 +495,7 @@ def test_overlay_scratch_dir_oserror_falls_back_to_legacy_copy(
 
 
 @pytest.mark.unit
-def test_overlay_signature_write_oserror_falls_back_to_legacy_copy(
+def test_overlay_signature_write_oserror_keeps_live_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     host_home = tmp_path / "host-home"
@@ -503,8 +503,8 @@ def test_overlay_signature_write_oserror_falls_back_to_legacy_copy(
     _seed_host_claude(host_home)
 
     def _write_fails(self: Path, *args: object, **kwargs: object) -> int:
-        # The only ``write_text`` in the resolve path is the base-signature
-        # marker; a disk-full filesystem fails it after the scratch dirs exist.
+        # The only ``write_text`` in the resolve path is the base-signature marker,
+        # now written *after* a successful mount; a disk-full filesystem fails it.
         raise OSError("No space left on device")
 
     monkeypatch.setattr(auth_mounts_mod.Path, "write_text", _write_fails)
@@ -520,9 +520,13 @@ def test_overlay_signature_write_oserror_falls_back_to_legacy_copy(
 
     by_target = {m.target: m for m in mounts}
     claude_root = work_dir / "auth" / "ws_sig_fail" / "claude"
-    # A signature-marker OSError degrades to the legacy full copy, not a hard fail.
-    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
-    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    # The mount already succeeded, so a marker-write OSError keeps the live overlay
+    # (it is correct for this provision) rather than discarding it for a needless
+    # full copy — it must not hard-fail provisioning either. The pin marker is just
+    # absent, so a future teardown+retry recomputes the base from the host.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    assert not (claude_root / ".claude").exists()
+    assert not (claude_root / "base.signature").exists()
     assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
 
 
@@ -964,6 +968,74 @@ def test_prepin_upper_mount_failure_does_not_pin_guessed_base(tmp_path: Path) ->
     # host hash; persisting it would lock every later retry to the wrong lowerdir
     # so the surviving upper could never remount (even after the host reverts).
     assert not (claude_root / "base.signature").exists()
+
+
+@pytest.mark.unit
+def test_crash_before_mount_does_not_pin_stale_base_for_fresh_provision(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    class KilledMidMountMounter(FakeOverlayMounter):
+        """Models the worker being hard-killed (SIGKILL/reboot) during ``mount``.
+
+        A signal-driven kill is not an ``OSError``/``SubprocessError``, so it is
+        *not* caught by the mount fallback handler and no cleanup runs — exactly
+        the window a graceful-failure ``unlink`` could never cover.
+        """
+
+        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
+            raise KeyboardInterrupt("worker killed mid-mount")
+
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+
+    # Provision 1: a *fresh* provision (no prior upper, no legacy copy) builds the
+    # base and creates the empty scratch dirs, then the worker is killed before the
+    # mount establishes the overlay. The empty ``upper`` survives on disk.
+    with pytest.raises(KeyboardInterrupt):
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_killed",
+            host_env={},
+            overlay_mounter=KilledMidMountMounter(supported=True),
+        )
+    claude_root = work_dir / "auth" / "ws_killed" / "claude"
+    assert (claude_root / "upper").is_dir()
+    assert not any((claude_root / "upper").iterdir())
+    # The crux of the fix: no pin marker may survive, because the overlay never
+    # actually mounted. (Before the fix the marker was written ahead of the mount
+    # and would persist through the kill, pinning a base no overlay-backed
+    # workspace ever ran against.)
+    assert not (claude_root / "base.signature").exists()
+
+    # The operator updates ``~/.claude`` before the retry, so a fresh provision
+    # must reflect the *new* host content, not the base captured pre-kill.
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+    base_b = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert base_b != base_a
+
+    # Provision 2 (retry): with no surviving marker the empty ``upper`` is treated
+    # as a fresh start — the base is recomputed from the current host and mounted,
+    # never the stale pre-kill base.
+    mounter = FakeOverlayMounter(supported=True)
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_killed",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    assert mounter.mounts[-1]["lowerdir"] == base_b
+    assert mounter.mounts[-1]["lowerdir"] != base_a
+    # The marker is now recorded post-mount, pinning the base the overlay truly ran
+    # against so a later teardown+retry remounts correctly.
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
 
 
 @pytest.mark.unit

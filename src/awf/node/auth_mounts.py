@@ -798,20 +798,13 @@ def _prepare_claude_overlay_mount(
     try:
         for directory in (upper, work, merged):
             directory.mkdir(parents=True, exist_ok=True)
-
-        if fresh_signature is not None:
-            # Record the base signature so a later retry over this upper/work pins
-            # to this exact base instead of recomputing it from a changed host.
-            # (Pinned retries leave ``fresh_signature`` None — the marker exists.)
-            sig_marker.write_text(fresh_signature)
     except OSError as exc:
-        # Creating the per-workspace scratch dirs or writing the signature marker
-        # can fail with OSError (disk full after the base copytree just consumed
-        # space, permissions). Degrade to the legacy full copy rather than
-        # hard-failing provisioning — the same resilience contract honored when
-        # the base build or the mount itself fails. ``upper``/``work`` are left
-        # intact: a retry path may carry the agent's overlay mutations there,
-        # which a teardown would destroy.
+        # Creating the per-workspace scratch dirs can fail with OSError (disk full
+        # after the base copytree just consumed space, permissions). Degrade to the
+        # legacy full copy rather than hard-failing provisioning — the same
+        # resilience contract honored when the base build or the mount itself fails.
+        # ``upper``/``work`` are left intact: a retry path may carry the agent's
+        # overlay mutations there, which a teardown would destroy.
         _log.warning(
             "claude_auth_overlay_unavailable",
             reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
@@ -854,26 +847,42 @@ def _prepare_claude_overlay_mount(
             workspace_auth_root=str(claude_root),
             error=str(exc),
         )
-        # Drop the signature marker if we wrote one this call (``fresh_signature``
-        # set). The mount never validated the surviving ``upper`` against that
-        # base, and for a pre-pin upper (no prior marker) the recorded signature
-        # is only a guess from the current host hash — the upper may have been
-        # built against an older base. Persisting it would pin every later retry
-        # to the wrong lowerdir, so the surviving upper could never remount even
-        # after the host reverts. Removing it lets retries recompute the base from
-        # the host. A pinned retry leaves ``fresh_signature`` None and keeps its
-        # (already validated) marker so a later transient-failure retry can remount.
-        if fresh_signature is not None:
-            sig_marker.unlink(missing_ok=True)
         # Remove only the unused ``merged`` mountpoint. ``upper``/``work`` are left
         # intact: a normal teardown leaves the agent's overlay mutations in
         # ``upper`` on disk, and a retry that fails to remount here (a transient
         # error — the pinned lowerdir already rules out the upper/base mismatch)
         # must not wipe them. We degrade to the legacy full copy for now; a later
         # provision can pin the surviving ``upper`` and remount it, recovering the
-        # mutations. This matches the scratch-dir OSError path above.
+        # mutations. This matches the scratch-dir OSError path above. No signature
+        # marker is undone here: it is now written only *after* a successful mount
+        # (below), so a failed — or never-reached — mount never leaves a pin.
         shutil.rmtree(merged, ignore_errors=True)
         return None
+
+    if fresh_signature is not None:
+        # Record the base signature only now that the overlay is actually
+        # established, so a later retry over this upper/work pins to this exact
+        # base instead of recomputing it from a changed host. Writing it before the
+        # mount risked a crash in the window between the write and a successful
+        # mount: the next retry would see the empty ``upper`` plus a stale pin and
+        # reuse the old base for what is really a fresh provision, mounting stale
+        # Claude auth/config if the operator changed the host ``~/.claude`` in
+        # between. A post-mount write means a pin exists only for an overlay that
+        # genuinely ran. (Pinned retries leave ``fresh_signature`` None — the
+        # marker already exists and was validated by the prior successful mount.)
+        try:
+            sig_marker.write_text(fresh_signature)
+        except OSError as exc:
+            # The overlay is live and correct for this provision; a failed marker
+            # write only forfeits the pin hint for a future teardown+retry (which
+            # then recomputes the base from the host). Keep the working overlay
+            # rather than discarding it — never hard-fail provisioning on this.
+            _log.warning(
+                "claude_auth_overlay_unavailable",
+                reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
+                workspace_auth_root=str(claude_root),
+                error=str(exc),
+            )
 
     return (
         AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
