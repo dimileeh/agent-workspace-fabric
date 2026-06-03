@@ -648,10 +648,12 @@ def _teardown_completed_workspace_auth_overlay(work_dir: Path, workspace_id: str
 
     try:
         teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=workspace_id)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
         _log.warning(
             "monitor.auth_overlay_teardown_failed",
+            reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
             workspace_id=workspace_id,
+            error=repr(exc)[:400],
         )
 
 

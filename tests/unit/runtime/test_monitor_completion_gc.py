@@ -295,9 +295,14 @@ async def test_completed_monitor_auth_overlay_teardown_failure_does_not_block_gc
     ):
         await runner._gc_completed_workspace_filesystem(ws_id)
 
+    # The warning must carry diagnostic detail (reason_code + the bound error),
+    # mirroring the ``service gc`` handler, so operators can tell EBUSY from a
+    # missing umount binary or a permission error.
     assert any(
         record.get("event") == "monitor.auth_overlay_teardown_failed"
         and record.get("workspace_id") == ws_id
+        and record.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"
+        and "target is busy" in record.get("error", "")
         for record in captured
     )
     # The teardown failure is swallowed; GC still reclaims the auth dir.
