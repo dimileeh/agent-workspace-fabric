@@ -749,8 +749,14 @@ def _prepare_claude_overlay_mount(
             workspace_auth_root=str(claude_root),
             error=str(exc),
         )
-        for directory in (merged, work, upper):
-            shutil.rmtree(directory, ignore_errors=True)
+        # Remove only the unused ``merged`` mountpoint. ``upper``/``work`` are left
+        # intact: a normal teardown leaves the agent's overlay mutations in
+        # ``upper`` on disk, and a retry that fails to remount here (a transient
+        # error — the pinned lowerdir already rules out the upper/base mismatch)
+        # must not wipe them. We degrade to the legacy full copy for now; a later
+        # provision can pin the surviving ``upper`` and remount it, recovering the
+        # mutations. This matches the scratch-dir OSError path above.
+        shutil.rmtree(merged, ignore_errors=True)
         return None
 
     return (

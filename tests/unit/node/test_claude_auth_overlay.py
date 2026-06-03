@@ -708,6 +708,53 @@ def test_mount_ebusy_after_concurrent_mount_reuses_live_overlay(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_transient_mount_failure_preserves_surviving_upper(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_transient",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_transient" / "claude"
+    # The agent accumulated writable overlay data in ``upper`` during the run.
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+
+    # The overlay is torn down normally (``upper``/``work`` persist on disk) and a
+    # later provision retry hits a *transient* mount failure with ``merged`` not
+    # mounted. The cleanup must not wipe the surviving ``upper``/``work`` layers
+    # (the agent's mutations); only the unused ``merged`` mountpoint is removed and
+    # we degrade to the legacy copy so the retry can later recover the overlay.
+    mounter.mounted.clear()
+    mounter._mount_error = OSError("transient remount failure")
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_transient",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    # Degraded to the legacy full copy for this provision ...
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+    # ... but the agent's surviving overlay mutations are intact for a future
+    # retry to remount, and the unused mountpoint is cleaned up.
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+    assert (claude_root / "work").is_dir()
+    assert not (claude_root / "merged").exists()
+
+
+@pytest.mark.unit
 def test_teardown_unmounts_merged_before_removal(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     merged = work_dir / "auth" / "ws_t" / "claude" / "merged"
