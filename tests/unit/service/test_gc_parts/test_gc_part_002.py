@@ -23,6 +23,7 @@ from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
     COMPLETED_PR_RETENTION_EXPIRED,
     FAILED_WORKSPACE_NO_WORK,
+    PATH_ALREADY_REMOVED,
     TERMINAL_WORKSPACE_RETENTION_EXPIRED,
     WORKSPACE_WITHIN_RETENTION,
     WorkspaceGCCandidate,
@@ -33,6 +34,7 @@ from awf.service.gc import (
     _classify_workspace_for_gc,
     _container_command_is_idle,
     _delete_gc_path,
+    _delete_gc_path_outcome,
     _estimate_bytes,
     _failed_terminal_workspace_has_no_work,
     _snapshot_has_no_work,
@@ -584,6 +586,76 @@ def test_delete_gc_path_handles_rmtree_oserror(
     assert error == "disk gone"
     # A generic OSError (no permission errno) stays a plain delete failure.
     assert reason_code == "PATH_DELETE_FAILED"
+
+
+@pytest.mark.unit
+def test_delete_gc_path_treats_enoent_rmtree_race_as_already_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A concurrent GC run can remove the dir between the preflight ``exists``
+    # probe and ``rmtree``, surfacing as ENOENT. That is an idempotent no-op,
+    # not a ``PATH_DELETE_FAILED`` partial-run failure.
+    import errno
+
+    target = tmp_path / "service" / "git" / "worktrees" / "ws_race"
+    target.mkdir(parents=True)
+    gc_path = WorkspaceGCPath(
+        kind="worktree",
+        path=target,
+        exists=True,
+        estimated_bytes=0,
+    )
+
+    def _raise_enoent(_path: object) -> None:
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+    monkeypatch.setattr("shutil.rmtree", _raise_enoent)
+
+    deleted, error, reason_code = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+
+    assert deleted is False
+    assert error is None
+    assert reason_code == PATH_ALREADY_REMOVED
+
+
+@pytest.mark.unit
+def test_delete_gc_path_outcome_maps_enoent_race_to_already_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The outcome wrapper must not turn the ENOENT race into a ``failed`` path
+    # outcome (which would flip the whole GC run to ``partial``).
+    import errno
+
+    target_path = tmp_path / "service" / "git" / "worktrees" / "ws_race"
+    target_path.mkdir(parents=True)
+    target = WorkspaceGCPath(
+        kind="worktree",
+        path=target_path,
+        exists=True,
+        estimated_bytes=0,
+    )
+    candidate = WorkspaceGCCandidate(
+        workspace_id="ws_race",
+        status=WorkspaceStatus.destroyed,
+        updated_at=datetime.now(UTC),
+        age_hours=72,
+        reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+        worktree=target,
+        compose=WorkspaceGCPath(kind="compose", path=target_path, exists=False, estimated_bytes=0),
+        auth=WorkspaceGCPath(kind="auth", path=target_path, exists=False, estimated_bytes=0),
+    )
+
+    def _raise_enoent(_path: object) -> None:
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+    monkeypatch.setattr("shutil.rmtree", _raise_enoent)
+
+    outcome = _delete_gc_path_outcome(candidate, target, work_dir=tmp_path / "service")
+
+    assert outcome.status == "already_removed"
+    assert outcome.reason_code == PATH_ALREADY_REMOVED
+    assert outcome.deleted is False
+    assert outcome.error is None
 
 
 @pytest.mark.unit

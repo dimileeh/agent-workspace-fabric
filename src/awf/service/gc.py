@@ -1229,6 +1229,17 @@ def _delete_gc_path_outcome(
             deleted=True,
             estimated_bytes=target.estimated_bytes,
         )
+    if failure_reason_code == PATH_ALREADY_REMOVED and error is None:
+        # The dir vanished mid-delete (concurrent GC). Treat it as an
+        # already-removed no-op rather than a partial-run failure.
+        return WorkspaceGCPathOutcome(
+            workspace_id=candidate.workspace_id,
+            kind=target.kind,
+            path=target.path,
+            status="already_removed",
+            reason_code=PATH_ALREADY_REMOVED,
+            estimated_bytes=target.estimated_bytes,
+        )
     return WorkspaceGCPathOutcome(
         workspace_id=candidate.workspace_id,
         kind=target.kind,
@@ -1616,6 +1627,11 @@ def _delete_gc_path(
     except PermissionError as exc:
         return False, str(exc), PATH_DELETE_PERMISSION_DENIED
     except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            # A concurrent GC run removed the dir between the preflight
+            # ``exists`` probe and ``rmtree``. That is an idempotent no-op, not
+            # a failure: report ``PATH_ALREADY_REMOVED`` so the run stays clean.
+            return False, None, PATH_ALREADY_REMOVED
         reason_code = (
             PATH_DELETE_PERMISSION_DENIED
             if exc.errno in _PERMISSION_DENIED_ERRNOS
