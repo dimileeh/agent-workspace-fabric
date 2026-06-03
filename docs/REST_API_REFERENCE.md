@@ -683,8 +683,12 @@ curl -X POST "http://localhost:8000/v1/service/gc" \
 The response is `ServiceGCResponse`: the top-level `status`
 (`dry_run`/`succeeded`/`partial`), `reason_code`, and counts, plus the full GC
 plan (`candidates`, `preserved`, `delete_errors`). A permission-denied delete is
-reported loudly as a `partial` result with reason code
-`PATH_DELETE_PERMISSION_DENIED` -- never a silent success.
+reported loudly -- never a silent success -- but the codes live in two places:
+the envelope `status` is `partial` and the top-level `reason_code` is
+`CLEANUP_EXECUTION_PARTIAL`, while the specific `PATH_DELETE_PERMISSION_DENIED`
+code is carried per-item on `delete_errors[*].reason_code`. Operators should
+check the envelope for `CLEANUP_EXECUTION_PARTIAL` and the individual
+`delete_errors` entries for `PATH_DELETE_PERMISSION_DENIED`.
 
 ---
 
