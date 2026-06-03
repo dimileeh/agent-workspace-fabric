@@ -863,9 +863,10 @@ def _probe_gh_auth(run_subprocess: SubprocessRun, environ: Mapping[str, str]) ->
     except FileNotFoundError:
         return "absent"
     except (OSError, subprocess.SubprocessError):
-        # A non-zero exit, timeout, or launch failure all mean ``gh`` could not
-        # confirm usable auth. Record a secret-free signal and degrade rather than
-        # crash the orchestration.
+        # A timeout (``TimeoutExpired``) or an OS-level launch failure: ``gh`` could
+        # not even run to confirm usable auth. Record a secret-free signal and degrade
+        # rather than crash the orchestration. A non-zero exit is *not* raised here
+        # under ``check=False`` — it falls through to the ``returncode`` check below.
         logger.warning("host_setup.github_probe_failed")
         return "unusable"
     return "ok" if result.returncode == 0 else "unusable"
