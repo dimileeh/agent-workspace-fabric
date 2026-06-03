@@ -1477,6 +1477,37 @@ def test_setup_mixed_clients_block_when_one_conflicts(client_harness: _ClientHar
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == "CLIENT_CONFIG_CONFLICT"
     assert set(payload["details"]["clients"]) == {"claude", "codex"}
+    # Regression (PRRT_kwDOSJAM6s6GxKEf): the clean codex create must NOT be
+    # applied when a sibling client conflicts -- no partial write.
+    assert not (client_harness.home / ".codex" / "config.toml").exists()
+
+
+@pytest.mark.unit
+def test_setup_mixed_clients_no_partial_write_when_later_client_conflicts(
+    client_harness: _ClientHarness,
+) -> None:
+    """Regression (PRRT_kwDOSJAM6s6GxKEf): a conflict in a later-listed client
+    must not leave an earlier, non-conflicting client partially written."""
+    # Claude has no config (a clean create, listed first); codex has a
+    # conflicting awf entry (listed second).
+    codex_config = client_harness.home / ".codex" / "config.toml"
+    codex_config.parent.mkdir(parents=True, exist_ok=True)
+    original_codex = '[mcp_servers.awf]\ncommand = "other"\nargs = []\n'
+    codex_config.write_text(original_codex, encoding="utf-8")
+
+    result = _runner.invoke(
+        app,
+        ["setup", "--client", "claude", "--client", "codex", "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "CLIENT_CONFIG_CONFLICT"
+    # The earlier, clean claude client must not have been written.
+    assert not (client_harness.home / ".claude.json").exists()
+    # The conflicting codex config is left exactly as it was.
+    assert codex_config.read_text(encoding="utf-8") == original_codex
 
 
 @pytest.mark.unit

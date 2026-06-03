@@ -26,7 +26,7 @@ from awf.cli.init_ops import (
 from awf.host_setup.clients import (
     default_client_command_runner,
     normalize_clients,
-    setup_client,
+    setup_clients,
 )
 from awf.host_setup.config import (
     HostSetupConfig,
@@ -322,10 +322,11 @@ def _run_client_setup(
     """Dispatch the selected MCP client integrations and render one payload.
 
     Unknown client selectors raise ``SetupCheckError(SETUP_CLIENT_UNKNOWN)``
-    (handled by ``setup_command`` as an exit-2 usage error). Each selected client
-    is processed through ``setup_client`` with the injected home/which/run/now
-    seams; a single client returns its payload verbatim, multiple are folded into
-    one multi-issue report.
+    (handled by ``setup_command`` as an exit-2 usage error). The selected clients
+    are processed through ``setup_clients`` with the injected home/which/run/now
+    seams, which plans every client before applying any so a conflict never
+    leaves a partial write; a single client returns its payload verbatim,
+    multiple are folded into one multi-issue report.
     """
     selected = normalize_clients(clients)
     try:
@@ -336,18 +337,18 @@ def _run_client_setup(
         # client config diff pointing the MCP server at a non-checkout env file.
         return _client_source_checkout_blocked_payload(error)
     home = _client_home()
-    payloads = [
-        setup_client(
-            client,
-            env_file=env_file,
-            dry_run=dry_run,
-            home=home,
-            which=_client_which,
-            run=_client_run,
-            now=_client_now,
-        )
-        for client in selected
-    ]
+    # Plan all selected clients before applying any so a single conflicting
+    # client cannot leave earlier/later clients partially written while the run
+    # reports blocked overall (see setup_clients).
+    payloads = setup_clients(
+        selected,
+        env_file=env_file,
+        dry_run=dry_run,
+        home=home,
+        which=_client_which,
+        run=_client_run,
+        now=_client_now,
+    )
     if len(payloads) == 1:
         return payloads[0]
     return _combine_client_payloads(selected, payloads)

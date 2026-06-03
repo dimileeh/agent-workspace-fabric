@@ -433,6 +433,48 @@ def setup_client(
     plan = build_client_config_plan(client, env_file=env_file, home=home, which=which, now=now)
     if dry_run:
         return _dry_run_payload(plan)
+    return _apply_plan_payload(plan, run=run, now=now)
+
+
+def setup_clients(
+    clients: Sequence[str],
+    *,
+    env_file: str | Path,
+    dry_run: bool,
+    home: Path,
+    which: WhichFn,
+    run: CommandRunner,
+    now: NowFn = lambda: datetime.now(UTC),
+) -> list[FirstRunPayload]:
+    """Plan every selected client first, then apply only if none conflict.
+
+    Building all plans up front is safe because planning is side-effect free
+    (:func:`build_client_config_plan` only reads). Applying each client inline
+    instead would let one conflicting target leave earlier/later clients
+    mutated while the run still reports blocked overall -- a partial write. So
+    when any plan is a conflict (the failure mode that *is* knowable before any
+    mutation), nothing is applied and each client renders a plan-only payload
+    (a blocked conflict for the offender, an informational not-applied plan for
+    the rest). Unpredictable apply-time failures (an official-CLI/IO error) are
+    not pre-checkable, so a clean multi-client run still applies in order. On
+    ``dry_run`` nothing is ever applied. Returns one payload per client, in the
+    given order, for the caller to fold into a combined report.
+    """
+    plans = [
+        build_client_config_plan(client, env_file=env_file, home=home, which=which, now=now)
+        for client in clients
+    ]
+    if dry_run:
+        return [_dry_run_payload(plan) for plan in plans]
+    if any(plan.action == "conflict" for plan in plans):
+        return [_plan_only_payload(plan) for plan in plans]
+    return [_apply_plan_payload(plan, run=run, now=now) for plan in plans]
+
+
+def _apply_plan_payload(
+    plan: ClientConfigPlan, *, run: CommandRunner, now: NowFn
+) -> FirstRunPayload:
+    """Apply a non-dry-run plan and render its success/blocked payload."""
     try:
         result = apply_client_config_plan(plan, run=run, now=now)
     except SetupCheckError as error:
@@ -440,7 +482,7 @@ def setup_client(
             command=SETUP_COMMAND,
             reason_code=error.reason_code,
             status="blocked",
-            summary=f"AWF could not configure the {_label(client)} MCP client.",
+            summary=f"AWF could not configure the {_label(plan.client)} MCP client.",
             details=error.details,
             next_steps=_client_next_steps(error.reason_code),
         )
@@ -449,6 +491,37 @@ def setup_client(
         summary=_apply_summary(result),
         details=_apply_details(plan, result),
         next_steps=("Restart the client session to load the AWF MCP server.",),
+    )
+
+
+def _plan_only_payload(plan: ClientConfigPlan) -> FirstRunPayload:
+    """Render a planned-but-not-applied payload for a conflict-blocked run.
+
+    Used when a sibling client conflicts so the whole multi-client run applies
+    nothing: the conflicting client renders its blocked conflict payload, while
+    a clean create/update reports that it was planned but *not* written (so the
+    combined report never implies a partial apply) and a no-change client
+    reports it needs no change. ``dry_run`` is ``False`` in the details because
+    nothing was applied for the *sibling conflict*, not because of a dry-run.
+    """
+    if plan.action == "conflict":
+        return _dry_run_payload(plan)
+    label = _label(plan.client)
+    if plan.action == "no_change":
+        summary = f"{label} MCP config already registers the AWF server; no change needed."
+    else:
+        verb = "create" if plan.action == "create" else "update"
+        summary = (
+            f"awf setup would {verb} the {label} MCP config but applied nothing "
+            "because another selected client conflicts."
+        )
+    return first_run_success_payload(
+        command=SETUP_COMMAND,
+        summary=summary,
+        details=_plan_details(plan, dry_run=False),
+        next_steps=(
+            "Resolve the conflicting client reported above, then re-run setup for these clients.",
+        ),
     )
 
 
@@ -857,4 +930,5 @@ __all__ = [
     "normalize_client",
     "normalize_clients",
     "setup_client",
+    "setup_clients",
 ]

@@ -21,6 +21,7 @@ from awf.host_setup.clients import (
     normalize_client,
     normalize_clients,
     setup_client,
+    setup_clients,
 )
 from awf.host_setup.rendering import (
     CLIENT_CONFIG_CONFLICT,
@@ -852,6 +853,119 @@ def test_default_client_command_runner_captures_result() -> None:
     assert result is not None
     assert result.returncode == 0
     assert "hi" in result.stdout
+
+
+# --- setup_clients: plan-all-then-apply (no partial writes) ---------------
+
+
+@pytest.mark.unit
+def test_setup_clients_applies_all_when_none_conflict(tmp_path: Path) -> None:
+    """Verify a clean multi-client run writes every selected client's config."""
+    payloads = setup_clients(
+        ["claude", "codex"],
+        env_file=_ENV_FILE,
+        dry_run=False,
+        home=tmp_path,
+        which=_which_missing,
+        run=_never_run,
+        now=_now,
+    )
+
+    assert [payload.status for payload in payloads] == ["success", "success"]
+    assert [payload.details["wrote"] for payload in payloads] == [True, True]
+    assert _claude_config_path(tmp_path).exists()
+    assert _codex_config_path(tmp_path).exists()
+
+
+@pytest.mark.unit
+def test_setup_clients_applies_nothing_when_any_client_conflicts(tmp_path: Path) -> None:
+    """Verify a conflict blocks the run and leaves the clean sibling unwritten.
+
+    The clean claude client is listed first so, without plan-all-then-apply, it
+    would be written before the conflicting codex client is even planned. The
+    fix must leave no client config on disk.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    original = '[mcp_servers.awf]\ncommand = "other"\nargs = []\n'
+    codex_path.write_text(original, encoding="utf-8")
+
+    # Payloads are returned in the input order: claude (clean), codex (conflict).
+    claude_payload, codex_payload = setup_clients(
+        ["claude", "codex"],
+        env_file=_ENV_FILE,
+        dry_run=False,
+        home=tmp_path,
+        which=_which_missing,
+        run=_never_run,
+        now=_now,
+    )
+
+    # The clean sibling is reported as planned-but-not-applied (never written);
+    # the conflicting client renders a blocked conflict.
+    assert claude_payload.status == "success"
+    assert claude_payload.details.get("wrote") is not True
+    assert "applied nothing" in claude_payload.summary
+    assert codex_payload.status == "blocked"
+    assert codex_payload.reason_code == CLIENT_CONFIG_CONFLICT
+    # No client config was written: claude is absent and codex is untouched.
+    assert not _claude_config_path(tmp_path).exists()
+    assert codex_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.unit
+def test_setup_clients_conflict_block_reports_no_change_sibling(tmp_path: Path) -> None:
+    """Verify a no_change sibling is reported as such when another conflicts."""
+    # claude already registers AWF (no_change); codex conflicts.
+    _claude_config_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    AWF_MCP_SERVER_KEY: {
+                        "type": "stdio",
+                        "command": "awf",
+                        "args": _desired_args(),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text('[mcp_servers.awf]\ncommand = "other"\nargs = []\n', encoding="utf-8")
+
+    claude_payload, _codex_payload = setup_clients(
+        ["claude", "codex"],
+        env_file=_ENV_FILE,
+        dry_run=False,
+        home=tmp_path,
+        which=_which_missing,
+        run=_never_run,
+        now=_now,
+    )
+
+    assert claude_payload.status == "success"
+    assert claude_payload.details["action"] == "no_change"
+    assert "no change needed" in claude_payload.summary
+
+
+@pytest.mark.unit
+def test_setup_clients_dry_run_writes_nothing(tmp_path: Path) -> None:
+    """Verify a dry-run multi-client plan renders payloads without mutating."""
+    payloads = setup_clients(
+        ["claude", "codex"],
+        env_file=_ENV_FILE,
+        dry_run=True,
+        home=tmp_path,
+        which=_which_missing,
+        run=_never_run,
+        now=_now,
+    )
+
+    assert all(payload.details["dry_run"] is True for payload in payloads)
+    assert not _claude_config_path(tmp_path).exists()
+    assert not _codex_config_path(tmp_path).exists()
 
 
 @pytest.mark.unit

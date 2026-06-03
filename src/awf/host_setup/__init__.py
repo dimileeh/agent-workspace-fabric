@@ -14,6 +14,7 @@ from awf.host_setup.clients import (
     normalize_client,
     normalize_clients,
     setup_client,
+    setup_clients,
 )
 from awf.host_setup.config import (
     DEFAULT_API_HOST_PORT,
@@ -304,6 +305,7 @@ __all__ = [
     "run_system_checks",
     "select_credential_backend",
     "setup_client",
+    "setup_clients",
     "store_provider_credential",
     "validate_source_checkout",
     "verified_source_from_metadata",
