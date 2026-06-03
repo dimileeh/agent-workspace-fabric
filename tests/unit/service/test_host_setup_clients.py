@@ -312,6 +312,42 @@ def test_build_plan_diff_excludes_adjacent_secret_gaining_trailing_comma(
     assert secret not in plan.diff
     # The pre-existing key itself must not be echoed as a comma-churn line.
     assert "apiKey" not in plan.diff
+    # The only suppression here is the benign comma rewrite of the prior last key
+    # (offset by its matching removal), so the preview is still complete.
+    assert plan.diff_is_approximate is False
+
+
+@pytest.mark.unit
+def test_build_plan_diff_flags_approximate_when_added_line_matches_existing(
+    tmp_path: Path,
+) -> None:
+    """Verify a genuine AWF line dropped by the secret filter flags the diff approximate.
+
+    When another ``stdio`` server already exists, AWF's brand-new ``"type": "stdio"``
+    line is identical to a pre-existing line, so the secret-leak suppression filter
+    drops it from the preview even though the write adds it. The diff must then be
+    marked approximate (like the official-CLI path) so the operator is not misled
+    into thinking the (now incomplete) preview is the full set of added lines.
+    """
+    config = {
+        "mcpServers": {
+            "aaa-other": {"type": "stdio", "command": "other", "args": []},
+        }
+    }
+    _claude_config_path(tmp_path).write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert plan.method == "file"
+    # The added ``"type": "stdio"`` line is suppressed (it echoes the sibling
+    # server's identical line), so the diff is incomplete and flagged approximate.
+    assert plan.diff_is_approximate is True
+    assert '"type": "stdio"' not in plan.diff
+    # The write itself stays exact: the merged config still carries AWF's entry.
+    assert plan.merged_config["mcpServers"][AWF_MCP_SERVER_KEY]["type"] == "stdio"
 
 
 # --- build_client_config_plan: conflict -----------------------------------
@@ -1245,6 +1281,35 @@ def test_setup_client_dry_run_file_method_omits_approximate_marker(tmp_path: Pat
 
     assert payload.details["method"] == "file"
     assert "diff_is_approximate" not in payload.details
+    assert "cli_command" not in payload.details
+
+
+@pytest.mark.unit
+def test_setup_client_dry_run_file_method_marks_approximate_when_line_suppressed(
+    tmp_path: Path,
+) -> None:
+    """Verify the file-method dry-run flags an incomplete diff as approximate.
+
+    A sibling ``stdio`` server makes AWF's new ``"type": "stdio"`` line identical
+    to a pre-existing one, so the secret-leak filter drops it from the preview.
+    The payload must mark the diff approximate (without a CLI argv, which is an
+    official-CLI-only field) so the operator knows the preview is incomplete.
+    """
+    config = {"mcpServers": {"aaa-other": {"type": "stdio", "command": "x", "args": []}}}
+    _claude_config_path(tmp_path).write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    payload = setup_client(
+        "claude",
+        env_file=_ENV_FILE,
+        dry_run=True,
+        home=tmp_path,
+        which=_which_missing,
+        run=_never_run,
+        now=_now,
+    )
+
+    assert payload.details["method"] == "file"
+    assert payload.details["diff_is_approximate"] is True
     assert "cli_command" not in payload.details
 
 

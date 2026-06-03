@@ -216,6 +216,10 @@ class ClientConfigPlan:
     config_path: Path
     action: ClientConfigAction
     diff: str = ""
+    # Set when the scoped diff filter dropped a genuine AWF line that
+    # coincidentally matched existing content, so the preview is incomplete
+    # (the write itself is always exact). Mirrors the ``official_cli`` flag.
+    diff_is_approximate: bool = False
     backup_path: Path | None = None
     conflict_detail: str | None = None
     desired_entry: Mapping[str, Any] = field(default_factory=dict)
@@ -414,7 +418,7 @@ def build_client_config_plan(
         )
 
     action: ClientConfigAction = "create" if file_missing else "update"
-    diff = _unified_diff(existing_text, merged_text, config_path)
+    diff, diff_is_approximate = _unified_diff(existing_text, merged_text, config_path)
     backup_path = (
         _backup_path(config_path, now()) if method == "file" and action == "update" else None
     )
@@ -424,6 +428,7 @@ def build_client_config_plan(
         config_path=config_path,
         action=action,
         diff=diff,
+        diff_is_approximate=diff_is_approximate,
         backup_path=backup_path,
         desired_entry=desired_entry,
         merged_config=merged,
@@ -731,8 +736,8 @@ def _serialize_config(config: Mapping[str, Any], config_format: ClientConfigForm
     return _emit_toml(config)
 
 
-def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> str:
-    """Return a unified diff between the existing and merged config text.
+def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> tuple[str, bool]:
+    """Return the scoped unified diff and whether it omits genuine AWF lines.
 
     Emitted with zero context lines (``n=0``) and then filtered so the result
     contains only brand-new AWF lines. AWF only ever adds or changes its own
@@ -750,17 +755,51 @@ def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> st
       ``existing_text`` is therefore suppressed — it is pre-existing user
       content, never an AWF addition — keeping those third-party secrets out of
       dry-run/apply payloads entirely.
+
+    The second leakage guard is content-based, so it can also drop a *genuine*
+    new AWF line whose serialized form coincidentally equals a line already in
+    the file (e.g. another ``stdio`` server makes ``"type": "stdio"`` pre-exist,
+    or a Codex server already carries ``startup_timeout_sec = 20``). Such a drop
+    leaves the preview incomplete, so this returns ``True`` as the second value
+    to flag the diff approximate — mirroring the ``official_cli`` path — without
+    affecting the always-exact write. A suppressed addition that is merely the
+    comma-rewritten form of a removed line (offset by a suppressed removal of the
+    same content) is the benign intended case and does not set the flag.
     """
     existing_lines = {_normalize_config_line(line) for line in existing_text.splitlines()}
-    diff_lines = unified_diff(
+    kept: list[str] = []
+    suppressed_additions: list[str] = []
+    suppressed_removals: list[str] = []
+    for line in unified_diff(
         existing_text.splitlines(keepends=True),
         merged_text.splitlines(keepends=True),
         fromfile=f"a/{config_path.name}",
         tofile=f"b/{config_path.name}",
         n=0,
-    )
-    kept = [line for line in diff_lines if not _echoes_existing_line(line, existing_lines)]
-    return "".join(kept)
+    ):
+        if not _echoes_existing_line(line, existing_lines):
+            kept.append(line)
+            continue
+        bucket = suppressed_additions if line.startswith("+") else suppressed_removals
+        bucket.append(_normalize_config_line(line[1:]))
+    return "".join(kept), _hides_added_line(suppressed_additions, suppressed_removals)
+
+
+def _hides_added_line(suppressed_additions: list[str], suppressed_removals: list[str]) -> bool:
+    """Return whether a suppressed ``+`` line is a genuine AWF addition, not a comma rewrite.
+
+    A suppressed addition is benign when a suppressed removal of the same content
+    exists: that pair is the trailing-comma rewrite of the prior last entry. Any
+    leftover suppressed addition is a brand-new AWF line that coincidentally
+    matched existing content and was dropped, leaving the preview incomplete.
+    """
+    remaining = list(suppressed_removals)
+    for added in suppressed_additions:
+        if added in remaining:
+            remaining.remove(added)
+        else:
+            return True
+    return False
 
 
 def _normalize_config_line(body: str) -> str:
@@ -1002,6 +1041,12 @@ def _plan_details(plan: ClientConfigPlan, *, dry_run: bool) -> dict[str, Any]:
         # thinking the preview byte-for-byte describes the resulting file.
         details["diff_is_approximate"] = True
         details["cli_command"] = list(plan.cli_command or ())
+    elif plan.diff_is_approximate:
+        # The file path is exact on write, but the scoped diff filter dropped a
+        # genuine AWF line that coincidentally matched existing content, so the
+        # preview understates what is being added. Flag it the same way so the
+        # operator knows the diff is not the full picture.
+        details["diff_is_approximate"] = True
     if plan.backup_path is not None:
         details["backup_path"] = str(plan.backup_path)
     return details
