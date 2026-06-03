@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from awf.cli import setup_commands
 from awf.cli.main import app
-from awf.host_setup.config import HostSetupConfig, HostSetupConfigError
+from awf.host_setup.config import HostSetupConfig, HostSetupConfigError, ProviderConfig
 from awf.host_setup.providers import (
     ProviderSetupResult,
     ProviderSetupSummary,
@@ -942,6 +942,81 @@ def test_setup_non_interactive_provider_persists_source_checkout(
 
 
 @pytest.mark.unit
+def test_setup_non_interactive_persists_resolved_refs_before_guard(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Safe provider refs survive the interactive guard without explicit consent.
+
+    Regression for review comment 4419120368: a ``--provider github --provider
+    codex --non-interactive`` run where GitHub resolves a safe env ref but codex
+    still needs an uncollectable secret must persist GitHub's resolved ref before
+    raising INTERACTIVE_INPUT_REQUIRED. Previously the guard aborted ahead of the
+    write (no explicit consent flags), silently dropping the safe ref.
+    """
+
+    def _github_ref_codex_interactive(
+        _settings: object,
+        *,
+        selected_providers: list[str],
+        config: HostSetupConfig,
+        **_kwargs: object,
+    ) -> tuple[ProviderSetupSummary, HostSetupConfig]:
+        updated = config.model_copy(
+            update={
+                "providers": {
+                    **dict(config.providers),
+                    "github": ProviderConfig(backend="env_ref", credential_ref="env://GH_TOKEN"),
+                }
+            }
+        )
+        summary = ProviderSetupSummary(
+            mode="targeted_recheck",
+            selected=tuple(selected_providers),
+            providers=(
+                ProviderSetupResult(
+                    name="github",
+                    status="ready",
+                    reason_code="GITHUB_ENV_REF_OK",
+                    summary="GitHub configured from env ref.",
+                    backend="env_ref",
+                    credential_ref="env://GH_TOKEN",
+                    configured=True,
+                    rechecked=True,
+                ),
+                ProviderSetupResult(
+                    name="codex",
+                    status="not_configured",
+                    reason_code=INTERACTIVE_INPUT_REQUIRED,
+                    summary="codex needs interactive credential entry.",
+                ),
+            ),
+            overall_status="not_ready",
+        )
+        return summary, updated
+
+    monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _github_ref_codex_interactive)
+    result = _runner.invoke(
+        app,
+        [
+            "setup",
+            "--provider",
+            "github",
+            "--provider",
+            "codex",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "INTERACTIVE_INPUT_REQUIRED"
+    written = harness.writes[-1]
+    assert written.providers["github"].credential_ref == "env://GH_TOKEN"
+
+
+@pytest.mark.unit
 def test_setup_non_interactive_provider_surfaces_readiness_blockers(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1006,7 +1081,13 @@ def _ready_github_summary(
     config: HostSetupConfig,
     **_kwargs: object,
 ) -> tuple[ProviderSetupSummary, HostSetupConfig]:
-    """Fake orchestration that marks GitHub ready via gh (no token stored)."""
+    """Fake orchestration that marks GitHub ready via gh (no token stored).
+
+    The per-provider ``summary`` text embeds a token-shaped value so the
+    no-token CLI assertion actually exercises the rendering layer (which both
+    drops the free-text summary from ``to_details`` and redacts known token
+    shapes) rather than passing vacuously against secret-free text.
+    """
     summary = ProviderSetupSummary(
         mode="targeted_recheck" if selected_providers else "all_providers",
         selected=tuple(selected_providers),
@@ -1015,7 +1096,7 @@ def _ready_github_summary(
                 name="github",
                 status="ready",
                 reason_code="GITHUB_GH_AUTH_OK",
-                summary="GitHub is ready via gh CLI authentication.",
+                summary="GitHub is ready via gh CLI authentication (ghp_should_be_redacted).",
                 configured=True,
                 rechecked=True,
             ),

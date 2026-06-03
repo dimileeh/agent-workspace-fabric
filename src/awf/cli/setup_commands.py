@@ -236,14 +236,16 @@ def _run_setup(
         # the operator must fix first, so only orchestrate when the host is ready.
         host_ready = payload.status not in ("blocked", "failed")
         # ``--allow-plain-secrets`` and the ``--source-checkout`` selection are
-        # explicit, non-secret CLI flags -- not interactive prompts -- so
-        # persisting them never needs input and must survive the provider
-        # interactive guard. Otherwise a ready-host
-        # ``--provider X --non-interactive --allow-plain-secrets`` run aborts
-        # with INTERACTIVE_INPUT_REQUIRED before the safe write, silently
-        # discarding consent the operator passed explicitly. When no such
-        # explicit consent was given there is nothing to record ahead of the
-        # guard, so its original no-write early abort is preserved.
+        # explicit, non-secret CLI flags -- not interactive prompts -- and
+        # orchestration can resolve safe provider refs (gh/env) for some selected
+        # providers without any input. All of that is safe to persist and must
+        # survive the provider interactive guard: a ready-host
+        # ``--provider X --provider Y --non-interactive`` run where only Y needs a
+        # secret must still record X's resolved ref (and any explicit consent)
+        # before raising INTERACTIVE_INPUT_REQUIRED for Y, rather than discarding
+        # it. Only when the guard fires and there is genuinely nothing safe to
+        # record (no explicit consent and orchestration mutated nothing) is the
+        # original no-write early abort preserved.
         explicit_consent = allow_plain_secrets or explicit_source is not None
         updated_config = config
         needs_interactive = False
@@ -266,27 +268,24 @@ def _run_setup(
             needs_interactive = (
                 bool(selected_providers) and non_interactive and summary.requires_interactive_input
             )
-        if needs_interactive and not explicit_consent:
+        has_safe_state = explicit_consent or updated_config != config
+        if not needs_interactive or has_safe_state:
+            try:
+                _persist_safe_config(
+                    updated_config,
+                    source_checkout=explicit_source,
+                    allow_plain_secrets=allow_plain_secrets,
+                )
+            except HostSetupConfigError as error:
+                # The safe-config write happens after the host checks finish. Folding
+                # the failure into the readiness payload keeps the check blockers and
+                # warnings the operator ran setup to see, rather than dropping them in
+                # favour of a config-write-only diagnostic.
+                return _readiness_with_config_write_failure(payload, error)
+        if needs_interactive:
             # A selected provider needs interactive credential entry that
-            # --non-interactive cannot collect; surface the machine-readable signal
-            # without first writing a config that records nothing new.
-            _require_provider_interactive(non_interactive, payload)
-        try:
-            _persist_safe_config(
-                updated_config,
-                source_checkout=explicit_source,
-                allow_plain_secrets=allow_plain_secrets,
-            )
-        except HostSetupConfigError as error:
-            # The safe-config write happens after the host checks finish. Folding
-            # the failure into the readiness payload keeps the check blockers and
-            # warnings the operator ran setup to see, rather than dropping them in
-            # favour of a config-write-only diagnostic.
-            return _readiness_with_config_write_failure(payload, error)
-        if needs_interactive and explicit_consent:
-            # Explicit non-secret consent (and any configured provider refs) are now
-            # persisted; still surface the interactive-input signal for the selected
-            # provider that cannot complete under --non-interactive.
+            # --non-interactive cannot collect; surface the machine-readable signal.
+            # Any safe consent or resolved provider refs were already persisted above.
             _require_provider_interactive(non_interactive, payload)
 
     return payload
