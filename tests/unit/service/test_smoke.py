@@ -701,6 +701,35 @@ class TestCollectSmokeReportExceptionPaths:
         assert result["api"] == "ok"
         assert result["worker_db_substrate"] == "fail"
 
+    async def test_default_service_collector_ok_when_db_ready_even_on_503(
+        self,
+    ) -> None:
+        """`/readyz` 503 (providers missing) but `checks.db.ok=true` ⇒ api + substrate ok.
+
+        This is the headline no-token proof: providers are unconfigured (so the
+        overall ``/readyz`` status is 503) yet the DB substrate is healthy, which
+        must still report ``status: ok``. Locks in the success side of the 503
+        branch so a future HTTP-status guard cannot silently regress it.
+        """
+
+        async def _get(url: str):
+            if url.endswith("/healthz"):
+                return SimpleNamespace(status_code=200)
+            return SimpleNamespace(
+                status_code=503,
+                json=lambda: {"checks": {"db": {"ok": True}}},
+            )
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_instance = SimpleNamespace()
+            mock_instance.get = _get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_service_collector(_settings())
+        assert result["status"] == "ok"
+        assert result["api"] == "ok"
+        assert result["worker_db_substrate"] == "ok"
+
     async def test_default_service_collector_returns_unreachable_on_503_healthz(
         self,
     ) -> None:
