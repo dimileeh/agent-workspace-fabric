@@ -115,11 +115,16 @@ async def test_transient_db_error_warns_and_reschedules_without_raising(
     assert calls == 1
 
 
-async def test_fatal_error_is_reraised_and_reschedules(
+async def test_fatal_error_is_logged_swallowed_and_reschedules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current_time = 3_000.0
     monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: current_time)
+    logged: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "awf.control.worker.cleanup._log.exception",
+        lambda event, **fields: logged.append((event, fields)),
+    )
 
     async def _reconcile() -> OrphanDirReconcileResult:
         raise RuntimeError("disk exploded")
@@ -127,8 +132,13 @@ async def test_fatal_error_is_reraised_and_reschedules(
     worker = _make_worker(_reconcile, interval=60.0)
     worker._next_orphan_reconcile_scan_at = 0.0  # noqa: SLF001
 
-    with pytest.raises(RuntimeError, match="disk exploded"):
-        await worker._maybe_reconcile_orphan_dirs()  # noqa: SLF001
+    # A non-transient error is logged loudly but NOT re-raised: re-raising
+    # would skip workspace dispatch for the iteration and double-log through
+    # run_forever's last-resort run_once_failed handler.
+    await worker._maybe_reconcile_orphan_dirs()  # noqa: SLF001
 
-    # Even a fatal error reschedules so the worker does not hot-loop the sweep.
+    assert [event for event, _ in logged] == ["worker.orphan_dir_reconcile_failed"]
+    assert logged[0][1]["reason_code"] == "ORPHAN_DIR_RECONCILE_FAILED"
+
+    # The sweep still reschedules so the worker does not hot-loop on it.
     assert worker._next_orphan_reconcile_scan_at == current_time + 60.0  # noqa: SLF001
