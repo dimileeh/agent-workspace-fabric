@@ -565,19 +565,26 @@ def _plan_only_payload(plan: ClientConfigPlan) -> FirstRunPayload:
     label = _label(plan.client)
     if plan.action == "no_change":
         summary = f"{label} MCP config already registers the AWF server; no change needed."
+        # A no_change client is already correctly configured, so re-running setup
+        # for it is a pointless no-op; only the conflicting sibling needs another run.
+        next_steps = (
+            "This client is already correctly configured; only re-run setup for the "
+            "conflicting client reported above.",
+        )
     else:
         verb = "create" if plan.action == "create" else "update"
         summary = (
             f"awf setup would {verb} the {label} MCP config but applied nothing "
             "because another selected client conflicts."
         )
+        next_steps = (
+            "Resolve the conflicting client reported above, then re-run setup for these clients.",
+        )
     return first_run_success_payload(
         command=SETUP_COMMAND,
         summary=summary,
         details=_plan_details(plan, dry_run=False),
-        next_steps=(
-            "Resolve the conflicting client reported above, then re-run setup for these clients.",
-        ),
+        next_steps=next_steps,
     )
 
 
@@ -930,6 +937,14 @@ def _plan_details(plan: ClientConfigPlan, *, dry_run: bool) -> dict[str, Any]:
     }
     if plan.diff:
         details["diff"] = plan.diff
+    if plan.method == "official_cli" and plan.action in ("create", "update"):
+        # The diff is computed from a file-based merge, but the apply shells out to
+        # the client's own ``mcp add`` CLI, whose JSON formatting/field set may
+        # differ from this preview. Mark the diff approximate and surface the exact
+        # argv that will run so an operator approving a dry-run is not misled into
+        # thinking the preview byte-for-byte describes the resulting file.
+        details["diff_is_approximate"] = True
+        details["cli_command"] = list(plan.cli_command or ())
     if plan.backup_path is not None:
         details["backup_path"] = str(plan.backup_path)
     return details

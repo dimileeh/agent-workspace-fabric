@@ -1119,6 +1119,54 @@ def test_setup_client_dry_run_no_change_summary(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_setup_client_dry_run_official_cli_marks_diff_approximate(tmp_path: Path) -> None:
+    """Verify an official-CLI dry-run flags its file-derived diff as approximate.
+
+    The apply shells out to ``claude mcp add`` rather than writing the previewed
+    file, so the diff cannot be guaranteed byte-for-byte. The payload must say so
+    and surface the exact argv that will run.
+    """
+    payload = setup_client(
+        "claude",
+        env_file=_ENV_FILE,
+        dry_run=True,
+        home=tmp_path,
+        which=_which_found,
+        run=_never_run,
+        now=_now,
+    )
+
+    assert payload.status == "success"
+    assert payload.details["method"] == "official_cli"
+    assert payload.details["action"] == "create"
+    assert payload.details["diff_is_approximate"] is True
+    assert payload.details["cli_command"][0] == "claude"
+    assert payload.details["cli_command"][-1] == _ENV_FILE
+
+
+@pytest.mark.unit
+def test_setup_client_dry_run_file_method_omits_approximate_marker(tmp_path: Path) -> None:
+    """Verify the file-method dry-run carries no approximate-diff marker.
+
+    The file path writes exactly the previewed merge, so the diff is authoritative
+    and must not be labelled approximate or carry a CLI argv.
+    """
+    payload = setup_client(
+        "claude",
+        env_file=_ENV_FILE,
+        dry_run=True,
+        home=tmp_path,
+        which=_which_missing,
+        run=_never_run,
+        now=_now,
+    )
+
+    assert payload.details["method"] == "file"
+    assert "diff_is_approximate" not in payload.details
+    assert "cli_command" not in payload.details
+
+
+@pytest.mark.unit
 def test_setup_client_cli_failure_without_stderr_is_reason_coded(tmp_path: Path) -> None:
     """Verify a CLI failure carrying no stderr still folds into a blocked payload."""
     runner = _FakeRunner(CommandResult(returncode=3))
@@ -1257,6 +1305,12 @@ def test_setup_clients_conflict_block_reports_no_change_sibling(tmp_path: Path) 
     assert claude_payload.status == "success"
     assert claude_payload.details["action"] == "no_change"
     assert "no change needed" in claude_payload.summary
+    # A no_change sibling has nothing to re-run, so its guidance must not tell the
+    # operator to re-run setup for "these clients" like a planned create/update does.
+    assert claude_payload.next_steps == (
+        "This client is already correctly configured; only re-run setup for the "
+        "conflicting client reported above.",
+    )
 
 
 @pytest.mark.unit
