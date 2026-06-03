@@ -54,7 +54,10 @@ test("desktop theme screenshots cover dashboard, details, and fullscreen logs", 
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("desktop-dashboard.png"), fullPage: true });
 
-  await page.getByRole("button", { name: "Details" }).first().click();
+  // The per-card "Details" button opens the Task details dialog. Use exact
+  // matching: the full-card "Open workspace details for ..." buttons also
+  // contain "details", so a substring match would resolve to the wrong button.
+  await page.getByRole("button", { name: "Details", exact: true }).first().click();
   await expect(page.getByRole("dialog", { name: /Task details/i })).toBeVisible();
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("desktop-workspace-details.png"), fullPage: true });
@@ -71,7 +74,9 @@ test("task details modal scrolls long prompts without moving the dashboard", asy
   await page.setViewportSize({ width: 947, height: 982 });
   await page.goto("/");
   await waitForConsoleReady(page);
-  const detailsButton = page.getByRole("button", { name: "Details" }).first();
+  // Exact match targets the per-card "Details" button (opens the Task details
+  // dialog), not the full-card "Open workspace details for ..." button.
+  const detailsButton = page.getByRole("button", { name: "Details", exact: true }).first();
   await expect(detailsButton).toBeVisible();
   const scrollTarget = await detailsButton.evaluate((node) => {
     const rect = node.getBoundingClientRect();
@@ -132,7 +137,16 @@ test("mobile theme screenshots cover dashboard, workspace, and logs views", asyn
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-dashboard.png"), fullPage: true });
 
-  await page.getByRole("button", { name: /policy parity title should wrap fully inside the list row/i }).click();
+  // Open the inspector by clicking the card. The title text sits in a
+  // pointer-events-none layer over the full-card open-details button, and the
+  // copy-id button overlaps that button's centre, so click the title box
+  // directly (above the copy-id control) to land on the open-details button.
+  const cardTitle = page.getByTestId(`workspace-title-${workspaceId}`);
+  const titleBox = await cardTitle.boundingBox();
+  if (!titleBox) {
+    throw new Error(`Workspace title ${workspaceId} did not produce a clickable box`);
+  }
+  await page.mouse.click(titleBox.x + titleBox.width / 2, titleBox.y + titleBox.height / 2);
   await expect(page.getByRole("heading", { name: "Workspace", exact: true })).toBeVisible();
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-workspace.png"), fullPage: true });
