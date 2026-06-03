@@ -645,6 +645,11 @@ class TestCollectSmokeReportExceptionPaths:
         service_phase = next(p for p in report["phases"] if p["name"] == "service_readiness")
         assert service_phase["status"] == "ok"
         assert service_phase["reason_code"] == "SMOKE_SERVICE_READY"
+        # The collector never probed the substrate, so it must not be claimed as
+        # reachable/ok — surface it as unknown / not probed instead.
+        assert service_phase["evidence"]["worker_db_substrate"] == "unknown"
+        assert "not probed" in service_phase["message"]
+        assert "substrate reachable" not in service_phase["message"]
 
     async def test_default_service_collector_returns_ok_when_db_ready(
         self,

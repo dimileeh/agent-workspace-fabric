@@ -230,12 +230,21 @@ async def _phase_service_readiness(
                 "poll/claim loop needs a reachable control-plane database."
             ),
         }
+    # Only claim the worker DB substrate is reachable when the collector actually
+    # probed it. An injected collector that returns a plain ``{"status": "ok"}``
+    # (no ``worker_db_substrate`` key) never checked the substrate, so reporting it
+    # as "ok" would be a false claim — surface "unknown" / "not probed" instead.
+    substrate_clause = (
+        "worker DB substrate reachable"
+        if worker_db_substrate is not None
+        else "worker DB substrate not probed by this collector"
+    )
     return {
         "name": "service_readiness",
         "status": "ok",
         "reason_code": "SMOKE_SERVICE_READY",
         "message": (
-            "AWF local Core health check passed (API up; worker DB substrate reachable). "
+            f"AWF local Core health check passed (API up; {substrate_clause}). "
             "Worker-process liveness is not probed by this provider-free check."
         ),
         "evidence": {
@@ -243,7 +252,7 @@ async def _phase_service_readiness(
             "status": "ok",
             "api": api_status,
             "worker_db_substrate": (
-                worker_db_substrate if worker_db_substrate is not None else "ok"
+                worker_db_substrate if worker_db_substrate is not None else "unknown"
             ),
         },
         "action": "No action required.",
