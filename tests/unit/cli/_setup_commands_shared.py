@@ -188,4 +188,13 @@ def client_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _ClientHa
     )
     monkeypatch.setattr(setup_commands, "_client_which", _which_missing)
     monkeypatch.setattr(setup_commands, "_client_run", runner)
+    # ``_run_client_setup`` threads ``_client_env()`` into ``setup_clients`` and
+    # Codex resolves its config dir from ``CODEX_HOME`` (see
+    # ``ClientDescriptor.config_path``). Leaving ``_client_env`` on the real
+    # process env lets a CI runner with ``CODEX_HOME`` set relocate the planned
+    # config write outside ``state.home``, breaking the temp-dir isolation the
+    # other seams establish. Pin it to an empty mapping so resolution always
+    # falls back to the ``state.home``-anchored path; the CODEX_HOME regression
+    # test overrides this with its own controlled value.
+    monkeypatch.setattr(setup_commands, "_client_env", lambda: {})
     return state
