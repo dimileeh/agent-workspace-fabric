@@ -537,6 +537,12 @@ def _prepare_claude_overlay_mount(
     """
 
     if not overlay_mounter.supported():
+        _log.info(
+            "claude_auth_overlay_unavailable",
+            reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
+            workspace_auth_root=str(claude_root),
+            reason="overlayfs_unsupported",
+        )
         return None
 
     base = _ensure_shared_claude_base(

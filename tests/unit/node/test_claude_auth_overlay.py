@@ -263,8 +263,9 @@ def test_overlay_unavailable_falls_back_to_legacy_copy(
     assert not (claude_root / ".claude" / "projects").exists()
     # No stray ``merged`` mountpoint is left behind on fallback.
     assert not (claude_root / "merged").exists()
-    if mounter.supported():
-        assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+    # Every fallback path — overlay unsupported and mount failure alike — emits a
+    # clear reason so the copy fallback is never silent (issue #361 requirement).
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
 
 
 @pytest.mark.unit
