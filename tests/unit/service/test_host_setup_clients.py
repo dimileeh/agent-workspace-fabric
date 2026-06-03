@@ -866,6 +866,35 @@ def test_apply_file_uses_plan_backup_path_not_recomputed(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_apply_file_update_preserves_symlinked_config(tmp_path: Path) -> None:
+    """Verify an update through a symlinked config writes the real target in place.
+
+    Regression: the atomic replace renamed the temp file over the config path
+    itself, so a dotfiles-managed symlink (e.g. ``~/.claude.json`` -> a tracked
+    file) was destroyed and the real managed file left stale. The write must
+    resolve the link and update the target, keeping the symlink intact.
+    """
+    real_target = tmp_path / "dotfiles" / "claude.json"
+    real_target.parent.mkdir(parents=True)
+    real_target.write_text(json.dumps({"telemetry": True}), encoding="utf-8")
+    config_path = _claude_config_path(tmp_path)
+    config_path.symlink_to(real_target)
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+    apply_client_config_plan(plan, run=_never_run)
+
+    # The link survives and still points at the managed file.
+    assert config_path.is_symlink()
+    assert config_path.resolve() == real_target.resolve()
+    # The merged config landed in the real target, preserving unrelated keys.
+    written = json.loads(real_target.read_text(encoding="utf-8"))
+    assert written["telemetry"] is True
+    assert AWF_MCP_SERVER_KEY in written["mcpServers"]
+
+
+@pytest.mark.unit
 @pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX permissions only")
 def test_apply_file_write_leaves_owner_private_permissions(tmp_path: Path) -> None:
     """Verify the written config and its parent dir are owner-private."""

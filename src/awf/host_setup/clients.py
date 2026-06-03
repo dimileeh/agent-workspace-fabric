@@ -1034,15 +1034,23 @@ def _write_config_atomic(config_path: Path, text: str, *, backup_path: Path | No
     parent is ``$HOME``, so chmodding it would clobber intentionally shared
     home-directory permissions. The backup of an existing file is taken before
     the replacement so an interrupted run never destroys the prior config.
+
+    When ``config_path`` is a symlink (e.g. a dotfiles-managed ``~/.claude.json``
+    or ``$CODEX_HOME/config.toml``), the atomic replace is targeted at the real
+    file the link resolves to. ``Path.replace`` renames over the link path
+    itself, which would otherwise destroy the symlink and strand the user's
+    managed config; resolving first updates that managed file in place and keeps
+    the link intact.
     """
-    parent_existed = config_path.parent.exists()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path = config_path.resolve() if config_path.is_symlink() else config_path
+    parent_existed = target_path.parent.exists()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
     if not parent_existed:
-        _chmod_best_effort(config_path.parent, 0o700)
-    if backup_path is not None and config_path.exists():
-        backup_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+        _chmod_best_effort(target_path.parent, 0o700)
+    if backup_path is not None and target_path.exists():
+        backup_path.write_text(target_path.read_text(encoding="utf-8"), encoding="utf-8")
         _chmod_best_effort(backup_path, 0o600)
-    tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
+    tmp_path = target_path.with_name(f".{target_path.name}.{secrets.token_hex(8)}.tmp")
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         handle = os.fdopen(fd, "w", encoding="utf-8")
@@ -1071,8 +1079,8 @@ def _write_config_atomic(config_path: Path, text: str, *, backup_path: Path | No
             tmp_path.unlink()
         raise
     _chmod_best_effort(tmp_path, 0o600)
-    tmp_path.replace(config_path)
-    _chmod_best_effort(config_path, 0o600)
+    tmp_path.replace(target_path)
+    _chmod_best_effort(target_path, 0o600)
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:
