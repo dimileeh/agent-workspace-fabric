@@ -680,6 +680,18 @@ def _ensure_shared_claude_base(
     complete base or loses the rename race and reuses the winner's. Chowned once
     to the agent uid/gid (all workspace agents share uid 1000) so the read-only
     lower is readable through the overlay.
+
+    Known limitation (superseded-base accumulation): each distinct host
+    ``~/.claude`` signature builds a new ``<sig>/.claude`` base (~1.7 GB) and
+    leaves prior-signature bases in place. ``_reap_stale_claude_base_staging``
+    only reclaims crash-orphaned ``.claude-base-*`` *staging* dirs, and GC only
+    enumerates ``auth/<workspace_id>`` rows (never ``_shared``), so completed
+    but superseded base dirs are never reclaimed today. With N host-content
+    revisions this strands up to N×1.7 GB under ``_shared``. Reaping them safely
+    is deferred to a follow-up (GC-B): a superseded base may still back a live
+    overlay as its ``lowerdir`` (overlayfs forbids mutating/removing a live
+    lower), so a reaper must skip the current signature and any base referenced
+    by an ``lowerdir=`` in ``/proc/mounts`` before removing it.
     """
 
     base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
