@@ -517,7 +517,22 @@ def _orchestrate_agent_provider(
                 # Preserve and report that state instead of falsely reporting
                 # not_configured and discarding the existing ref.
                 return _preserved_existing_result(spec, existing)
-            return _not_configured_result(spec, non_interactive=non_interactive)
+            # No captured secret, no env ref, and no prior config — but several
+            # providers authenticate purely from documented file-based auth
+            # (e.g. Codex in ~/.codex, Claude in ~/.claude) that the readiness
+            # probe already treats as ready and that ``awf start`` mounts per
+            # workspace. Probe before declaring the provider not_configured so
+            # ``awf setup --provider codex --non-interactive`` honors mounted
+            # auth files instead of demanding interactive input no file-auth
+            # setup needs.
+            return _orchestrate_file_backed_provider(
+                spec,
+                settings=settings,
+                environ=environ,
+                non_interactive=non_interactive,
+                run_subprocess=run_subprocess,
+                http_get=http_get,
+            )
         ref = _build_env_ref(spec, env_var, capabilities, backends)
         source = "env"
         recheck_environ = dict(environ)
@@ -579,6 +594,55 @@ def _orchestrate_agent_provider(
             rechecked=True,
         )
     return result, provider_config
+
+
+def _orchestrate_file_backed_provider(
+    spec: ProviderSpec,
+    *,
+    settings: ServiceSettings,
+    environ: Mapping[str, str],
+    non_interactive: bool,
+    run_subprocess: SubprocessRun,
+    http_get: HttpGet | None,
+) -> tuple[ProviderSetupResult, ProviderConfig | None]:
+    """Honor documented file-based provider auth before reporting not_configured.
+
+    Reached only when there is no captured secret, no service-visible env ref,
+    and no prior config. Providers such as Codex (``~/.codex``), Claude Code
+    (``~/.claude``), Gemini (``~/.gemini``/``GOOGLE_APPLICATION_CREDENTIALS``),
+    and OpenCode (``~/.config/opencode``/``~/.ollama``) can still be ready via
+    mounted auth files that ``awf start`` copies per workspace. Run the same
+    bounded readiness probe ``_orchestrate_agent_provider`` uses for an env ref;
+    if it reports ready, persist a ref-less ``ready`` file config so
+    ``awf setup`` agrees with runtime instead of falsely prompting for input.
+    Otherwise fall back to the not_configured result.
+    """
+    readiness_provider = spec.readiness_provider
+    if readiness_provider is None:  # pragma: no cover - registry guarantees a mapping.
+        return _not_configured_result(spec, non_interactive=non_interactive)
+    readiness = check_single_provider_readiness(
+        settings,
+        provider=readiness_provider,
+        environ=environ,
+        run_subprocess=run_subprocess,
+        http_get=http_get,
+    )
+    if readiness.get("ok") is not True:
+        return _not_configured_result(spec, non_interactive=non_interactive)
+    # File-based auth carries no storable reference (the credential lives in the
+    # mounted files, never a value AWF holds); record a ref-less ready config so
+    # the persisted entry matches the probe without inventing a credential ref.
+    provider_config = ProviderConfig(status="ready", source="file")
+    return (
+        _ready_result(
+            spec,
+            reason_code=str(readiness.get("reason") or "PROVIDER_READY"),
+            summary=str(readiness.get("message") or "Provider authentication is ready."),
+            provider_config=provider_config,
+            rechecked=True,
+        ),
+        provider_config,
+    )
 
 
 def _store_captured_secret(

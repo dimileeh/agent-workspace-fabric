@@ -298,6 +298,72 @@ def test_provider_missing_credential_is_not_configured_and_unchanged(tmp_path: P
 
 
 @pytest.mark.unit
+def test_file_backed_auth_is_ready_without_secret_or_env(tmp_path: Path) -> None:
+    """Mounted file-based auth (~/.codex) reports ready, not not_configured.
+
+    A provider whose only credential is the documented file-based auth — with no
+    captured secret and no env ref — must be probed before being declared
+    not_configured: ``awf start`` mounts those files per workspace, so
+    ``awf setup --provider codex --non-interactive`` should honor them instead of
+    demanding interactive input no file-auth setup needs.
+    """
+    codex_dir = tmp_path / "home" / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "auth.json").write_text("{}", encoding="utf-8")
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        capture=lambda _provider: None,
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    assert result.status == "ready"
+    assert result.configured is True
+    assert result.rechecked is True
+    assert result.reason_code == "CODEX_FILE_AUTH_PRESENT"
+    # File-based auth carries no storable reference: the credential stays in the
+    # mounted files, so no raw value or ref is invented.
+    assert result.credential_ref is None
+    assert result.backend is None
+    stored = config.providers["codex"]
+    assert stored.status == "ready"
+    assert stored.source == "file"
+    assert stored.credential_ref is None
+
+
+@pytest.mark.unit
+def test_file_backed_probe_falls_back_to_not_configured_when_absent(tmp_path: Path) -> None:
+    """No file auth, secret, or env still yields not_configured after the probe."""
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        capture=lambda _provider: None,
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    assert result.status == "not_configured"
+    assert result.reason_code == INTERACTIVE_INPUT_REQUIRED
+    assert "codex" not in config.providers
+
+
+@pytest.mark.unit
 def test_recheck_without_fresh_secret_preserves_existing_config(tmp_path: Path) -> None:
     """A recheck with no fresh secret/env preserves a prior config, not not_configured."""
     existing = ProviderConfig(
