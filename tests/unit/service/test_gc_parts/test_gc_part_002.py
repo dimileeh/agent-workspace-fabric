@@ -659,6 +659,83 @@ def test_delete_gc_path_outcome_maps_enoent_race_to_already_removed(
 
 
 @pytest.mark.unit
+def test_delete_gc_path_outcome_records_permission_denied_from_preflight_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A root-owned 0700 parent makes even the not-exists preflight stat raise
+    # PermissionError. The outcome wrapper must route that probe through the
+    # permission-aware delete and record PATH_DELETE_PERMISSION_DENIED -- never
+    # let the stat escape and abort the whole execute run.
+    import errno
+
+    target_path = tmp_path / "service" / "auth" / "ws_root_owned_parent"
+    target_path.mkdir(parents=True)
+    target = WorkspaceGCPath(
+        kind="auth",
+        path=target_path,
+        exists=True,
+        estimated_bytes=0,
+    )
+    candidate = WorkspaceGCCandidate(
+        workspace_id="ws_root_owned_parent",
+        status=WorkspaceStatus.destroyed,
+        updated_at=datetime.now(UTC),
+        age_hours=72,
+        reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+        worktree=WorkspaceGCPath(
+            kind="worktree", path=target_path, exists=False, estimated_bytes=0
+        ),
+        compose=WorkspaceGCPath(kind="compose", path=target_path, exists=False, estimated_bytes=0),
+        auth=target,
+    )
+
+    def _raise_eacces(_self: object, *_args: object, **_kwargs: object) -> bool:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(Path, "exists", _raise_eacces)
+
+    outcome = _delete_gc_path_outcome(candidate, target, work_dir=tmp_path / "service")
+
+    assert outcome.status == "failed"
+    assert outcome.reason_code == "PATH_DELETE_PERMISSION_DENIED"
+    assert outcome.deleted is False
+    assert outcome.error is not None
+
+
+@pytest.mark.unit
+def test_delete_gc_path_outcome_maps_absent_path_to_already_removed(
+    tmp_path: Path,
+) -> None:
+    # A genuinely absent path returns ``(False, None, None)`` from
+    # ``_delete_gc_path``; the wrapper must still report it as an idempotent
+    # ``already_removed`` no-op, not a failure.
+    target_path = tmp_path / "service" / "git" / "worktrees" / "ws_gone"
+    target = WorkspaceGCPath(
+        kind="worktree",
+        path=target_path,
+        exists=False,
+        estimated_bytes=0,
+    )
+    candidate = WorkspaceGCCandidate(
+        workspace_id="ws_gone",
+        status=WorkspaceStatus.destroyed,
+        updated_at=datetime.now(UTC),
+        age_hours=72,
+        reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+        worktree=target,
+        compose=WorkspaceGCPath(kind="compose", path=target_path, exists=False, estimated_bytes=0),
+        auth=WorkspaceGCPath(kind="auth", path=target_path, exists=False, estimated_bytes=0),
+    )
+
+    outcome = _delete_gc_path_outcome(candidate, target, work_dir=tmp_path / "service")
+
+    assert outcome.status == "already_removed"
+    assert outcome.reason_code == PATH_ALREADY_REMOVED
+    assert outcome.deleted is False
+    assert outcome.error is None
+
+
+@pytest.mark.unit
 def test_delete_gc_path_reports_permission_denied_loudly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

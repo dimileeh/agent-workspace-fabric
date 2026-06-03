@@ -1209,15 +1209,13 @@ def _delete_gc_path_outcome(
     *,
     work_dir: Path,
 ) -> WorkspaceGCPathOutcome:
-    if not target.path.exists():
-        return WorkspaceGCPathOutcome(
-            workspace_id=candidate.workspace_id,
-            kind=target.kind,
-            path=target.path,
-            status="already_removed",
-            reason_code=PATH_ALREADY_REMOVED,
-            estimated_bytes=target.estimated_bytes,
-        )
+    # Route the not-exists preflight through ``_delete_gc_path`` rather than a
+    # bare ``target.path.exists()`` here: an unguarded probe would raise (and
+    # abort the whole execute run) when a root-owned ``0700`` parent cannot be
+    # stat'ed, instead of being recorded as ``PATH_DELETE_PERMISSION_DENIED``.
+    # ``_delete_gc_path`` already wraps the same probe in permission-aware
+    # handling, so let it own that path. It returns ``(False, None, None)`` for a
+    # genuinely absent path.
     deleted, error, failure_reason_code = _delete_gc_path(target, work_dir=work_dir)
     if deleted:
         return WorkspaceGCPathOutcome(
@@ -1229,9 +1227,10 @@ def _delete_gc_path_outcome(
             deleted=True,
             estimated_bytes=target.estimated_bytes,
         )
-    if failure_reason_code == PATH_ALREADY_REMOVED and error is None:
-        # The dir vanished mid-delete (concurrent GC). Treat it as an
-        # already-removed no-op rather than a partial-run failure.
+    if error is None and failure_reason_code in (None, PATH_ALREADY_REMOVED):
+        # The path was already absent (``None``) or vanished mid-delete during a
+        # concurrent GC run (``PATH_ALREADY_REMOVED``). Both are idempotent
+        # no-ops, not partial-run failures.
         return WorkspaceGCPathOutcome(
             workspace_id=candidate.workspace_id,
             kind=target.kind,
