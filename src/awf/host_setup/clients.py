@@ -598,6 +598,32 @@ def _plan_only_payload(plan: ClientConfigPlan) -> FirstRunPayload:
 # --- read + compute helpers ----------------------------------------------
 
 
+class _DuplicateJsonKeyError(ValueError):
+    """Raised when a JSON object contains a duplicate key.
+
+    ``json.loads`` silently keeps only the *last* value for a repeated key, so a
+    hand-edited ``~/.claude.json`` with duplicate top-level keys (e.g. two
+    ``mcpServers`` blocks) would be parsed into a reduced mapping; rewriting that
+    via ``_apply_file`` would delete the earlier block without surfacing a
+    conflict or showing the deletion in the diff. TOML already rejects duplicate
+    keys, so this restores parity by treating duplicates as ambiguous config.
+    """
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"duplicate key {key!r}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``object_pairs_hook`` that rejects duplicate keys in any JSON object."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKeyError(key)
+        result[key] = value
+    return result
+
+
 def _read_existing_config(
     config_path: Path,
     config_format: ClientConfigFormat,
@@ -607,6 +633,8 @@ def _read_existing_config(
     ``parsed_config`` is ``None`` when the file is absent (a fresh ``create``).
     A read/parse failure or a non-mapping top-level document yields a non-secret
     ``parse_error`` string that the caller turns into an ambiguous ``conflict``.
+    Duplicate JSON object keys are likewise refused (see
+    :class:`_DuplicateJsonKeyError`) so a rewrite never silently drops a block.
     """
     if not config_path.exists():
         return None, None
@@ -616,9 +644,19 @@ def _read_existing_config(
         return None, f"Existing config could not be read ({type(exc).__name__})."
     try:
         if config_format == "json":
-            parsed: object = json.loads(raw_text) if raw_text.strip() else {}
+            parsed: object = (
+                json.loads(raw_text, object_pairs_hook=_reject_duplicate_json_keys)
+                if raw_text.strip()
+                else {}
+            )
         else:
             parsed = tomllib.loads(raw_text)
+    except _DuplicateJsonKeyError as exc:
+        return None, (
+            f"Existing {config_format.upper()} config has a duplicate '{exc.key}' key; "
+            "AWF refuses to rewrite it because the duplicate would be silently dropped. "
+            "Resolve it manually, then re-run."
+        )
     except (json.JSONDecodeError, tomllib.TOMLDecodeError, UnicodeError) as exc:
         return None, f"Existing config is not valid {config_format.upper()} ({type(exc).__name__})."
     if not isinstance(parsed, Mapping):

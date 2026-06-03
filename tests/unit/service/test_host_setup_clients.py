@@ -516,6 +516,30 @@ def test_build_plan_malformed_json_is_conflict(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_build_plan_duplicate_json_keys_is_conflict(tmp_path: Path) -> None:
+    """Verify duplicate top-level JSON keys are refused, not silently reduced.
+
+    ``json.loads`` keeps only the last value for a repeated key, so a
+    hand-edited ``~/.claude.json`` with two ``mcpServers`` blocks would be
+    rewritten with the earlier block dropped. AWF must surface this as an
+    ambiguous conflict instead of silently deleting the duplicate.
+    """
+    _claude_config_path(tmp_path).write_text(
+        '{"mcpServers": {"a": {"command": "x"}}, "mcpServers": {"b": {"command": "y"}}}',
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert "duplicate" in (plan.conflict_detail or "")
+    assert "mcpServers" in (plan.conflict_detail or "")
+    assert plan.merged_config is None
+
+
+@pytest.mark.unit
 def test_build_plan_malformed_toml_is_conflict(tmp_path: Path) -> None:
     """Verify unparseable existing TOML is an ambiguous conflict."""
     codex_path = _codex_config_path(tmp_path)
