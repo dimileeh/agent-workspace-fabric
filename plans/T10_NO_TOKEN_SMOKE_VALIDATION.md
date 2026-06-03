@@ -22,7 +22,8 @@ Implementation contract: `docs/awf-plans/ws_bcb857fd33ea4c1dbd4d3962.md`
   dual-probe `_default_service_collector` + `_probe_worker_db_substrate`.
 - `src/awf/cli/start_commands.py` — provider-free leading next step.
 - `src/awf/cli/profile_smoke_commands.py` — no-token help text.
-- `tests/unit/service/test_smoke_parts/test_smoke_part_002.py` — regression flip +
+- `tests/unit/service/test_smoke.py` (renamed from
+  `tests/unit/service/test_smoke_parts/test_smoke_part_002.py`) — regression flip +
   new phase/collector tests.
 - `tests/unit/cli/test_start_commands.py`, `test_smoke.py`, `test_setup_commands.py`
   — first-run-chain assertions.
@@ -32,9 +33,11 @@ Implementation contract: `docs/awf-plans/ws_bcb857fd33ea4c1dbd4d3962.md`
 - `ruff check src/awf tests` → All checks passed.
 - `ruff format --check src/awf tests` → already formatted.
 - `mypy src/awf` → Success: no issues found in 326 source files.
-- `pytest tests/unit/service/test_smoke_parts tests/unit/cli/test_smoke.py
-  tests/unit/cli/test_start_commands.py tests/unit/cli/test_setup_commands.py
-  tests/unit/docs/test_catalog_coverage.py` → 164 passed.
+- `pytest tests/unit/service/test_smoke.py tests/unit/service/test_smoke_parts
+  tests/unit/cli/test_smoke.py tests/unit/cli/test_start_commands.py
+  tests/unit/cli/test_setup_commands.py tests/unit/docs/test_catalog_coverage.py`
+  → 155 passed. (The renamed `tests/unit/service/test_smoke.py` holds the new T10
+  service-layer cases; `test_smoke_parts` now only retains `test_smoke_part_001.py`.)
 - `pytest tests/unit/cli/test_profile_smoke_commands_edges.py
   tests/unit/cli/test_clean_install_smoke.py` → 9 passed.
 
