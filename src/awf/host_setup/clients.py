@@ -301,7 +301,9 @@ def build_client_config_plan(
         else "file"
     )
 
-    existing, parse_error = _read_existing_config(config_path, descriptor.config_format)
+    existing, parse_error, existing_has_comments = _read_existing_config(
+        config_path, descriptor.config_format
+    )
     if parse_error is not None:
         return ClientConfigPlan(
             client=client,
@@ -395,6 +397,27 @@ def build_client_config_plan(
     # that lacks a required field — a Codex entry written by ``codex mcp add`` or
     # a pre-file-write AWF setup carries no bounded timeouts. Fall through to an
     # ``update`` so the file write adds them instead of a misleading no-op.
+
+    if existing is not None and existing_has_comments:
+        # ``tomllib`` dropped the file's comments on parse, so rewriting it would
+        # delete hand-written documentation the comment-free scoped diff cannot
+        # surface (the dry-run would look like a pure AWF addition). Refuse rather
+        # than silently destroy unrelated content — mirroring the other
+        # non-round-trippable TOML refusals above.
+        return ClientConfigPlan(
+            client=client,
+            method=method,
+            config_path=config_path,
+            action="conflict",
+            conflict_detail=(
+                f"Existing {_label(client)} config at {config_path} contains comments that "
+                "AWF cannot preserve when rewriting it; the structured write would drop them. "
+                "Remove the comments or add the 'awf' MCP server entry manually, then re-run."
+            ),
+            desired_entry=desired_entry,
+            cli_command=descriptor.add_command(env_file_str) if method == "official_cli" else None,
+            descriptor=descriptor,
+        )
 
     merged = _merged_config(existing, descriptor, desired_entry)
     try:
@@ -627,21 +650,25 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _read_existing_config(
     config_path: Path,
     config_format: ClientConfigFormat,
-) -> tuple[Mapping[str, Any] | None, str | None]:
-    """Return ``(parsed_config, parse_error)`` for the known client config path.
+) -> tuple[Mapping[str, Any] | None, str | None, bool]:
+    """Return ``(parsed_config, parse_error, has_comments)`` for the config path.
 
     ``parsed_config`` is ``None`` when the file is absent (a fresh ``create``).
     A read/parse failure or a non-mapping top-level document yields a non-secret
     ``parse_error`` string that the caller turns into an ambiguous ``conflict``.
     Duplicate JSON object keys are likewise refused (see
     :class:`_DuplicateJsonKeyError`) so a rewrite never silently drops a block.
+    ``has_comments`` reports whether a TOML document carries comments that
+    ``tomllib`` discards on parse — the caller refuses to rewrite such a file
+    rather than silently drop hand-written documentation (JSON has no comments,
+    so it is always ``False`` there).
     """
     if not config_path.exists():
-        return None, None
+        return None, None, False
     try:
         raw_text = config_path.read_text(encoding="utf-8")
     except OSError as exc:
-        return None, f"Existing config could not be read ({type(exc).__name__})."
+        return None, f"Existing config could not be read ({type(exc).__name__}).", False
     try:
         if config_format == "json":
             parsed: object = (
@@ -652,16 +679,62 @@ def _read_existing_config(
         else:
             parsed = tomllib.loads(raw_text)
     except _DuplicateJsonKeyError as exc:
-        return None, (
-            f"Existing {config_format.upper()} config has a duplicate '{exc.key}' key; "
-            "AWF refuses to rewrite it because the duplicate would be silently dropped. "
-            "Resolve it manually, then re-run."
+        return (
+            None,
+            (
+                f"Existing {config_format.upper()} config has a duplicate '{exc.key}' key; "
+                "AWF refuses to rewrite it because the duplicate would be silently dropped. "
+                "Resolve it manually, then re-run."
+            ),
+            False,
         )
     except (json.JSONDecodeError, tomllib.TOMLDecodeError, UnicodeError) as exc:
-        return None, f"Existing config is not valid {config_format.upper()} ({type(exc).__name__})."
+        return (
+            None,
+            f"Existing config is not valid {config_format.upper()} ({type(exc).__name__}).",
+            False,
+        )
     if not isinstance(parsed, Mapping):
-        return None, f"Existing {config_format.upper()} config is not a table/object."
-    return parsed, None
+        return None, f"Existing {config_format.upper()} config is not a table/object.", False
+    has_comments = config_format == "toml" and _toml_text_has_comment(raw_text)
+    return parsed, None, has_comments
+
+
+def _toml_text_has_comment(raw_text: str) -> bool:
+    """Return whether raw TOML text contains a comment outside any string.
+
+    ``tomllib`` silently discards comments, so an ``update`` computed from the
+    parsed document and written with the scoped emitter would drop hand-written
+    documentation while the scoped diff — itself built from the comment-free
+    re-serialization — never shows the loss. Detecting a real comment (a ``#``
+    that is not inside a string) lets the planner refuse rather than destroy
+    unrelated content. The scan tracks single-line basic/literal strings and
+    triple-quoted multiline strings so a ``#`` inside a string value is not
+    mistaken for a comment; an unterminated string is treated as running to the
+    end of input, which can only over-detect (a safe refusal), never miss one.
+    """
+    i = 0
+    length = len(raw_text)
+    while i < length:
+        if raw_text.startswith('"""', i) or raw_text.startswith("'''", i):
+            delimiter = raw_text[i : i + 3]
+            end = raw_text.find(delimiter, i + 3)
+            i = length if end == -1 else end + 3
+            continue
+        char = raw_text[i]
+        if char == "#":
+            return True
+        if char in ('"', "'"):
+            i += 1
+            while i < length and raw_text[i] not in (char, "\n"):
+                # Basic strings honor backslash escapes; literal ('') strings do not.
+                if char == '"' and raw_text[i] == "\\":
+                    i += 1
+                i += 1
+            i += 1
+            continue
+        i += 1
+    return False
 
 
 def _entries_match(existing: Mapping[str, Any], desired: Mapping[str, Any]) -> bool:

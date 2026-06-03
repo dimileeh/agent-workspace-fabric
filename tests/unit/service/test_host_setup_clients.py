@@ -17,6 +17,7 @@ from awf.host_setup.clients import (
     CLIENT_DESCRIPTORS,
     KNOWN_SETUP_CLIENTS,
     ClientConfigPlan,
+    _toml_text_has_comment,
     apply_client_config_plan,
     build_client_config_plan,
     normalize_client,
@@ -569,6 +570,80 @@ def test_build_plan_codex_unrepresentable_existing_is_conflict(tmp_path: Path) -
 
     assert plan.action == "conflict"
     assert "round-trip" in (plan.conflict_detail or "")
+
+
+@pytest.mark.unit
+def test_build_plan_codex_commented_config_update_is_conflict(tmp_path: Path) -> None:
+    """Verify an update of a commented Codex config is refused, not silently rewritten.
+
+    ``tomllib`` drops comments on parse, so rewriting the file would delete the
+    user's documentation while the comment-free scoped diff shows only the AWF
+    additions. AWF refuses such an update rather than destroy unrelated content.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        "# my hand-tuned codex config\n"
+        "[mcp_servers.awf]\n"
+        'command = "awf"\n'
+        f'args = ["mcp", "serve", "--env-file", "{_ENV_FILE}"]\n',
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert "comments" in (plan.conflict_detail or "")
+    assert plan.merged_config is None
+
+
+@pytest.mark.unit
+def test_build_plan_codex_commented_config_no_change_is_not_refused(tmp_path: Path) -> None:
+    """Verify a comment never wedges a Codex config that already matches AWF.
+
+    A fully matching ``awf`` entry plans a ``no_change`` that never writes the
+    file, so the comments are preserved and the comment refusal must not fire.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        "# keep this comment\n"
+        "[mcp_servers.awf]\n"
+        'command = "awf"\n'
+        f'args = ["mcp", "serve", "--env-file", "{_ENV_FILE}"]\n'
+        "startup_timeout_sec = 20\n"
+        "tool_timeout_sec = 120\n",
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "no_change"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("# a comment\n", True),
+        ("key = 1 # trailing comment\n", True),
+        ("key = 1\n", False),
+        ('key = "value with # inside"\n', False),
+        ("key = 'literal # not a comment'\n", False),
+        ('key = "escaped quote \\" then # still string"\n', False),
+        ('key = """\nmultiline # not a comment\n"""\n', False),
+        ("key = '''\nliteral multiline # not a comment\n'''\n", False),
+        ('key = """unterminated # treated as string\n', False),
+        ('comment_after = "s"  # real comment\n', True),
+    ],
+)
+def test_toml_text_has_comment_detects_only_real_comments(text: str, expected: bool) -> None:
+    """Verify the scanner flags ``#`` outside strings and ignores in-string hashes."""
+    assert _toml_text_has_comment(text) is expected
 
 
 @pytest.mark.unit
