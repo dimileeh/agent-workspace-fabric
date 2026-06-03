@@ -811,6 +811,133 @@ def test_retry_after_transient_fallback_remounts_surviving_upper(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_prepin_upper_mount_failure_does_not_pin_guessed_base(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    # A pre-pin overlay left by an older build: ``upper``/``work`` survive but no
+    # ``base.signature`` marker was ever recorded, so the original base the
+    # surviving ``upper`` was built against is unknowable.
+    claude_root = work_dir / "auth" / "ws_prepin" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    (claude_root / "work").mkdir(parents=True)
+    surviving = claude_root / "upper" / "settings.json"
+    surviving.write_text('{"theme": "agent-edited"}\n')
+
+    # The mount fails (the surviving upper does not line up with the freshly
+    # hashed host base) and ``merged`` never goes live.
+    mounter = FakeOverlayMounter(supported=True, mount_error=OSError("upper/base mismatch"))
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_prepin",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    # Degraded to the legacy full copy; the surviving upper is preserved for a
+    # future retry to recover.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert surviving.read_text() == '{"theme": "agent-edited"}\n'
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+    # The signature marker must NOT be left pinning a base the mount never
+    # validated against. The recorded signature was only a guess from the current
+    # host hash; persisting it would lock every later retry to the wrong lowerdir
+    # so the surviving upper could never remount (even after the host reverts).
+    assert not (claude_root / "base.signature").exists()
+
+
+@pytest.mark.unit
+def test_prepin_upper_recovers_after_host_reverts_when_mount_failed(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    class BaseMismatchMounter(FakeOverlayMounter):
+        """Models overlayfs rejecting an upper built against a different lower.
+
+        The mount only succeeds when ``lowerdir`` is the base the surviving
+        ``upper`` was actually built against; any other lower (a base recomputed
+        from a since-changed host) fails as a real kernel mismatch would.
+        """
+
+        def __init__(self, *, allowed_base: Path) -> None:
+            super().__init__(supported=True)
+            self._allowed_base = allowed_base
+
+        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
+            if Path(lowerdir) != self._allowed_base:
+                raise OSError("overlay upper built against a different lower")
+            super().mount(lowerdir=lowerdir, upperdir=upperdir, workdir=workdir, merged=merged)
+
+    # Capture host state A exactly (the signature keys off ``st_mtime_ns``, so a
+    # later revert must restore the mtime too, not just the content).
+    settings = host_home / ".claude" / "settings.json"
+    state_a_mtime_ns = settings.stat().st_mtime_ns
+
+    # Provision 1: overlay succeeds against the host-content-A base; the agent
+    # mutates the writable ``upper``.
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    mounter = BaseMismatchMounter(allowed_base=base_a)
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_revert",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_revert" / "claude"
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    # Simulate a pre-pin overlay: the marker is absent (older build) so the base
+    # is unknowable on the next provision.
+    (claude_root / "base.signature").unlink()
+
+    # Provision 2: the host changed (content B) and the overlay is torn down. The
+    # base recomputed from the changed host does not match the surviving upper, so
+    # the remount fails and we degrade to the legacy copy.
+    mounter.mounted.clear()
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+    base_b = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert base_b != base_a
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_revert",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    # The failed mount must not have pinned the guessed (host-B) base.
+    assert not (claude_root / "base.signature").exists()
+
+    # Provision 3: the operator reverts ``~/.claude`` back to content A. Because
+    # the failed mount did not poison the marker, the base recomputed from the
+    # reverted host matches the surviving upper again and the overlay remounts,
+    # recovering the agent's mutations.
+    mounter.mounted.clear()
+    settings.write_text('{"theme": "dark"}\n')
+    os.utime(settings, ns=(state_a_mtime_ns, state_a_mtime_ns))
+    assert _shared_claude_base_dir(work_dir, _host_claude_signature(host_home)) == base_a
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_revert",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    assert mounter.mounts[-1]["lowerdir"] == base_a
+    assert mounter.mounts[-1]["upperdir"] == claude_root / "upper"
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
 def test_teardown_unmounts_merged_before_removal(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     merged = work_dir / "auth" / "ws_t" / "claude" / "merged"

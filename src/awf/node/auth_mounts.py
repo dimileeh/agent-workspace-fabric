@@ -759,6 +759,17 @@ def _prepare_claude_overlay_mount(
             workspace_auth_root=str(claude_root),
             error=str(exc),
         )
+        # Drop the signature marker if we wrote one this call (``fresh_signature``
+        # set). The mount never validated the surviving ``upper`` against that
+        # base, and for a pre-pin upper (no prior marker) the recorded signature
+        # is only a guess from the current host hash — the upper may have been
+        # built against an older base. Persisting it would pin every later retry
+        # to the wrong lowerdir, so the surviving upper could never remount even
+        # after the host reverts. Removing it lets retries recompute the base from
+        # the host. A pinned retry leaves ``fresh_signature`` None and keeps its
+        # (already validated) marker so a later transient-failure retry can remount.
+        if fresh_signature is not None:
+            sig_marker.unlink(missing_ok=True)
         # Remove only the unused ``merged`` mountpoint. ``upper``/``work`` are left
         # intact: a normal teardown leaves the agent's overlay mutations in
         # ``upper`` on disk, and a retry that fails to remount here (a transient
