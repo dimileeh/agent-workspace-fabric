@@ -23,6 +23,15 @@ class WorkerConfig:
     terminal_runtime_release_scan_interval_seconds: float = 300.0
     terminal_runtime_release_max_per_scan: int = 5
     orphan_reconcile_scan_interval_seconds: float = 3600.0
+    # NOTE: only ``orphan_reconcile_scan_interval_seconds`` (above) is read by
+    # the worker — it gates the interval in ``cleanup._maybe_reconcile_orphan_dirs``.
+    # The three fields below are informational mirrors of the same settings: the
+    # *effective* values are captured by the ``_reconcile_orphan_dirs`` closure
+    # built in ``service/worker.py``, which reads them straight from ``settings``
+    # and bakes them into the no-arg ``orphan_dir_reconciler`` callable. The
+    # worker never reads these via ``self._config``, so mutating them on a
+    # ``WorkerConfig`` in isolation (e.g. ``WorkerConfig(auto_cleanup_orphans=True)``)
+    # does NOT change reconciler behavior — the closure is the source of truth.
     orphan_reconcile_max_per_scan: int = 50
     orphan_reconcile_min_age_hours: float = DEFAULT_MIN_AGE_HOURS
     auto_cleanup_orphans: bool = False
