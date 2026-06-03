@@ -210,6 +210,25 @@ def test_service_gc_http_error_exits_nonzero() -> None:
 
 
 @pytest.mark.unit
+def test_service_gc_non_json_2xx_body_exits_clean() -> None:
+    # A proxy / load balancer / early-close can return a 2xx with a non-JSON
+    # body; the CLI must surface a clean error rather than letting
+    # ``json.JSONDecodeError`` bubble out as a cryptic traceback.
+    response = MagicMock(spec=httpx.Response)
+    response.status_code = 200
+    response.content = b"<html>502 from upstream proxy</html>"
+    response.text = "<html>502 from upstream proxy</html>"
+    response.json.side_effect = json.JSONDecodeError("Expecting value", "doc", 0)
+    response.request = httpx.Request("POST", "http://localhost:8000/v1/service/gc")
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 1
+    assert "non-JSON response" in _combined_output(result)
+    assert "502 from upstream proxy" in _combined_output(result)
+
+
+@pytest.mark.unit
 def test_service_gc_supports_pretty_output() -> None:
     response = _mock_response(
         payload={

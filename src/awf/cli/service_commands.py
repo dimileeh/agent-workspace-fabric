@@ -560,7 +560,18 @@ def service_gc(
         # ``_handle_response`` prints the error envelope and always raises
         # ``typer.Exit`` for >= 400, so control never returns from this call.
         _handle_response(response, fmt)
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError:
+        # A proxy, load balancer, or early-close can return a 2xx with a
+        # non-JSON (or empty) body; surface a clean error instead of letting
+        # ``json.JSONDecodeError`` bubble out as a cryptic traceback.
+        typer.echo(
+            f"error: GC API returned a non-JSON response (HTTP {response.status_code}): "
+            f"{response.text[:200]}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
     _emit(payload, fmt)
     if isinstance(payload, dict) and payload.get("status") == "partial":
         raise typer.Exit(code=1)
