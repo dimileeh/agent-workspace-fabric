@@ -26,6 +26,11 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     (host_home / ".config" / "opencode" / "opencode.json").write_text('{"model": "ollama/x"}\n')
     (host_home / ".grok").mkdir()
     (host_home / ".grok" / "auth.json").write_text('{"token":"do-not-mount"}\n')
+    (host_home / ".grok" / "config.toml").write_text("auto_update = false\n")
+    (host_home / ".grok" / "bin").mkdir()
+    (host_home / ".grok" / "bin" / "grok").write_text("host-platform binary\n")
+    (host_home / ".grok" / "sessions").mkdir()
+    (host_home / ".grok" / "sessions" / "history.jsonl").write_text("do not copy\n")
     (host_home / ".ollama").mkdir()
     (host_home / ".ollama" / "config.json").write_text('{"integrations": {}}\n')
     (host_home / ".ollama" / "id_ed25519").write_text("private-key\n")
@@ -45,6 +50,7 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     claude_home = work_dir / "auth" / "ws_auth" / "claude"
     gemini_home = work_dir / "auth" / "ws_auth" / "gemini"
     opencode_home = work_dir / "auth" / "ws_auth" / "opencode"
+    grok_home = work_dir / "auth" / "ws_auth" / "grok"
     ollama_home = work_dir / "auth" / "ws_auth" / "ollama"
     assert by_target["/home/agent/.config/gh"].source == str(host_home / ".config" / "gh")
     assert by_target["/home/agent/.config/gh"].mode == "ro"
@@ -72,12 +78,35 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     assert (
         opencode_home / ".config" / "opencode" / "opencode.json"
     ).read_text() == '{"model": "ollama/x"}\n'
+    assert by_target["/home/agent/.grok"].source == str(grok_home / ".grok")
+    assert by_target["/home/agent/.grok"].mode == "rw"
+    assert (grok_home / ".grok" / "auth.json").read_text() == '{"token":"do-not-mount"}\n'
+    assert (grok_home / ".grok" / "config.toml").read_text() == "auto_update = false\n"
+    assert not (grok_home / ".grok" / "bin").exists()
+    assert not (grok_home / ".grok" / "sessions").exists()
     assert by_target["/home/agent/.ollama"].source == str(ollama_home / ".ollama")
     assert by_target["/home/agent/.ollama"].mode == "rw"
     assert (ollama_home / ".ollama" / "config.json").read_text() == ('{"integrations": {}}\n')
     assert (ollama_home / ".ollama" / "id_ed25519").read_text() == "private-key\n"
     assert not (ollama_home / ".ollama" / "models").exists()
-    assert "/home/agent/.grok" not in by_target
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_skip_grok_when_auth_json_missing(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_grok = host_home / ".grok"
+    host_grok.mkdir(parents=True)
+    (host_grok / "config.toml").write_text("auto_update = false\n")
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    assert "/home/agent/.grok" not in {mount.target for mount in mounts}
     assert not (work_dir / "auth" / "ws_auth" / "grok").exists()
 
 
@@ -384,6 +413,34 @@ def test_service_auth_mounts_preserve_existing_workspace_opencode_and_ollama_aut
 
 
 @pytest.mark.unit
+def test_service_auth_mounts_preserve_existing_workspace_grok_auth(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_grok = host_home / ".grok"
+    host_grok.mkdir(parents=True)
+    (host_grok / "auth.json").write_text('{"token": "initial"}\n')
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+    grok_dir = Path({m.target: m for m in mounts}["/home/agent/.grok"].source)
+    (grok_dir / "auth.json").write_text('{"token": "agent-refreshed"}\n')
+    (host_grok / "auth.json").write_text('{"token": "host-updated"}\n')
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    assert (grok_dir / "auth.json").read_text() == '{"token": "agent-refreshed"}\n'
+
+
+@pytest.mark.unit
 def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -393,11 +450,13 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     host_claude = host_home / ".claude"
     host_gemini = host_home / ".gemini"
     host_opencode = host_home / ".config" / "opencode"
+    host_grok = host_home / ".grok"
     host_ollama = host_home / ".ollama"
     host_codex.mkdir(parents=True)
     host_claude.mkdir(parents=True)
     host_gemini.mkdir(parents=True)
     host_opencode.mkdir(parents=True)
+    host_grok.mkdir(parents=True)
     host_ollama.mkdir(parents=True)
     (host_codex / "auth.json").write_text('{"token": "codex"}\n')
     (host_codex / "rules").mkdir()
@@ -406,6 +465,8 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     (host_home / ".claude.json").write_text('{"token": "claude-file"}\n')
     (host_gemini / "settings.json").write_text('{"token": "gemini"}\n')
     (host_opencode / "opencode.json").write_text('{"token": "opencode"}\n')
+    (host_grok / "auth.json").write_text('{"token": "grok"}\n')
+    (host_grok / "config.toml").write_text("auto_update = false\n")
     (host_ollama / "config.json").write_text('{"token": "ollama"}\n')
     (host_ollama / "id_ed25519").write_text("private-key\n")
     (host_home / ".gitconfig").write_text("[user]\n  name = Host\n")
@@ -438,6 +499,9 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
         Path(by_target["/home/agent/.gemini"].source) / "settings.json",
         Path(by_target["/home/agent/.config/opencode"].source),
         Path(by_target["/home/agent/.config/opencode"].source) / "opencode.json",
+        Path(by_target["/home/agent/.grok"].source),
+        Path(by_target["/home/agent/.grok"].source) / "auth.json",
+        Path(by_target["/home/agent/.grok"].source) / "config.toml",
         Path(by_target["/home/agent/.ollama"].source),
         Path(by_target["/home/agent/.ollama"].source) / "config.json",
         Path(by_target["/home/agent/.ollama"].source) / "id_ed25519",

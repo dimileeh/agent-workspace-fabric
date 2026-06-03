@@ -10,6 +10,7 @@ x-awf-auth-volumes:
   - &awf-claude-file-auth ${AWF_HOST_HOME:-${HOME}}/.claude.json:${AWF_HOST_HOME:-${HOME}}/.claude.json:ro
   - &awf-gemini-auth ${AWF_HOST_HOME:-${HOME}}/.gemini:${AWF_HOST_HOME:-${HOME}}/.gemini:ro
   - &awf-opencode-auth ${AWF_HOST_HOME:-${HOME}}/.config/opencode:${AWF_HOST_HOME:-${HOME}}/.config/opencode:ro
+  - &awf-grok-auth ${AWF_HOST_HOME:-${HOME}}/.grok:${AWF_HOST_HOME:-${HOME}}/.grok:ro
   - &awf-ollama-auth ${AWF_HOST_HOME:-${HOME}}/.ollama:${AWF_HOST_HOME:-${HOME}}/.ollama:ro
 
 # api/worker/migrate run as root inside the container by design. The control
@@ -142,6 +143,7 @@ services:
       - *awf-claude-file-auth
       - *awf-gemini-auth
       - *awf-opencode-auth
+      - *awf-grok-auth
       - *awf-ollama-auth
     ports:
       - "${AWF_API_HOST_PORT:-8000}:8000"
@@ -167,6 +169,7 @@ services:
       - *awf-claude-file-auth
       - *awf-gemini-auth
       - *awf-opencode-auth
+      - *awf-grok-auth
       - *awf-ollama-auth
     command: sh -c "awf worker"
 

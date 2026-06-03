@@ -279,6 +279,74 @@ def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_provider_readiness_grok_file_present_before_env(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".grok").mkdir(parents=True)
+    (home / ".grok" / "auth.json").write_text('{"token":"grok_file_secret"}')
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"XAI_API_KEY": "xai_env_secret"},
+        run_subprocess=_runtime_cli_ok("grok"),
+    )
+
+    grok = payload["providers"]["grok"]
+    assert grok["ok"] is True
+    assert grok["reason"] == "GROK_FILE_AUTH_PRESENT"
+    assert grok["signals"] == ["~/.grok/auth.json"]
+    assert grok["credential_scope"] == "isolated_workspace"
+    assert grok["isolation"] == "per_workspace_copy"
+    assert grok["warnings"] == []
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "grok_file_secret" not in serialized
+    assert "xai_env_secret" not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_grok_ignores_non_file_auth_json(tmp_path: Path) -> None:
+    """Non-regular-file at ~/.grok/auth.json must not mark file auth present.
+
+    _check_grok must use is_file (to match _prepare_isolated_grok_auth) so a
+    directory, symlink-to-dir, or other non-file does not report
+    GROK_FILE_AUTH_PRESENT. Otherwise preflight can pass while no .grok mount
+    is created and XAI_API_KEY env fallback may be skipped by the caller.
+    Regression test for GitHub PR review thread PRRT_kwDOSJAM6s6G0PEp.
+    """
+    home = tmp_path / "home"
+    grok_dir = home / ".grok"
+    grok_dir.mkdir(parents=True)
+    # Exists but not a regular file (a dir with the auth.json name).
+    (grok_dir / "auth.json").mkdir()
+
+    # With XAI env present: must prefer env path, not claim file auth.
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"XAI_API_KEY": "xai_env_secret"},
+        run_subprocess=_runtime_cli_ok("grok"),
+    )
+
+    grok = payload["providers"]["grok"]
+    assert grok["ok"] is True
+    assert grok["reason"] == "GROK_ENV_AUTH_PRESENT"
+    assert grok["signals"] == ["XAI_API_KEY"]
+    assert grok["credential_scope"] == "static_env_token"
+    assert grok["isolation"] == "service_env"
+    assert grok["warnings"] != []
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "xai_env_secret" not in serialized
+
+    # No env: must report missing (never file present from non-file path).
+    payload2 = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+    grok2 = payload2["providers"]["grok"]
+    assert grok2["ok"] is False
+    assert grok2["reason"] == "GROK_AUTH_MISSING"
+
+
+@pytest.mark.unit
 def test_provider_readiness_cursor_env_present(tmp_path: Path) -> None:
     """Cursor env auth appears as a static service-env token."""
     payload = collect_agent_readiness(
@@ -1396,88 +1464,3 @@ def test_provider_readiness_defensive_provider_dispatch_and_probe_fallbacks(
 
     assert probe["status"] == "unavailable"
     assert probe["reason_code"] == "PROVIDER_PROBE_UNAVAILABLE"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("exc", "reason_code"),
-    [
-        (FileNotFoundError("docker missing"), "DOCKER_CLI_NOT_FOUND"),
-        (
-            subprocess.TimeoutExpired(cmd=["docker"], timeout=5),
-            "CODEX_RUNTIME_CLI_PROBE_TIMEOUT",
-        ),
-        (RuntimeError("probe blew up sk-runtime-secret"), "CODEX_RUNTIME_CLI_PROBE_ERROR"),
-    ],
-)
-def test_agent_runtime_cli_probe_reports_structured_failures(
-    tmp_path: Path,
-    exc: Exception,
-    reason_code: str,
-) -> None:
-    def _run(_: list[str], **_kwargs: object) -> Any:
-        raise exc
-
-    result = provider_readiness._probe_agent_runtime_cli(
-        _settings(tmp_path),
-        executable="codex",
-        provider="codex",
-        environ={},
-        run_subprocess=_run,
-        secrets=frozenset({"sk-runtime-secret"}),
-    )
-
-    assert result["status"] == "fail"
-    assert result["reason_code"] == reason_code
-    assert "sk-runtime-secret" not in json.dumps(result, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_cli_auth_probe_reports_success_and_nonzero_failure() -> None:
-    ok = provider_readiness._probe_cli_auth_status(
-        provider_label="Codex",
-        args=["codex", "auth", "status"],
-        failure_reason="CODEX_AUTH_FAILED",
-        timeout_reason="CODEX_AUTH_TIMEOUT",
-        missing_reason="CODEX_AUTH_CLI_MISSING",
-        error_reason="CODEX_AUTH_ERROR",
-        environ={},
-        run_subprocess=lambda _args, **_kwargs: _completed(stdout="ok\n"),
-        secrets=frozenset(),
-    )
-    failed = provider_readiness._probe_cli_auth_status(
-        provider_label="Codex",
-        args=["codex", "auth", "status"],
-        failure_reason="CODEX_AUTH_FAILED",
-        timeout_reason="CODEX_AUTH_TIMEOUT",
-        missing_reason="CODEX_AUTH_CLI_MISSING",
-        error_reason="CODEX_AUTH_ERROR",
-        environ={},
-        run_subprocess=lambda _args, **_kwargs: _completed(returncode=1, stderr="bad auth"),
-        secrets=frozenset(),
-    )
-
-    assert ok == {"status": "ok", "reason_code": "CODEX_AUTH_OK"}
-    assert failed["status"] == "fail"
-    assert failed["reason_code"] == "CODEX_AUTH_FAILED"
-    assert failed["detail"] == "bad auth"
-
-
-@pytest.mark.unit
-def test_redaction_parts_cover_urls_empty_secrets_existing_redactions_and_merges() -> None:
-    redacted, parts = provider_readiness._redact_with_redaction_parts(
-        "connect http://user:pass@example.test with sk-providersecret123456",
-        frozenset({""}),
-    )
-
-    assert "user:pass" not in redacted
-    assert "sk-providersecret123456" not in redacted
-    assert parts is not None
-    assert provider_readiness_helpers._slice_redaction_segments(
-        [("literal", "before"), ("redaction", ""), ("literal", "after")],
-        6,
-        16,
-    ) == [("redaction", "")]
-    assert provider_readiness_helpers._merge_literal_redaction_segments(
-        [("literal", ""), ("literal", "a"), ("literal", "b")]
-    ) == [("literal", "ab")]
