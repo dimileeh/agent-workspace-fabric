@@ -33,6 +33,7 @@ def _build_release(
     *,
     version: str = "0.1.0",
     channel: str = "auto",
+    commit: str | None = None,
 ) -> tuple[Path, Path, Path]:
     """Create paired dist/checksum fixtures and a matching published manifest."""
     dist_dir = tmp_path / "dist"
@@ -53,6 +54,7 @@ def _build_release(
         repository_url=REPOSITORY_URL,
         channel=channel,
         generated_at=GENERATED_AT,
+        commit=commit,
     )
     manifest_path = tmp_path / "awf-install-manifest.json"
     write_manifest(manifest, manifest_path)
@@ -67,6 +69,7 @@ def _run_check(
     version: str | None = None,
     tag: str | None = None,
     repository_url: str | None = None,
+    commit: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the drift-gate CLI against fixtures."""
     command = [
@@ -85,6 +88,8 @@ def _run_check(
         command.extend(["--tag", tag])
     if repository_url is not None:
         command.extend(["--repository-url", repository_url])
+    if commit is not None:
+        command.extend(["--commit", commit])
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
 
@@ -327,6 +332,63 @@ def test_drift_gate_fails_on_source_tag_mismatch(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "tag" in result.stderr
+
+
+@pytest.mark.unit
+def test_drift_gate_fails_when_explicit_commit_disagrees_with_manifest(tmp_path: Path) -> None:
+    """An explicit --commit that disagrees with the published source.commit is drift.
+
+    Without an expected commit the gate reuses the manifest's own value to build the
+    comparison, so a stale/edited source.commit would compare equal to itself and
+    escape detection. Passing the workflow's GITHUB_SHA pins provenance independently.
+    """
+    dist_dir, checksums_file, manifest_path = _build_release(tmp_path, commit="a" * 40)
+
+    result = _run_check(
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        manifest_path=manifest_path,
+        version="0.1.0",
+        tag="v0.1.0",
+        commit="b" * 40,
+    )
+
+    assert result.returncode != 0
+    assert "source.commit" in result.stderr
+    assert "b" * 40 in result.stderr
+
+
+@pytest.mark.unit
+def test_drift_gate_passes_when_explicit_commit_matches_manifest(tmp_path: Path) -> None:
+    """An explicit --commit equal to the published source.commit passes."""
+    dist_dir, checksums_file, manifest_path = _build_release(tmp_path, commit="a" * 40)
+
+    result = _run_check(
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        manifest_path=manifest_path,
+        version="0.1.0",
+        tag="v0.1.0",
+        commit="a" * 40,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.unit
+def test_check_release_artifacts_validates_explicit_commit(tmp_path: Path) -> None:
+    """The importable entrypoint surfaces commit drift when an expected commit is given."""
+    dist_dir, checksums_file, manifest_path = _build_release(tmp_path, commit="a" * 40)
+
+    with pytest.raises(ManifestError) as excinfo:
+        check_release_artifacts(
+            dist_dir=dist_dir,
+            checksums_file=checksums_file,
+            manifest_path=manifest_path,
+            commit="b" * 40,
+        )
+
+    assert "source.commit" in str(excinfo.value)
 
 
 @pytest.mark.unit

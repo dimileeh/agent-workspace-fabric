@@ -57,13 +57,17 @@ def check_release_artifacts(
     version: str | None = None,
     tag: str | None = None,
     repository_url: str | None = None,
+    commit: str | None = None,
 ) -> None:
     """Raise ManifestError if the published manifest drifts from the dist artifacts.
 
-    Release metadata (version, tag, repository URL) defaults to the published
-    manifest when the corresponding flag is omitted, so the gate can run from the
-    manifest alone; an explicit flag that disagrees with the published manifest
-    surfaces as drift through the field-level comparison.
+    Release metadata (version, tag, repository URL, commit) defaults to the
+    published manifest when the corresponding flag is omitted, so the gate can run
+    from the manifest alone; an explicit flag that disagrees with the published
+    manifest surfaces as drift through the field-level comparison. Passing the
+    workflow's commit (``GITHUB_SHA``) pins ``source.commit`` to the current build
+    instead of trusting the published manifest's own value, which would otherwise
+    compare equal to itself and let a stale or edited commit escape the gate.
     """
     published = load_published_manifest(manifest_path)
 
@@ -75,7 +79,7 @@ def check_release_artifacts(
     )
     resolved_channel = _required_str(published, "channel")
     package = published.get("package", DEFAULT_PACKAGE)
-    commit = source.get("commit")
+    resolved_commit = commit if commit is not None else source.get("commit")
     generated_at = _required_str(published, "generated_at")
 
     expected = build_manifest(
@@ -87,7 +91,7 @@ def check_release_artifacts(
         channel=resolved_channel,
         generated_at=generated_at,
         package=str(package),
-        commit=commit,
+        commit=resolved_commit,
     )
 
     differences = _manifest_differences(published, expected)
@@ -110,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             version=args.version,
             tag=args.tag,
             repository_url=args.repository_url,
+            commit=args.commit,
         )
     except (OSError, ManifestError, ValueError) as exc:
         parser.error(str(exc))
@@ -129,6 +134,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--version")
     parser.add_argument("--tag")
     parser.add_argument("--repository-url")
+    parser.add_argument("--commit")
     return parser
 
 

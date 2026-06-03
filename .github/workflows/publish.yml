@@ -87,9 +87,11 @@ jobs:
       - name: Verify release artifact drift
         run: |
           # Fail the release if the generated manifest or the checksum file drift
-          # from the built dist/* (sha256, filenames, channel/version/tag, or
-          # checksum bytes). A skipped manifest (non-release ref) leaves no file;
-          # only run the gate when the manifest exists.
+          # from the built dist/* (sha256, filenames, channel/version/tag/commit,
+          # or checksum bytes). Pass GITHUB_SHA as the expected commit so a stale
+          # or edited source.commit is caught instead of being compared against
+          # itself. A skipped manifest (non-release ref) leaves no file; only run
+          # the gate when the manifest exists.
           if [[ -f artifacts/release/awf-install-manifest.json ]]; then
             .venv/bin/python scripts/check_release_artifacts.py \
               --dist-dir dist \
@@ -97,7 +99,8 @@ jobs:
               --manifest artifacts/release/awf-install-manifest.json \
               --version "${AWF_RELEASE_VERSION}" \
               --tag "${AWF_RELEASE_TAG}" \
-              --repository-url "https://github.com/dimileeh/aira-agent-workspace-fabric"
+              --repository-url "https://github.com/dimileeh/aira-agent-workspace-fabric" \
+              --commit "${GITHUB_SHA}"
           else
             echo "SKIP: no manifest generated for this ref; nothing to drift-check"
           fi
