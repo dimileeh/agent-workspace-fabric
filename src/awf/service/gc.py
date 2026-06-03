@@ -68,6 +68,7 @@ _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 DEFAULT_MIN_AGE_HOURS = 168
 
 COMPLETED_PR_RETENTION_EXPIRED = "COMPLETED_PR_RETENTION_EXPIRED"
+COMPLETED_PR_IMMEDIATE_RECLAIM = "COMPLETED_PR_IMMEDIATE_RECLAIM"
 TERMINAL_WORKSPACE_RETENTION_EXPIRED = "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
 WORKSPACE_WITHIN_RETENTION = "WORKSPACE_WITHIN_RETENTION"
 FAILED_WORKSPACE_TRIAGE_PRESERVED = "FAILED_WORKSPACE_TRIAGE_PRESERVED"
@@ -1429,11 +1430,19 @@ def _classify_workspace_for_gc(
                 age_hours=age_hours,
                 reason_code=WORKSPACE_WITHIN_RETENTION,
             )
+        # Distinguish an immediate post-merge reclaim (``ignore_retention``
+        # bypassed the window) from one that naturally aged out, so audit logs
+        # and ``WorkspaceEvent`` trails do not mislabel a minutes-old workspace
+        # as "retention expired".
         return _candidate_for_workspace(
             workspace,
             work_dir=work_dir,
             now=now,
-            reason_code=COMPLETED_PR_RETENTION_EXPIRED,
+            reason_code=(
+                COMPLETED_PR_IMMEDIATE_RECLAIM
+                if ignore_retention
+                else COMPLETED_PR_RETENTION_EXPIRED
+            ),
         )
 
     if updated_at > cutoff_at:

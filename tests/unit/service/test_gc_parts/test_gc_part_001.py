@@ -23,6 +23,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
+    COMPLETED_PR_IMMEDIATE_RECLAIM,
     COMPLETED_PR_NOT_MERGED,
     COMPLETED_PR_RETENTION_EXPIRED,
     FAILED_WORKSPACE_NO_WORK,
@@ -1110,7 +1111,9 @@ async def test_single_workspace_gc_ignore_retention_reclaims_recent_merged_works
 ) -> None:
     # A freshly-merged workspace whose ``updated_at`` is well within the
     # retention window is reclaimed immediately when ignore_retention=True; the
-    # durable DB row + events survive (only pressure dirs go).
+    # durable DB row + events survive (only pressure dirs go). The candidate is
+    # tagged COMPLETED_PR_IMMEDIATE_RECLAIM so audit logs distinguish this
+    # post-merge bypass from a workspace that naturally aged out of retention.
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -1137,7 +1140,7 @@ async def test_single_workspace_gc_ignore_retention_reclaims_recent_merged_works
 
     assert result.dry_run is False
     assert [candidate.workspace_id for candidate in result.plan.candidates] == [workspace_id]
-    assert result.plan.candidates[0].reason_code == COMPLETED_PR_RETENTION_EXPIRED
+    assert result.plan.candidates[0].reason_code == COMPLETED_PR_IMMEDIATE_RECLAIM
     assert not worktree.exists()
     assert not auth.exists()
     async with session_factory() as session:
