@@ -170,7 +170,20 @@ jobs:
             --run
 
   publish:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_target != 'none' }}
+    # always() defeats GitHub Actions' implicit skip-propagation: installer-smoke
+    # is intentionally skipped on non-release refs (no manifest to verify), and
+    # without always() that skip would silently skip publish too — swallowing a
+    # manual workflow_dispatch with publish_target != 'none' from a development
+    # branch (AC4). Gate explicitly on dependency results instead: build must
+    # have produced artifacts, and a *failed* (or cancelled) smoke still blocks
+    # the release, while a *skipped* smoke leaves the manual publish to proceed.
+    if: >-
+      ${{ always()
+          && github.event_name == 'workflow_dispatch'
+          && inputs.publish_target != 'none'
+          && needs.build.result == 'success'
+          && needs.installer-smoke.result != 'failure'
+          && needs.installer-smoke.result != 'cancelled' }}
     needs: [build, installer-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -201,6 +201,35 @@ def test_publish_workflow_publish_job_gated_on_installer_smoke() -> None:
 
 
 @pytest.mark.unit
+def test_publish_workflow_publish_not_silently_skipped_when_smoke_skips() -> None:
+    """A workflow_dispatch publish must not be silently skipped by a skipped smoke job.
+
+    GitHub Actions propagates a ``skipped`` status from any ``needs`` job to
+    dependents whose ``if`` omits ``always()``. ``installer-smoke`` skips on
+    non-release refs (no manifest), so without ``always()`` a manual
+    ``publish_target=testpypi`` dispatch from a development branch would be
+    silently skipped, defeating the manual gate (AC4). The publish condition
+    must therefore use ``always()`` and gate explicitly on dependency results:
+    build must succeed and the smoke must not have failed, while a *skipped*
+    smoke (no manifest to verify) still allows the manual publish to proceed.
+    """
+    workflow = _publish_workflow()
+    publish_job = _job(workflow, "publish")
+    condition = str(publish_job.get("if", ""))
+
+    # always() defeats the implicit skip-propagation from installer-smoke.
+    assert "always()" in condition
+    # Build must have succeeded for there to be artifacts to publish.
+    assert "needs.build.result == 'success'" in condition
+    # A failed (or cancelled) smoke still blocks the release...
+    assert "needs.installer-smoke.result != 'failure'" in condition
+    assert "needs.installer-smoke.result != 'cancelled'" in condition
+    # ...but a skipped smoke must not be treated as a blocker, so the condition
+    # must not require the smoke to have succeeded outright.
+    assert "needs.installer-smoke.result == 'success'" not in condition
+
+
+@pytest.mark.unit
 def test_publish_workflow_does_not_treat_v_prefixed_branch_as_release_tag() -> None:
     """Manual dispatch from a v-prefixed branch must still use the version tag."""
     build_job = _job(_publish_workflow(), "build")
