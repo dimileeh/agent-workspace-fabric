@@ -65,3 +65,16 @@ Full AWF/GitHub validation (including 99% coverage gate, OpenAPI drift, console,
 
 - The review comment being "addressed" means performing the mandated verification + verdict bookkeeping; because the bot itself declares the work safe and prior flags addressed, the correct outcome per decision tree is FALSE POSITIVE with zero source edits.
 - No update to any ws_*.md conformance under docs/awf-plans is required for this review-address protocol task (those are AWF-generated per-workspace run artifacts).
+
+## Post-Plan Iteration Note (added during execution)
+
+After the initial plan+validation were committed (80064ab7), a merge from development (b1fb4485, the commit referenced by the Greptile summary as "last reviewed") was performed on the workspace branch. This merge refactored provider_readiness (moved helpers, added check_single_provider_readiness + public factories, shifted some line numbers) but left the grok _check_grok is_file() path, _prepare_isolated_grok_auth, auth files constant, and the dedicated grok regression tests in the part_*.py files untouched.
+
+Per PLAN_EXECUTION_PROTOCOL §4, an iteration was performed:
+- Re-inspected code post-merge (no behavior change to the guarded grok file-auth).
+- Re-ran the exact narrow verification commands listed in this plan (results still green; see sibling VALIDATION Iteration 2 for fresh outputs and line number corrections).
+- Updated only the VALIDATION.md (added Iteration 2 section, refreshed evidence, corrected stale line refs and test descriptions for accuracy). PLAN itself required only this note.
+- Committed the validation update with a follow-up conventional commit also referencing issue:4614528914 (so the thread's bookkeeping is current for the reviewed merge commit).
+- Still no source/test/docker edits; verdict remains FALSE POSITIVE.
+
+This keeps the artifacts accurate for the review comment that was (re)triggered against the post-merge state without violating scope or contract rules on broad validation.
