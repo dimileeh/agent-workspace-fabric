@@ -214,6 +214,99 @@ async def test_completed_monitor_filesystem_gc_logs_success_for_retained_old_wor
 
 
 @pytest.mark.unit
+async def test_completed_monitor_filesystem_gc_unmounts_auth_overlay_before_removal(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+    ws_id = await _seed_old_completed_pr_workspace(
+        factory,
+        updated_at=datetime.now(UTC) - timedelta(days=30),
+    )
+    auth = work_dir / "auth" / ws_id
+    _write(auth / "claude" / "merged" / "settings.json", "auth")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+    )
+
+    teardown_calls: list[tuple[Path, str, bool]] = []
+
+    def _record_teardown(*, work_dir: Path, workspace_id: str) -> None:
+        # Capture whether the auth dir still exists when teardown runs so the
+        # test proves the unmount precedes GC's rmtree (not after it, when it
+        # would be a no-op and the EBUSY race would already have fired).
+        teardown_calls.append((work_dir, workspace_id, auth.exists()))
+
+    with (
+        _mock_worktree_remove_success(),
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.teardown_workspace_auth_overlay",
+            new=_record_teardown,
+        ),
+    ):
+        await runner._gc_completed_workspace_filesystem(ws_id)
+
+    assert teardown_calls == [(work_dir, ws_id, True)]
+    assert not auth.exists()
+
+
+@pytest.mark.unit
+async def test_completed_monitor_auth_overlay_teardown_failure_does_not_block_gc(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+    ws_id = await _seed_old_completed_pr_workspace(
+        factory,
+        updated_at=datetime.now(UTC) - timedelta(days=30),
+    )
+    auth = work_dir / "auth" / ws_id
+    _write(auth / "claude" / "merged" / "settings.json", "auth")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+    )
+
+    def _raise_busy(*, work_dir: Path, workspace_id: str) -> None:
+        raise OSError("target is busy")
+
+    with (
+        _mock_worktree_remove_success(),
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.teardown_workspace_auth_overlay",
+            new=_raise_busy,
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await runner._gc_completed_workspace_filesystem(ws_id)
+
+    assert any(
+        record.get("event") == "monitor.auth_overlay_teardown_failed"
+        and record.get("workspace_id") == ws_id
+        for record in captured
+    )
+    # The teardown failure is swallowed; GC still reclaims the auth dir.
+    assert not auth.exists()
+
+
+@pytest.mark.unit
 async def test_completed_monitor_filesystem_gc_revokes_active_secret_leases(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,

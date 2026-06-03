@@ -5,6 +5,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from datetime import (
     UTC,
@@ -25,6 +26,7 @@ from awf.db.repositories import (
     WorkspaceEventCreate,
     WorkspaceRepository,
 )
+from awf.node.auth_mounts import teardown_workspace_auth_overlay
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_PROCESSED_KEY_PREFIX,
     OPERATOR_HINT_STATE_KEY,
@@ -631,12 +633,38 @@ async def _teardown_compose_stack(
     return False
 
 
+def _teardown_completed_workspace_auth_overlay(work_dir: Path, workspace_id: str) -> None:
+    """Unmount a completed workspace's Claude auth overlay before GC removes its dir.
+
+    The monitor's own filesystem GC (``run_workspace_filesystem_gc`` with no
+    ``compose_teardown`` hook) does not unmount the overlay, unlike the
+    ``service gc`` path which wires teardown through
+    ``_run_terminal_workspace_compose_teardown``. A still-mounted overlay makes
+    GC's ``rmtree`` of ``auth/<workspace_id>`` fail with ``EBUSY`` and strands
+    the merged mount, so unmount here first. Best-effort: a genuine busy/umount
+    error is logged and swallowed (GC's own rmtree surfaces any residual EBUSY)
+    so it never masks the completion signal the merge already produced.
+    """
+
+    try:
+        teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=workspace_id)
+    except (OSError, subprocess.SubprocessError):
+        _log.warning(
+            "monitor.auth_overlay_teardown_failed",
+            workspace_id=workspace_id,
+        )
+
+
 async def _gc_completed_workspace_filesystem(self: Any, workspace_id: str) -> None:
     """Remove local pressure directories for a successfully completed workspace.
 
     The durable DB row, events, logs, and artifacts are intentionally kept.
     """
 
+    # Unmount the Claude auth overlay before GC removes ``auth/<workspace_id>``;
+    # the compose stack is already down (GC only runs on a successful teardown),
+    # mirroring the ``service gc`` unmount-before-remove ordering.
+    _teardown_completed_workspace_auth_overlay(self._work_dir, workspace_id)
     try:
         result = await run_workspace_filesystem_gc(
             self._deps.session_factory,
