@@ -555,6 +555,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#service_status_collection_failed](#service_status_collection_failed)
 
+### SETUP_CLIENT_UNKNOWN
+**Problem:** AWF setup was asked to configure an unsupported client integration.
+**Likely Cause:** The client selector does not match a client known to this AWF build.
+**Operator Fix:** Use a supported client name (claude or codex) with `awf setup --client <client>`, or omit `--client` to run the readiness pass.
+**Related Command:** `awf setup --client <client>`
+**Docs Link:** [docs/REASON_CATALOG.md#setup_client_unknown](#setup_client_unknown)
+
+### SETUP_PLAIN_SECRETS_CLIENT_CONFLICT
+**Problem:** AWF setup cannot combine --allow-plain-secrets with --client.
+**Likely Cause:** The client dispatch never reaches the consent-persisting path, so accepting --allow-plain-secrets there would silently drop the operator's opt-in flag.
+**Operator Fix:** Re-run setup with --client to register a client MCP integration, and record plain-file consent separately via the readiness/provider path (awf setup --allow-plain-secrets), which is the only path that persists it.
+**Related Command:** `awf setup --client <client>`
+**Docs Link:** [docs/REASON_CATALOG.md#setup_plain_secrets_client_conflict](#setup_plain_secrets_client_conflict)
+
+### SETUP_PROVIDER_CLIENT_CONFLICT
+**Problem:** AWF setup cannot combine --provider with --client.
+**Likely Cause:** The setup command received mutually exclusive --provider and --client selectors in one invocation.
+**Operator Fix:** Re-run setup with either --provider to evaluate providers or --client to register a client MCP integration, but not both.
+**Related Command:** `awf setup --client <client>`
+**Docs Link:** [docs/REASON_CATALOG.md#setup_provider_client_conflict](#setup_provider_client_conflict)
+
 ### SETUP_PROVIDER_UNKNOWN
 **Problem:** AWF setup was asked to configure an unsupported provider.
 **Likely Cause:** The provider selector does not match a provider known to this AWF build.
