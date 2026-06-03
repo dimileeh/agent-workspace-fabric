@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 import awf.service.gc as gc
 from awf.db.enums import WorkspaceStatus
@@ -168,6 +169,7 @@ async def test_execute_gc_deletes_workspace_paths_in_threads(
     ]
     assert to_thread_calls == [
         "_classify_workspace_for_gc",
+        "_unmount_candidate_auth_overlay",
         "_delete_gc_path_outcome",
         "_delete_gc_path_outcome",
         "_delete_gc_path_outcome",
@@ -269,3 +271,87 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
         "already_removed"
     }
     assert third.path_outcomes[0].to_dict()["reason_code"] == "PATH_ALREADY_REMOVED"
+
+
+@pytest.mark.unit
+async def test_service_gc_unmounts_auth_overlay_before_removing_auth_dir(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # The Claude auth overlay is mounted at ``auth/<id>/claude/merged``; the
+    # terminal/service GC path must unmount it before ``rmtree`` of ``auth/<id>``,
+    # otherwise a live mount makes removal fail with EBUSY and strands the mount.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="b" * 40,
+    )
+    auth = work_dir / "auth" / workspace_id
+    _write(auth / "claude" / "merged" / "settings.json", "{}")
+
+    auth_present_at_unmount: list[bool] = []
+    teardown = Mock(side_effect=lambda **_kw: auth_present_at_unmount.append(auth.exists()))
+
+    with patch("awf.node.auth_mounts.teardown_workspace_auth_overlay", teardown):
+        result = await run_terminal_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            min_age_hours=24,
+            execute=True,
+            now=now,
+        )
+
+    assert result.status == "succeeded"
+    teardown.assert_called_once_with(work_dir=work_dir, workspace_id=workspace_id)
+    # The overlay was unmounted while the auth dir still existed (before removal),
+    # and the auth dir is then deleted rather than left stranded.
+    assert auth_present_at_unmount == [True]
+    assert not auth.exists()
+
+
+@pytest.mark.unit
+async def test_service_gc_swallows_and_logs_overlay_unmount_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A genuine umount failure must be logged with its reason code and swallowed:
+    # the per-path delete still surfaces any residual EBUSY rather than the whole
+    # GC run aborting on the unmount.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="c" * 40,
+    )
+    _write(work_dir / "auth" / workspace_id / "claude" / "merged" / "settings.json", "{}")
+
+    teardown = Mock(side_effect=OSError("device or resource busy"))
+
+    with (
+        patch("awf.node.auth_mounts.teardown_workspace_auth_overlay", teardown),
+        capture_logs() as logs,
+    ):
+        result = await run_terminal_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            min_age_hours=24,
+            execute=True,
+            now=now,
+        )
+
+    # The run is not aborted by the unmount failure ...
+    assert result.status == "succeeded"
+    # ... and the failure is recorded with its reason code rather than swallowed
+    # silently.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"
+        and entry.get("workspace_id") == workspace_id
+        for entry in logs
+    )

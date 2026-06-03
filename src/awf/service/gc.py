@@ -8,6 +8,7 @@ log streams.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
+from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -56,6 +58,8 @@ from awf.service.secret_leases import (
 
 if TYPE_CHECKING:
     from awf.node.compose_manager import ComposeManager
+
+_log = get_logger(__name__)
 
 WorkspaceGCWorktreeRemoveResult = _gc_worktrees.WorkspaceGCWorktreeRemoveResult
 WorkspaceGCWorktreeRemoveTargetResult = _gc_worktrees.WorkspaceGCWorktreeRemoveTargetResult
@@ -979,6 +983,36 @@ async def _revoke_gc_secret_leases(
     return summaries
 
 
+def _unmount_candidate_auth_overlay(
+    candidate: WorkspaceGCCandidate,
+    *,
+    work_dir: Path,
+) -> None:
+    """Unmount a GC candidate's Claude auth overlay before its dir is removed.
+
+    Unmount-before-remove: a live overlay mount at ``auth/<id>/claude/merged``
+    makes the subsequent ``rmtree`` of ``auth/<id>`` fail with ``EBUSY`` and
+    strands both the mount and the auth dir. The PR monitor unmounts before its
+    own filesystem GC, but ``POST /v1/service/gc`` funnels through here too, so
+    doing it centrally covers both entrypoints. Best-effort and idempotent: a
+    no-op when nothing is mounted, and a genuine umount failure is logged and
+    swallowed so the per-path delete still records any residual ``EBUSY`` rather
+    than aborting the whole run.
+    """
+
+    from awf.node.auth_mounts import teardown_workspace_auth_overlay
+
+    try:
+        teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=candidate.workspace_id)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.warning(
+            "gc.auth_overlay_unmount_failed",
+            reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
+            workspace_id=candidate.workspace_id,
+            error=repr(exc)[:400],
+        )
+
+
 async def _delete_gc_plan_paths(
     plan: WorkspaceGCPlan,
     *,
@@ -997,6 +1031,7 @@ async def _delete_gc_plan_paths(
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
     worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] = {}
     for candidate in plan.candidates:
+        await asyncio.to_thread(_unmount_candidate_auth_overlay, candidate, work_dir=plan.work_dir)
         teardown = await _run_compose_teardown(candidate, compose_teardown)
         if teardown is not None:
             compose_teardowns[candidate.workspace_id] = teardown
