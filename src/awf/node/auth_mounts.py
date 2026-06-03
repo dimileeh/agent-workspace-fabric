@@ -551,6 +551,19 @@ def _prepare_claude_overlay_mount(
     for directory in (upper, work, merged):
         directory.mkdir(parents=True, exist_ok=True)
 
+    if overlay_mounter.is_mounted(merged):
+        # Idempotent retry: a prior provision already mounted this overlay (e.g.
+        # the auth dir survived a failed stack launch). Reuse the live mount
+        # instead of remounting onto a busy mountpoint — a second mount would
+        # raise EBUSY and the cleanup below would ``rmtree`` the writable
+        # ``upper``/``work`` layers, destroying the agent's overlay data and
+        # forcing a needless full-copy fallback.
+        return (
+            AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
+            upper,
+            work,
+        )
+
     try:
         overlay_mounter.mount(lowerdir=base, upperdir=upper, workdir=work, merged=merged)
     except (OSError, subprocess.SubprocessError) as exc:

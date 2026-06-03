@@ -51,6 +51,9 @@ class FakeOverlayMounter:
     def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
         if self._mount_error is not None:
             raise self._mount_error
+        if Path(merged) in self.mounted:
+            # Mirror the kernel: mounting onto a live overlay mountpoint is EBUSY.
+            raise OSError("device or resource busy")
         self.mounts.append(
             {"lowerdir": lowerdir, "upperdir": upperdir, "workdir": workdir, "merged": merged}
         )
@@ -262,6 +265,45 @@ def test_overlay_unavailable_falls_back_to_legacy_copy(
     assert not (claude_root / "merged").exists()
     if mounter.supported():
         assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+
+
+@pytest.mark.unit
+def test_overlay_reprovision_reuses_live_mount_without_data_loss(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_retry",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_retry" / "claude"
+    # The agent's writable overlay data accumulated in ``upper`` during the run.
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+
+    # A second provision on the same workspace (auth dir survived a failed stack
+    # launch, overlay still mounted) must reuse the live mount, not remount.
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_retry",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # No second mount onto the busy mountpoint, so no EBUSY-triggered rmtree.
+    assert len(mounter.mounts) == 1
+    # The writable upper layer (the agent's overlay data) is preserved, and no
+    # full-copy fallback tree was written.
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+    assert not (claude_root / ".claude").exists()
 
 
 @pytest.mark.unit
