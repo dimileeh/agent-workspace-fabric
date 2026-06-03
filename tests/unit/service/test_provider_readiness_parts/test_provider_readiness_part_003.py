@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -439,6 +440,40 @@ def test_provider_readiness_security_summary_handles_malformed_warning_payloads(
         "DOCKER_AUTH_NOT_OBSERVED",
         "GITHUB_TOKEN_ENV_MISSING",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exc", "reason_code"),
+    [
+        (FileNotFoundError("docker missing"), "DOCKER_CLI_NOT_FOUND"),
+        (
+            subprocess.TimeoutExpired(cmd=["docker"], timeout=5),
+            "CODEX_RUNTIME_CLI_PROBE_TIMEOUT",
+        ),
+        (RuntimeError("probe blew up sk-runtime-secret"), "CODEX_RUNTIME_CLI_PROBE_ERROR"),
+    ],
+)
+def test_agent_runtime_cli_probe_reports_structured_failures(
+    tmp_path: Path,
+    exc: Exception,
+    reason_code: str,
+) -> None:
+    def _run(_: list[str], **_kwargs: object) -> Any:
+        raise exc
+
+    result = provider_readiness._probe_agent_runtime_cli(
+        _settings(tmp_path),
+        executable="codex",
+        provider="codex",
+        environ={},
+        run_subprocess=_run,
+        secrets=frozenset({"sk-runtime-secret"}),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == reason_code
+    assert "sk-runtime-secret" not in json.dumps(result, sort_keys=True)
 
 
 @pytest.mark.unit
