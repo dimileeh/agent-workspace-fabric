@@ -596,6 +596,26 @@ def test_build_plan_malformed_json_is_conflict(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_build_plan_invalid_utf8_config_is_conflict(tmp_path: Path) -> None:
+    """Verify an existing config with invalid UTF-8 bytes is an ambiguous conflict.
+
+    ``Path.read_text(encoding="utf-8")`` raises ``UnicodeDecodeError`` (a
+    ``ValueError`` subclass, not ``OSError``) on malformed bytes. Without a
+    dedicated guard it would escape ``awf setup`` as an uncaught traceback
+    instead of the reason-coded client config conflict.
+    """
+    _claude_config_path(tmp_path).write_bytes(b"\xff\xfe invalid utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert "JSON" in (plan.conflict_detail or "")
+    assert plan.merged_config is None
+
+
+@pytest.mark.unit
 def test_build_plan_duplicate_json_keys_is_conflict(tmp_path: Path) -> None:
     """Verify duplicate top-level JSON keys are refused, not silently reduced.
 

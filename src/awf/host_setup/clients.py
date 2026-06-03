@@ -685,6 +685,17 @@ def _read_existing_config(
         raw_text = config_path.read_text(encoding="utf-8")
     except OSError as exc:
         return None, f"Existing config could not be read ({type(exc).__name__}).", False
+    except UnicodeDecodeError as exc:
+        # ``read_text`` raises ``UnicodeDecodeError`` (a ``ValueError`` subclass,
+        # not ``OSError``) for invalid UTF-8 bytes, so it escapes the read guard
+        # above and the parse guard below only wraps json/tomllib. Treat it as an
+        # ambiguous parse failure so the CLI returns the reason-coded conflict
+        # rather than an uncaught traceback.
+        return (
+            None,
+            f"Existing config is not valid {config_format.upper()} ({type(exc).__name__}).",
+            False,
+        )
     try:
         if config_format == "json":
             parsed: object = (
