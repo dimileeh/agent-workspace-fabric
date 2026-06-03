@@ -52,8 +52,8 @@ from awf.service.provider_readiness import (
     ProviderName,
     SubprocessRun,
     check_single_provider_readiness,
+    default_subprocess_runner,
 )
-from awf.service.provider_readiness_helpers import _run_subprocess as _default_run_subprocess
 
 logger = get_logger(__name__)
 
@@ -262,7 +262,7 @@ def orchestrate_provider_setup(
     mode: ProviderSetupMode = "targeted_recheck" if selected else "all_providers"
     target_names = set(selected) if selected else set(_SPEC_BY_NAME)
     capabilities = detect_host_credential_capabilities(environ=env)
-    resolved_run = run_subprocess or _default_run_subprocess
+    resolved_run = run_subprocess or default_subprocess_runner()
     backends = _CredentialBackends(
         keyring=keyring_backend, env=env_backend, plain_file=plain_file_backend
     )

@@ -234,6 +234,17 @@ def check_single_provider_readiness(
     )
 
 
+def default_subprocess_runner() -> SubprocessRun:
+    """Return the default bounded subprocess runner used by readiness probes.
+
+    A stable public factory so callers outside this package (e.g. host setup
+    provider orchestration) can reuse the exact ``subprocess.run`` wrapper the
+    readiness checks default to — without importing the private ``_run_subprocess``
+    helper and coupling to a name that may move or be renamed during a refactor.
+    """
+    return _run_subprocess
+
+
 def selected_provider_readiness_preflight(
     settings: ServiceSettings,
     *,
@@ -1490,6 +1501,7 @@ __all__ = [
     "ProviderReadinessError",
     "check_single_provider_readiness",
     "collect_agent_readiness",
+    "default_subprocess_runner",
     "provider_readiness_preflight_from_task_policy",
     "redact_launch_preflight_text",
     "selected_provider_readiness_preflight",

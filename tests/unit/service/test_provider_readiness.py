@@ -14,7 +14,10 @@ from typing import Any
 import pytest
 
 from awf.service.config import ServiceSettings
-from awf.service.provider_readiness import check_single_provider_readiness
+from awf.service.provider_readiness import (
+    check_single_provider_readiness,
+    default_subprocess_runner,
+)
 
 
 def _settings(tmp_path: Path) -> ServiceSettings:
@@ -36,6 +39,43 @@ def _settings(tmp_path: Path) -> ServiceSettings:
 
 def _unexpected_subprocess(args: list[str], **_kwargs: object) -> Any:
     raise AssertionError(f"unexpected subprocess call: {args}")
+
+
+@pytest.mark.unit
+def test_default_subprocess_runner_delegates_to_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public seam returns the bounded runner that calls ``subprocess.run``.
+
+    Callers outside this package reuse this factory instead of importing the
+    private ``_run_subprocess`` helper, so the contract must stay stable: invoking
+    the returned runner forwards verbatim to ``subprocess.run``.
+    """
+    from awf.service import provider_readiness_helpers
+
+    captured: dict[str, Any] = {}
+    completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def _subprocess_run(args: list[str], **kwargs: Any) -> Any:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return completed
+
+    monkeypatch.setattr(provider_readiness_helpers.subprocess, "run", _subprocess_run)
+
+    runner = default_subprocess_runner()
+    result = runner(
+        ["gh", "auth", "status"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=1.5,
+        env={},
+    )
+
+    assert result is completed
+    assert captured["args"] == ["gh", "auth", "status"]
+    assert captured["kwargs"]["timeout"] == 1.5
 
 
 @pytest.mark.unit
