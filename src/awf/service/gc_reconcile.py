@@ -223,9 +223,10 @@ def scan_orphan_workspace_dirs(
             # file at the root path: ``iterdir()`` would raise ``NotADirectoryError``
             # and crash the background sweep. A missing root is also handled here.
             continue
-        for entry in sorted(root.iterdir(), key=lambda item: item.name):
-            if not entry.name.startswith("ws_"):
-                continue
+        for entry in sorted(
+            (e for e in root.iterdir() if e.name.startswith("ws_")),
+            key=lambda item: item.name,
+        ):
             if entry.is_symlink() or not entry.is_dir():
                 continue
             scanned += 1
