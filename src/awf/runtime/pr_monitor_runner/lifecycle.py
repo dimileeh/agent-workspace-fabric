@@ -5,6 +5,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 from datetime import (
@@ -665,8 +666,13 @@ async def _gc_completed_workspace_filesystem(self: Any, workspace_id: str) -> No
 
     # Unmount the Claude auth overlay before GC removes ``auth/<workspace_id>``;
     # the compose stack is already down (GC only runs on a successful teardown),
-    # mirroring the ``service gc`` unmount-before-remove ordering.
-    _teardown_completed_workspace_auth_overlay(self._work_dir, workspace_id)
+    # mirroring the ``service gc`` unmount-before-remove ordering. The unmount
+    # runs a blocking ``subprocess.run(["umount", ...], timeout=30.0)``, so push
+    # it to a worker thread to avoid stalling the event loop (the ``service gc``
+    # path does the same via ``asyncio.to_thread``).
+    await asyncio.to_thread(
+        _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
+    )
     try:
         result = await run_workspace_filesystem_gc(
             self._deps.session_factory,

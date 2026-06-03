@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -15,6 +15,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.pr_monitor_runner import lifecycle
 from awf.service.gc import WorkspaceGCWorktreeRemoveResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -255,6 +256,63 @@ async def test_completed_monitor_filesystem_gc_unmounts_auth_overlay_before_remo
 
     assert teardown_calls == [(work_dir, ws_id, True)]
     assert not auth.exists()
+
+
+@pytest.mark.unit
+async def test_completed_monitor_auth_overlay_teardown_runs_off_event_loop(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The overlay teardown runs a blocking ``subprocess.run(["umount", ...])``;
+    # it must be offloaded via ``asyncio.to_thread`` so a real (mounted) overlay
+    # cannot stall the monitor's event loop for up to 30s. Mirrors the
+    # ``service gc`` regression test that asserts the same offload.
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+    ws_id = await _seed_old_completed_pr_workspace(
+        factory,
+        updated_at=datetime.now(UTC) - timedelta(days=30),
+    )
+    auth = work_dir / "auth" / ws_id
+    _write(auth / "claude" / "merged" / "settings.json", "auth")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+    )
+
+    to_thread_calls: list[str] = []
+
+    async def _record_to_thread(
+        func: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        to_thread_calls.append(func.__name__)
+        return func(*args, **kwargs)
+
+    def _noop_teardown(*, work_dir: Path, workspace_id: str) -> None:
+        return None
+
+    with (
+        _mock_worktree_remove_success(),
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.teardown_workspace_auth_overlay",
+            new=_noop_teardown,
+        ),
+    ):
+        monkeypatch.setattr(lifecycle.asyncio, "to_thread", _record_to_thread)
+        await runner._gc_completed_workspace_filesystem(ws_id)
+
+    assert "_teardown_completed_workspace_auth_overlay" in to_thread_calls
 
 
 @pytest.mark.unit
