@@ -351,16 +351,46 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     """Return the env-file path the registered MCP server should read.
 
     Reuses the same source-checkout / packaged-asset resolution ``awf start``
-    uses (an explicit ``--source-checkout`` pins that checkout's
-    ``docker/compose/.env``; otherwise the packaged/default ``.env`` from
-    ``resolve_service_compose_paths``). The file is never opened here -- only its
+    uses so the registered ``--env-file`` matches the ``docker/compose/.env``
+    ``awf start`` / ``awf setup`` actually honor: an explicit ``--source-checkout``
+    pins that checkout's ``docker/compose/.env``; otherwise a previously persisted,
+    still-valid source checkout (revalidated like ``awf start``'s
+    ``_resolve_start_source_checkout``) pins *its* compose env; only with neither
+    does it fall back to the packaged/default ``.env`` from
+    ``resolve_service_compose_paths``. The file is never opened here -- only its
     path is threaded into the client config -- so a dry-run diff needs no env file
     on disk and no provider token is ever read.
     """
     if source_checkout is not None:
         return source_checkout.expanduser() / "docker" / "compose" / ".env"
+    persisted = _persisted_client_source_checkout()
+    if persisted is not None:
+        return persisted.root / "docker" / "compose" / ".env"
     _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
     return raw_env_file
+
+
+def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
+    """Return the persisted, revalidated source checkout, or ``None``.
+
+    Mirrors ``awf start``'s ``_resolve_start_source_checkout`` so the MCP client
+    ``--env-file`` honors source-checkout metadata stored by an earlier
+    ``awf setup --source-checkout`` run instead of always defaulting to the
+    packaged ``.env`` while ``awf start`` runs from the checkout's compose env. A
+    missing/unreadable host config or stale metadata (the checkout moved or no
+    longer matches the asset contract) falls back to default discovery rather than
+    pinning a path ``awf start`` would itself reject.
+    """
+    try:
+        config = read_host_setup_config()
+    except HostSetupConfigError:
+        return None
+    if config.source_checkout is None:
+        return None
+    try:
+        return verified_source_from_metadata(config.source_checkout)
+    except SourceCheckoutError:
+        return None
 
 
 def _combine_client_payloads(

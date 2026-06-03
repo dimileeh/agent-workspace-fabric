@@ -1490,7 +1490,85 @@ def test_resolve_client_env_file_uses_source_checkout_when_given(tmp_path: Path)
 def test_resolve_client_env_file_defaults_to_compose_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify the default path comes from resolve_service_compose_paths."""
+    """Verify the default path comes from resolve_service_compose_paths.
+
+    With no explicit ``--source-checkout`` and no persisted source metadata, the
+    client env file falls back to the packaged/default ``.env``.
+    """
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: HostSetupConfig())
+    monkeypatch.setattr(
+        setup_commands,
+        "resolve_service_compose_paths",
+        lambda: (Path("/x/compose.yml"), Path("/x/.env"), Path("/x/.env.example")),
+    )
+
+    assert setup_commands._resolve_client_env_file(None) == Path("/x/.env")
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_honors_persisted_source_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify a persisted, still-valid checkout pins its docker/compose/.env.
+
+    Regression for PRRT_kwDOSJAM6s6GxEX4: ``awf setup --client`` without
+    ``--source-checkout`` must honor source-checkout metadata stored by an earlier
+    run — the same checkout ``awf start``'s ``_resolve_start_source_checkout``
+    revalidates — instead of always defaulting to the packaged ``.env`` and
+    registering an MCP ``--env-file`` that diverges from the env ``awf start`` uses.
+    """
+    root = _make_source_checkout(tmp_path / "awf")
+    persisted = HostSetupConfig(source_checkout=validate_source_checkout(root).to_metadata())
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: persisted)
+
+    resolved = setup_commands._resolve_client_env_file(None)
+
+    assert resolved == validate_source_checkout(root).root / "docker" / "compose" / ".env"
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_stale_persisted_falls_back_to_compose_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify stale persisted metadata falls back to default discovery.
+
+    A moved/invalid persisted checkout (the same failure ``awf start`` would
+    reject) must not pin a dead path into the MCP client config; the resolver
+    falls back to the packaged/default ``.env`` instead.
+    """
+    stale = HostSetupConfig(
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=tmp_path / "gone", verified_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: stale)
+    monkeypatch.setattr(
+        setup_commands,
+        "resolve_service_compose_paths",
+        lambda: (Path("/x/compose.yml"), Path("/x/.env"), Path("/x/.env.example")),
+    )
+
+    assert setup_commands._resolve_client_env_file(None) == Path("/x/.env")
+
+
+@pytest.mark.unit
+def test_resolve_client_env_file_unreadable_config_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify an unreadable host config falls back to default discovery.
+
+    A corrupt ``~/.awf/config.yml`` must not crash the client env resolution; like
+    ``awf start``'s resolver it falls back to default compose paths.
+    """
+
+    def _raise(**_kw: object) -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message="corrupt",
+            path=Path("/x/config.yml"),
+        )
+
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", _raise)
     monkeypatch.setattr(
         setup_commands,
         "resolve_service_compose_paths",
