@@ -225,6 +225,41 @@ def test_compose_teardown_keeps_result_when_overlay_unmount_raises(monkeypatch, 
 
 
 @pytest.mark.unit
+def test_compose_teardown_keeps_result_when_settings_resolution_raises(
+    monkeypatch, tmp_path
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    def _raise_settings() -> object:
+        # A malformed config (e.g. a bad host-port override) raises ``ValueError``
+        # from settings resolution; this must be swallowed, not propagated through
+        # GC's unguarded teardown loop.
+        raise ValueError("AWF_POSTGRES_HOST_PORT must be an integer between 1 and 65535")
+
+    def _unexpected_teardown(*, work_dir: object, workspace_id: str) -> None:
+        raise AssertionError("overlay teardown must not run when settings fail to resolve")
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", _raise_settings)
+    monkeypatch.setattr(
+        "awf.node.auth_mounts.teardown_workspace_auth_overlay", _unexpected_teardown
+    )
+    monkeypatch.setattr(
+        cli_common.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, returncode=0),
+    )
+
+    # A settings-resolution failure is logged but never alters the compose-down
+    # result nor escapes to abort the GC batch.
+    result = cli_common._run_terminal_workspace_compose_teardown(
+        SimpleNamespace(compose_file_path=str(compose_file), workspace_id="ws_badcfg")
+    )
+    assert result.status == "succeeded"
+    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+
+
+@pytest.mark.unit
 def test_teardown_overlay_skips_when_workspace_id_missing(monkeypatch) -> None:
     def _unexpected_settings() -> object:
         raise AssertionError("settings must not be resolved without a workspace id")

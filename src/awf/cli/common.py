@@ -182,19 +182,27 @@ def _run_terminal_workspace_compose_teardown(
 
 def _teardown_terminal_workspace_auth_overlay(candidate: Any) -> None:
     """Unmount the candidate's Claude auth overlay before GC removes its dir."""
+    from pydantic import ValidationError
+
     from awf.node.auth_mounts import teardown_workspace_auth_overlay
     from awf.service.config import resolve_service_settings
 
     workspace_id = getattr(candidate, "workspace_id", None)
     if not isinstance(workspace_id, str):
         return
-    work_dir = Path(resolve_service_settings().work_dir).expanduser()
     try:
+        # Resolve settings inside the try: a malformed config (pydantic
+        # ``ValidationError`` from ``Settings()`` or a ``ValueError`` from a bad
+        # host-port/tail value) must not propagate uncaught through GC's
+        # unguarded ``compose_teardown(candidate)`` loop and abort the whole
+        # terminal-candidate batch.
+        work_dir = Path(resolve_service_settings().work_dir).expanduser()
         teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=workspace_id)
-    except (OSError, subprocess.SubprocessError):
-        # The overlay unmount logged and re-raised the real busy/umount error;
-        # keep the compose-down result shape intact so GC reports compose
-        # outcome unchanged (GC's own rmtree will surface any residual EBUSY).
+    except (OSError, subprocess.SubprocessError, ValueError, ValidationError):
+        # Settings resolution or the overlay unmount logged and re-raised the
+        # real config/busy/umount error; keep the compose-down result shape
+        # intact so GC reports the compose outcome unchanged (GC's own rmtree
+        # will surface any residual EBUSY).
         _log.warning(
             "gc.auth_overlay_teardown_failed",
             workspace_id=workspace_id,
