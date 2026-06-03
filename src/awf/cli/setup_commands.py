@@ -408,11 +408,13 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     ``docker/compose/.env``; otherwise a previously persisted, still-valid source
     checkout (revalidated like ``awf start``'s ``_resolve_start_source_checkout``)
     pins *its* compose env; only with neither does it fall back to the
-    packaged/default ``.env`` from ``resolve_service_compose_paths``. Both
-    source-checkout branches resolve through ``resolve_existing_service_env_file``
-    so a not-yet-bootstrapped checkout (``docker/compose/.env`` absent but the
-    checkout root ``.env`` present) pins the same root ``.env`` ``awf start`` reads
-    via ``_resolve_start_bootstrap_inputs`` -- otherwise ``awf mcp serve`` would
+    packaged/default ``.env`` from ``resolve_service_compose_paths``. All three
+    branches resolve through ``resolve_existing_service_env_file`` so a
+    not-yet-bootstrapped checkout (``docker/compose/.env`` absent but the checkout
+    root ``.env`` present) pins the same root ``.env`` ``awf start`` reads via
+    ``_resolve_start_bootstrap_inputs`` -- including the default-discovery fallback,
+    which (like ``awf start``'s ``_resolve_service_runtime_env_files`` branch) would
+    otherwise register a non-existent compose ``.env`` and make ``awf mcp serve``
     reject the registered ``--env-file`` with "env file does not exist". Validating
     the explicit checkout keeps an invalid or stale path from registering an MCP
     ``--env-file`` that points at a non-checkout env file ``awf start`` would
@@ -431,13 +433,24 @@ def _resolve_client_env_file(source_checkout: Path | None) -> Path:
     if persisted is not None:
         return resolve_existing_service_env_file(persisted.root / "docker" / "compose" / ".env")
     _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
-    # The packaged/default fallback may be a relative ``Path(".env")``. The
+    # ``resolve_service_compose_paths`` points the default fallback at the compose
+    # ``docker/compose/.env``, which is absent until ``awf service bootstrap`` seeds
+    # it. Running from a local source checkout before bootstrap therefore yields a
+    # compose ``.env`` path that does not exist yet while the checkout-root ``.env``
+    # carries the real settings. ``awf start``'s default-discovery branch resolves
+    # that same fallback through ``resolve_existing_service_env_file`` (via
+    # ``_resolve_service_runtime_env_files``) so it reads the root ``.env``; mirror
+    # that here so the registered ``--env-file`` points at the env file that
+    # actually exists -- otherwise ``awf mcp serve`` rejects it with "env file does
+    # not exist" despite setup succeeding.
+    resolved_env_file = resolve_existing_service_env_file(raw_env_file)
+    # The packaged/default fallback may still be a relative ``Path(".env")``. The
     # explicit and persisted checkout branches above already pin absolute paths;
     # the registered ``--env-file`` is read later by ``awf mcp serve``, which
     # resolves it against the client process cwd (mcp_commands._resolve_mcp_settings),
     # so a relative path would break Claude/Codex sessions launched from any other
     # directory. Pin the fallback to an absolute path here as well.
-    return raw_env_file.resolve()
+    return resolved_env_file.resolve()
 
 
 def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:

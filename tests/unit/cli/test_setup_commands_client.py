@@ -477,6 +477,35 @@ def test_resolve_client_env_file_fallback_is_absolute(
 
 
 @pytest.mark.unit
+def test_resolve_client_env_file_fallback_uses_existing_root_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6G1JGR: in the no-checkout/no-metadata path,
+    a local source checkout before bootstrap resolves ``<root>/docker/compose/.env``
+    even though only the checkout-root ``.env`` exists yet. ``awf start``'s
+    default-discovery branch routes that fallback through
+    ``resolve_existing_service_env_file`` so it reads the root ``.env``; the client
+    resolver must do the same, otherwise ``awf mcp serve --env-file
+    .../docker/compose/.env`` rejects a non-existent path despite setup succeeding."""
+    root = tmp_path / "awf"
+    (root / "docker" / "compose").mkdir(parents=True)
+    root_env = root / ".env"
+    root_env.write_text("AWF_API_TOKEN=t\n")
+    compose_env = root / "docker" / "compose" / ".env"  # not seeded yet
+
+    monkeypatch.setattr(setup_commands, "read_host_setup_config", lambda **_kw: HostSetupConfig())
+    monkeypatch.setattr(
+        setup_commands,
+        "resolve_service_compose_paths",
+        lambda: (root / "docker" / "compose" / "compose.yml", compose_env, root / ".env.example"),
+    )
+
+    resolved = setup_commands._resolve_client_env_file(None)
+
+    assert resolved == root_env.resolve()
+
+
+@pytest.mark.unit
 def test_resolve_client_env_file_honors_persisted_source_checkout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
