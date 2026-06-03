@@ -223,6 +223,16 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf setup --client <client>",
         _reason_catalog_link("SETUP_CLIENT_UNKNOWN"),
     ),
+    "SETUP_PROVIDER_CLIENT_CONFLICT": _ReasonText(
+        "AWF setup cannot combine --provider with --client.",
+        (
+            "Re-run setup with either --provider to evaluate providers or "
+            "--client to register a client MCP integration, but not both."
+        ),
+        "The setup command received mutually exclusive --provider and --client selectors in one invocation.",
+        "awf setup --client <client>",
+        _reason_catalog_link("SETUP_PROVIDER_CLIENT_CONFLICT"),
+    ),
     "CLIENT_CONFIG_CONFLICT": _ReasonText(
         "AWF found a client MCP configuration conflict.",
         (

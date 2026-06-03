@@ -1389,8 +1389,20 @@ def test_setup_client_with_provider_exits_two_without_writing(
 
     assert result.exit_code == 2
     payload = json.loads(result.stdout)
-    assert payload["reason_code"] == "SETUP_PROVIDER_UNKNOWN"
+    # The conflict reports SETUP_PROVIDER_CLIENT_CONFLICT, not
+    # SETUP_PROVIDER_UNKNOWN: the provider name may be perfectly valid, so the
+    # remediation must describe the mutually exclusive flags rather than imply an
+    # unsupported provider (PRRT_kwDOSJAM6s6Gx30C).
+    assert payload["reason_code"] == "SETUP_PROVIDER_CLIENT_CONFLICT"
     assert payload["issues"][0]["details"]["providers"] == ["anthropic"]
+    assert payload["issues"][0]["details"]["clients"] == ["claude"]
+    # The next-step hint points at details keys that actually exist, not the
+    # SETUP_PROVIDER_UNKNOWN-only ``known_providers`` key.
+    assert payload["next_steps"] == [
+        "Re-run awf setup with either --provider or --client, not both; the "
+        "rejected selectors are listed under providers and clients in the "
+        "issue details.",
+    ]
     # No client config was written for the rejected run.
     assert not list(client_harness.home.rglob("*.json"))
     assert not list(client_harness.home.rglob("config.toml"))

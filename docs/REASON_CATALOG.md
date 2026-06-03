@@ -562,6 +562,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf setup --client <client>`
 **Docs Link:** [docs/REASON_CATALOG.md#setup_client_unknown](#setup_client_unknown)
 
+### SETUP_PROVIDER_CLIENT_CONFLICT
+**Problem:** AWF setup cannot combine --provider with --client.
+**Likely Cause:** The setup command received mutually exclusive --provider and --client selectors in one invocation.
+**Operator Fix:** Re-run setup with either --provider to evaluate providers or --client to register a client MCP integration, but not both.
+**Related Command:** `awf setup --client <client>`
+**Docs Link:** [docs/REASON_CATALOG.md#setup_provider_client_conflict](#setup_provider_client_conflict)
+
 ### SETUP_PROVIDER_UNKNOWN
 **Problem:** AWF setup was asked to configure an unsupported provider.
 **Likely Cause:** The provider selector does not match a provider known to this AWF build.

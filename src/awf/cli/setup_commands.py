@@ -37,6 +37,7 @@ from awf.host_setup.config import (
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
     SETUP_CLIENT_UNKNOWN,
+    SETUP_PROVIDER_CLIENT_CONFLICT,
     SETUP_PROVIDER_UNKNOWN,
     FirstRunPayload,
     first_run_issue_from_reason_code,
@@ -135,11 +136,15 @@ def setup_command(
             if provider:
                 # The client dispatch never consumes ``--provider``; failing fast
                 # here keeps the provider argument from being silently discarded
-                # behind a successful client-setup result.
+                # behind a successful client-setup result. The conflict is reported
+                # as SETUP_PROVIDER_CLIENT_CONFLICT rather than SETUP_PROVIDER_UNKNOWN
+                # so the catalog remediation and next-step hint describe the
+                # mutually exclusive flags instead of a (possibly valid) provider
+                # name that AWF never evaluated.
                 raise SetupCheckError(
                     "--provider is not supported with --client; re-run without --provider.",
-                    reason_code=SETUP_PROVIDER_UNKNOWN,
-                    details={"providers": provider},
+                    reason_code=SETUP_PROVIDER_CLIENT_CONFLICT,
+                    details={"providers": provider, "clients": client},
                 )
             payload = _run_client_setup(
                 clients=client,
@@ -744,5 +749,11 @@ def _reason_coded_next_steps(reason_code: str) -> tuple[str, ...]:
         return (
             "Re-run awf setup with a supported --client; the accepted names are "
             "listed under known_clients in the issue details.",
+        )
+    if reason_code == SETUP_PROVIDER_CLIENT_CONFLICT:
+        return (
+            "Re-run awf setup with either --provider or --client, not both; the "
+            "rejected selectors are listed under providers and clients in the "
+            "issue details.",
         )
     return ("Fix the reported issue above, then re-run awf setup --dry-run.",)
