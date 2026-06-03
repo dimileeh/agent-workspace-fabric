@@ -364,10 +364,7 @@ def build_client_config_plan(
             method=method,
             config_path=config_path,
             action="conflict",
-            conflict_detail=(
-                "An existing 'awf' MCP server entry uses a different command/args; "
-                "AWF refuses to overwrite it. Resolve the entry manually, then re-run."
-            ),
+            conflict_detail=_command_args_conflict_detail(existing_entry, desired_entry),
             desired_entry=desired_entry,
             existing_entry=existing_entry,
             cli_command=descriptor.add_command(env_file_str) if method == "official_cli" else None,
@@ -644,6 +641,28 @@ def _entries_match(existing: Mapping[str, Any], desired: Mapping[str, Any]) -> b
     if not isinstance(existing_args, (list, tuple)) or not isinstance(desired_args, (list, tuple)):
         return False
     return list(existing_args) == list(desired_args)
+
+
+def _command_args_conflict_detail(existing: Mapping[str, Any], desired: Mapping[str, Any]) -> str:
+    """Return the conflict detail for an ``awf`` entry whose command/args drifted.
+
+    The base message names the generic "different command/args" drift. When the
+    registered ``command`` is unchanged and only the (list) ``args`` differ —
+    the common case after relocating the AWF install, where just the
+    ``--env-file`` path moved — a diagnostic hint is appended so the operator
+    knows to update the registered path rather than suspecting a wholly
+    different binary. Non-list ``args`` (a malformed ``null``/scalar entry) skip
+    the hint since the path framing would be misleading there.
+    """
+    detail = "An existing 'awf' MCP server entry uses a different command/args; "
+    same_command = existing.get("command") == desired.get("command")
+    if same_command and isinstance(existing.get("args"), (list, tuple)):
+        detail += (
+            "the registered command is unchanged and only its args differ "
+            "(commonly a stale --env-file path after the AWF install moved). "
+        )
+    detail += "AWF refuses to overwrite it. Resolve the entry manually, then re-run."
+    return detail
 
 
 def _entry_has_required_fields(

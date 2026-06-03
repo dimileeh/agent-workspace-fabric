@@ -357,6 +357,36 @@ def test_build_plan_codex_conflicting_args_is_conflict(tmp_path: Path) -> None:
 
     assert plan.action == "conflict"
     assert plan.conflict_detail is not None
+    # Same binary ('awf'), only the --env-file path moved: the detail must surface
+    # the concrete same-command/different-args case, not just "command/args".
+    assert "--env-file" in (plan.conflict_detail or "")
+    assert "command is unchanged" in (plan.conflict_detail or "")
+
+
+@pytest.mark.unit
+def test_build_plan_claude_different_command_conflict_omits_env_file_hint(
+    tmp_path: Path,
+) -> None:
+    """Verify a genuinely different binary keeps the generic detail, no path hint.
+
+    The env-file hint is reserved for the same-command/different-args case; a
+    wholly different ``command`` must not claim the difference is merely a moved
+    ``--env-file`` path.
+    """
+    config = {
+        "mcpServers": {
+            AWF_MCP_SERVER_KEY: {"type": "stdio", "command": "other-binary", "args": ["--serve"]}
+        }
+    }
+    _claude_config_path(tmp_path).write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "conflict"
+    assert "different command/args" in (plan.conflict_detail or "")
+    assert "--env-file" not in (plan.conflict_detail or "")
 
 
 @pytest.mark.unit
