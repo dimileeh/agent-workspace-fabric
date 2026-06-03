@@ -712,13 +712,24 @@ def _serialize_config(config: Mapping[str, Any], config_format: ClientConfigForm
 def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> str:
     """Return a unified diff between the existing and merged config text.
 
-    Emitted with zero context lines (``n=0``). AWF only ever adds or changes its
-    own ``awf`` server entry, so the changed lines are exclusively AWF's; any
-    surrounding context would expose unrelated existing config — other servers'
-    env entries or API keys that the payload redactor may not match — in CLI
-    output and logs. Scoping the diff to the inserted/changed lines keeps those
-    third-party secrets out of dry-run/apply payloads entirely.
+    Emitted with zero context lines (``n=0``) and then filtered so the result
+    contains only brand-new AWF lines. AWF only ever adds or changes its own
+    ``awf`` server entry, so the changed lines should be exclusively AWF's. Two
+    leakage channels are closed here:
+
+    * Surrounding context — eliminated by ``n=0`` — would otherwise expose
+      unrelated existing config (other servers' env entries or API keys the
+      payload redactor may not match) in CLI output and logs.
+    * A *pre-existing* line can still surface as a changed line when appending
+      AWF's entry rewrites its syntax: in JSON the previous last key gains a
+      trailing comma, so an existing ``{ "apiKey": "secret" }`` emits the
+      ``apiKey`` line as both a removal and a comma-suffixed addition. Any diff
+      body line equal (ignoring a trailing comma) to a line already present in
+      ``existing_text`` is therefore suppressed — it is pre-existing user
+      content, never an AWF addition — keeping those third-party secrets out of
+      dry-run/apply payloads entirely.
     """
+    existing_lines = {_normalize_config_line(line) for line in existing_text.splitlines()}
     diff_lines = unified_diff(
         existing_text.splitlines(keepends=True),
         merged_text.splitlines(keepends=True),
@@ -726,7 +737,31 @@ def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> st
         tofile=f"b/{config_path.name}",
         n=0,
     )
-    return "".join(diff_lines)
+    kept = [line for line in diff_lines if not _echoes_existing_line(line, existing_lines)]
+    return "".join(kept)
+
+
+def _normalize_config_line(body: str) -> str:
+    """Normalize a config line for pre-existing comparison (drop a trailing comma).
+
+    Appending a key in JSON gives the previous last line a structural trailing
+    comma; stripping a single trailing comma lets that rewritten line match its
+    original form. Internal commas inside a string value sit before the closing
+    quote, so they are untouched.
+    """
+    return body.rstrip().removesuffix(",").rstrip()
+
+
+def _echoes_existing_line(line: str, existing_lines: set[str]) -> bool:
+    """Return whether a unified-diff line merely echoes a pre-existing config line.
+
+    File headers (``---``/``+++``) and hunk headers are never suppressed; only
+    ``+``/``-`` body lines whose content already exists in the original file
+    (ignoring a trailing comma added when AWF's entry is appended) are dropped.
+    """
+    if line.startswith(("---", "+++")) or not line.startswith(("+", "-")):
+        return False
+    return _normalize_config_line(line[1:]) in existing_lines
 
 
 def _backup_path(config_path: Path, now: datetime) -> Path:

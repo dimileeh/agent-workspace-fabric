@@ -286,6 +286,34 @@ def test_build_plan_diff_excludes_unrelated_existing_secrets(tmp_path: Path) -> 
     assert "DEPLOY_TOKEN" not in plan.diff
 
 
+def test_build_plan_diff_excludes_adjacent_secret_gaining_trailing_comma(
+    tmp_path: Path,
+) -> None:
+    """Verify a top-level sibling secret is not leaked via JSON comma rewrite.
+
+    Appending AWF's ``mcpServers`` key makes the previous last JSON key gain a
+    structural trailing comma, so an ``n=0`` diff would otherwise emit that
+    pre-existing line (e.g. ``"apiKey": "<secret>"``) as both a removal and a
+    comma-suffixed addition — bypassing the token redactor for camelCase/other
+    unrecognized secret shapes. The diff must scope itself to AWF's brand-new
+    lines only.
+    """
+    secret = "unrecognized-camelCase-apikey-value"
+    config = {"apiKey": secret}
+    _claude_config_path(tmp_path).write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert AWF_MCP_SERVER_KEY in plan.diff
+    assert _ENV_FILE in plan.diff
+    assert secret not in plan.diff
+    # The pre-existing key itself must not be echoed as a comma-churn line.
+    assert "apiKey" not in plan.diff
+
+
 # --- build_client_config_plan: conflict -----------------------------------
 
 
