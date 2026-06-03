@@ -14,7 +14,6 @@ import httpx
 import typer
 import typer.rich_utils as typer_rich_utils
 
-from awf.common.logging import get_logger
 from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.node.companion_images import run_companion_image_prune
 
@@ -22,8 +21,6 @@ from awf.node.companion_images import run_companion_image_prune
 # the CLI helper namespace; the implementation lives in ``node.companion_images``
 # so the root control-plane GC entrypoint can reuse it.
 _run_companion_image_prune = run_companion_image_prune
-
-_log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
 _DEPRECATED_CLI_BASE_URL_NOTICE = "AWF_CLI_BASE_URL is deprecated; use AWF_BASE_URL"
