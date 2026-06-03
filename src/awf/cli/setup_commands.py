@@ -10,6 +10,10 @@ gate are validated and forwarded for later setup slices (T06/T07).
 
 from __future__ import annotations
 
+import os
+import shutil
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,11 @@ from awf.cli.init_ops import (
     resolve_existing_service_env_file,
     resolve_service_compose_paths,
     resolve_service_runtime_env_files,
+)
+from awf.host_setup.clients import (
+    default_client_command_runner,
+    normalize_clients,
+    setup_clients,
 )
 from awf.host_setup.config import (
     HostSetupConfig,
@@ -33,7 +42,11 @@ from awf.host_setup.providers import (
 )
 from awf.host_setup.rendering import (
     INTERACTIVE_INPUT_REQUIRED,
+    SETUP_CLIENT_UNKNOWN,
+    SETUP_PLAIN_SECRETS_CLIENT_CONFLICT,
+    SETUP_PROVIDER_CLIENT_CONFLICT,
     SETUP_PROVIDER_UNKNOWN,
+    START_COMPOSE_ASSETS_MISSING,
     FirstRunPayload,
     first_run_issue_from_reason_code,
     first_run_report_payload,
@@ -59,6 +72,40 @@ _PROVIDER_HELP = (
     "Target a single provider (repeatable). Validated and forwarded so later "
     "provider setup can recheck just that provider."
 )
+_CLIENT_HELP = (
+    "Register AWF's MCP server into a client config (repeatable). Supported "
+    "clients: claude, codex. Shows a diff and writes a backup; --dry-run never "
+    "mutates. Never reads or stores provider tokens."
+)
+
+# Dependency-injection seams for the client-integration dispatch, mirroring the
+# hermetic readiness seams. Tests monkeypatch these to point at temp homes and
+# fake CLI detection/execution; production resolves the real host home, the
+# ``which`` detector, the bounded official-CLI runner, and the wall clock.
+_client_which = shutil.which
+_client_run = default_client_command_runner
+
+
+def _client_home() -> Path:
+    """Return the host home directory the client config paths anchor under."""
+    return Path.home()
+
+
+def _client_now() -> datetime:
+    """Return the current UTC time used to stamp config backups."""
+    return datetime.now(UTC)
+
+
+def _client_env() -> Mapping[str, str]:
+    """Return the process environment used to resolve client config home overrides.
+
+    Threaded into ``setup_clients`` so a client that relocates its config via an
+    environment variable (Codex's ``CODEX_HOME``) is planned/written at the path
+    its official CLI actually loads, not the hard-coded home-anchored default.
+    """
+    return os.environ
+
+
 _DRY_RUN_HELP = "Run read-only checks only; never write config and never start Core."
 _NON_INTERACTIVE_HELP = "Fail with INTERACTIVE_INPUT_REQUIRED instead of prompting for input."
 _ALLOW_PLAIN_SECRETS_HELP = (
@@ -88,6 +135,7 @@ def _config_error_details(error: HostSetupConfigError) -> dict[str, Any]:
 
 def setup_command(
     provider: list[str] = typer.Option([], "--provider", help=_PROVIDER_HELP),
+    client: list[str] = typer.Option([], "--client", help=_CLIENT_HELP),
     dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help=_DRY_RUN_HELP),
     non_interactive: bool = typer.Option(False, "--non-interactive", help=_NON_INTERACTIVE_HELP),
     allow_plain_secrets: bool = typer.Option(
@@ -100,13 +148,50 @@ def setup_command(
 ) -> None:
     """Prepare this machine for AWF first-run use with read-only host checks."""
     try:
-        payload = _run_setup(
-            providers=provider,
-            dry_run=dry_run,
-            non_interactive=non_interactive,
-            allow_plain_secrets=allow_plain_secrets,
-            source_checkout=source_checkout,
-        )
+        if client:
+            # T08 owns only the client-selector dispatch; it returns before the
+            # readiness path so the no-``--client`` flow is unchanged from T04.
+            if provider:
+                # The client dispatch never consumes ``--provider``; failing fast
+                # here keeps the provider argument from being silently discarded
+                # behind a successful client-setup result. The conflict is reported
+                # as SETUP_PROVIDER_CLIENT_CONFLICT rather than SETUP_PROVIDER_UNKNOWN
+                # so the catalog remediation and next-step hint describe the
+                # mutually exclusive flags instead of a (possibly valid) provider
+                # name that AWF never evaluated.
+                raise SetupCheckError(
+                    "--provider is not supported with --client; re-run without --provider.",
+                    reason_code=SETUP_PROVIDER_CLIENT_CONFLICT,
+                    details={"providers": provider, "clients": client},
+                )
+            if allow_plain_secrets:
+                # The client dispatch returns before ``_run_setup``, the only path
+                # that persists plain-file consent via ``_persist_safe_config``.
+                # Accepting ``--allow-plain-secrets`` here would exit successfully
+                # while silently dropping the operator's opt-in, leaving later
+                # credential setup blocked despite the flag having been "accepted".
+                # Reject the combination (like ``--provider``) so the operator
+                # records consent on the readiness/provider path that actually
+                # persists it instead of losing it to a no-op client run.
+                raise SetupCheckError(
+                    "--allow-plain-secrets is not supported with --client; "
+                    "re-run without --allow-plain-secrets.",
+                    reason_code=SETUP_PLAIN_SECRETS_CLIENT_CONFLICT,
+                    details={"clients": client},
+                )
+            payload = _run_client_setup(
+                clients=client,
+                dry_run=dry_run,
+                source_checkout=source_checkout,
+            )
+        else:
+            payload = _run_setup(
+                providers=provider,
+                dry_run=dry_run,
+                non_interactive=non_interactive,
+                allow_plain_secrets=allow_plain_secrets,
+                source_checkout=source_checkout,
+            )
     except SetupCheckError as error:
         if isinstance(error, _ReadinessInteractiveBlockError):
             # The interactive guard fired after the host checks ran; surface the
@@ -289,6 +374,277 @@ def _run_setup(
             _require_provider_interactive(non_interactive, payload)
 
     return payload
+
+
+def _run_client_setup(
+    *,
+    clients: list[str],
+    dry_run: bool,
+    source_checkout: Path | None,
+) -> FirstRunPayload:
+    """Dispatch the selected MCP client integrations and render one payload.
+
+    Unknown client selectors raise ``SetupCheckError(SETUP_CLIENT_UNKNOWN)``
+    (handled by ``setup_command`` as an exit-2 usage error). The selected clients
+    are processed through ``setup_clients`` with the injected home/which/run/now
+    seams, which plans every client before applying any so a conflict never
+    leaves a partial write; a single client returns its payload verbatim,
+    multiple are folded into one multi-issue report.
+    """
+    selected = normalize_clients(clients)
+    try:
+        # Require the resolved env file to exist on a non-dry-run apply: a dry-run
+        # only renders a diff and never starts the MCP server, but a real write
+        # registers an ``--env-file`` that ``awf mcp serve`` reads and rejects when
+        # absent. Passed positionally to stay compatible with the test seam.
+        env_file = _resolve_client_env_file(source_checkout, not dry_run)
+    except SourceCheckoutError as error:
+        # An explicit/persisted source checkout that fails validation must block
+        # with the same reason the readiness flow surfaces instead of writing a
+        # client config diff pointing the MCP server at a non-checkout env file.
+        return _client_source_checkout_blocked_payload(error)
+    except ClientEnvFileMissingError as error:
+        # A fresh, valid source checkout resolves a docker/compose/.env that is not
+        # seeded until ``awf service bootstrap`` runs. Block the apply instead of
+        # registering an MCP server that cannot start (see the payload helper).
+        return _client_env_file_missing_payload(error.env_file)
+    home = _client_home()
+    # Plan all selected clients before applying any so a single conflicting
+    # client cannot leave earlier/later clients partially written while the run
+    # reports blocked overall (see setup_clients).
+    payloads = setup_clients(
+        selected,
+        env_file=env_file,
+        dry_run=dry_run,
+        home=home,
+        which=_client_which,
+        run=_client_run,
+        now=_client_now,
+        env=_client_env(),
+    )
+    if len(payloads) == 1:
+        return payloads[0]
+    return _combine_client_payloads(selected, payloads)
+
+
+def _resolve_client_env_file(source_checkout: Path | None, require_existing: bool = False) -> Path:
+    """Return the env-file path the registered MCP server should read.
+
+    Reuses the same source-checkout / packaged-asset resolution ``awf start``
+    uses so the registered ``--env-file`` matches the ``docker/compose/.env``
+    ``awf start`` / ``awf setup`` actually honor: an explicit ``--source-checkout``
+    is validated (``validate_source_checkout``, exactly like the readiness flow's
+    ``_resolve_setup_source_checkout``) and pins that checkout's
+    ``docker/compose/.env``; otherwise a previously persisted, still-valid source
+    checkout (revalidated like ``awf start``'s ``_resolve_start_source_checkout``)
+    pins *its* compose env; only with neither does it fall back to the
+    packaged/default ``.env`` from ``resolve_service_compose_paths``. All three
+    branches resolve through ``resolve_existing_service_env_file`` so a
+    not-yet-bootstrapped checkout (``docker/compose/.env`` absent but the checkout
+    root ``.env`` present) pins the same root ``.env`` ``awf start`` reads via
+    ``_resolve_start_bootstrap_inputs`` -- including the default-discovery fallback,
+    which (like ``awf start``'s ``_resolve_service_runtime_env_files`` branch) would
+    otherwise register a non-existent compose ``.env`` and make ``awf mcp serve``
+    reject the registered ``--env-file`` with "env file does not exist". Validating
+    the explicit checkout keeps an invalid or stale path from registering an MCP
+    ``--env-file`` that points at a non-checkout env file ``awf start`` would
+    itself reject; the same revalidation applies to a persisted checkout, so a
+    stale/moved persisted checkout blocks rather than defaulting (matching
+    ``awf start``, which exits on that metadata). The failure raises
+    ``SourceCheckoutError`` for the caller to surface as a blocked payload. The
+    file is never opened here -- only its path
+    is threaded into the client config -- so a dry-run diff needs no env file on
+    disk and no provider token is ever read.
+
+    When ``require_existing`` is set (a non-dry-run apply), the resolved path must
+    exist on disk: a fresh, valid source checkout (only ``.env.example`` present)
+    resolves a ``docker/compose/.env`` that is not seeded until ``awf service
+    bootstrap`` runs, and registering that absent path as the MCP ``--env-file``
+    would let setup report success while ``awf mcp serve`` rejects it with "env
+    file does not exist". The missing path raises ``ClientEnvFileMissingError`` for
+    the caller to surface as a blocked payload; a dry-run keeps resolving the path
+    as-is because it never starts the server.
+    """
+    if source_checkout is not None:
+        compose_env = validate_source_checkout(source_checkout).root / "docker" / "compose" / ".env"
+        return _client_env_file_or_block(
+            resolve_existing_service_env_file(compose_env), require_existing
+        )
+    persisted = _persisted_client_source_checkout()
+    if persisted is not None:
+        return _client_env_file_or_block(
+            resolve_existing_service_env_file(persisted.root / "docker" / "compose" / ".env"),
+            require_existing,
+        )
+    _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
+    # ``resolve_service_compose_paths`` points the default fallback at the compose
+    # ``docker/compose/.env``, which is absent until ``awf service bootstrap`` seeds
+    # it. Running from a local source checkout before bootstrap therefore yields a
+    # compose ``.env`` path that does not exist yet while the checkout-root ``.env``
+    # carries the real settings. ``awf start``'s default-discovery branch resolves
+    # that same fallback through ``resolve_existing_service_env_file`` (via
+    # ``_resolve_service_runtime_env_files``) so it reads the root ``.env``; mirror
+    # that here so the registered ``--env-file`` points at the env file that
+    # actually exists -- otherwise ``awf mcp serve`` rejects it with "env file does
+    # not exist" despite setup succeeding.
+    resolved_env_file = resolve_existing_service_env_file(raw_env_file)
+    # The packaged/default fallback may still be a relative ``Path(".env")``. The
+    # explicit and persisted checkout branches above already pin absolute paths;
+    # the registered ``--env-file`` is read later by ``awf mcp serve``, which
+    # resolves it against the client process cwd (mcp_commands._resolve_mcp_settings),
+    # so a relative path would break Claude/Codex sessions launched from any other
+    # directory. Pin the fallback to an absolute path here as well.
+    return _client_env_file_or_block(resolved_env_file.resolve(), require_existing)
+
+
+class ClientEnvFileMissingError(Exception):
+    """Raised when a non-dry-run client setup resolves a missing MCP env file.
+
+    Carries the resolved ``env_file`` so the dispatch can render a blocked payload
+    that names the path the operator must seed (``awf service bootstrap``) before
+    the registered MCP server can start.
+    """
+
+    def __init__(self, env_file: Path) -> None:
+        super().__init__(f"MCP env file does not exist: {env_file}")
+        self.env_file = env_file
+
+
+def _client_env_file_or_block(env_file: Path, require_existing: bool) -> Path:
+    """Return ``env_file``, or raise when a non-dry-run apply needs it on disk.
+
+    ``awf mcp serve`` reads the registered ``--env-file`` and exits when it is
+    absent (``mcp_commands._resolve_mcp_settings``). ``require_existing`` is set
+    only for a non-dry-run ``awf setup --client`` apply so a not-yet-bootstrapped
+    checkout (compose ``.env`` absent, no checkout-root ``.env``) blocks instead of
+    registering an MCP server that cannot start; a dry-run never starts the server
+    and resolves the path as-is. The existence probe mirrors ``awf mcp serve``'s
+    own ``expanduser().resolve().is_file()`` check so setup blocks exactly the
+    paths that command would reject.
+    """
+    if require_existing and not env_file.expanduser().resolve().is_file():
+        raise ClientEnvFileMissingError(env_file)
+    return env_file
+
+
+def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
+    """Return the persisted, revalidated source checkout, or ``None``.
+
+    Mirrors ``awf start``'s ``_resolve_start_source_checkout`` so the MCP client
+    ``--env-file`` honors source-checkout metadata stored by an earlier
+    ``awf setup --source-checkout`` run instead of always defaulting to the
+    packaged ``.env`` while ``awf start`` runs from the checkout's compose env. A
+    missing/unreadable host config or absent metadata falls back to default
+    discovery. Stale metadata (the checkout moved or no longer matches the asset
+    contract) is **not** swallowed: ``verified_source_from_metadata`` raises
+    ``SourceCheckoutError`` exactly as ``awf start`` does, so the caller surfaces a
+    blocked client payload instead of silently registering an MCP ``--env-file``
+    at the packaged ``.env`` while ``awf start`` revalidates that same metadata and
+    exits on it -- leaving the registered server pointing at a different env than
+    the checkout the operator is told to fix.
+    """
+    try:
+        config = read_host_setup_config()
+    except HostSetupConfigError:
+        return None
+    if config.source_checkout is None:
+        return None
+    return verified_source_from_metadata(config.source_checkout)
+
+
+def _client_source_checkout_blocked_payload(error: SourceCheckoutError) -> FirstRunPayload:
+    """Render a blocked client payload for an invalid/stale source checkout.
+
+    Mirrors the readiness flow's ``_source_checkout_issue`` so the ``--client``
+    path surfaces the same SOURCE_CHECKOUT_INVALID / SOURCE_CHECKOUT_ASSETS_STALE
+    reason, root, and missing markers instead of registering an MCP ``--env-file``
+    under a checkout ``awf start`` would reject.
+    """
+    details: dict[str, Any] = {"check": "source_checkout", "root": str(error.root)}
+    if error.missing_markers:
+        details["missing_markers"] = list(error.missing_markers)
+    for key, value in error.details.items():
+        details.setdefault(key, value)
+    issue = first_run_issue_from_reason_code(
+        error.reason_code,
+        severity="blocked",
+        details=details,
+        problem=error.message,
+    )
+    return first_run_report_payload(
+        command=SETUP_COMMAND,
+        summary="AWF could not resolve the source checkout for MCP client setup.",
+        issues=(issue,),
+        next_steps=(
+            "Fix the reported --source-checkout path above, then re-run "
+            "awf setup --client <client>.",
+        ),
+    )
+
+
+def _client_env_file_missing_payload(env_file: Path) -> FirstRunPayload:
+    """Render a blocked client payload when the resolved MCP env file is absent.
+
+    A fresh, valid source checkout (only ``.env.example`` present) resolves a
+    ``docker/compose/.env`` that ``awf service bootstrap`` has not seeded yet, so
+    registering it as the MCP ``--env-file`` would let ``awf setup --client``
+    report success while ``awf mcp serve`` rejects the server with "env file does
+    not exist". Surface the same START_COMPOSE_ASSETS_MISSING blocker the
+    readiness/start flows use for a not-yet-bootstrapped checkout, pointing the
+    operator at the bootstrap step that creates the env file.
+    """
+    issue = first_run_issue_from_reason_code(
+        START_COMPOSE_ASSETS_MISSING,
+        severity="blocked",
+        details={"check": "client_env_file", "env_file": str(env_file)},
+        problem=(
+            f"The MCP server env file {env_file} does not exist yet, so the "
+            "registered --env-file would make awf mcp serve fail to start."
+        ),
+        fix=(
+            "Run awf service bootstrap to seed docker/compose/.env (or otherwise "
+            "create the env file), then re-run awf setup --client <client>."
+        ),
+    )
+    return first_run_report_payload(
+        command=SETUP_COMMAND,
+        summary="AWF could not register the MCP client: the env file does not exist yet.",
+        issues=(issue,),
+        next_steps=(
+            "Run awf service bootstrap to create the env file, then re-run "
+            "awf setup --client <client>.",
+        ),
+    )
+
+
+def _combine_client_payloads(
+    clients: list[str],
+    payloads: list[FirstRunPayload],
+) -> FirstRunPayload:
+    """Fold per-client payloads into one multi-issue report payload."""
+    issues = tuple(issue for payload in payloads for issue in payload.issues)
+    clients_detail = {
+        client: {"status": payload.status, "summary": payload.summary, **dict(payload.details)}
+        for client, payload in zip(clients, payloads, strict=True)
+    }
+    blocked = [payload for payload in payloads if payload.status in ("blocked", "failed")]
+    if blocked:
+        summary = (
+            f"awf setup processed {len(clients)} MCP client(s) with {len(blocked)} blocker(s)."
+        )
+        next_steps: tuple[str, ...] = (
+            "Resolve the reported client blocker(s) above, then re-run setup for that client.",
+        )
+    else:
+        summary = f"awf setup processed {len(clients)} MCP client(s) successfully."
+        next_steps = ("Restart the client sessions to load the AWF MCP server.",)
+    return first_run_report_payload(
+        command=SETUP_COMMAND,
+        summary=summary,
+        issues=issues,
+        details={"clients": clients_detail},
+        next_steps=next_steps,
+    )
 
 
 def _resolve_provider_settings(environ: dict[str, str]) -> Any:
@@ -577,5 +933,22 @@ def _reason_coded_next_steps(reason_code: str) -> tuple[str, ...]:
         return (
             "Re-run without --non-interactive to supply the required input, or pass "
             "--dry-run for a read-only readiness check.",
+        )
+    if reason_code == SETUP_CLIENT_UNKNOWN:
+        return (
+            "Re-run awf setup with a supported --client; the accepted names are "
+            "listed under known_clients in the issue details.",
+        )
+    if reason_code == SETUP_PROVIDER_CLIENT_CONFLICT:
+        return (
+            "Re-run awf setup with either --provider or --client, not both; the "
+            "rejected selectors are listed under providers and clients in the "
+            "issue details.",
+        )
+    if reason_code == SETUP_PLAIN_SECRETS_CLIENT_CONFLICT:
+        return (
+            "Re-run awf setup --client without --allow-plain-secrets; plain-file "
+            "consent is recorded by the readiness/provider path (awf setup), not the "
+            "client path.",
         )
     return ("Fix the reported issue above, then re-run awf setup --dry-run.",)

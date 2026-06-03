@@ -213,6 +213,37 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf setup --provider <provider>",
         _reason_catalog_link("PROVIDER_SETUP_AUTH_INVALID"),
     ),
+    "SETUP_CLIENT_UNKNOWN": _ReasonText(
+        "AWF setup was asked to configure an unsupported client integration.",
+        (
+            "Use a supported client name (claude or codex) with `awf setup "
+            "--client <client>`, or omit `--client` to run the readiness pass."
+        ),
+        "The client selector does not match a client known to this AWF build.",
+        "awf setup --client <client>",
+        _reason_catalog_link("SETUP_CLIENT_UNKNOWN"),
+    ),
+    "SETUP_PROVIDER_CLIENT_CONFLICT": _ReasonText(
+        "AWF setup cannot combine --provider with --client.",
+        (
+            "Re-run setup with either --provider to evaluate providers or "
+            "--client to register a client MCP integration, but not both."
+        ),
+        "The setup command received mutually exclusive --provider and --client selectors in one invocation.",
+        "awf setup --client <client>",
+        _reason_catalog_link("SETUP_PROVIDER_CLIENT_CONFLICT"),
+    ),
+    "SETUP_PLAIN_SECRETS_CLIENT_CONFLICT": _ReasonText(
+        "AWF setup cannot combine --allow-plain-secrets with --client.",
+        (
+            "Re-run setup with --client to register a client MCP integration, and "
+            "record plain-file consent separately via the readiness/provider path "
+            "(awf setup --allow-plain-secrets), which is the only path that persists it."
+        ),
+        "The client dispatch never reaches the consent-persisting path, so accepting --allow-plain-secrets there would silently drop the operator's opt-in flag.",
+        "awf setup --client <client>",
+        _reason_catalog_link("SETUP_PLAIN_SECRETS_CLIENT_CONFLICT"),
+    ),
     "CLIENT_CONFIG_CONFLICT": _ReasonText(
         "AWF found a client MCP configuration conflict.",
         (
