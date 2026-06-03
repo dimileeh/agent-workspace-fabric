@@ -155,8 +155,12 @@ async def _maybe_reconcile_orphan_dirs(self: Any) -> None:
 
     No-op when no reconciler callback is wired. The callback already decides
     report-only vs execute based on the ``auto_cleanup_orphans`` flag; this
-    method only handles interval gating and transient-DB resilience, mirroring
-    :func:`_maybe_release_terminal_runtime`.
+    method handles interval gating and transient-DB resilience. Unlike
+    :func:`_maybe_release_terminal_runtime` (which swallows all reconcile
+    failures), non-transient exceptions are re-raised here to fail fast and
+    surface orphan-reconciliation issues to operators; transient closed-DB
+    errors are still warned-and-swallowed. The cursor is always rescheduled
+    first so a fatal sweep cannot hot-loop ``run_once``.
     """
     if self._orphan_dir_reconciler is None:
         return
