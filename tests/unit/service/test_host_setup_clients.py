@@ -178,6 +178,41 @@ def test_build_plan_claude_identical_entry_is_no_change(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("stale_type", ["http", "sse"])
+def test_build_plan_claude_stale_transport_type_plans_update(
+    tmp_path: Path, stale_type: str
+) -> None:
+    """Verify a Claude awf entry with a non-stdio transport ``type`` plans update.
+
+    Claude MCP config uses ``type`` to distinguish stdio from HTTP/SSE
+    transports. An ``awf`` entry whose command/args match but whose ``type`` is a
+    stale/malformed non-stdio value would not launch ``awf mcp serve``; reporting
+    it as ``no_change`` would claim AWF is registered while leaving a dead entry.
+    The planner must instead route it to an ``update`` that rewrites the canonical
+    ``"type": "stdio"`` transport.
+    """
+    config = {
+        "mcpServers": {
+            AWF_MCP_SERVER_KEY: {
+                "type": stale_type,
+                "command": "awf",
+                "args": _desired_args(),
+            }
+        }
+    }
+    _claude_config_path(tmp_path).write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert plan.method == "file"
+    assert plan.merged_config is not None
+    assert plan.merged_config["mcpServers"][AWF_MCP_SERVER_KEY]["type"] == "stdio"
+
+
+@pytest.mark.unit
 def test_build_plan_codex_full_matching_entry_is_no_change(tmp_path: Path) -> None:
     """Verify a Codex entry matching command/args and bounded timeouts is no_change."""
     codex_path = _codex_config_path(tmp_path)

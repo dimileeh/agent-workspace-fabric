@@ -111,8 +111,10 @@ class ClientDescriptor:
     # Entry fields beyond command/args that AWF must persist exactly. An existing
     # entry whose command/args match but that is missing or stale on one of these
     # (Codex's bounded ``startup_timeout_sec``/``tool_timeout_sec``, which ``codex
-    # mcp add`` and pre-file-write AWF setups leave unset) is refreshed via an
-    # ``update`` rather than reported as a ``no_change`` that never writes them.
+    # mcp add`` and pre-file-write AWF setups leave unset; Claude's stdio
+    # transport ``type``, which a stale/malformed entry may set to HTTP/SSE) is
+    # refreshed via an ``update`` rather than reported as a ``no_change`` that
+    # leaves it broken.
     required_entry_fields: tuple[str, ...] = ()
 
     def config_path(self, home: Path, env: Mapping[str, str]) -> Path:
@@ -184,6 +186,11 @@ CLIENT_DESCRIPTORS: Mapping[str, ClientDescriptor] = {
         cli_binary="claude",
         config_relative_path=(".claude.json",),
         servers_key="mcpServers",
+        # Claude's JSON ``type`` field selects the transport (stdio vs HTTP/SSE).
+        # An entry with matching command/args but a stale/malformed non-stdio
+        # ``type`` would never launch ``awf mcp serve``, so it is required exactly
+        # and refreshed via an update rather than reported as a no-op.
+        required_entry_fields=("type",),
     ),
     "codex": ClientDescriptor(
         key="codex",
@@ -743,9 +750,9 @@ def _entries_match(existing: Mapping[str, Any], desired: Mapping[str, Any]) -> b
     The meaningful identity of an MCP server entry is its launch command and
     args; matching those means the client already points at AWF, so a difference
     here is *not* a drift conflict. Required auxiliary fields the planner must
-    still persist (Codex's bounded timeouts) are checked separately by
-    :func:`_entry_has_required_fields`, while purely cosmetic fields (``type``)
-    are left untouched.
+    still persist (Codex's bounded timeouts, Claude's stdio transport ``type``)
+    are checked separately by :func:`_entry_has_required_fields`; any remaining
+    user-added fields are left untouched.
 
     An existing ``args`` that is not a list (e.g. Claude JSON ``"args": null``
     or Codex TOML ``args = 1``) cannot match the desired list args, so it
@@ -791,12 +798,14 @@ def _entry_has_required_fields(
     """Return whether ``existing`` already carries every required desired field.
 
     ``_entries_match`` compares only command/args, but some clients need extra
-    fields persisted that their official CLI cannot write — Codex's bounded
-    ``startup_timeout_sec``/``tool_timeout_sec``. An ``awf`` entry created by
-    ``codex mcp add`` (or by an AWF setup predating the direct file-write path)
-    has the right command/args yet lacks those bounded timeouts; reporting it as
-    a no-op would leave them unset. This returns ``False`` for such an entry so
-    the planner routes it to ``update`` and the file write adds them.
+    fields persisted exactly — Codex's bounded
+    ``startup_timeout_sec``/``tool_timeout_sec`` and Claude's stdio transport
+    ``type``. An ``awf`` entry created by ``codex mcp add`` (or by an AWF setup
+    predating the direct file-write path) has the right command/args yet lacks
+    those bounded timeouts; a Claude entry with a stale/malformed non-stdio
+    ``type`` likewise has matching command/args but would not launch. Reporting
+    either as a no-op would leave it broken, so this returns ``False`` for such
+    an entry and the planner routes it to ``update`` so the file write fixes it.
     """
     return all(existing.get(field) == desired.get(field) for field in required_fields)
 
