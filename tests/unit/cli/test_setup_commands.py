@@ -11,6 +11,7 @@ import pytest
 
 from awf.cli import setup_commands
 from awf.cli.main import app
+from awf.common.audit import REDACTION_MARKER
 from awf.host_setup.config import HostSetupConfig, HostSetupConfigError, ProviderConfig
 from awf.host_setup.providers import (
     ProviderSetupResult,
@@ -962,13 +963,13 @@ def _ready_github_summary(
 ) -> tuple[ProviderSetupSummary, HostSetupConfig]:
     """Fake orchestration that marks GitHub ready via gh (no token stored).
 
-    The per-provider ``summary`` text embeds a token-shaped value so the
-    no-token assertion in ``test_setup_provider_github_pretty_prints_no_token``
-    exercises pretty (stderr) rendering rather than passing vacuously against
-    secret-free text. ``ProviderSetupSummary.to_details()`` already drops the
-    per-provider ``summary`` field, so the token never reaches the JSON payload;
-    the value therefore only guards that the pretty renderer redacts known token
-    shapes instead of leaking them.
+    A token-shaped value is planted on ``backend`` -- a field that
+    ``ProviderSetupSummary.to_details()`` actually emits and the renderer prints
+    under ``Details:`` -- so the no-token assertion in
+    ``test_setup_provider_github_pretty_prints_no_token`` exercises the renderer's
+    redaction rather than passing vacuously. Planting it on the free-text
+    ``summary`` would be vacuous: ``to_details()`` drops that field, so the token
+    would never reach the rendered payload and the assertion could not regress.
     """
     summary = ProviderSetupSummary(
         mode="targeted_recheck" if selected_providers else "all_providers",
@@ -978,7 +979,8 @@ def _ready_github_summary(
                 name="github",
                 status="ready",
                 reason_code="GITHUB_GH_AUTH_OK",
-                summary="GitHub is ready via gh CLI authentication (ghp_should_be_redacted).",
+                summary="GitHub is ready via gh CLI authentication.",
+                backend="ghp_should_be_redacted",
                 configured=True,
                 rechecked=True,
             ),
@@ -1036,6 +1038,10 @@ def test_setup_provider_github_pretty_prints_no_token(
     result = _runner.invoke(app, ["setup", "--provider", "github"])
 
     assert result.exit_code == 0, result.output
+    # ``_ready_github_summary`` plants a ``ghp_`` token shape on the rendered
+    # ``backend`` field, so the renderer must have actively redacted it (the
+    # marker is present) rather than the value simply never reaching stderr.
+    assert REDACTION_MARKER in result.stderr
     assert "ghp_" not in result.stderr
     assert "Traceback" not in result.stderr
 
