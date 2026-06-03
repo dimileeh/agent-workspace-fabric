@@ -402,6 +402,34 @@ def test_github_ready_via_env_ref_when_gh_absent(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_github_ready_via_awf_github_token_env_ref(tmp_path: Path) -> None:
+    """``AWF_GITHUB_TOKEN`` (the documented service var) marks GitHub ready.
+
+    Regression for a registry that only honored ``GH_TOKEN`` / ``GITHUB_TOKEN``:
+    an operator who exports only ``AWF_GITHUB_TOKEN`` — the token ``awf start``
+    uses for PR creation/monitoring — must not have ``awf setup`` reject GitHub.
+    """
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["github"],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"AWF_GITHUB_TOKEN": _FAKE_GH_TOKEN},
+        run_subprocess=_SubprocessSpy(raise_exc=FileNotFoundError("gh")),
+        http_get=_unexpected_http,
+    )
+
+    github = summary.result_for("github")
+    assert github is not None
+    assert github.status == "ready"
+    assert github.credential_ref == "env://AWF_GITHUB_TOKEN"
+    assert github.backend == "env_ref"
+    assert _FAKE_GH_TOKEN not in json.dumps(github.model_dump())
+    assert config.providers["github"].credential_ref == "env://AWF_GITHUB_TOKEN"
+
+
+@pytest.mark.unit
 def test_github_invalid_env_token_overwrites_prior_ready_config(tmp_path: Path) -> None:
     """A rejected GitHub token must not leave a prior ready config entry stale."""
     prior = HostSetupConfig(providers={"github": ProviderConfig(status="ready", source="gh")})

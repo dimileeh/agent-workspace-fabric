@@ -11,8 +11,8 @@ summary plus an updated :class:`HostSetupConfig`.
 
 GitHub is treated as **first-class** because PR creation, monitoring, and merging
 depend on it: GitHub is marked ready when either ``gh auth status`` succeeds or an
-environment-reference token (``GH_TOKEN`` / ``GITHUB_TOKEN``) is configured, and a
-raw GitHub token is **never** stored.
+environment-reference token (``AWF_GITHUB_TOKEN`` / ``GH_TOKEN`` / ``GITHUB_TOKEN``)
+is configured, and a raw GitHub token is **never** stored.
 
 Failure isolation is by construction: each provider is orchestrated
 independently, so one missing/invalid credential marks only that provider
@@ -112,7 +112,10 @@ PROVIDER_REGISTRY: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         name="github",
         readiness_provider="github",
-        env_ref_vars=("GH_TOKEN", "GITHUB_TOKEN"),
+        # Order mirrors ``provider_readiness._GITHUB_TOKEN_ENV_KEYS`` and
+        # ``ServiceSettings._resolve_github_token`` (``AWF_GITHUB_TOKEN`` first) so
+        # ``awf setup`` accepts exactly the tokens ``awf start`` uses for PR work.
+        env_ref_vars=("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
         github_first_class=True,
     ),
     ProviderSpec(
