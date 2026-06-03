@@ -219,14 +219,46 @@ def _host_claude_signature(host_home: Path) -> str:
     but leaves ``st_size`` and ``st_mtime_ns`` untouched, so signing on size+mtime
     alone would reuse a stale base that lacks the new mode bits. Including the mode
     rebuilds when permissions change.
+
+    ``followlinks=True`` does not detect symlink cycles, so a circular link in
+    ``~/.claude`` (e.g. a skills dir linked back to a parent) would otherwise loop
+    forever — and unlike the legacy per-workspace ``copytree`` this runs on every
+    provision call, so one cycle would silently hang all future provisioning. A
+    ``visited`` set of resolved ``(st_dev, st_ino)`` directory identities bounds
+    the walk: a directory already seen is pruned before descent.
     """
 
     source = host_home / ".claude"
     excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
     entries: list[str] = []
+    visited: set[tuple[int, int]] = set()
+    try:
+        source_stat = source.stat()
+        visited.add((source_stat.st_dev, source_stat.st_ino))
+    except OSError:
+        pass
     for root, dirs, files in os.walk(source, followlinks=True):
-        dirs[:] = [name for name in dirs if name not in excluded]
         root_path = Path(root)
+        kept: list[str] = []
+        for name in dirs:
+            if name in excluded:
+                continue
+            try:
+                dir_stat = (root_path / name).stat()
+            except OSError:
+                # A dangling/broken dir link: keep it so the entry loop below
+                # records the ``missing`` marker, matching the prior behaviour.
+                kept.append(name)
+                continue
+            identity = (dir_stat.st_dev, dir_stat.st_ino)
+            if identity in visited:
+                # Cycle (or a dir reachable via two links): pruning it bounds
+                # the walk without dropping content already signed under its
+                # first-seen path.
+                continue
+            visited.add(identity)
+            kept.append(name)
+        dirs[:] = kept
         for name in (*dirs, *files):
             entry = root_path / name
             rel = entry.relative_to(source).as_posix()

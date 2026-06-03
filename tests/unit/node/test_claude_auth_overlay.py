@@ -238,6 +238,26 @@ def test_signature_follows_symlink_target_content(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_signature_terminates_on_circular_symlink(tmp_path: Path) -> None:
+    # ``os.walk(followlinks=True)`` does not detect symlink cycles, so a circular
+    # link in ``~/.claude`` (e.g. a child linked back to a parent) would loop
+    # forever — and this runs on every provision call. The ``visited`` inode set
+    # must bound the walk so signing terminates instead of hanging the worker.
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    claude = host_home / ".claude"
+    loop_dir = claude / "skills" / "demo"
+    # Link ``demo/cycle`` back to its own parent ``skills``; followlinks would
+    # otherwise descend skills→demo→cycle→skills→… without limit.
+    (loop_dir / "cycle").symlink_to(claude / "skills", target_is_directory=True)
+
+    # Terminates (no hang) and returns a stable 16-char digest.
+    signature = _host_claude_signature(host_home)
+    assert len(signature) == 16
+    assert signature == _host_claude_signature(host_home)
+
+
+@pytest.mark.unit
 def test_shared_base_content_excludes_history_and_skips_dangling_links(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
