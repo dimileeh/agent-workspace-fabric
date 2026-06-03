@@ -252,6 +252,46 @@ def test_build_plan_codex_stale_timeout_plans_update(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_build_plan_codex_update_dropping_extra_fields_flags_approximate(
+    tmp_path: Path,
+) -> None:
+    """Verify an update that drops a user-added ``awf`` field flags the diff approximate.
+
+    A Codex ``awf`` entry with matching command/args but missing AWF's bounded
+    timeouts plus a manually configured ``env`` subtable routes to ``update``;
+    ``_merged_config`` replaces the whole entry wholesale, deleting the ``env``
+    subtable. Those removed lines all echo pre-existing content, so the scoped
+    diff filter suppresses them — the preview must then be flagged approximate so
+    the destructive drop is not hidden behind a "just added timeouts" preview.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        "[mcp_servers.awf]\n"
+        'command = "awf"\n'
+        f'args = ["mcp", "serve", "--env-file", "{_ENV_FILE}"]\n'
+        "\n"
+        "[mcp_servers.awf.env]\n"
+        'MY_VAR = "kept-by-user"\n',
+        encoding="utf-8",
+    )
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert plan.method == "file"
+    # The write genuinely drops the user's env subtable (AWF owns its entry).
+    assert plan.merged_config is not None
+    assert "env" not in plan.merged_config["mcp_servers"][AWF_MCP_SERVER_KEY]
+    # The removed env lines echo existing content and are suppressed from the
+    # preview, so the diff must be flagged approximate rather than hiding the loss.
+    assert plan.diff_is_approximate is True
+    assert "MY_VAR" not in plan.diff
+
+
+@pytest.mark.unit
 def test_build_plan_diff_excludes_unrelated_existing_secrets(tmp_path: Path) -> None:
     """Verify the update diff is scoped to the awf entry and never quotes a
     neighboring server's secret as surrounding context.

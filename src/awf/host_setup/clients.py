@@ -418,7 +418,9 @@ def build_client_config_plan(
         )
 
     action: ClientConfigAction = "create" if file_missing else "update"
-    diff, diff_is_approximate = _unified_diff(existing_text, merged_text, config_path)
+    diff, diff_is_approximate = _unified_diff(
+        existing_text, merged_text, config_path, replacing_entry=existing_entry is not None
+    )
     backup_path = (
         _backup_path(config_path, now()) if method == "file" and action == "update" else None
     )
@@ -701,8 +703,10 @@ def _merged_config(
     # deep-merging user-added fields into it. This guarantees the canonical
     # command/args and the bounded startup/tool timeouts are exactly what AWF
     # intends, with no stale or conflicting fields surviving an update. Any
-    # user-added fields on the prior ``awf`` entry are dropped — the dry-run
-    # diff surfaces the loss and the timestamped backup allows a rollback.
+    # user-added fields on the prior ``awf`` entry are dropped — their removed
+    # lines echo existing content and are filtered from the scoped diff, so the
+    # dry-run flags the diff approximate (see ``_hides_changed_line``) to surface
+    # the loss, and the timestamped backup allows a rollback.
     servers_map[AWF_MCP_SERVER_KEY] = dict(desired_entry)
     merged[descriptor.servers_key] = servers_map
     return merged
@@ -736,7 +740,13 @@ def _serialize_config(config: Mapping[str, Any], config_format: ClientConfigForm
     return _emit_toml(config)
 
 
-def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> tuple[str, bool]:
+def _unified_diff(
+    existing_text: str,
+    merged_text: str,
+    config_path: Path,
+    *,
+    replacing_entry: bool,
+) -> tuple[str, bool]:
     """Return the scoped unified diff and whether it omits genuine AWF lines.
 
     Emitted with zero context lines (``n=0``) and then filtered so the result
@@ -757,14 +767,23 @@ def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> tu
       dry-run/apply payloads entirely.
 
     The second leakage guard is content-based, so it can also drop a *genuine*
-    new AWF line whose serialized form coincidentally equals a line already in
-    the file (e.g. another ``stdio`` server makes ``"type": "stdio"`` pre-exist,
-    or a Codex server already carries ``startup_timeout_sec = 20``). Such a drop
-    leaves the preview incomplete, so this returns ``True`` as the second value
-    to flag the diff approximate — mirroring the ``official_cli`` path — without
-    affecting the always-exact write. A suppressed addition that is merely the
-    comma-rewritten form of a removed line (offset by a suppressed removal of the
-    same content) is the benign intended case and does not set the flag.
+    changed line whose serialized form coincidentally equals a line already in
+    the file. This happens for both additions (another ``stdio`` server makes
+    ``"type": "stdio"`` pre-exist) and removals — an ``update`` that replaces the
+    whole ``awf`` entry deletes a user-added field (e.g. an ``env`` subtable)
+    whose lines, being prior content, all echo the existing file and are
+    suppressed wholesale. Either kind of drop leaves the preview incomplete, so
+    this returns ``True`` as the second value to flag the diff approximate —
+    mirroring the ``official_cli`` path — without affecting the always-exact
+    write. The benign intended case is the trailing-comma rewrite of the prior
+    last entry, where a suppressed addition is exactly offset by a suppressed
+    removal of the same content; those cancel out and do not set the flag.
+
+    A suppressed removal only signals a dropped field when ``replacing_entry`` is
+    true (an existing ``awf`` entry is being replaced). With no prior entry the
+    merge adds and never deletes AWF content, so an unpaired removal is structural
+    noise (e.g. an empty ``{}`` document expanding into a populated one) and must
+    not flag the create preview approximate.
     """
     existing_lines = {_normalize_config_line(line) for line in existing_text.splitlines()}
     kept: list[str] = []
@@ -782,16 +801,35 @@ def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> tu
             continue
         bucket = suppressed_additions if line.startswith("+") else suppressed_removals
         bucket.append(_normalize_config_line(line[1:]))
-    return "".join(kept), _hides_added_line(suppressed_additions, suppressed_removals)
+    return "".join(kept), _hides_changed_line(
+        suppressed_additions, suppressed_removals, replacing_entry=replacing_entry
+    )
 
 
-def _hides_added_line(suppressed_additions: list[str], suppressed_removals: list[str]) -> bool:
-    """Return whether a suppressed ``+`` line is a genuine AWF addition, not a comma rewrite.
+def _hides_changed_line(
+    suppressed_additions: list[str],
+    suppressed_removals: list[str],
+    *,
+    replacing_entry: bool,
+) -> bool:
+    """Return whether the filter dropped a genuine changed line, not just a comma rewrite.
 
-    A suppressed addition is benign when a suppressed removal of the same content
-    exists: that pair is the trailing-comma rewrite of the prior last entry. Any
-    leftover suppressed addition is a brand-new AWF line that coincidentally
-    matched existing content and was dropped, leaving the preview incomplete.
+    The benign case is the trailing-comma rewrite of the prior last entry: a
+    suppressed addition paired with a suppressed removal of the same content.
+    Those pairs cancel out. Any *leftover* suppressed line is a genuine change the
+    preview now hides:
+
+    * an unpaired addition is a brand-new AWF line that coincidentally matched
+      existing content, so the preview understates what is added;
+    * an unpaired removal, *when an existing entry is being replaced*
+      (``replacing_entry``), is a field being deleted — an ``update`` that
+      replaces the whole ``awf`` entry drops a user-added field (e.g. an ``env``
+      subtable), so the preview would otherwise hide a destructive change.
+
+    When no prior entry is replaced, unpaired removals are structural artifacts of
+    serialization (an empty ``{}`` document becoming populated), not dropped
+    fields, so they do not flag the preview. Either flagged case leaves the
+    preview incomplete, so the diff is marked approximate.
     """
     remaining = list(suppressed_removals)
     for added in suppressed_additions:
@@ -799,7 +837,7 @@ def _hides_added_line(suppressed_additions: list[str], suppressed_removals: list
             remaining.remove(added)
         else:
             return True
-    return False
+    return replacing_entry and bool(remaining)
 
 
 def _normalize_config_line(body: str) -> str:
@@ -1043,9 +1081,10 @@ def _plan_details(plan: ClientConfigPlan, *, dry_run: bool) -> dict[str, Any]:
         details["cli_command"] = list(plan.cli_command or ())
     elif plan.diff_is_approximate:
         # The file path is exact on write, but the scoped diff filter dropped a
-        # genuine AWF line that coincidentally matched existing content, so the
-        # preview understates what is being added. Flag it the same way so the
-        # operator knows the diff is not the full picture.
+        # genuine changed line that coincidentally matched existing content —
+        # either an added line that understates what is written, or a removed
+        # line for a dropped field that understates what is deleted. Flag it the
+        # same way so the operator knows the diff is not the full picture.
         details["diff_is_approximate"] = True
     if plan.backup_path is not None:
         details["backup_path"] = str(plan.backup_path)
