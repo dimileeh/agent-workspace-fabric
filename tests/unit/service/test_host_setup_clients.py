@@ -251,6 +251,41 @@ def test_build_plan_codex_stale_timeout_plans_update(tmp_path: Path) -> None:
     assert plan.merged_config["mcp_servers"][AWF_MCP_SERVER_KEY]["startup_timeout_sec"] == 20
 
 
+@pytest.mark.unit
+def test_build_plan_diff_excludes_unrelated_existing_secrets(tmp_path: Path) -> None:
+    """Verify the update diff is scoped to the awf entry and never quotes a
+    neighboring server's secret as surrounding context.
+
+    Existing client configs commonly hold other MCP servers whose env entries
+    carry API keys. AWF only ever adds/changes its own ``awf`` entry, so the
+    diff must not surface adjacent secret values as diff context where the
+    payload redactor (which only catches known token shapes) could miss them.
+    """
+    secret = "raw-unmatched-deployment-secret-value"
+    config = {
+        "mcpServers": {
+            "aaa-other": {
+                "type": "stdio",
+                "command": "other",
+                "args": [],
+                "env": {"DEPLOY_TOKEN": secret},
+            }
+        }
+    }
+    _claude_config_path(tmp_path).write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    assert plan.action == "update"
+    assert AWF_MCP_SERVER_KEY in plan.diff
+    assert _ENV_FILE in plan.diff
+    assert secret not in plan.diff
+    # The unrelated server's env key must not appear as diff context either.
+    assert "DEPLOY_TOKEN" not in plan.diff
+
+
 # --- build_client_config_plan: conflict -----------------------------------
 
 

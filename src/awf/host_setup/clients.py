@@ -690,12 +690,21 @@ def _serialize_config(config: Mapping[str, Any], config_format: ClientConfigForm
 
 
 def _unified_diff(existing_text: str, merged_text: str, config_path: Path) -> str:
-    """Return a unified diff between the existing and merged config text."""
+    """Return a unified diff between the existing and merged config text.
+
+    Emitted with zero context lines (``n=0``). AWF only ever adds or changes its
+    own ``awf`` server entry, so the changed lines are exclusively AWF's; any
+    surrounding context would expose unrelated existing config — other servers'
+    env entries or API keys that the payload redactor may not match — in CLI
+    output and logs. Scoping the diff to the inserted/changed lines keeps those
+    third-party secrets out of dry-run/apply payloads entirely.
+    """
     diff_lines = unified_diff(
         existing_text.splitlines(keepends=True),
         merged_text.splitlines(keepends=True),
         fromfile=f"a/{config_path.name}",
         tofile=f"b/{config_path.name}",
+        n=0,
     )
     return "".join(diff_lines)
 
