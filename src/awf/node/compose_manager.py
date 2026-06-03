@@ -871,15 +871,11 @@ class ComposeManager:
                     proc.communicate(),
                     timeout=capture_timeout_seconds,
                 )
-            except FileNotFoundError as e:
-                raise ComposeOperationError(
-                    operation=operation,
-                    returncode=127,
-                    stdout="",
-                    stderr=str(e),
-                    reason_code="DOCKER_UNAVAILABLE",
-                ) from e
             except TimeoutError as e:
+                # ``TimeoutError`` is itself an ``OSError`` subclass, so this clause
+                # must stay *above* the broad ``except OSError`` below or timeouts
+                # would be misclassified as ``DOCKER_UNAVAILABLE`` and skip the
+                # kill/reap cleanup.
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
                 with contextlib.suppress(ProcessLookupError, TimeoutError):
@@ -895,6 +891,22 @@ class ComposeManager:
                         f"docker compose {operation} exceeded {capture_timeout_seconds:g}s timeout"
                     ),
                     reason_code="DOCKER_COMMAND_TIMEOUT",
+                ) from e
+            except OSError as e:
+                # ``FileNotFoundError`` (docker binary absent) is the common case,
+                # but ``create_subprocess_exec`` can raise other ``OSError`` subclasses
+                # too -- notably ``PermissionError`` (docker present but not
+                # executable). They all mean docker is unusable here, so translate
+                # them to a structured ``DOCKER_UNAVAILABLE`` error rather than letting
+                # a raw ``OSError`` escape: callers like ``teardown_project`` catch only
+                # ``ComposeOperationError`` and would otherwise abort the whole
+                # ``awf service gc`` request instead of falling back to label cleanup.
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=127,
+                    stdout="",
+                    stderr=str(e),
+                    reason_code="DOCKER_UNAVAILABLE",
                 ) from e
 
             stdout = stdout_bytes.decode("utf-8", errors="replace")
