@@ -796,7 +796,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "GROK_AUTH_MISSING": _ReasonText(
         "No Grok Build auth signal was visible.",
-        "Set XAI_API_KEY in the AWF service environment.",
+        "Mount ~/.grok or set XAI_API_KEY in the AWF service environment.",
         "Missing xAI API credentials for the official Grok Build CLI.",
         "awf service doctor",
         "https://docs.x.ai/build/enterprise",
