@@ -1084,9 +1084,12 @@ def _ready_github_summary(
     """Fake orchestration that marks GitHub ready via gh (no token stored).
 
     The per-provider ``summary`` text embeds a token-shaped value so the
-    no-token CLI assertion actually exercises the rendering layer (which both
-    drops the free-text summary from ``to_details`` and redacts known token
-    shapes) rather than passing vacuously against secret-free text.
+    no-token assertion in ``test_setup_provider_github_pretty_prints_no_token``
+    exercises pretty (stderr) rendering rather than passing vacuously against
+    secret-free text. ``ProviderSetupSummary.to_details()`` already drops the
+    per-provider ``summary`` field, so the token never reaches the JSON payload;
+    the value therefore only guards that the pretty renderer redacts known token
+    shapes instead of leaking them.
     """
     summary = ProviderSetupSummary(
         mode="targeted_recheck" if selected_providers else "all_providers",
