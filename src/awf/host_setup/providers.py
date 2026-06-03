@@ -449,6 +449,13 @@ def _orchestrate_agent_provider(
     else:
         env_var = _first_present(environ, spec.env_ref_vars)
         if env_var is None:
+            existing = config.providers.get(spec.name)
+            if existing is not None:
+                # The provider was configured by a prior run (e.g. keyring or
+                # plain_file) but no fresh secret/env is available to re-probe.
+                # Preserve and report that state instead of falsely reporting
+                # not_configured and discarding the existing ref.
+                return _preserved_existing_result(spec, existing)
             return _not_configured_result(spec, non_interactive=non_interactive)
         ref = _build_env_ref(spec, env_var, capabilities, backends)
         source = "env"
@@ -598,6 +605,46 @@ def _not_configured_result(
         ),
         None,
     )
+
+
+def _preserved_existing_result(
+    spec: ProviderSpec,
+    existing: ProviderConfig,
+) -> tuple[ProviderSetupResult, ProviderConfig]:
+    """Preserve an already-configured provider when no fresh credential is supplied.
+
+    A recheck that finds neither a captured secret nor an env reference must not
+    erase or misreport a provider that a prior run configured (keyring / plain_file
+    / env_ref). Without this, the summary would surface ``not_configured`` while the
+    persisted config still holds a ready ref. Report the last-known state verbatim
+    with ``rechecked=False`` (it was not re-probed this run) and return the existing
+    config unchanged.
+    """
+    backend_label = existing.backend or "stored"
+    return (
+        ProviderSetupResult(
+            name=spec.name,
+            status=_as_setup_status(existing.status),
+            reason_code=f"{spec.name.upper()}_PRESERVED",
+            summary=f"Preserved existing {backend_label} {spec.name} configuration.",
+            backend=existing.backend,
+            credential_ref=existing.credential_ref,
+            configured=True,
+            rechecked=False,
+        ),
+        existing,
+    )
+
+
+def _as_setup_status(status: str) -> ProviderSetupStatus:
+    """Narrow a persisted provider status to a setup status, never over-reporting.
+
+    Persisted provider configs only ever record ``ready``/``unavailable`` (the
+    schema default is ``missing``). Map only an exact ``ready`` to ``ready``; any
+    other value — including a hand-edited config — degrades to ``unavailable`` so a
+    preserved, un-reprobed entry can never over-report readiness.
+    """
+    return "ready" if status == "ready" else "unavailable"
 
 
 def _credential_failure_result(spec: ProviderSpec, exc: CredentialError) -> ProviderSetupResult:

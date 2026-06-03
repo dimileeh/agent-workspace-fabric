@@ -178,6 +178,77 @@ def test_provider_missing_credential_is_not_configured_and_unchanged(tmp_path: P
 
 
 @pytest.mark.unit
+def test_recheck_without_fresh_secret_preserves_existing_config(tmp_path: Path) -> None:
+    """A recheck with no fresh secret/env preserves a prior config, not not_configured."""
+    existing = ProviderConfig(
+        credential_ref="keyring://awf/codex",
+        backend="keyring",
+        status="ready",
+        source="captured",
+    )
+    base = HostSetupConfig(providers={"codex": existing})
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=base,
+        allow_plain_secrets=False,
+        non_interactive=False,
+        environ={},
+        capture=lambda _provider: None,
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    # The summary reflects the persisted (last-known) state instead of falsely
+    # reporting not_configured, and flags that it was not actually re-probed.
+    assert result.status == "ready"
+    assert result.configured is True
+    assert result.rechecked is False
+    assert result.reason_code == "CODEX_PRESERVED"
+    assert result.backend == "keyring"
+    assert result.credential_ref == "keyring://awf/codex"
+    # The persisted config entry stays exactly as it was.
+    assert config.providers["codex"] == existing
+
+
+@pytest.mark.unit
+def test_recheck_preserves_existing_unavailable_config(tmp_path: Path) -> None:
+    """Preserving a non-ready entry reports its last-known status, never ready."""
+    existing = ProviderConfig(
+        credential_ref="env://OPENAI_API_KEY",
+        backend="env_ref",
+        status="unavailable",
+        source="env",
+    )
+    base = HostSetupConfig(providers={"codex": existing})
+
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=base,
+        allow_plain_secrets=False,
+        non_interactive=False,
+        environ={},
+        capture=lambda _provider: None,
+        run_subprocess=_unexpected_subprocess,
+        http_get=_unexpected_http,
+        keyring_backend=_keyring_backend(),
+    )
+
+    result = summary.result_for("codex")
+    assert result is not None
+    assert result.status == "unavailable"
+    assert result.configured is True
+    assert result.rechecked is False
+    assert result.reason_code == "CODEX_PRESERVED"
+    assert config.providers["codex"] == existing
+
+
+@pytest.mark.unit
 def test_provider_invalid_credential_marks_unavailable(tmp_path: Path) -> None:
     """A configured GitHub token rejected by ``gh`` is reported unavailable."""
     spy = _SubprocessSpy(returncode=1)
