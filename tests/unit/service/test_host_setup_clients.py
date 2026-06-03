@@ -729,6 +729,33 @@ def test_codex_update_emits_bool_and_quoted_keys(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_codex_update_quotes_non_ascii_keys(tmp_path: Path) -> None:
+    """Verify non-ASCII alphanumeric keys are quoted so TOML stays valid.
+
+    ``str.isalnum`` is True for non-ASCII letters (e.g. ``é``), but TOML bare
+    keys are restricted to ASCII; emitting such a key unquoted yields invalid
+    TOML, so the emitter must quote it and the result must round-trip.
+    """
+    codex_path = _codex_config_path(tmp_path)
+    codex_path.parent.mkdir(parents=True)
+    # Quoted non-ASCII keys parse cleanly, but their unquoted spelling is invalid
+    # TOML — the emitter must re-quote them on the way out.
+    codex_path.write_text('[ui]\n"café" = "kept"\n', encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+    apply_client_config_plan(plan, run=_never_run, now=_now)
+
+    rendered = codex_path.read_text(encoding="utf-8")
+    # The bare (unquoted) spelling would be invalid TOML; it must be quoted.
+    assert "\ncafé = " not in rendered
+    reparsed = tomllib.loads(rendered)
+    assert reparsed["ui"]["café"] == "kept"
+    assert reparsed["mcp_servers"][AWF_MCP_SERVER_KEY]["args"] == _desired_args()
+
+
+@pytest.mark.unit
 def test_setup_client_apply_no_change_reports_success_without_diff(tmp_path: Path) -> None:
     """Verify a non-dry-run no_change apply succeeds with no diff/backup details."""
     config = {

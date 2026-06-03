@@ -580,7 +580,7 @@ def _emit_toml_table(table: Mapping[str, Any], path: tuple[str, ...], lines: lis
 def _emit_toml_key(key: object) -> str:
     """Return a TOML key, quoting it when it is not a bare-key identifier."""
     key_text = str(key)
-    if key_text and all(ch.isalnum() or ch in "_-" for ch in key_text):
+    if key_text and all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in key_text):
         return key_text
     return json.dumps(key_text)
 
