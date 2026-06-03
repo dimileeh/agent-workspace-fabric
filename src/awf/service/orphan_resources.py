@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,7 @@ AWF_PROJECT_PREFIXES = ("awf_", "awf-")
 # Reason codes for the flag-gated readiness-driven reaper.
 ORPHAN_REAP_DISABLED = "ORPHAN_REAP_DISABLED"
 ORPHAN_REAP_SKIPPED_UNKNOWN = "ORPHAN_REAP_SKIPPED_UNKNOWN"
+ORPHAN_REAP_SKIPPED_YOUNG = "ORPHAN_REAP_SKIPPED_YOUNG"
 ORPHAN_REAP_OK = "ORPHAN_REAP_OK"
 ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 
@@ -711,14 +713,56 @@ def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanComposeTeard
     return _teardown
 
 
+def _missing_record_is_aged(
+    record: ClassifiedResource,
+    *,
+    resolved_work_dir: Path,
+    grace_seconds: float,
+    now: float,
+) -> bool:
+    """Confirm a row-less (``missing``) resource is older than the grace window.
+
+    Mirrors :func:`gc_reconcile.scan_orphan_workspace_dirs`'s minimum-age grace:
+    a just-created worktree (or compose stack) can be visible on the filesystem
+    before its workspace row commits, and during that window :func:`_classify`
+    returns ``WORKSPACE_MISSING``. Reaping it would delete an in-flight provision
+    rather than a confirmed orphan, so a ``missing`` record is only reaped once
+    its on-disk provision artifact is older than ``grace_seconds``. ``terminal``
+    records skip this check entirely -- their workspace row confirms they are
+    done, so they are not gated here.
+    """
+    if grace_seconds <= 0.0:
+        return True
+    if record.kind == "worktree":
+        path_text = record.resource.path
+        if not path_text:  # pragma: no cover - worktree records always carry a path.
+            return False
+        anchor = Path(path_text)
+    else:
+        # Docker resources (container/network/volume) anchor on the per-workspace
+        # compose dir -- the same root gc_reconcile protects. If no compose dir
+        # exists, there is no in-flight provision to protect (row and dir both
+        # gone, only docker lingers), so the lingering stack is a genuine orphan.
+        anchor = resolved_work_dir / "compose" / record.workspace_id
+        if not anchor.exists():
+            return True
+    try:
+        mtime = anchor.stat().st_mtime
+    except OSError:  # pragma: no cover - reaper runs as root over its own dirs.
+        return False
+    return (now - mtime) >= grace_seconds
+
+
 async def reap_classified_orphans(
     summary: OrphanResourceSummary,
     *,
     work_dir: Path | str,
     compose_teardown: OrphanComposeTeardown,
     enabled: bool,
+    now: float | None = None,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
 ) -> OrphanReapResult:
-    """Reap ``terminal`` / ``missing`` classified orphans when ``enabled``.
+    """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
 
     Off by default: with ``enabled=False`` this is a pure no-op (report only),
     preserving the historical ``dry_run_only`` behavior. With ``enabled=True``
@@ -729,6 +773,12 @@ async def reap_classified_orphans(
     surfaces loudly (``PATH_DELETE_PERMISSION_DENIED``) as a ``partial`` run --
     never a silent success. When classification is unreliable (DB/scanner
     unavailable) it skips entirely rather than reaping on guesswork.
+
+    ``missing`` (row-less) records carry an extra minimum-age guard
+    (``min_age_hours``, mirroring :mod:`gc_reconcile`): a row-less resource whose
+    on-disk artifact is younger than the grace window is left alone, since a
+    just-created worktree can be visible before its workspace row commits and
+    would otherwise be reaped mid-provision. ``terminal`` records are not gated.
     """
     if not enabled:
         return OrphanReapResult(
@@ -749,9 +799,25 @@ async def reap_classified_orphans(
         )
 
     resolved_work_dir = Path(work_dir).expanduser().resolve()
-    orphan_records = [
-        record for record in summary.records if record.classification in {"terminal", "missing"}
-    ]
+    resolved_now = time.time() if now is None else now
+    grace_seconds = max(0.0, min_age_hours) * 3600.0
+    orphan_records: list[ClassifiedResource] = []
+    for record in summary.records:
+        if record.classification not in {"terminal", "missing"}:
+            continue
+        if record.classification == "missing" and not _missing_record_is_aged(
+            record,
+            resolved_work_dir=resolved_work_dir,
+            grace_seconds=grace_seconds,
+            now=resolved_now,
+        ):
+            _log.info(
+                "orphan_resources.reap_skipped_young",
+                reason_code=ORPHAN_REAP_SKIPPED_YOUNG,
+                **record.to_dict(),
+            )
+            continue
+        orphan_records.append(record)
     # One teardown per (project, workspace) so multiple docker resources from the
     # same stack do not trigger redundant downs.
     compose_projects: dict[tuple[str, str], None] = {}

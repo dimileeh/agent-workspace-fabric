@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -1303,6 +1304,7 @@ def test_reaper_flag_on_reaps_compose_and_worktree(tmp_path: Path) -> None:
             work_dir=tmp_path,
             compose_teardown=teardown,
             enabled=True,
+            min_age_hours=0,  # isolate reap mechanics from the row-less age guard
         )
     )
 
@@ -1402,6 +1404,7 @@ def test_reaper_permission_denied_is_loud(tmp_path: Path, monkeypatch: pytest.Mo
             work_dir=tmp_path,
             compose_teardown=teardown,
             enabled=True,
+            min_age_hours=0,  # isolate the permission-refusal path from the age guard
         )
     )
 
@@ -1438,6 +1441,7 @@ def test_reaper_worktree_already_removed_is_idempotent_success(
             work_dir=tmp_path,
             compose_teardown=teardown,
             enabled=True,
+            min_age_hours=0,  # isolate the idempotent-removal path from the age guard
         )
     )
 
@@ -1513,3 +1517,141 @@ def test_reaper_compose_teardown_failure_is_loud(tmp_path: Path) -> None:
     assert len(compose_errors) == 1
     assert compose_errors[0].reason_code == "DOCKER_UNAVAILABLE"
     assert compose_errors[0].error == "daemon down"
+
+
+@pytest.mark.unit
+def test_reaper_skips_young_missing_worktree(tmp_path: Path) -> None:
+    """A just-created row-less worktree is left alone (possible in-flight provision)."""
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),  # no rows -> the worktree is classified "missing"
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=1.0,
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.reaped == ()
+    assert teardown.calls == []
+    assert (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+
+
+@pytest.mark.unit
+def test_reaper_reaps_aged_missing_worktree(tmp_path: Path) -> None:
+    """An aged row-less worktree (older than the grace window) is reaped."""
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    old = 1_000_000.0
+    os.utime(worktree, (old, old))
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            now=old + 7200.0,  # two hours after the worktree's mtime
+            min_age_hours=1.0,
+        )
+    )
+
+    assert result.status == "ok"
+    reaped_kinds = [outcome.kind for outcome in result.reaped]
+    assert reaped_kinds == ["worktree"]
+    assert not worktree.exists()
+
+
+@pytest.mark.unit
+def test_reaper_reaps_terminal_worktree_without_age_guard(tmp_path: Path) -> None:
+    """A fresh worktree backed by a terminal row is reaped despite the grace window."""
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_dead"}),  # terminal row -> not gated
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=168.0,
+        )
+    )
+
+    assert result.status == "ok"
+    assert [outcome.kind for outcome in result.reaped] == ["worktree"]
+    assert not worktree.exists()
+
+
+@pytest.mark.unit
+def test_reaper_skips_young_missing_compose_when_dir_present(tmp_path: Path) -> None:
+    """A row-less compose stack with a fresh on-disk compose dir is not torn down."""
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    (tmp_path / "compose" / "ws_dead").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_dead-agent-1",
+                    "project": "awf_ws_dead",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=empty_worktree_scan(),
+        workspace_view=_ok_view(),  # no rows -> the container is classified "missing"
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=1.0,
+        )
+    )
+
+    assert result.status == "ok"
+    assert teardown.calls == []
+    assert result.reaped == ()
