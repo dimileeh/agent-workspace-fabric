@@ -157,6 +157,77 @@ All commands were the narrowest possible (state + one-file ruff on a bot-listed 
 
 Full AWF/GitHub validation (the 99% coverage gate, OpenAPI drift check via `python scripts/generate_openapi.py --check`, console lint/typecheck/build, `ruff check .`, mypy, full pytest -q, ci-required rollup, etc.), provenance, logs, timeouts, and merge gating are owned by AWF (and the PR monitor loop) after this agent phase per the workspace contract, .awf/workspace.yml, and AGENTS.md. Only the four ultra-narrow commands (plus 2 ancestry locators) listed above were executed locally for this iteration; they were state/ancestry confirmations on already-reviewed files, not validation of new behavior.
 
+## Iteration 2 (evidence refresh at HEAD c5640d62 matching task prompt's reviewed commit)
+
+**Trigger:** The AWF-provided body evidence (quoted from the GitHub review comment issue:4614449601) now describes "Reviewing files ... between 45cb384a... and c5640d62f7be797ebe338024ed8d0f6cbbb6d5b5" and "Files selected for processing (22)" that includes:
+- the rate-limit plan/validation themselves
+- the greptile 4614528914 plan/validation
+- docker/compose/local-service.yml
+- src/awf/adapters/{defaults.py,grok.py}, node/auth_mounts.py, service/{doctor/reasons.py,provider_readiness.py}
+- multiple tests/unit/* for adapters/cli/node/service
+This workspace's current HEAD is exactly c5640d62 (the "to" commit in the evidence; this is also the commit from the prior Iteration 1 re-verify on this thread). The banner text itself remains the pure rate-limit warning (no code findings). The prior address (commit 529767dd) + Iteration 1 re-verify (c5640d62) are in ancestry. Per PLAN_EXECUTION_PROTOCOL §4, iteration required to keep validation evidence current vs. the state described in the prompt for this review comment.
+
+**Gap identified:** None. The comment body contains no defect claim, no line reference, no suggestion, no "consider", and no summary of AWF code. It is the CodeRabbit rate-limit service notice (WARNING banner, "couldn't start this review", time remaining, billing link, fair-usage explanation, run config details, finishing-touches checkboxes for unit tests, and tips). The file list and commit range are metadata about what the bot *would have* processed if quota had allowed. No code change was or is warranted. The address commits are ancestors of c5640d62 (confirmed via merge-base); no behavior in grok auth or elsewhere was altered by the re-verify commits.
+
+**Actions in this iteration:**
+- Re-ran the exact four narrow verification commands specified in the PLAN's "Verification Commands and Pass Criteria" section (plus minimal ancestry queries for context). Commands and outputs captured below in "Re-verification evidence".
+- Re-read the on-disk plan and validation (and `git show` of the original address commit) to confirm they still accurately describe the boilerplate nature; no edits to any non-plan files.
+- Updated this VALIDATION.md with this Iteration 2 section (fresh outputs, trigger/gap/actions/verdict, AWF-owned validation statement). Updated the PLAN.md with matching Post-Plan Iteration Note 2 (this was the "plan update" step before validation edit per protocol spirit).
+- Confirmed `git status --porcelain` clean before edits; will `git add -f` only the two plans/ md files for the review-address bookkeeping commit.
+- No broad commands of any kind were executed (no pytest at all, no ruff without file arg, no mypy, no coverage, no full lint, no console builds, no awf service, no openapi generate --check, etc.).
+
+**Re-verification evidence (fresh from this run, matching PLAN's listed narrow commands):**
+
+```bash
+git branch --show-current
+```
+Result:
+```
+feature-sync/ws_9cf7091f505542f59b92d58d
+```
+
+```bash
+git log --oneline -3
+```
+Result:
+```
+c5640d62 fix: address review comment issue:4614449601 — coderabbit rate limit reached notice; re-verify at 3014ae47 (post greptile re-verifies), still pure boilerplate with no code feedback, no code change
+3014ae47 fix: address review comment issue:4614528914 — greptile grok auth summary positive; re-verify on address commit 0650dd7, is_file contract + tests intact, no code change
+0650dd7c fix: address review comment issue:4614528914 — greptile grok auth summary positive; re-verify on address commit ccec5128, is_file contract + tests intact, no code change
+```
+
+(Note: the log -3 now shows the rate-limit re-verify at top because this workspace's HEAD is the c5640d62 commit on the rate-limit address thread; the greptile re-verifies are the prior ones on the branch.)
+
+```bash
+git status --porcelain
+```
+Result: (no output lines; exit 0) — confirms working tree clean.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf/node/auth_mounts.py --select E,F,W 2>&1 | cat
+```
+Result:
+```
+All checks passed!
+```
+
+Additional narrow git queries to establish ancestry vs. evidence's c5640d62 and original address:
+```bash
+git merge-base --is-ancestor 529767dd HEAD && echo '529767dd (rate-limit address) is ancestor of HEAD'
+git log --oneline 529767dd -1
+```
+Results:
+```
+529767dd (rate-limit address) is ancestor of HEAD
+529767dd fix: address review comment issue:4614449601 — coderabbit rate limit reached notice; pure boilerplate with no code feedback, no code change
+```
+
+All commands were the narrowest possible (state + one-file ruff on a bot-listed file). No change to behavior or coverage surface.
+
+**Verdict for this iteration:** Still FALSE POSITIVE. The review comment issue:4614449601 remains a CodeRabbit-generated "Review limit reached" banner with no review content, no pointed-at code, and no requested action on the AWF diff. The fact that its metadata now lists 22 files (including the prior address plans for itself and the greptile thread) and references c5640d62 simply means the banner was generated against a later snapshot of the same PR branch (specifically the snapshot at/after the prior re-verify commit on this thread); the banner text has not changed and still contains zero actionable feedback. Per decision tree (2): "If the feedback is wrong, stale, or pure review boilerplate, do not change code." No source edit performed or needed. The original address commit plus prior + this iteration's plan/validation updates fully address the bookkeeping for the thread.
+
+Full AWF/GitHub validation (the 99% coverage gate, OpenAPI drift check via `python scripts/generate_openapi.py --check`, console lint/typecheck/build, `ruff check .`, mypy, full pytest -q, ci-required rollup, etc.), provenance, logs, timeouts, and merge gating are owned by AWF (and the PR monitor loop) after this agent phase per the workspace contract, .awf/workspace.yml, and AGENTS.md. Only the four ultra-narrow commands (plus 2 ancestry locators) listed above were executed locally for this iteration; they were state/ancestry confirmations on already-reviewed files, not validation of new behavior.
+
 ## Commit
 
 The original address commit (529767dd) contained only the plan + validation under `plans/`:
@@ -165,8 +236,14 @@ The original address commit (529767dd) contained only the plan + validation unde
 fix: address review comment issue:4614449601 — coderabbit rate limit reached notice; pure boilerplate with no code feedback, no code change
 ```
 
-This iteration will produce a follow-up commit (after validation) that updates only the plan+validation artifacts (to keep them current for the reviewed commit 3014ae47 per the evidence in the task prompt):
+The prior Iteration 1 produced:
 
 ```
-fix: address review comment issue:4614449601 — coderabbit rate limit reached notice; re-verify at 3014ae47 (post greptile re-verifies), still pure boilerplate with no code feedback, no code change
+c5640d62 fix: address review comment issue:4614449601 — coderabbit rate limit reached notice; re-verify at 3014ae47 (post greptile re-verifies), still pure boilerplate with no code feedback, no code change
+```
+
+This iteration will produce a follow-up commit (after validation) that updates only the plan+validation artifacts (to keep them current for the reviewed commit c5640d62 per the evidence in the task prompt):
+
+```
+fix: address review comment issue:4614449601 — coderabbit rate limit reached notice; re-verify at c5640d62 (post prior re-verify), still pure boilerplate with no code feedback, no code change
 ```
