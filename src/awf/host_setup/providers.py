@@ -117,6 +117,13 @@ PROVIDER_REGISTRY: tuple[ProviderSpec, ...] = (
         # ``awf setup`` accepts exactly the tokens ``awf start`` uses for PR work.
         env_ref_vars=("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
         github_first_class=True,
+        # GitHub resolves only via ``gh`` or an env ref — ``_orchestrate_github``
+        # never uses the ``capture`` callback, so an interactive re-run cannot prompt
+        # for or capture a raw token. Keep ``needs_secret=False`` so a missing
+        # credential yields a consistent ``GITHUB_NOT_CONFIGURED`` in both modes
+        # rather than an ``INTERACTIVE_INPUT_REQUIRED`` signal that no interactive
+        # path can satisfy.
+        needs_secret=False,
     ),
     ProviderSpec(
         name="awf_cloud",

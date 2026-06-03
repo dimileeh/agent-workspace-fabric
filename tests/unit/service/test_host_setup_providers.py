@@ -657,6 +657,36 @@ def test_github_gh_keychain_only_degrades_prior_ready_config(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_github_missing_credential_is_not_configured_not_interactive(tmp_path: Path) -> None:
+    """A non-interactive GitHub run with no fallback must not signal interactive.
+
+    Regression for review comment issue:4613005092: GitHub resolves only via ``gh``
+    or an env ref and never uses the ``capture`` callback, so an interactive re-run
+    cannot prompt for a raw token. With ``gh`` absent and no env token, the result
+    must be ``GITHUB_NOT_CONFIGURED`` (consistent with interactive mode) rather than a
+    misleading ``INTERACTIVE_INPUT_REQUIRED`` signal no interactive path can satisfy.
+    """
+    summary, config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["github"],
+        config=HostSetupConfig(),
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        run_subprocess=_SubprocessSpy(raise_exc=FileNotFoundError("gh")),
+        http_get=_unexpected_http,
+    )
+
+    github = summary.result_for("github")
+    assert github is not None
+    assert github.status == "not_configured"
+    assert github.reason_code == "GITHUB_NOT_CONFIGURED"
+    assert github.reason_code != INTERACTIVE_INPUT_REQUIRED
+    assert summary.requires_interactive_input is False
+    assert "github" not in config.providers
+
+
+@pytest.mark.unit
 def test_github_ready_via_env_ref_when_gh_absent(tmp_path: Path) -> None:
     """An env token marks GitHub ready via env ref even when ``gh`` is absent."""
     summary, config = orchestrate_provider_setup(
