@@ -132,7 +132,13 @@ def test_publish_workflow_has_installer_smoke_job_consuming_release_artifacts() 
     commands = _run_steps(smoke_job)
     assert "scripts/release_smoke.py" in commands
     assert "--run" in commands
-    assert "packaging/install.sh" not in commands or "scripts/release_smoke.py" in commands
+    # The smoke must be driven via the script, never a raw install.sh invocation.
+    # Ignore comment lines (the script's purpose is documented in a comment that
+    # mentions install.sh); only executable command lines are asserted against.
+    executable_commands = "\n".join(
+        line for line in commands.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "packaging/install.sh" not in executable_commands
 
 
 @pytest.mark.unit
