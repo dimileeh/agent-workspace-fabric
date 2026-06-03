@@ -10,8 +10,10 @@ accept, store, or return provider tokens.
 The flow is split into pure read+compute (:func:`build_client_config_plan`) and
 mutation (:func:`apply_client_config_plan`), so a dry-run produces a unified diff
 and planned action without touching the filesystem or invoking any external CLI.
-When the official client CLI is present it is preferred for the apply; otherwise
-the helpers fall back to structured JSON/TOML parsing, write a timestamped backup
+When the official client CLI is present *and* it can register the full desired
+entry it is preferred for the apply (Claude Code); otherwise -- a missing CLI, or
+Codex, whose ``mcp add`` cannot persist AWF's bounded startup/tool timeouts -- the
+helpers fall back to structured JSON/TOML parsing, write a timestamped backup
 before replacing an existing file, and refuse ambiguous conflicts. The official
 CLI, the ``which`` detector, the home directory, and the clock are all
 dependency-injected so tests are fully hermetic.
@@ -99,6 +101,13 @@ class ClientDescriptor:
     # client reads/writes its config under (Codex honors ``CODEX_HOME`` over
     # ``~/.codex``). ``None`` for clients with no such override (Claude Code).
     config_home_env: str | None = None
+    # Whether the client's official ``mcp add`` CLI registers the *full* desired
+    # entry. When ``False`` the CLI drops fields AWF requires (Codex's ``mcp
+    # add`` constructs the server with ``startup_timeout_sec``/``tool_timeout_sec``
+    # left unset, ignoring the bounded timeouts in :meth:`desired_entry`), so the
+    # structured file write is used even when the CLI is on ``PATH`` — otherwise
+    # the applied config would silently diverge from the dry-run/file plan.
+    cli_applies_full_entry: bool = True
 
     def config_path(self, home: Path, env: Mapping[str, str]) -> Path:
         """Return the absolute client config path under ``home``.
@@ -130,31 +139,26 @@ class ClientDescriptor:
         return {"type": "stdio", "command": _AWF_BINARY, "args": args}
 
     def add_command(self, env_file: str) -> tuple[str, ...]:
-        """Return the official-CLI argv that registers the AWF MCP server."""
-        if self.key == "claude":
-            # ``user`` scope writes the all-projects ``mcpServers`` block in
-            # ``~/.claude.json`` — the same home config the file fallback edits.
-            # ``local`` would instead register a cwd-only entry, diverging from
-            # the plan/diff and the fallback path.
-            return (
-                self.cli_binary,
-                "mcp",
-                "add",
-                "--transport",
-                "stdio",
-                "--scope",
-                "user",
-                AWF_MCP_SERVER_KEY,
-                "--",
-                _AWF_BINARY,
-                *_MCP_SERVE_ARGS,
-                env_file,
-            )
-        # Codex registers MCP servers via ``codex mcp add <name> -- <cmd> <args>``.
+        """Return the official-CLI argv that registers the AWF MCP server.
+
+        Only clients whose official CLI applies the full desired entry
+        (``cli_applies_full_entry``) reach this path, so today this is the Claude
+        Code registration command alone. Codex's ``mcp add`` cannot persist the
+        bounded startup/tool timeouts AWF requires, so Codex always uses the
+        structured file write and never builds an official-CLI command.
+        """
+        # ``user`` scope writes the all-projects ``mcpServers`` block in
+        # ``~/.claude.json`` — the same home config the file fallback edits.
+        # ``local`` would instead register a cwd-only entry, diverging from
+        # the plan/diff and the fallback path.
         return (
             self.cli_binary,
             "mcp",
             "add",
+            "--transport",
+            "stdio",
+            "--scope",
+            "user",
             AWF_MCP_SERVER_KEY,
             "--",
             _AWF_BINARY,
@@ -180,6 +184,9 @@ CLIENT_DESCRIPTORS: Mapping[str, ClientDescriptor] = {
         config_relative_path=(".codex", "config.toml"),
         servers_key="mcp_servers",
         config_home_env="CODEX_HOME",
+        # Codex's ``mcp add`` ignores the bounded startup/tool timeouts AWF
+        # registers, so write the config file directly to honor them.
+        cli_applies_full_entry=False,
     ),
 }
 
@@ -270,7 +277,13 @@ def build_client_config_plan(
     config_path = descriptor.config_path(home, env)
     env_file_str = str(env_file)
     desired_entry = descriptor.desired_entry(env_file_str)
-    method: ClientConfigMethod = "official_cli" if which(descriptor.cli_binary) else "file"
+    # Prefer the official CLI only when it can apply the full desired entry; Codex's
+    # ``mcp add`` drops the bounded timeouts, so it always takes the file path.
+    method: ClientConfigMethod = (
+        "official_cli"
+        if descriptor.cli_applies_full_entry and which(descriptor.cli_binary)
+        else "file"
+    )
 
     existing, parse_error = _read_existing_config(config_path, descriptor.config_format)
     if parse_error is not None:

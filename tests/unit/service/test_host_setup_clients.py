@@ -437,6 +437,29 @@ def test_build_plan_selects_file_when_cli_absent(tmp_path: Path) -> None:
     assert plan.cli_command is None
 
 
+@pytest.mark.unit
+def test_build_plan_codex_uses_file_even_with_cli_present(tmp_path: Path) -> None:
+    """Verify Codex takes the file path even when its CLI is on PATH.
+
+    Regression for PRRT_kwDOSJAM6s6GyZ1X: ``codex mcp add`` cannot persist the
+    bounded ``startup_timeout_sec``/``tool_timeout_sec`` AWF registers, so the
+    official-CLI apply would silently install Codex defaults and diverge from the
+    promised plan. Codex must therefore use the structured file write — which
+    embeds the timeouts — even when ``codex`` resolves on PATH.
+    """
+    plan = build_client_config_plan(
+        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_found, now=_now
+    )
+
+    assert plan.method == "file"
+    assert plan.cli_command is None
+    # The file write registers the bounded timeouts the CLI path would have dropped.
+    assert plan.desired_entry["startup_timeout_sec"] == 20
+    assert plan.desired_entry["tool_timeout_sec"] == 120
+    assert "startup_timeout_sec = 20" in plan.diff
+    assert "tool_timeout_sec = 120" in plan.diff
+
+
 # --- apply_client_config_plan: file fallback ------------------------------
 
 
@@ -628,15 +651,17 @@ def test_apply_official_cli_failure_is_reason_coded(
 ) -> None:
     """Verify a non-zero/None CLI result yields CLIENT_CONFIG_WRITE_FAILED."""
     runner = _FakeRunner(result)
+    # Claude is the only client that uses the official-CLI apply path; Codex's CLI
+    # cannot apply AWF's timeouts, so it always takes the structured file write.
     plan = build_client_config_plan(
-        "codex", env_file=_ENV_FILE, home=tmp_path, which=_which_found, now=_now
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_found, now=_now
     )
 
     with pytest.raises(SetupCheckError) as excinfo:
         apply_client_config_plan(plan, run=runner)
 
     assert excinfo.value.reason_code == CLIENT_CONFIG_WRITE_FAILED
-    assert not _codex_config_path(tmp_path).exists()
+    assert not _claude_config_path(tmp_path).exists()
 
 
 # --- setup_client orchestration & security --------------------------------
@@ -693,8 +718,10 @@ def test_setup_client_apply_write_failure_folds_into_blocked_payload(tmp_path: P
     """Verify an apply write failure folds into a blocked payload, not a raise."""
     runner = _FakeRunner(CommandResult(returncode=1, stderr="nope"))
 
+    # Use Claude so the official-CLI apply (which the failing runner models) runs;
+    # Codex always takes the file path because its CLI cannot apply AWF's timeouts.
     payload = setup_client(
-        "codex",
+        "claude",
         env_file=_ENV_FILE,
         dry_run=False,
         home=tmp_path,
