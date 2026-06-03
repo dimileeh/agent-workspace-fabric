@@ -527,16 +527,39 @@ class ComposeManager:
         Prefers ``down_project`` (compose-file driven); if that fails (e.g. an
         unusable compose file), falls back to label-scoped
         ``remove_project_by_label`` so volumes are still removed. An absent
-        compose file is an idempotent ``skipped`` no-op -- a prior ``down -v``
-        already reaped the stack -- never a failure.
+        compose file does **not** short-circuit: an earlier GC run may have
+        removed the compose directory without reaping the project's volumes (the
+        historical leak this reclaim path exists to recover), so a gone compose
+        file also falls back to label-scoped teardown. With nothing left to
+        remove that fallback is an idempotent success, never a failure.
         """
         if not compose_file.exists():
+            # The compose file is gone, but the Docker project (and its
+            # ``awf-<workspace>`` volumes) may still exist if an earlier GC run
+            # deleted the compose directory without a volume-removing teardown.
+            # Reap via label scope rather than reporting a successful skip that
+            # would leave the historical volume leak behind.
             _log.info(
-                "compose.teardown_project.noop",
+                "compose.teardown_project.compose_missing_label_fallback",
                 workspace_id=workspace_id,
                 project_name=project_name,
             )
-            return ComposeTeardownResult(status="skipped", reason_code="NO_COMPOSE_STACK")
+            try:
+                await self.remove_project_by_label(
+                    project_name=project_name,
+                    workspace_id=workspace_id,
+                    remove_volumes=remove_volumes,
+                )
+            except ComposeOperationError as label_exc:
+                return ComposeTeardownResult(
+                    status="failed",
+                    reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                    error=redact_secrets(str(label_exc))[:1000],
+                )
+            return ComposeTeardownResult(
+                status="succeeded",
+                reason_code="DOCKER_COMPOSE_PROJECT_LABEL_REMOVED",
+            )
         try:
             await self.down_project(
                 project_name=project_name,
