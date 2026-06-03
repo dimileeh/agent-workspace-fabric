@@ -122,7 +122,7 @@ class _ClientHarness:
     runner_calls: list[tuple[str, ...]] = field(default_factory=list)
 
 
-def _which_missing(_binary: str) -> None:
+def _which_missing(_binary: str) -> str | None:
     return None
 
 
