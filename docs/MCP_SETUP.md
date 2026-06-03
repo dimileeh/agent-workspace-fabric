@@ -67,7 +67,7 @@ repository's `.awf/workspace.yml`.
 Register AWF as a local stdio MCP server:
 
 ```bash
-claude mcp add --transport stdio --scope local awf -- \
+claude mcp add --transport stdio --scope user awf -- \
   awf mcp serve --env-file /absolute/path/to/docker/compose/.env
 ```
 

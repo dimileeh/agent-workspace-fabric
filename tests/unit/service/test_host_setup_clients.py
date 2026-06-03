@@ -514,7 +514,7 @@ def test_apply_official_cli_invokes_expected_argv(tmp_path: Path) -> None:
             "--transport",
             "stdio",
             "--scope",
-            "local",
+            "user",
             "awf",
             "--",
             "awf",

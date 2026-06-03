@@ -115,6 +115,10 @@ class ClientDescriptor:
     def add_command(self, env_file: str) -> tuple[str, ...]:
         """Return the official-CLI argv that registers the AWF MCP server."""
         if self.key == "claude":
+            # ``user`` scope writes the all-projects ``mcpServers`` block in
+            # ``~/.claude.json`` — the same home config the file fallback edits.
+            # ``local`` would instead register a cwd-only entry, diverging from
+            # the plan/diff and the fallback path.
             return (
                 self.cli_binary,
                 "mcp",
@@ -122,7 +126,7 @@ class ClientDescriptor:
                 "--transport",
                 "stdio",
                 "--scope",
-                "local",
+                "user",
                 AWF_MCP_SERVER_KEY,
                 "--",
                 _AWF_BINARY,
