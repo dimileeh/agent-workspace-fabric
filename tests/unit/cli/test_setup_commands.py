@@ -1372,6 +1372,32 @@ def test_setup_unknown_client_exits_two(client_harness: _ClientHarness) -> None:
 
 
 @pytest.mark.unit
+def test_setup_client_with_provider_exits_two_without_writing(
+    client_harness: _ClientHarness,
+) -> None:
+    """Verify --client with --provider fails fast instead of discarding --provider.
+
+    Regression for PRRT_kwDOSJAM6s6GxLDJ: the client dispatch never consumes
+    ``--provider``, so a combined ``awf setup --client claude --provider anthropic``
+    run must reject the unsupported combination rather than report a successful
+    client setup that silently ignored the provider argument.
+    """
+    result = _runner.invoke(
+        app,
+        ["setup", "--client", "claude", "--provider", "anthropic", "--format", "json"],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "SETUP_PROVIDER_UNKNOWN"
+    assert payload["issues"][0]["details"]["providers"] == ["anthropic"]
+    # No client config was written for the rejected run.
+    assert not list(client_harness.home.rglob("*.json"))
+    assert not list(client_harness.home.rglob("config.toml"))
+    assert client_harness.runner_calls == []
+
+
+@pytest.mark.unit
 def test_setup_client_apply_writes_config_and_backup(client_harness: _ClientHarness) -> None:
     """Verify a non-dry-run --client update writes config and a backup."""
     config_path = client_harness.home / ".claude.json"

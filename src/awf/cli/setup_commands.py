@@ -132,6 +132,15 @@ def setup_command(
         if client:
             # T08 owns only the client-selector dispatch; it returns before the
             # readiness path so the no-``--client`` flow is unchanged from T04.
+            if provider:
+                # The client dispatch never consumes ``--provider``; failing fast
+                # here keeps the provider argument from being silently discarded
+                # behind a successful client-setup result.
+                raise SetupCheckError(
+                    "--provider is not supported with --client; re-run without --provider.",
+                    reason_code=SETUP_PROVIDER_UNKNOWN,
+                    details={"providers": provider},
+                )
             payload = _run_client_setup(
                 clients=client,
                 dry_run=dry_run,
