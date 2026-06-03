@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -936,6 +937,36 @@ def test_apply_file_leaves_existing_parent_permissions_untouched(tmp_path: Path)
     assert config_path.exists()
     assert (config_path.stat().st_mode & 0o777) == 0o600
     assert (home.stat().st_mode & 0o777) == 0o755
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX permissions only")
+def test_apply_file_backup_is_owner_private(tmp_path: Path) -> None:
+    """Verify the backup of a prior config is created owner-private (0o600).
+
+    Regression: the backup was written with ``Path.write_text`` (umask perms,
+    typically 0o644) and only narrowed afterwards by a best-effort chmod that
+    swallows ``OSError``. A failed chmod left a verbatim copy of a config that
+    may hold API keys/tokens world-readable. The backup must be created 0o600
+    from the start (os.open), independent of any later chmod. A permissive umask
+    is forced here so the old write_text path would have produced 0o666.
+    """
+    config = {"mcpServers": {}, "telemetry": True}
+    config_path = _claude_config_path(tmp_path)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    plan = build_client_config_plan(
+        "claude", env_file=_ENV_FILE, home=tmp_path, which=_which_missing, now=_now
+    )
+
+    old_umask = os.umask(0o000)
+    try:
+        result = apply_client_config_plan(plan, run=_never_run)
+    finally:
+        os.umask(old_umask)
+
+    assert result.backup_path is not None and result.backup_path.exists()
+    assert (result.backup_path.stat().st_mode & 0o777) == 0o600
 
 
 @pytest.mark.unit

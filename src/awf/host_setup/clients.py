@@ -1048,8 +1048,21 @@ def _write_config_atomic(config_path: Path, text: str, *, backup_path: Path | No
     if not parent_existed:
         _chmod_best_effort(target_path.parent, 0o700)
     if backup_path is not None and target_path.exists():
-        backup_path.write_text(target_path.read_text(encoding="utf-8"), encoding="utf-8")
-        _chmod_best_effort(backup_path, 0o600)
+        # Create the backup owner-private from the start: it is a verbatim copy of
+        # the prior config (which may hold API keys/tokens from other entries), so
+        # it must never briefly exist at umask perms. ``Path.write_text`` would
+        # create it world-readable and rely on a best-effort chmod that silently
+        # swallows OSError; ``os.open(..., 0o600)`` matches the temp-file write
+        # below and refuses to follow a pre-existing path (O_EXCL).
+        backup_text = target_path.read_text(encoding="utf-8")
+        backup_fd = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(backup_fd, "w", encoding="utf-8") as bfh:
+                bfh.write(backup_text)
+        except Exception:  # pragma: no cover - defensive backup cleanup
+            with suppress(OSError):
+                backup_path.unlink()
+            raise
     tmp_path = target_path.with_name(f".{target_path.name}.{secrets.token_hex(8)}.tmp")
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
