@@ -1503,6 +1503,49 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HKFwb`:
+
+- `docs/UNINSTALL.md` now anchors the generic source-checkout refresh snippet,
+  the source-checkout/global-tool uninstall snippet, and the
+  source-checkout/no-global uninstall snippet with
+  `cd /path/to/aira-agent-workspace-fabric` before reading
+  `docker/compose/.env` or stopping Core through
+  `docker/compose/local-service.yml`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  uninstall snippets that use checkout-relative Compose paths before entering
+  the checkout.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/UNINSTALL.md` omitted `cd /path/to/aira-agent-workspace-fabric` before the
+source-checkout env restore and Core stop snippets.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Final focused repair result: `1 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Shell syntax result: `1 passed in 0.76s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

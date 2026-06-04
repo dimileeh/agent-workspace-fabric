@@ -20,6 +20,7 @@ holds them. Editing `~/.awf/config.yml` remains the no-stop option. Before
 deleting a recorded checkout, either refresh the persisted path:
 
 ```bash
+cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
@@ -101,6 +102,7 @@ the API and Postgres host ports and blocks while the previous Core stack still
 holds them. Then run:
 
 ```bash
+cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
@@ -159,6 +161,7 @@ API and Postgres host ports and blocks while the previous Core stack still holds
 them. Then run:
 
 ```bash
+cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue

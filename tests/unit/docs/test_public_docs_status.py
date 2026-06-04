@@ -1131,6 +1131,7 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         "Core stack still holds them"
     )
     no_stop_guidance = "Editing `~/.awf/config.yml` remains the no-stop option"
+    checkout_cd_line = "cd /path/to/aira-agent-workspace-fabric"
     stop_guard_line = "if [ -f docker/compose/.env ]; then"
     stop_env_file_line = (
         "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
@@ -1172,6 +1173,7 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         not in intro_section
     )
     assert intro_words.index(core_stop_guidance) < intro_words.index(intro_setup_line)
+    assert checkout_cd_line in intro_section
     assert stop_guard_line in intro_section
     assert stop_env_file_line in intro_section
     assert stop_fallback_line in intro_section
@@ -1185,7 +1187,8 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
     )
     intro_fallback_index = intro_section.index(stop_fallback_line)
     assert (
-        intro_env_restore_start_index
+        intro_section.index(checkout_cd_line)
+        < intro_env_restore_start_index
         < intro_env_restore_end_index
         < intro_section.index(stop_guard_line)
         < intro_section.index(stop_env_file_line)
@@ -1203,6 +1206,7 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         assert core_stop_guidance in section_words, f"{label} must tell users to stop Core"
         assert port_block_guidance in section_words, f"{label} must explain setup port blockers"
         assert section_words.index(core_stop_guidance) < section_words.index(setup_line)
+        assert checkout_cd_line in section, f"{label} must cd into the source checkout"
         assert stop_guard_line in section, f"{label} must provide a compose stop guard"
         assert stop_env_file_line in section, f"{label} must stop with compose env file"
         assert stop_fallback_line in section, f"{label} must stop without compose env file"
@@ -1216,7 +1220,8 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         )
         stop_fallback_index = section.index(stop_fallback_line)
         assert (
-            env_restore_start_index
+            section.index(checkout_cd_line)
+            < env_restore_start_index
             < env_restore_end_index
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)

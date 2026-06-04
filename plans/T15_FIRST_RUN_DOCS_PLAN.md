@@ -319,6 +319,17 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HJ8Ps`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKFwb`: source-checkout
+uninstall snippets in `docs/UNINSTALL.md` must anchor relative
+`docker/compose/.env` and `docker/compose/local-service.yml` paths in the source
+checkout before restoring env or stopping Core.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKFwb`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
 Focused lint command:
 
 ```bash
