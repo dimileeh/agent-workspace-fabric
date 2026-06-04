@@ -254,10 +254,11 @@ class TestTerminalRuntimeReleasePart004:
         async def _record_with_one_failure(
             candidate: _TerminalRuntimeCandidate,
             cleanup: WorkspaceCleanupResult,
+            **kwargs: object,
         ) -> None:
             if candidate.workspace_id == failing_workspace_id:
                 raise RuntimeError("simulated event recording failure")
-            await original_record(candidate, cleanup)
+            await original_record(candidate, cleanup, **kwargs)
 
         worker._record_terminal_runtime_released = _record_with_one_failure  # type: ignore[method-assign]  # noqa: SLF001
 
@@ -362,10 +363,11 @@ class TestTerminalRuntimeReleasePart004:
         async def _record_with_one_failure(
             candidate: _TerminalRuntimeCandidate,
             cleanup: WorkspaceCleanupResult,
+            **kwargs: object,
         ) -> None:
             if candidate.workspace_id == failing_workspace_id:
                 raise RuntimeError("simulated event recording failure")
-            await original_record(candidate, cleanup)
+            await original_record(candidate, cleanup, **kwargs)
 
         worker._record_terminal_runtime_released = _record_with_one_failure  # type: ignore[method-assign]  # noqa: SLF001
 

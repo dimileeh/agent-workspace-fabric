@@ -43,6 +43,11 @@ class WorkerDelegatesMixin:
     )
     _list_terminal_runtime_candidates = _cleanup._list_terminal_runtime_candidates
     _release_terminal_runtime_for_candidate = _cleanup._release_terminal_runtime_for_candidate
+    # NB: ``_teardown_terminal_auth_overlay`` is intentionally not delegated here.
+    # Its only caller (``_release_terminal_runtime_for_candidate``) invokes it as a
+    # module-level free function (``await _teardown_terminal_auth_overlay(self, ...)``),
+    # so a mixin binding would be unreachable and only misleads readers into treating
+    # it as a contractual override point.
     _record_terminal_runtime_released = _cleanup._record_terminal_runtime_released
     _record_terminal_runtime_release_failed = _cleanup._record_terminal_runtime_release_failed
     _has_terminal_runtime_release_event = _cleanup._has_terminal_runtime_release_event

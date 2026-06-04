@@ -424,6 +424,44 @@ def _format_coverage_target(value: object, *, fractional: bool = False) -> str:
     return str(value)
 
 
+_OVERLAY_UNMOUNT_REASON_CODES = frozenset(
+    {
+        "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+        "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
+    }
+)
+
+
+def warn_on_overlay_unmount_failure(payload: object) -> None:
+    """Print an actionable hint when GC could not unmount a Claude auth overlay.
+
+    The ``partial`` status already drives a non-zero exit; this surfaces *why* the
+    auth dir was skipped. The per-workspace ``~/.claude`` overlay is created and
+    owned by the worker (it alone holds ``CAP_SYS_ADMIN`` and shares the agent's
+    mount namespace), so a capability-less GC context cannot release it. The
+    worker unmounts terminal overlays on its runtime-release sweep — re-running GC
+    after that, or where ``CAP_SYS_ADMIN`` is held, clears the skip.
+    """
+
+    if not isinstance(payload, dict):
+        return
+    delete_errors = payload.get("delete_errors")
+    if not isinstance(delete_errors, list):
+        return
+    if not any(
+        isinstance(error, Mapping) and error.get("reason_code") in _OVERLAY_UNMOUNT_REASON_CODES
+        for error in delete_errors
+    ):
+        return
+    typer.echo(
+        "warning: a Claude auth overlay could not be unmounted from this context, so its "
+        "auth dir was preserved (not deleted). The worker releases terminal overlays on its "
+        "runtime-release sweep — re-run GC after that sweep, or run GC where CAP_SYS_ADMIN is "
+        "held.",
+        err=True,
+    )
+
+
 def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
     """Parse a command-line JSON object option.
 
