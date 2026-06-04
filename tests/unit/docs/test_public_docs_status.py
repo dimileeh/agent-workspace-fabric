@@ -461,6 +461,66 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
         _assert_package_upgrade_restores_service_env("example", section, upgrade_line)
 
 
+def test_upgrade_release_installed_rollback_restores_service_env_before_start() -> None:
+    """Assert release-installed rollback keeps mandatory service env available."""
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    release_heading = "For release-installed lanes"
+    source_heading = "For the source checkout with global tool install lane"
+    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then"
+    api_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        'or persist it in .env before rollback}"'
+    )
+    api_export_line = "  export AWF_API_TOKEN"
+    unsafe_api_generation_line = (
+        '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    )
+    password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
+    password_export_line = '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    start_line = "\nawf start\n"
+
+    assert release_heading in rollback_section
+    assert source_heading in rollback_section
+    release_section = rollback_section.split(release_heading, maxsplit=1)[1].split(
+        source_heading,
+        maxsplit=1,
+    )[0]
+    assert api_guard_line in release_section
+    assert api_require_line in release_section
+    assert api_export_line in release_section
+    assert unsafe_api_generation_line not in release_section
+    assert password_guard_line in release_section
+    assert password_export_line in release_section
+    assert start_line in release_section
+
+    api_guard_index = release_section.index(api_guard_line)
+    api_require_index = release_section.index(api_require_line)
+    api_export_index = release_section.index(api_export_line)
+    api_guard_end_index = _shell_closing_fi_index(
+        release_section,
+        api_export_index,
+        "release-installed rollback",
+    )
+    password_guard_index = release_section.index(password_guard_line)
+    password_export_index = release_section.index(password_export_line)
+    password_guard_end_index = _shell_closing_fi_index(
+        release_section,
+        password_export_index,
+        "release-installed rollback",
+    )
+    assert (
+        api_guard_index
+        < api_require_index
+        < api_export_index
+        < api_guard_end_index
+        < password_guard_index
+        < password_export_index
+        < password_guard_end_index
+        < release_section.index(start_line)
+    ), "release-installed rollback must restore missing service env before start"
+
+
 def test_quickstart_source_checkout_upgrades_reuse_existing_checkout() -> None:
     """Assert source-checkout upgrade commands reuse the checkout created earlier."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")

@@ -148,6 +148,11 @@ current `.env` does not already persist one. Require operators to restore the
 same API token used for the running local Core before restarting, so upgrades do
 not desynchronize CLI/API authentication.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HHCfa`: the
+release-installed and virtualenv rollback snippet in `docs/UPGRADE.md` must
+restore `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` from `.env` or the current
+shell before `awf start`, matching the package upgrade guidance.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

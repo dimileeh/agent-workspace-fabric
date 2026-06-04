@@ -53,6 +53,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address PR thread `PRRT_kwDOSJAM6s6HHCBV` by preventing package and
   virtualenv upgrade snippets from generating a replacement `AWF_API_TOKEN` when
   `.env` does not already persist the running local Core token.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HHCfa` by restoring mandatory
+  package and virtualenv service env before the release-installed rollback
+  `awf start` command in `docs/UPGRADE.md`.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -769,6 +772,42 @@ Red-phase result after updating the focused assertion: failed because
 Quickstart Lane 1 did not require the existing `AWF_API_TOKEN`.
 
 Final focused repair result: `2 passed in 0.66s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HHCfa`:
+
+- `docs/UPGRADE.md` now restores `AWF_API_TOKEN` from `.env` or the current
+  shell before the release-installed rollback `awf start`, and requires the
+  same local Core token instead of generating a replacement.
+- `docs/UPGRADE.md` now restores `AWF_POSTGRES_PASSWORD` before that rollback
+  start when `.env` does not already persist it.
+- `tests/unit/docs/test_public_docs_status.py` now rejects release-installed
+  rollback docs that start AWF before restoring the mandatory service env.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start -q
+```
+
+Red-phase result after adding the focused assertion: failed because the
+release-installed rollback block had no `AWF_API_TOKEN` restore guard before
+`awf start`.
+
+Final focused repair result: `1 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `47 passed in 1.39s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py

@@ -130,6 +130,13 @@ For release-installed lanes, and for virtualenv/pip installs after activating
 the restored environment:
 
 ```bash
+if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before rollback}"
+  export AWF_API_TOKEN
+fi
+if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+fi
 awf start
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty
