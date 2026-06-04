@@ -423,6 +423,8 @@ class ControlWorker(WorkerDelegatesMixin):
                 error=redact_audit_text(str(exc))[:240],
             )
         finally:
+            # Rate-limit prune attempts after both success and handled failure
+            # so a database outage does not turn stale-row cleanup into retry load.
             self._last_heartbeat_pruned_at = now
 
     async def _prune_stale_heartbeats(self: Any) -> None:

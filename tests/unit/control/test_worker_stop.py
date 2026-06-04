@@ -149,6 +149,33 @@ async def test_run_once_prunes_stale_worker_heartbeats(
 
 
 @pytest.mark.unit
+async def test_prune_stale_heartbeats_failure_throttles_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    current_time = 100.0
+    monkeypatch.setattr(worker_manager, "monotonic", lambda: current_time, raising=False)
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=0),
+    )
+    prune_stale_heartbeats = AsyncMock(side_effect=RuntimeError("db unavailable"))
+    monkeypatch.setattr(worker, "_prune_stale_heartbeats", prune_stale_heartbeats)
+
+    await worker._prune_stale_heartbeats_safely()  # noqa: SLF001
+    await worker._prune_stale_heartbeats_safely()  # noqa: SLF001
+
+    assert prune_stale_heartbeats.await_count == 1
+    assert worker._last_heartbeat_pruned_at == current_time  # noqa: SLF001
+
+    current_time += worker_manager._WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS + 0.01  # noqa: SLF001
+    await worker._prune_stale_heartbeats_safely()  # noqa: SLF001
+
+    assert prune_stale_heartbeats.await_count == 2
+
+
+@pytest.mark.unit
 async def test_heartbeat_loop_defers_initial_write_to_run_once(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],

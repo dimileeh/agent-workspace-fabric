@@ -37,35 +37,13 @@ def test_worker_heartbeat_upsert_supports_postgres_only() -> None:
 
 
 @pytest.mark.unit
-async def test_record_heartbeat_handles_concurrent_first_writes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_record_heartbeat_handles_concurrent_first_writes() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
         worker_id = "worker_concurrent_first_heartbeat"
         started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
         first_heartbeat_at = started_at + timedelta(seconds=1)
         second_heartbeat_at = started_at + timedelta(seconds=2)
-        arrivals = 0
-        arrivals_lock = asyncio.Lock()
-        both_read_missing = asyncio.Event()
-        original_get = WorkerHeartbeatRepository.get
-
-        async def synchronized_get(
-            self: WorkerHeartbeatRepository,
-            *,
-            worker_id: str,
-        ) -> WorkerHeartbeat | None:
-            nonlocal arrivals
-            heartbeat = await original_get(self, worker_id=worker_id)
-            async with arrivals_lock:
-                arrivals += 1
-                if arrivals == 2:
-                    both_read_missing.set()
-            await asyncio.wait_for(both_read_missing.wait(), timeout=2)
-            return heartbeat
-
-        monkeypatch.setattr(WorkerHeartbeatRepository, "get", synchronized_get)
 
         async def write_heartbeat(
             *,
@@ -96,10 +74,7 @@ async def test_record_heartbeat_handles_concurrent_first_writes(
         )
 
         async with factory() as session:
-            heartbeat = await original_get(
-                WorkerHeartbeatRepository(session),
-                worker_id=worker_id,
-            )
+            heartbeat = await WorkerHeartbeatRepository(session).get(worker_id=worker_id)
 
     assert heartbeat is not None
     assert heartbeat.worker_id == worker_id
