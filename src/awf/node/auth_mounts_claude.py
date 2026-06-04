@@ -194,7 +194,18 @@ def _overlay_lowerdir_from_proc_mounts(proc_mounts: Path, merged: Path) -> Path 
             continue
         for option in fields[3].split(","):
             if option.startswith("lowerdir="):
-                return Path(_unescape_proc_mount_field(option[len("lowerdir=") :]))
+                # ``lowerdir`` may layer multiple lowers as ``a:b:c`` (overlayfs's
+                # ``:`` separator, distinct from the ``\072`` octal escape a literal
+                # colon in a path takes). Pin to the first/primary lower — the one
+                # closest to the upper — instead of treating the whole colon-joined
+                # string as a single directory path, which would never resolve to a
+                # shared base and would silently drop the pin. AWF's Claude overlay
+                # uses a single lower today; splitting keeps pin recovery correct if
+                # that ever changes, matching :func:`iter_overlay_lowerdirs`.
+                for entry in option[len("lowerdir=") :].split(":"):
+                    if entry:
+                        return Path(_unescape_proc_mount_field(entry))
+                return None
         return None
     return None
 
@@ -530,17 +541,24 @@ def _overlay_upper_has_data(upper: Path) -> bool:
         return False
 
 
-def _safe_mtime_ns(path: Path) -> int | None:
+def _safe_mtime_ns(path: Path, *, follow_symlinks: bool = True) -> int | None:
     """Return ``path``'s ``st_mtime_ns``, or ``None`` if it is absent/unstattable.
 
     Used by :func:`_reconcile_fallback_edits_into_upper` to compare generations
-    without raising on a file that exists in one tree but not another. ``stat``
-    follows symlinks, matching the legacy copy's ``copytree(symlinks=False)`` which
-    materialized link targets as real files.
+    without raising on a file that exists in one tree but not another. The default
+    ``follow_symlinks=True`` matches the legacy copy's ``copytree(symlinks=False)``,
+    which materialized link targets as real files — correct for the ``legacy`` and
+    ``base`` trees (the former pre-skips symlinks, the latter contains none).
+
+    The agent-controlled ``upper`` tree can hold a planted symlink, so its generation
+    must be read with ``follow_symlinks=False`` (``lstat``): the overlay entry's *own*
+    mtime is when the agent made the overlay-era change, whereas the symlink target's
+    mtime is unrelated and would make the "upper wins ties" comparison decide on the
+    wrong file's metadata.
     """
 
     try:
-        return path.stat().st_mtime_ns
+        return path.stat(follow_symlinks=follow_symlinks).st_mtime_ns
     except OSError:
         return None
 
@@ -714,7 +732,10 @@ def _reconcile_fallback_edits_into_upper(
             if not is_fallback_edit:
                 continue
             upper_file = upper / rel
-            upper_mtime_ns = _safe_mtime_ns(upper_file)
+            # ``lstat`` the overlay entry: ``upper`` is agent-controlled and may hold a
+            # planted symlink. Comparing the symlink's *own* mtime (not its target's)
+            # is the semantically correct generation for the "upper wins ties" rule.
+            upper_mtime_ns = _safe_mtime_ns(upper_file, follow_symlinks=False)
             if upper_mtime_ns is not None and legacy_mtime_ns <= upper_mtime_ns:
                 continue
             merged_file = _safe_overlay_dest(merged, rel)

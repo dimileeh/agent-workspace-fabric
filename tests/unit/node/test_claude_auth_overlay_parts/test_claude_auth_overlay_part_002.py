@@ -945,6 +945,36 @@ def test_subprocess_overlay_mounter_active_lowerdir_parses_proc_mounts(
 
 
 @pytest.mark.unit
+def test_subprocess_overlay_mounter_active_lowerdir_multi_lower_returns_primary(
+    tmp_path: Path,
+) -> None:
+    # A multi-layer ``lowerdir=primary:secondary`` must resolve to the first/primary
+    # lower, not the whole colon-joined string treated as one directory path — which
+    # would never resolve to a shared base and would silently drop the live-mount pin.
+    merged = tmp_path / "merged"
+    primary = tmp_path / "sig" / ".claude"
+    secondary = tmp_path / "other-lower"
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(
+        f"overlay {merged} overlay rw,lowerdir={primary}:{secondary},upperdir=/u,workdir=/w 0 0\n"
+    )
+    mounter = _SubprocessOverlayMounter(proc_mounts=proc_mounts)
+    assert mounter.active_lowerdir(merged) == primary
+
+
+@pytest.mark.unit
+def test_subprocess_overlay_mounter_active_lowerdir_empty_lowerdir_returns_none(
+    tmp_path: Path,
+) -> None:
+    merged = tmp_path / "merged"
+    proc_mounts = tmp_path / "mounts"
+    # An empty ``lowerdir=`` value yields no usable lower, so there is nothing to pin.
+    proc_mounts.write_text(f"overlay {merged} overlay rw,lowerdir=,upperdir=/u,workdir=/w 0 0\n")
+    mounter = _SubprocessOverlayMounter(proc_mounts=proc_mounts)
+    assert mounter.active_lowerdir(merged) is None
+
+
+@pytest.mark.unit
 def test_subprocess_overlay_mounter_active_lowerdir_missing_file_returns_none(
     tmp_path: Path,
 ) -> None:
@@ -1275,6 +1305,42 @@ def test_reconcile_upper_wins_ties(tmp_path: Path) -> None:
 
     assert (upper / "f").read_text() == "upper edit\n"
     assert not (merged / "f").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_compares_upper_symlink_own_mtime_not_target(tmp_path: Path) -> None:
+    # ``upper`` is agent-controlled and can hold a planted symlink. The generation
+    # comparison for the "upper wins ties" rule must use the overlay entry's *own*
+    # mtime (``lstat``), not the symlink target's (``stat``): the target's mtime is
+    # unrelated to when the agent made the overlay-era change. Here the upper symlink's
+    # own mtime is older than the legacy fallback edit while its target is newer, so the
+    # strictly-newer legacy edit must win and be forwarded. With the buggy ``stat`` the
+    # target's newer mtime would wrongly suppress the edit.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    for directory in (legacy, merged, upper, base, outside):
+        directory.mkdir()
+    (legacy / "f").write_text("legacy edit\n")
+    legacy_mtime_ns = (legacy / "f").stat().st_mtime_ns
+    # The symlink target carries a *newer* mtime — it must NOT be what we compare.
+    target = outside / "target"
+    target.write_text("newer target\n")
+    os.utime(target, ns=(legacy_mtime_ns + 1_000_000, legacy_mtime_ns + 1_000_000))
+    # The agent-planted upper symlink, whose own (lstat) mtime predates the legacy edit.
+    (upper / "f").symlink_to(target)
+    os.utime(
+        upper / "f",
+        ns=(legacy_mtime_ns - 1_000_000, legacy_mtime_ns - 1_000_000),
+        follow_symlinks=False,
+    )
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # The strictly-newer legacy edit wins and is forwarded through ``merged``.
+    assert (merged / "f").read_text() == "legacy edit\n"
 
 
 @pytest.mark.unit
