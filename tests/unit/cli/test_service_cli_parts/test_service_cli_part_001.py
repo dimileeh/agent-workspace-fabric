@@ -773,22 +773,23 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert calls == [
-        (
-            [
-                "docker",
-                "compose",
-                "-f",
-                compose_file,
-                "logs",
-                "--tail",
-                "100",
-                "--follow",
-                "worker",
-            ],
-            {"check": False, "capture_output": False, "text": True, "env": None},
-        )
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == [
+        "docker",
+        "compose",
+        "-f",
+        compose_file,
+        "logs",
+        "--tail",
+        "100",
+        "--follow",
+        "worker",
     ]
+    assert kwargs["capture_output"] is False
+    assert kwargs["check"] is False
+    assert kwargs["text"] is True
+    assert kwargs["env"] is None
 
 
 @pytest.mark.unit
