@@ -184,6 +184,16 @@ docstrings:
 Add concise behavior-neutral docstrings to those tests only, re-run the focused
 audit, and run narrow Ruff plus the affected targeted MCP artifact tests.
 
+### Iteration 12 Update
+
+Later provider-readiness redaction commits expanded the PR's Python diff and
+the focused added-line audit now reports one PR-added test without a docstring:
+
+- `tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier`
+
+Add a concise behavior-neutral docstring to that test only, re-run the focused
+audit, and run narrow Ruff plus the affected targeted provider-readiness test.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

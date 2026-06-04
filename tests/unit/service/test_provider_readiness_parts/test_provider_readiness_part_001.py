@@ -83,6 +83,7 @@ def _runtime_cli_ok(expected_executable: str) -> Any:
 
 @pytest.mark.unit
 def test_provider_readiness_public_secret_env_key_classifier() -> None:
+    """Classify public-looking keys separately from secret environment keys."""
     assert provider_readiness.is_secret_env_key("OPENAI_API_KEY")
     assert provider_readiness.is_secret_env_key("custom-token")
     assert provider_readiness.is_secret_env_key("PASSWORD")
