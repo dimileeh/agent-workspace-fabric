@@ -9,8 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from awf.service.orphan_resources import (
+    ORPHAN_REAP_DISABLED,
+    ORPHAN_REAP_OK,
+    ORPHAN_REAP_SKIPPED_UNKNOWN,
     WorkspaceIdView,
     build_orphan_resource_summary,
     empty_docker_scan,
@@ -589,6 +593,248 @@ def test_reaper_reaps_aged_missing_worktree(tmp_path: Path) -> None:
     reaped_kinds = [outcome.kind for outcome in result.reaped]
     assert reaped_kinds == ["worktree"]
     assert not worktree.exists()
+
+
+class _SessionScope:
+    """Async context manager test double for orphan sweep DB sessions."""
+
+    def __init__(self, session: object | None = None, error: SQLAlchemyError | None = None) -> None:
+        """Store the fake session or entry error to expose during context entry."""
+        self._session = session or object()
+        self._error = error
+
+    async def __aenter__(self) -> object:
+        """Return the fake session or raise the configured entry error."""
+        if self._error is not None:
+            raise self._error
+        return self._session
+
+    async def __aexit__(self, *args: object) -> None:
+        """Leave the fake session scope without suppressing exceptions."""
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_scans_classifies_and_reaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A classified sweep scans resources, loads DB state, and reaps matches."""
+    from awf.service.orphan_resources import sweep_classified_orphans
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    docker_hosts: list[str] = []
+
+    def _run(args: list[str], **kwargs: object) -> _Completed:
+        """Capture Docker host wiring while returning one orphan container."""
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        docker_hosts.append(str(env["DOCKER_HOST"]))
+        return _run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_dead-agent-1",
+                    "project": "awf_ws_dead",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        )(args, **kwargs)
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.session_scope",
+        lambda _factory: _SessionScope(),
+    )
+
+    async def _workspace_view(_session: object, **kwargs: object) -> WorkspaceIdView:
+        """Return a terminal workspace view for the sweep under test."""
+        assert kwargs["min_retention_hours"] == 72.0
+        return _ok_view()
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.workspace_id_view_from_session",
+        _workspace_view,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            min_retention_hours=72.0,
+            run_subprocess=_run,
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.reason_code == ORPHAN_REAP_OK
+    assert teardown.calls == [
+        ("awf_ws_dead", tmp_path / "compose" / "ws_dead" / "compose.yml", "ws_dead")
+    ]
+    assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+    assert set(docker_hosts) == {"unix:///test-docker.sock"}
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_disabled_skips_scans_and_workspace_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disabled classified sweep exits before scans or DB classification."""
+    import awf.service.orphan_resources as orphan_resources
+
+    calls: list[str] = []
+
+    def _unexpected_docker_scan(**_kwargs: object) -> Any:
+        """Fail if the disabled sweep scans Docker resources."""
+        calls.append("docker")
+        raise AssertionError("disabled sweep should not scan Docker resources")
+
+    def _unexpected_worktree_scan(_work_dir: Path | str) -> Any:
+        """Fail if the disabled sweep scans worktrees."""
+        calls.append("worktree")
+        raise AssertionError("disabled sweep should not scan managed worktrees")
+
+    def _unexpected_session_scope(_factory: object) -> Any:
+        """Fail if the disabled sweep opens a DB session."""
+        calls.append("workspace_view")
+        raise AssertionError("disabled sweep should not load workspace view")
+
+    monkeypatch.setattr(orphan_resources, "scan_docker_resources", _unexpected_docker_scan)
+    monkeypatch.setattr(orphan_resources, "scan_managed_worktrees", _unexpected_worktree_scan)
+    monkeypatch.setattr(orphan_resources, "session_scope", _unexpected_session_scope)
+
+    result = asyncio.run(
+        orphan_resources.sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=False,
+        )
+    )
+
+    assert result.enabled is False
+    assert result.status == "disabled"
+    assert result.reason_code == ORPHAN_REAP_DISABLED
+    assert result.reaped == ()
+    assert result.errors == ()
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_starts_scanners_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker and worktree scans are started concurrently during a sweep."""
+    import awf.service.orphan_resources as orphan_resources
+
+    started: set[str] = set()
+    sequential_starts: list[str] = []
+    both_scanners_started = asyncio.Event()
+
+    def _docker_scan(**_kwargs: object) -> Any:
+        """Return an empty Docker scan once asyncio.to_thread invokes it."""
+        return empty_docker_scan()
+
+    def _worktree_scan(work_dir: Path | str) -> Any:
+        """Return an empty worktree scan for the expected work directory."""
+        assert work_dir == tmp_path
+        return empty_worktree_scan()
+
+    async def _to_thread(func: Any, /, *args: object, **kwargs: object) -> Any:
+        """Emulate to_thread while detecting whether both scanners are started."""
+        if func in {_docker_scan, _worktree_scan}:
+            scanner = "docker" if func is _docker_scan else "worktree"
+            started.add(scanner)
+            if len(started) == 2:
+                both_scanners_started.set()
+            try:
+                await asyncio.wait_for(both_scanners_started.wait(), timeout=0.25)
+            except TimeoutError:
+                sequential_starts.append(scanner)
+            return func(*args, **kwargs)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(orphan_resources.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(orphan_resources, "scan_docker_resources", _docker_scan)
+    monkeypatch.setattr(orphan_resources, "scan_managed_worktrees", _worktree_scan)
+    monkeypatch.setattr(
+        orphan_resources,
+        "session_scope",
+        lambda _factory: _SessionScope(),
+    )
+
+    async def _workspace_view(_session: object, **_kwargs: object) -> WorkspaceIdView:
+        """Return an empty available workspace view for the concurrency test."""
+        return _ok_view()
+
+    monkeypatch.setattr(
+        orphan_resources,
+        "workspace_id_view_from_session",
+        _workspace_view,
+    )
+
+    result = asyncio.run(
+        orphan_resources.sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+        )
+    )
+
+    assert result.status == "ok"
+    assert started == {"docker", "worktree"}
+    assert sequential_starts == []
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_skips_when_workspace_view_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DB classification failure skips reaping unknown orphan resources."""
+    from awf.service.orphan_resources import sweep_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.session_scope",
+        lambda _factory: _SessionScope(error=SQLAlchemyError("db unavailable")),
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            run_subprocess=_run_for(
+                containers=_jsonl(
+                    {
+                        "id": "c1",
+                        "name": "awf_ws_dead-agent-1",
+                        "project": "awf_ws_dead",
+                        "service": "agent",
+                        "state": "exited",
+                        "status": "Exited",
+                    }
+                )
+            ),
+        )
+    )
+
+    assert result.status == "skipped"
+    assert result.reason_code == ORPHAN_REAP_SKIPPED_UNKNOWN
+    assert teardown.calls == []
+    assert worktree.exists()
 
 
 @pytest.mark.unit

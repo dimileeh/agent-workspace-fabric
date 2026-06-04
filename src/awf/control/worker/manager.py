@@ -63,6 +63,7 @@ from awf.service.scheduler import SchedulerOrderCursor
 
 if TYPE_CHECKING:
     from awf.service.gc_reconcile import OrphanDirReconcileResult
+    from awf.service.orphan_resources import OrphanReapResult
 
 
 class ControlWorker(WorkerDelegatesMixin):
@@ -78,6 +79,7 @@ class ControlWorker(WorkerDelegatesMixin):
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
         open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
         orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
+        classified_orphan_reaper: Callable[[], Awaitable[OrphanReapResult]] | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
@@ -87,6 +89,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._runtime_cleaner = runtime_cleaner
         self._open_pr_resolver = open_pr_resolver
         self._orphan_dir_reconciler = orphan_dir_reconciler
+        self._classified_orphan_reaper = classified_orphan_reaper
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
@@ -101,6 +104,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._next_secret_lease_expiration_scan_at = 0.0
         self._next_terminal_runtime_release_scan_at = 0.0
         self._next_orphan_reconcile_scan_at = 0.0
+        self._next_classified_orphan_reap_scan_at = 0.0
         self._requested_capacity_resume_after: SchedulerOrderCursor | None = None
         self._requested_capacity_resume_signature: _AllocatedReservationSignature | None = None
         self._requested_capacity_resume_queue_signature: _RequestedCapacityQueueSignature | None = (
@@ -152,6 +156,7 @@ class ControlWorker(WorkerDelegatesMixin):
         await self._maybe_expire_due_secret_leases()
         await self._maybe_release_terminal_runtime()
         await self._maybe_reconcile_orphan_dirs()
+        await self._maybe_reap_classified_orphans()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery

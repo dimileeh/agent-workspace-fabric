@@ -12,6 +12,7 @@ import pytest
 
 from awf.common.config import (
     DEFAULT_MIN_FREE_DISK_BYTES,
+    DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
     Settings,
 )
 from awf.service.config import (
@@ -311,6 +312,10 @@ def test_orphan_reconcile_defaults_are_off_and_sane() -> None:
 
     assert settings.auto_cleanup_orphans is False
     assert settings.orphan_reconcile_scan_interval_seconds == 3600.0
+    assert (
+        settings.classified_orphan_reap_scan_interval_seconds
+        == DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS
+    )
     assert settings.orphan_reconcile_max_per_scan == 50
     assert settings.orphan_reconcile_min_age_hours == 168.0
 
@@ -321,6 +326,7 @@ def test_orphan_reconcile_settings_flow_from_environment() -> None:
         _env_file=None,
         auto_cleanup_orphans=True,
         orphan_reconcile_scan_interval_seconds=900.0,
+        classified_orphan_reap_scan_interval_seconds=450.0,
         orphan_reconcile_max_per_scan=7,
         orphan_reconcile_min_age_hours=12.0,
     )
@@ -329,5 +335,6 @@ def test_orphan_reconcile_settings_flow_from_environment() -> None:
 
     assert settings.auto_cleanup_orphans is True
     assert settings.orphan_reconcile_scan_interval_seconds == 900.0
+    assert settings.classified_orphan_reap_scan_interval_seconds == 450.0
     assert settings.orphan_reconcile_max_per_scan == 7
     assert settings.orphan_reconcile_min_age_hours == 12.0
