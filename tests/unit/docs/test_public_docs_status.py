@@ -976,8 +976,18 @@ def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
     assert f"`{console_url}` when the console is running" in quickstart_text
     assert f"`{console_url}` for the console" in quickstart_text
     assert f"`{readyz_url}`" in quickstart_text
-    assert "http://127.0.0.1:8000" not in quickstart_text
-    assert "http://127.0.0.1:3000" not in quickstart_text
+    assert "http://127.0.0.1:8000" not in quickstart_text or api_url == "http://127.0.0.1:8000", (
+        "Quickstart contains http://127.0.0.1:8000 but "
+        f"DEFAULT_LOCAL_SERVICE_API_BASE_URL is {api_url!r}; "
+        "update the URL check to match the smoke default"
+    )
+    assert (
+        "http://127.0.0.1:3000" not in quickstart_text or console_url == "http://127.0.0.1:3000"
+    ), (
+        "Quickstart contains http://127.0.0.1:3000 but "
+        f"DEFAULT_LOCAL_CONSOLE_URL is {console_url!r}; "
+        "update the URL check to match the smoke default"
+    )
 
 
 def test_getting_started_first_run_urls_match_smoke_defaults() -> None:
@@ -2392,12 +2402,13 @@ def _assert_package_upgrade_restores_service_env(
     label: str,
     section: str,
     upgrade_line: str,
+    lifecycle: str = "upgrading",
 ) -> None:
     """Assert package upgrade snippets restore service environment before restart."""
     api_guard_line = PACKAGE_ENV_GUARD_LINES["AWF_API_TOKEN"]
     api_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
-        'or persist it in .env before upgrading}"'
+        f'or persist it in .env before {lifecycle}}}"'
     )
     api_export_line = "  export AWF_API_TOKEN"
     unsafe_api_generation_line = (
@@ -2406,7 +2417,7 @@ def _assert_package_upgrade_restores_service_env(
     password_guard_line = PACKAGE_ENV_GUARD_LINES["AWF_POSTGRES_PASSWORD"]
     password_require_line = (
         '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
-        'the running local Core or persist it in .env before upgrading}"'
+        f'the running local Core or persist it in .env before {lifecycle}}}"'
     )
     password_export_line = "  export AWF_POSTGRES_PASSWORD"
     unsafe_password_default_line = (
