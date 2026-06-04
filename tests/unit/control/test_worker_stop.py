@@ -136,6 +136,46 @@ async def test_record_heartbeat_safely_throttles_repeated_writes(
 
 
 @pytest.mark.unit
+async def test_wait_for_execution_tasks_refreshes_heartbeat_while_draining_once_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(
+        worker_manager,
+        "worker_heartbeat_write_interval_seconds",
+        lambda _poll_interval_seconds: 0.01,
+        raising=False,
+    )
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=0),
+    )
+    record_heartbeat = AsyncMock()
+    monkeypatch.setattr(worker, "_record_heartbeat", record_heartbeat)
+    await worker._record_heartbeat_safely()  # noqa: SLF001
+
+    release = asyncio.Event()
+
+    async def _blocked_execution() -> None:
+        await release.wait()
+
+    worker._execution_tasks["ws_active"] = asyncio.create_task(_blocked_execution())  # noqa: SLF001
+    wait_task = asyncio.create_task(worker.wait_for_execution_tasks())
+    try:
+        for _ in range(100):
+            if record_heartbeat.await_count >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert record_heartbeat.await_count >= 2
+    finally:
+        release.set()
+        await asyncio.wait_for(wait_task, timeout=1.0)
+
+    assert worker._execution_tasks == {}  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_safely_provision_swallows_provisioner_exceptions(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

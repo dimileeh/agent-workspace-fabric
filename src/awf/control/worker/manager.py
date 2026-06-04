@@ -273,6 +273,9 @@ class ControlWorker(WorkerDelegatesMixin):
 
     async def wait_for_execution_tasks(self: Any) -> None:
         """Wait for ready execution or monitor-resume tasks started by this worker."""
+        heartbeat_interval = worker_heartbeat_write_interval_seconds(
+            self._config.poll_interval_seconds
+        )
         while self._execution_tasks:
             tasks = tuple(self._execution_tasks.values())
             # Wait for the FIRST task to finish instead of gather()-ing them all:
@@ -281,8 +284,16 @@ class ControlWorker(WorkerDelegatesMixin):
             # never surface — wait_for_execution_tasks() would hang and once=True
             # runs would exit as if successful. Inspecting tasks as they complete
             # lets a real failure raise immediately while a draining monitor's
-            # CancelledError is still tolerated.
-            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            # CancelledError is still tolerated. The timeout keeps once=True
+            # workers heartbeating while long-running execution tasks drain.
+            done, _pending = await asyncio.wait(
+                tasks,
+                timeout=heartbeat_interval,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                await self._record_heartbeat_safely()
+                continue
             for workspace_id, task in list(self._execution_tasks.items()):
                 if task in done:
                     self._execution_tasks.pop(workspace_id, None)
@@ -293,6 +304,8 @@ class ControlWorker(WorkerDelegatesMixin):
                 exc = task.exception()
                 if exc is not None:
                     raise exc
+            if self._execution_tasks:
+                await self._record_heartbeat_safely()
 
     async def run_forever(self: Any) -> None:
         heartbeat_task = asyncio.create_task(
