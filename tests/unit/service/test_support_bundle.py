@@ -19,7 +19,10 @@ from awf.host_setup.config import (
     HostSetupConfigError,
     ProviderConfig,
 )
-from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
+from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS,
+    SourceCheckoutAssetMetadata,
+)
 from awf.service import support_bundle as support_bundle_mod
 from awf.service.config import ServiceSettings
 from awf.service.support_bundle import (
@@ -542,7 +545,7 @@ def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
     assert setup_state["source_checkout"] == {
         "configured": True,
         "verified_at": "2026-05-28T12:00:00Z",
-        "marker_count": 14,
+        "marker_count": len(SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS),
     }
 
     serialized = json.dumps(bundle, sort_keys=True)
