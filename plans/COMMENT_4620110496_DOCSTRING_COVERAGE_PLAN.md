@@ -217,6 +217,13 @@ docstring:
 Add a concise behavior-neutral docstring to that helper only, re-run the
 focused audit, and run narrow Ruff plus the affected targeted service-log test.
 
+### Current Recheck
+
+Later exact-MCP and shadowed compose-env redaction commits expanded the PR's
+added definition count, but the same focused added-line audit now reports zero
+PR-added definitions without docstrings. No additional code changes are needed
+for this review-level docstring warning.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports
