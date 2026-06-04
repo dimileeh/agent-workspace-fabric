@@ -20,9 +20,9 @@ In source checkout lanes, `awf setup` checks and `awf start` uses
 - At least one coding-agent credential for real workspace execution.
 
 The mocked smoke command below does not require live GitHub or provider access.
-Local first-run URLs use `127.0.0.1`: API checks use
-`http://127.0.0.1:8000` by default, and the console is
-`http://127.0.0.1:3000` when the console is running.
+Local first-run URLs use the smoke defaults: API checks use
+`http://localhost:8000` by default, and the console is
+`http://localhost:3000` when the console is running.
 
 ## Lane 1: uv tool or pipx
 
@@ -156,8 +156,8 @@ Only delete the AWF checkout if it was created just for evaluation.
 ## After Start
 
 `awf start` prints the local API and console URLs. Use
-`http://127.0.0.1:3000` for the console when it is running, and
-`http://127.0.0.1:8000/readyz` for a direct local API readiness check.
+`http://localhost:3000` for the console when it is running, and
+`http://localhost:8000/readyz` for a direct local API readiness check.
 
 Next:
 

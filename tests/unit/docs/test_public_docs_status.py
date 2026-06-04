@@ -15,6 +15,8 @@ import pytest
 import yaml
 
 from awf.cli.main import app
+from awf.service.config import DEFAULT_LOCAL_SERVICE_API_BASE_URL
+from awf.service.smoke import DEFAULT_LOCAL_CONSOLE_URL
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 README_PATH = REPO_ROOT / "README.md"
@@ -195,6 +197,21 @@ def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
         quickstart_text.count("# Optional: only needed for PR creation/monitoring features.") == 3
     )
     assert quickstart_text.count('# export AWF_GITHUB_TOKEN="$(gh auth token)"') == 3
+
+
+def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
+    """Assert Quickstart local URLs match the default smoke probe targets."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    api_url = DEFAULT_LOCAL_SERVICE_API_BASE_URL
+    readyz_url = f"{api_url.rstrip('/')}/readyz"
+    console_url = DEFAULT_LOCAL_CONSOLE_URL
+
+    assert f"`{api_url}` by default" in quickstart_text
+    assert f"`{console_url}` when the console is running" in quickstart_text
+    assert f"`{console_url}` for the console" in quickstart_text
+    assert f"`{readyz_url}`" in quickstart_text
+    assert "http://127.0.0.1:8000" not in quickstart_text
+    assert "http://127.0.0.1:3000" not in quickstart_text
 
 
 def test_markdown_section_accepts_trailing_heading_whitespace() -> None:

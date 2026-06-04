@@ -23,7 +23,7 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`.
 - Use current first-run grammar: `awf setup`, `awf start`, `awf init <path>` or
   project-local `awf init .`, and
   `awf smoke run --mocked-local --format pretty`.
-- Use `127.0.0.1` for local API and console URLs in first-run guidance.
+- Keep local API and console URLs aligned with the default smoke probe targets.
 - Remove stale placeholder/no-path bootstrap language from public first-run docs.
 - Add `docs/UNINSTALL.md` with lane-specific uninstall guidance that separates
   CLI/tool removal from destructive local state cleanup.
@@ -59,6 +59,11 @@ Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HBU4r`: mocked first-run
 command blocks in `docs/QUICKSTART.md` must not hard-require `gh auth token`;
 leave `AWF_GITHUB_TOKEN` explicit but commented as optional for PR creation and
 monitoring features.
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HBU-B`: Quickstart first-run
+URL prose must document the actual default smoke probe targets,
+`http://localhost:8000` and `http://localhost:3000`, unless the code defaults
+change.
 
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.

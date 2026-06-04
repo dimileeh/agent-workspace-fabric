@@ -19,7 +19,8 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Use current first-run grammar: `awf setup`, `awf start`,
   `awf init <path>` or project-local `awf init .`, and
   `awf smoke run --mocked-local --format pretty`.
-- Complete: Use `127.0.0.1` for first-run local API and console URLs.
+- Complete: Keep first-run local API and console URLs aligned with the default
+  smoke probe targets.
 - Complete: Remove stale placeholder and no-path bootstrap language from public
   first-run docs.
 - Complete: Add `docs/UNINSTALL.md` with lane-specific uninstall guidance and a
@@ -154,7 +155,7 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 Red-phase result after updating the focused assertion: failed because
 `docs/QUICKSTART.md` still used bare upgrade smoke commands without `--project`.
 
-Final repair result: `3 passed in 0.56s`.
+Final repair result: `3 passed in 0.54s`.
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
@@ -201,6 +202,35 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 ```
 
 Result: `1 file already formatted`.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HBU-B`:
+
+- `docs/QUICKSTART.md` now documents the actual default mocked-smoke probe
+  targets: `http://localhost:8000` for API checks and
+  `http://localhost:3000` for the default console probe.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Quickstart first-run
+  URL prose that diverges from `DEFAULT_LOCAL_SERVICE_API_BASE_URL` and
+  `DEFAULT_LOCAL_CONSOLE_URL`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_first_run_urls_match_smoke_defaults -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/QUICKSTART.md` still documented `http://127.0.0.1:8000` and
+`http://127.0.0.1:3000`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_quickstart_is_canonical_and_not_a_stub tests/unit/docs/test_public_docs_status.py::test_quickstart_presents_available_complete_first_run_lanes -q
+```
+
+Final repair result: `3 passed in 0.56s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
