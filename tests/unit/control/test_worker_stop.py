@@ -238,6 +238,32 @@ async def test_record_heartbeat_safely_throttles_repeated_writes(
 
 
 @pytest.mark.unit
+async def test_record_heartbeat_safely_throttles_failed_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    current_time = 200.0
+    monkeypatch.setattr(worker_manager, "monotonic", lambda: current_time, raising=False)
+    record_heartbeat = AsyncMock(side_effect=RuntimeError("db unavailable"))
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        config=WorkerConfig(poll_interval_seconds=1.0, max_concurrent_provisions=0),
+    )
+    monkeypatch.setattr(worker, "_record_heartbeat", record_heartbeat)
+
+    await worker._record_heartbeat_safely()  # noqa: SLF001
+    await worker._record_heartbeat_safely()  # noqa: SLF001
+
+    assert record_heartbeat.call_count == 1
+
+    current_time += 1.01
+    await worker._record_heartbeat_safely()  # noqa: SLF001
+
+    assert record_heartbeat.call_count == 2
+
+
+@pytest.mark.unit
 async def test_wait_for_execution_tasks_refreshes_heartbeat_while_draining_once_worker(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],

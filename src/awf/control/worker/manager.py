@@ -375,6 +375,7 @@ class ControlWorker(WorkerDelegatesMixin):
             await self._record_heartbeat()
             self._last_heartbeat_written_at = now
         except (SQLAlchemyError, RuntimeError, TimeoutError, OSError) as exc:
+            self._last_heartbeat_written_at = now
             _log.warning(
                 "worker.heartbeat_write_failed",
                 reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
