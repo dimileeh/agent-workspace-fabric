@@ -50,6 +50,9 @@ def test_source_tool_install_lane_installs_isolated_awf(tmp_path: Path) -> None:
     assert "uv tool install" in " ".join(install_result.command)
     setup_results = [result for result in results if "setup" in result.command]
     assert setup_results
+    source_checkout = setup_results[-1].source_checkout
+    assert isinstance(source_checkout, dict)
+    assert source_checkout.get("root") == str((tmp_path / "source-checkout").resolve())
     assert "SOURCE_CHECKOUT_INVALID" not in setup_results[-1].stdout_tail
 
 
