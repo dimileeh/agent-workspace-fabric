@@ -28,6 +28,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.node.auth_mounts import teardown_workspace_auth_overlay
+from awf.node.compose_manager import ComposeManager
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_PROCESSED_KEY_PREFIX,
     OPERATOR_HINT_STATE_KEY,
@@ -62,7 +63,12 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _truncate_target_reconcile_failure_payload,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
-from awf.service.gc import run_workspace_filesystem_gc
+from awf.service.gc import (
+    WorkspaceGCCandidate,
+    WorkspaceGCComposeTeardown,
+    WorkspaceGCComposeTeardownResult,
+    run_workspace_filesystem_gc,
+)
 
 
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace:
@@ -476,32 +482,14 @@ async def _terminate_completed(
             repo_url=repo_url,
             base_branch=base_branch,
         )
-    # Tear down the workspace's compose stack now that its PR was
-    # merged (or short-circuited because it was already merged).
-    # Running stacks hold network subnets from Docker's finite
-    # default pool; leaking them is what caused the 2026-04-24
-    # ``all predefined address pools have been fully subnetted``
-    # storm that took AWF offline for ~8 hours. User's rule: only
-    # tear down on COMPLETED, never on FAILED — failed workspaces
-    # stay up for operator inspection.
-    #
-    # Best-effort: any error here is logged but never masks the
-    # completion signal. The DB transition already landed above.
-    teardown_ok = True
-    if compose_project and compose_file is not None:
-        teardown_ok = await self._teardown_compose_stack(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-        )
-    if teardown_ok:
-        await self._gc_completed_workspace_filesystem(workspace_id)
-    else:
-        _log.warning(
-            "monitor.filesystem_gc_skipped",
-            workspace_id=workspace_id,
-            reason="compose_teardown_failed",
-        )
+    # GC is best-effort and never masks the completion signal. When compose
+    # context is present, pass it through the GC engine so compose teardown,
+    # auth-overlay unmount, and path deletion share the same failure gate.
+    await self._gc_completed_workspace_filesystem(
+        workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+    )
 
 
 async def _reconcile_target_branch_after_merge(
@@ -661,21 +649,77 @@ def _teardown_completed_workspace_auth_overlay(work_dir: Path, workspace_id: str
         )
 
 
-async def _gc_completed_workspace_filesystem(self: Any, workspace_id: str) -> None:
+def _default_completed_workspace_compose_template() -> Path:
+    """Resolve the workspace compose template for monitor-side teardown."""
+    return Path(__file__).resolve().parents[4] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+def _compose_file_for_gc_candidate(
+    candidate: WorkspaceGCCandidate,
+    fallback_compose_file: Path,
+) -> Path:
+    """Prefer persisted compose metadata while keeping monitor-run context as fallback."""
+    if candidate.compose_file_path:
+        return Path(candidate.compose_file_path).expanduser()
+    return fallback_compose_file
+
+
+def _completed_workspace_compose_teardown(
+    self: Any,
+    *,
+    compose_project: str | None,
+    compose_file: Path | None,
+) -> WorkspaceGCComposeTeardown | None:
+    """Build a volume-removing compose teardown callback for post-merge GC."""
+    if not compose_project or compose_file is None:
+        return None
+
+    manager = ComposeManager(
+        work_dir=self._work_dir,
+        template_path=_default_completed_workspace_compose_template(),
+    )
+
+    async def _teardown(candidate: WorkspaceGCCandidate) -> WorkspaceGCComposeTeardownResult:
+        result = await manager.teardown_project(
+            project_name=candidate.compose_project_name or compose_project,
+            compose_file=_compose_file_for_gc_candidate(candidate, compose_file),
+            workspace_id=candidate.workspace_id,
+            remove_volumes=True,
+        )
+        return WorkspaceGCComposeTeardownResult(
+            status=result.status,
+            reason_code=result.reason_code,
+            error=result.error,
+        )
+
+    return _teardown
+
+
+async def _gc_completed_workspace_filesystem(
+    self: Any,
+    workspace_id: str,
+    *,
+    compose_project: str | None = None,
+    compose_file: Path | None = None,
+) -> None:
     """Remove local pressure directories for a successfully completed workspace.
 
     The durable DB row, events, logs, and artifacts are intentionally kept.
     """
 
-    # Unmount the Claude auth overlay before GC removes ``auth/<workspace_id>``;
-    # the compose stack is already down (GC only runs on a successful teardown),
-    # mirroring the ``service gc`` unmount-before-remove ordering. The unmount
-    # runs a blocking ``subprocess.run(["umount", ...], timeout=30.0)``, so push
-    # it to a worker thread to avoid stalling the event loop (the ``service gc``
-    # path does the same via ``asyncio.to_thread``).
-    await asyncio.to_thread(
-        _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
+    compose_teardown = _completed_workspace_compose_teardown(
+        self,
+        compose_project=compose_project,
+        compose_file=compose_file,
     )
+    if compose_teardown is None:
+        # Legacy/direct callers may invoke this method without compose context.
+        # In that case, preserve the old best-effort pre-GC unmount path. When a
+        # compose callback exists, GC performs the unmount after compose teardown
+        # so a running agent container cannot keep the overlay busy.
+        await asyncio.to_thread(
+            _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
+        )
     try:
         result = await run_workspace_filesystem_gc(
             self._deps.session_factory,
@@ -686,16 +730,7 @@ async def _gc_completed_workspace_filesystem(self: Any, workspace_id: str) -> No
             # retention window so disk is returned on merge rather than a week
             # later. The durable DB row, events, and logs are always kept.
             ignore_retention=True,
-            # compose_teardown is intentionally omitted. This method only runs
-            # when teardown_ok is True (see the gate above), and that holds in
-            # two distinct cases. When a compose project exists (compose_project
-            # and compose_file are both set), _teardown_compose_stack already
-            # ran ``docker compose down --remove-orphans --volumes`` and reaped
-            # the per-workspace Docker volumes. When compose_project or
-            # compose_file is None the stack was never launched, so teardown_ok
-            # keeps its default True and no Docker volumes exist to reap. Either
-            # way passing a teardown callback here would only attempt a
-            # redundant second teardown.
+            compose_teardown=compose_teardown,
         )
     except Exception as exc:
         _log.warning(

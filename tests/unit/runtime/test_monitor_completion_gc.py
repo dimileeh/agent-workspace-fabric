@@ -16,8 +16,15 @@ from awf.common.commands import FakeCommandRunner
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor_runner import lifecycle
-from awf.service.gc import WorkspaceGCWorktreeRemoveResult
+from awf.service.gc import (
+    WorkspaceGCCandidate,
+    WorkspaceGCPath,
+    WorkspaceGCPlan,
+    WorkspaceGCResult,
+    WorkspaceGCWorktreeRemoveResult,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -63,6 +70,58 @@ def _mock_worktree_remove_success() -> object:
                 reason_code="WORKTREE_REMOVE_SUCCEEDED",
             )
         ),
+    )
+
+
+def _mock_completed_compose_manager(
+    result: ComposeTeardownResult,
+) -> tuple[object, list[tuple[str, Path, str, bool]]]:
+    calls: list[tuple[str, Path, str, bool]] = []
+
+    class _FakeComposeManager:
+        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+            self.work_dir = work_dir
+            self.template_path = template_path
+
+        async def teardown_project(
+            self,
+            *,
+            project_name: str,
+            compose_file: Path,
+            workspace_id: str,
+            remove_volumes: bool = True,
+        ) -> ComposeTeardownResult:
+            calls.append((project_name, compose_file, workspace_id, remove_volumes))
+            return result
+
+    return patch(
+        "awf.runtime.pr_monitor_runner.lifecycle.ComposeManager",
+        new=_FakeComposeManager,
+    ), calls
+
+
+def _empty_workspace_gc_result(work_dir: Path) -> WorkspaceGCResult:
+    now = datetime.now(UTC)
+    return WorkspaceGCResult(
+        plan=WorkspaceGCPlan(
+            work_dir=work_dir,
+            min_age_hours=24,
+            cutoff_at=now,
+            include_statuses=(WorkspaceStatus.completed.value,),
+            exclude_statuses=(),
+            candidates=[],
+            preserved=[],
+        ),
+        dry_run=False,
+        deleted_paths=[],
+        delete_errors=[],
+        path_outcomes=[],
+        compose_teardowns={},
+        secret_lease_revocations={},
+        worktree_removes={},
+        reservation_releases={},
+        status="succeeded",
+        reason_code="CLEANUP_EXECUTION_SUCCEEDED",
     )
 
 
@@ -143,7 +202,6 @@ async def test_completed_monitor_reclaims_recent_workspace_pressure_dirs_immedia
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
-    cmd.queue_result(returncode=0)  # docker compose down
 
     runner = make_runner(
         factory=factory,
@@ -152,7 +210,17 @@ async def test_completed_monitor_reclaims_recent_workspace_pressure_dirs_immedia
         sleep_fn=sleep_fn,
         worktrees_root=worktrees_root,
     )
-    with _mock_worktree_remove_success(), structlog.testing.capture_logs() as captured:
+    compose_patch, _compose_calls = _mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+    with (
+        _mock_worktree_remove_success(),
+        compose_patch,
+        structlog.testing.capture_logs() as captured,
+    ):
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
@@ -467,7 +535,6 @@ async def test_completed_monitor_invokes_target_branch_reconciler(
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
-    cmd.queue_result(returncode=0)  # docker compose down
 
     runner = make_runner(
         factory=factory,
@@ -477,13 +544,108 @@ async def test_completed_monitor_invokes_target_branch_reconciler(
         worktrees_root=worktrees_root,
         post_merge_target_reconciler=_reconcile,
     )
-    await runner.run(
-        workspace_id=ws_id,
-        compose_project="proj",
-        compose_file=work_dir / "compose" / ws_id / "compose.yml",
+    compose_patch, _compose_calls = _mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
     )
+    with compose_patch:
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=work_dir / "compose" / ws_id / "compose.yml",
+        )
 
     assert calls == [("git@github.com:dimileeh/aira-web.git", "development")]
+
+
+@pytest.mark.unit
+async def test_completed_monitor_passes_volume_reaping_compose_teardown_to_filesystem_gc(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+    ws_id = await seed_monitoring_workspace(factory)
+    compose_dir = work_dir / "compose" / ws_id
+    compose_file = compose_dir / "compose.yml"
+
+    cmd.queue_result(returncode=0)  # git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+
+    captured_teardown: dict[str, object] = {}
+
+    async def _record_gc(*args: object, **kwargs: object) -> WorkspaceGCResult:
+        del args
+        captured_teardown["callback"] = kwargs.get("compose_teardown")
+        return _empty_workspace_gc_result(work_dir)
+
+    compose_patch, compose_calls = _mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+    )
+    with (
+        compose_patch,
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=_record_gc,
+        ),
+    ):
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj_from_monitor",
+            compose_file=compose_file,
+        )
+
+    callback = captured_teardown["callback"]
+    assert callable(callback)
+    candidate = WorkspaceGCCandidate(
+        workspace_id=ws_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=datetime.now(UTC),
+        age_hours=0,
+        reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=worktrees_root / ws_id,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=compose_dir,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth",
+            path=work_dir / "auth" / ws_id,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose_project_name="proj_from_candidate",
+        compose_file_path=str(compose_file),
+    )
+    result = await callback(candidate)
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert compose_calls == [("proj_from_candidate", compose_file, ws_id, True)]
+    assert not any(call.args[:2] == ["docker", "compose"] for call in cmd.calls)
 
 
 @pytest.mark.unit
@@ -507,7 +669,6 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
-    cmd.queue_result(returncode=1, stderr="docker unavailable")  # docker compose down
 
     runner = make_runner(
         factory=factory,
@@ -516,15 +677,25 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
         sleep_fn=sleep_fn,
         worktrees_root=worktrees_root,
     )
-    await runner.run(
-        workspace_id=ws_id,
-        compose_project="proj",
-        compose_file=compose_dir / "compose.yml",
+    compose_patch, compose_calls = _mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_UNAVAILABLE",
+            error="docker unavailable",
+        )
     )
+    with compose_patch:
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=compose_dir / "compose.yml",
+        )
 
     assert worktree.exists()
     assert compose_dir.exists()
     assert auth.exists()
+    assert compose_calls == [(f"awf_{ws_id}", Path(f"/tmp/awf/{ws_id}/compose.yml"), ws_id, True)]
+    assert not any(call.args[:2] == ["docker", "compose"] for call in cmd.calls)
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
