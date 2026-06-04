@@ -29,7 +29,7 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.common.redaction import redact_secrets
+from awf.common.redaction import REDACTION_MARKER, redact_secrets
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
@@ -648,6 +648,30 @@ def _contains_secret_bytes(
     return provider_readiness_service.URL_CREDENTIAL_RE.search(decoded) is not None
 
 
+def _redact_exact_secret_bytes(
+    content: bytes,
+    settings: Settings,
+    service_settings: ServiceSettings,
+    extra_secrets: Iterable[str],
+) -> bytes:
+    """Redact exact configured secret byte sequences before text decoding."""
+    secrets = {
+        secret
+        for secret in (
+            settings.api_token,
+            settings.github_token,
+            service_settings.github_token,
+            *extra_secrets,
+        )
+        if secret and len(secret) >= 4
+    }
+    redacted = content
+    marker = REDACTION_MARKER.encode("ascii")
+    for secret in sorted(secrets, key=len, reverse=True):
+        redacted = redacted.replace(secret.encode("utf-8"), marker)
+    return redacted
+
+
 def _check_and_redact_artifact_content(
     content: bytes,
     limit_bytes: int,
@@ -676,6 +700,12 @@ def _check_and_redact_artifact_content(
             ),
         )
     if is_likely_text:
+        content = _redact_exact_secret_bytes(
+            content,
+            settings,
+            service_settings,
+            extra_secret_values,
+        )
         text = content.decode("latin-1")
         redacted_text = _redact_sensitive_text(
             text,

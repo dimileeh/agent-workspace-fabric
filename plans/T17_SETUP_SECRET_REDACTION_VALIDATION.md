@@ -1497,6 +1497,52 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 # Success: no issues found in 1 source file
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HLG5x` MCP Artifact Unicode Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: likely-text UTF-8 MCP artifacts now redact exact non-ASCII
+  Compose/env-file secrets before base64 content is returned.
+- Complete: binary artifact exact-secret blocking remains covered by the
+  adjacent focused Compose-env binary artifact test.
+- Complete: existing ASCII text artifact redaction remains covered by the
+  adjacent known-provider and custom secret artifact tests.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k unicode_compose_env_secret --tb=short -ra
+# failed: returned raw UTF-8 bytes for "p\u00e4ssw\u00f6rd1234" in artifact content
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k unicode_compose_env_secret --tb=short -ra
+# 1 passed, 33 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k 'compose_env_file_provider_secret or custom_compose_env_secret or unicode_compose_env_secret or binary_artifact_containing_compose_env_file_provider_secret' --tb=short -ra
+# 4 passed, 30 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.

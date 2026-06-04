@@ -1106,3 +1106,49 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HLG5x` MCP Artifact Unicode Secret Plan
+
+### Problem Statement And Scope
+
+The review thread reports that likely-text MCP artifacts decode bytes as
+Latin-1 before applying exact `extra_secret_values` redaction. UTF-8 artifact
+content containing a non-ASCII Compose/env-file secret such as
+`p\u00e4ssw\u00f6rd1234` is transformed to mojibake before exact matching, so
+the returned base64 payload can still include the original UTF-8 secret bytes.
+
+This repair is limited to MCP artifact exact-secret redaction for text
+artifacts, a focused MCP artifact regression, and validation evidence. It does
+not change binary artifact blocking policy, MIME detection, Compose env loading,
+or broad AWF/GitHub validation ownership.
+
+### Requirements Checklist
+
+- Likely-text UTF-8 MCP artifacts redact exact non-ASCII extra secrets before
+  base64 content is returned.
+- Binary artifact exact-secret blocking continues to detect configured secret
+  bytes directly.
+- Existing ASCII text artifact redaction behavior remains unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP artifact regression using a UTF-8 Compose env-file
+   secret with non-ASCII characters.
+2. Preserve exact secret bytes before the Latin-1 artifact text path, or decode
+   text artifacts in a way that lets exact collected secret values match.
+3. Run the targeted regression, adjacent MCP artifact redaction checks, and
+   narrow ruff/mypy checks for touched files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k unicode_compose_env_secret --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k 'compose_env_file_provider_secret or custom_compose_env_secret or unicode_compose_env_secret or binary_artifact_containing_compose_env_file_provider_secret' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```

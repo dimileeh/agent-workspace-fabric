@@ -704,6 +704,55 @@ class TestReadWorkspaceArtifact:
         assert secret.encode() not in decoded
 
     @pytest.mark.unit
+    async def test_read_workspace_artifact_redacts_unicode_compose_env_secret(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Redact non-ASCII Compose env secrets from UTF-8 text artifacts."""
+        key = "ANTHROPIC_AUTH_TOKEN"
+        secret = "p\u00e4ssw\u00f6rd1234"
+        monkeypatch.delenv(key, raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"{key}={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact Unicode Compose env redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "unicode-provider.txt").write_bytes(f"prefix {secret} suffix".encode())
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "unicode-provider.txt",
+                "limit_bytes": 1024,
+            },
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"prefix <redacted> suffix"
+        assert secret.encode("utf-8") not in decoded
+
+    @pytest.mark.unit
     async def test_read_workspace_artifact_does_not_redact_base64_content(
         self,
         factory: async_sessionmaker[AsyncSession],
