@@ -47,14 +47,18 @@ pipx install agent-workspace-fabric
 Then run the shared first-run commands from the directory where AWF should keep
 the package-lane `.env`. Persist the generated local service values before
 setup/start so a later upgrade can restore the same running Core token and
-password:
+password, and so host-side database checks use that same password:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
 } > .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
@@ -127,7 +131,8 @@ that checkout. It is useful when you want to inspect or patch AWF but still want
 the normal `awf` executable on `PATH`.
 
 Persist the generated local service values into the checkout's Compose env file
-before setup/start so a later upgrade can restore them.
+before setup/start so a later upgrade can restore them and host-side database
+checks use the same password.
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
@@ -136,9 +141,13 @@ uv tool install . --force
 
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
 } > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
@@ -262,7 +271,8 @@ This lane uses inspectable source and no global install. It does not place an
 from the checkout.
 
 Persist the generated local service values into the checkout's Compose env file
-before setup/start so a later upgrade can restore them.
+before setup/start so a later upgrade can restore them and host-side database
+checks use the same password.
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
@@ -271,9 +281,13 @@ uv sync --extra dev
 
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
 } > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.

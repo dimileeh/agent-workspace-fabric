@@ -259,6 +259,12 @@ installs should write `.env`; source-checkout snippets should write
 `docker/compose/.env`, matching the later upgrade guide's fresh-shell restore
 requirements.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKQiy`: Quickstart
+first-run snippets must persist an `AWF_DATABASE_URL` derived from the same
+`AWF_POSTGRES_PASSWORD` that Compose uses to initialize local Postgres. Persist
+the matching `AWF_POSTGRES_HOST_PORT` too so custom host ports do not leave the
+host-side database URL stale.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -328,6 +334,12 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKFwb`:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKQiy`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
 ```
 
 Focused lint command:

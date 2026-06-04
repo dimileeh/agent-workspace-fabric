@@ -234,23 +234,38 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
     api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
     password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
+    database_url_export = (
+        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}'
+        '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+    )
     api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
     password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
+    host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
+    database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
     persist_target = "} > .env"
     setup_command = "\nawf setup\n"
 
     assert "persist" in first_run_section.lower()
     assert api_export in first_run_section
     assert password_export in first_run_section
+    assert host_port_export in first_run_section
+    assert database_url_export in first_run_section
     assert api_persist in first_run_section
     assert password_persist in first_run_section
+    assert host_port_persist in first_run_section
+    assert database_url_persist in first_run_section
     assert persist_target in first_run_section
     assert setup_command in first_run_section
     assert (
         first_run_section.index(api_export)
         < first_run_section.index(password_export)
+        < first_run_section.index(host_port_export)
+        < first_run_section.index(database_url_export)
         < first_run_section.index(api_persist)
         < first_run_section.index(password_persist)
+        < first_run_section.index(host_port_persist)
+        < first_run_section.index(database_url_persist)
         < first_run_section.index(persist_target)
         < first_run_section.index(setup_command)
     )
@@ -279,22 +294,37 @@ def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
     first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
     api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
     password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
+    database_url_export = (
+        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}'
+        '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+    )
     api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
     password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
+    host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
+    database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
     persist_target = "} > docker/compose/.env"
 
     assert "persist" in first_run_section.lower()
     assert api_export in first_run_section
     assert password_export in first_run_section
+    assert host_port_export in first_run_section
+    assert database_url_export in first_run_section
     assert api_persist in first_run_section
     assert password_persist in first_run_section
+    assert host_port_persist in first_run_section
+    assert database_url_persist in first_run_section
     assert persist_target in first_run_section
     assert f"\n{setup_command}\n" in first_run_section
     assert (
         first_run_section.index(api_export)
         < first_run_section.index(password_export)
+        < first_run_section.index(host_port_export)
+        < first_run_section.index(database_url_export)
         < first_run_section.index(api_persist)
         < first_run_section.index(password_persist)
+        < first_run_section.index(host_port_persist)
+        < first_run_section.index(database_url_persist)
         < first_run_section.index(persist_target)
         < first_run_section.index(f"\n{setup_command}\n")
     )
