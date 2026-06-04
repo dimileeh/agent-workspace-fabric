@@ -29,6 +29,9 @@ from awf.service.config import (
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphan_resources import (
+    ORPHAN_REAPING_ACTION,
+)
+from awf.service.orphan_resources import (
     scan_docker_resources as scan_runtime_docker_resources,
 )
 from awf.service.orphans import (
@@ -567,13 +570,6 @@ def _runtime_workspaces_from_view(
     # Runtime recovery decisions require lifecycle metadata such as status and
     # PR URL; active_ids-only views are retained for orphan-resource checks.
     return tuple(by_id[workspace_id] for workspace_id in sorted(by_id))
-
-
-ORPHAN_REAPING_ACTION = (
-    "Reaping is enabled (auto_cleanup_orphans): the worker will tear down the "
-    "listed orphaned AWF stacks and remove their worktrees automatically; no "
-    "manual cleanup is required."
-)
 
 
 def _orphan_resources_reason(reason: object) -> str:

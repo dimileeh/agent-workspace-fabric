@@ -315,6 +315,15 @@ async def reconcile_orphaned_workspace_dirs(
     """
     normalized_work_dir = Path(work_dir).expanduser().resolve()
     resolved_now = time.time() if now is None else now
+    # The known-id set is an intentional point-in-time snapshot: it is loaded once
+    # here, the scan then runs off-loop, and each target is deleted sequentially,
+    # so the snapshot can be minutes old on a busy node. Re-querying per target was
+    # rejected because two independent mitigations already close the only unsafe
+    # window (a row committed after the snapshot). First, workspace ids are
+    # ``ws_`` + 24 hex chars (truncated uuid4), so a freshly minted id colliding
+    # with an already-scanned orphan dir is vanishingly unlikely. Second, the
+    # ``min_age_hours`` grace window covers the inverse race -- a dir created just
+    # before its row commits is younger than the grace and is never a target.
     known_ids = await _load_known_workspace_ids(session_factory)
 
     targets, scanned, dropped, young_orphan = await asyncio.to_thread(

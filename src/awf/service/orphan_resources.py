@@ -512,6 +512,17 @@ def parse_docker_resource_rows(kind: ResourceKind, stdout: str) -> tuple[Detecte
     return tuple(resources)
 
 
+# Shared action text for the reaping-enabled state. Both the health-check API
+# (this summary) and the service-status CLI (``status.ORPHAN_REAPING_ACTION``,
+# which imports this constant) must advertise identical wording for the same
+# ``auto_cleanup_orphans`` flag state, so operators never see two messages.
+ORPHAN_REAPING_ACTION = (
+    "Reaping is enabled (auto_cleanup_orphans): the worker will tear down the "
+    "listed orphaned AWF stacks and remove their worktrees automatically; no "
+    "manual cleanup is required."
+)
+
+
 def build_orphan_resource_summary(
     *,
     docker_scan: ResourceScan,
@@ -610,10 +621,7 @@ def build_orphan_resource_summary(
     if orphan_records:
         examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
         action = (
-            (
-                "Reaping is enabled (auto_cleanup_orphans): the worker will tear down "
-                "the listed AWF stacks and remove their orphaned worktrees."
-            )
+            ORPHAN_REAPING_ACTION
             if auto_cleanup_orphans
             else (
                 "Review the listed AWF resources and run a non-destructive cleanup plan; "
