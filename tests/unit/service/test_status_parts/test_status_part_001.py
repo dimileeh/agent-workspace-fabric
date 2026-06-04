@@ -1155,6 +1155,47 @@ def test_service_status_orphan_resources_reflect_auto_cleanup(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+def test_service_status_orphan_workspaces_action_aligns_with_reaping(tmp_path: Path) -> None:
+    # orphan_workspaces and orphan_resources are two views of the same orphan
+    # summary in one status response. With reaping enabled they must not disagree:
+    # orphan_workspaces may not keep advertising the legacy manual-cleanup action
+    # while orphan_resources says the worker reaps automatically.
+    settings = replace(_settings(tmp_path), auto_cleanup_orphans=True)
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / "ws_ghost"
+    worktree.mkdir(parents=True)
+
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_ghost-agent-1",
+            state="exited",
+            status="Exited",
+            project="awf_ws_ghost",
+            service="agent",
+        )
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+        )
+    )
+
+    orphan_workspaces = status["checks"]["orphan_workspaces"]
+    orphan_resources = status["checks"]["orphan_resources"]
+    assert orphan_workspaces["action"] == status_mod.ORPHAN_REAPING_ACTION
+    assert orphan_resources["action"] == status_mod.ORPHAN_REAPING_ACTION
+    assert "Inspect the listed resources" not in orphan_workspaces["action"]
+
+
+@pytest.mark.unit
 def test_orphan_resources_check_payload_threads_auto_cleanup_flag() -> None:
     payload = _orphan_resources_check_payload(
         {

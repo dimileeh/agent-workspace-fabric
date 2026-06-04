@@ -213,6 +213,12 @@ async def collect_service_status(
         orphan_workspaces_check,
         auto_cleanup_orphans=settings.auto_cleanup_orphans,
     )
+    if settings.auto_cleanup_orphans and orphan_workspaces_check.get("orphan_count"):
+        # The legacy orphan_workspaces payload otherwise keeps its manual-cleanup
+        # action, which contradicts the reaping-aware orphan_resources action on the
+        # same response. Align it so a single status never tells operators both
+        # "the worker will reap this automatically" and "run manual cleanup".
+        orphan_workspaces_check["action"] = ORPHAN_REAPING_ACTION
     stranded_workspaces_check = _stranded_workspaces_check_payload(
         workspace_view,
         runtime_docker_scan,
