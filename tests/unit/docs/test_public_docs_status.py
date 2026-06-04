@@ -101,6 +101,7 @@ def test_copy_paste_marked_snippets_are_syntactically_valid() -> None:
 
 
 def test_quickstart_is_canonical_and_not_a_stub() -> None:
+    """Assert Quickstart remains the canonical public first-run entrypoint."""
     readme_text = README_PATH.read_text(encoding="utf-8")
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     start_here_text = (REPO_ROOT / "docs" / "START_HERE.md").read_text(encoding="utf-8")
@@ -120,6 +121,7 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
 
 
 def test_quickstart_presents_available_complete_first_run_lanes() -> None:
+    """Assert each advertised Quickstart lane is complete and currently available."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     lanes = {
         "## Lane 1: uv tool or pipx": ("release-installed", "package-manager"),
@@ -157,17 +159,20 @@ def test_quickstart_presents_available_complete_first_run_lanes() -> None:
 
 
 def test_markdown_section_accepts_trailing_heading_whitespace() -> None:
+    """Assert section extraction tolerates harmless heading whitespace."""
     text = "Intro\n## Target \t\nbody\n## Next\nother\n"
 
     assert _markdown_section(text, "## Target") == "body\n"
 
 
 def test_markdown_section_reports_missing_heading_clearly() -> None:
+    """Assert missing section headings fail with a useful assertion message."""
     with pytest.raises(AssertionError, match=r"Markdown heading '## Missing' not found"):
         _markdown_section("## Present\nbody\n", "## Missing")
 
 
 def test_getting_started_uses_runnable_startup_path() -> None:
+    """Assert Getting Started uses setup/start before project initialization."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
     startup_section = getting_started_text.split(
         "### Recommended First-Run Sequence",
@@ -191,6 +196,7 @@ def test_getting_started_uses_runnable_startup_path() -> None:
 
 
 def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
+    """Assert MCP setup prerequisites use the canonical local startup flow."""
     mcp_setup_text = (REPO_ROOT / "docs" / "MCP_SETUP.md").read_text(encoding="utf-8")
     prerequisites_section = mcp_setup_text.split("## Prerequisites", maxsplit=1)[1].split(
         "## Claude Code",
@@ -212,6 +218,7 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
 
 
 def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
+    """Assert onboarding starts AWF before initializing the project workspace."""
     onboarding_text = (REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
     first_run_section = onboarding_text.split(
         "## First-run operator command",
@@ -232,6 +239,7 @@ def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
 
 
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
+    """Assert project onboarding documents path-based awf init as the primary flow."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
     onboarding_text = (REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
@@ -248,6 +256,7 @@ def test_project_onboarding_docs_make_awf_init_primary() -> None:
 
 
 def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None:
+    """Assert public docs do not revive the old no-path init bootstrap grammar."""
     public_paths = [Path("README.md"), *map(Path, sorted(_public_docs()))]
     forbidden_patterns = [
         r"`awf init`\s+without a path",
@@ -279,6 +288,7 @@ def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None
 
 
 def test_changelog_upgrade_and_uninstall_guides_are_discoverable() -> None:
+    """Assert release lifecycle docs are linked from the public README."""
     readme_text = README_PATH.read_text(encoding="utf-8")
 
     assert (REPO_ROOT / "CHANGELOG.md").exists()
@@ -292,6 +302,7 @@ def test_changelog_upgrade_and_uninstall_guides_are_discoverable() -> None:
 
 
 def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
+    """Assert upgrade and uninstall guides cover each currently available lane."""
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
     uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
 
@@ -320,6 +331,7 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
 
 
 def test_public_first_run_docs_do_not_advertise_unpublished_curl_installer() -> None:
+    """Assert public first-run docs do not expose the unpublished curl lane."""
     public_first_run_paths = (
         README_PATH,
         REPO_ROOT / "docs" / "QUICKSTART.md",
@@ -542,6 +554,7 @@ def test_awf_command_mentions_ignore_missing_readme_linked_docs(
 
 
 def _markdown_section(text: str, heading: str) -> str:
+    """Return the Markdown body for a second-level heading."""
     normalized_text = text.replace("\r\n", "\n")
     heading_match = re.search(
         rf"(?m)^{re.escape(heading)}[ \t]*(?:\n|$)",

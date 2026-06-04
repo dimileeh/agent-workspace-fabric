@@ -548,6 +548,7 @@ def test_getting_started_compose_env_snippet_feeds_setup_and_start() -> None:
 
 @pytest.mark.unit
 def test_project_onboarding_doc_distinguishes_init_modes() -> None:
+    """Assert onboarding docs distinguish project init from service startup."""
     doc = Path("docs/PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
     assert "awf setup" in doc
