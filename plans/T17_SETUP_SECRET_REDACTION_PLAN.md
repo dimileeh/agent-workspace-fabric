@@ -13,6 +13,15 @@ Scope is limited to redaction and sanitized setup diagnostics. No branch
 switching, pushing, broad validation, coverage gates, setup redesign, new MCP
 credential entry, or unrelated refactors are included.
 
+## Assumptions/Changes
+
+- Review thread `PRRT_kwDOSJAM6s6G_-Om` identified a remaining MCP log-read
+  gap: redacting only the already requested byte slice can leak configured
+  secret substrings when callers request overlapping offsets through a raw log
+  file.
+- This repair remains inside the existing T17 redaction scope and only changes
+  MCP log-read redaction plus focused regressions.
+
 ## Requirements Checklist
 
 - Support bundles include setup config/provider/client/consent/source-checkout
@@ -24,6 +33,8 @@ credential entry, or unrelated refactors are included.
   kind and credential-ref presence diagnostics.
 - MCP structured/text/artifact/log surfaces cannot expose raw setup secrets or
   provider refs.
+- MCP workspace log reads redact with enough surrounding context that arbitrary
+  requested offsets cannot reveal substrings of configured secrets.
 - Existing first-run rendering behavior remains compatible.
 
 ## Implementation Steps
@@ -40,6 +51,9 @@ credential entry, or unrelated refactors are included.
    configured/verified metadata without local root paths.
 6. Create `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` after implementation
    with requirement-by-requirement evidence.
+7. Add a focused regression for a raw MCP log whose requested slice starts
+   inside a configured secret, confirm it fails, then redact an expanded log
+   window before returning the requested slice.
 
 ## Verification Commands
 
@@ -48,6 +62,14 @@ Focused tests:
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py tests/unit/runtime/test_log_redaction.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/service/test_doctor.py -q
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py -q
+```
+
+Review-thread repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
 ```
 
 Focused lint/type checks, adjusted to touched files:

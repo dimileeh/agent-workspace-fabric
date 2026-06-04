@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 from awf.common.token_patterns import (
     compile_known_token_re,
@@ -25,6 +26,7 @@ _PROVIDER_REF_RE = compile_provider_ref_re()
 # Runtime logs use the same explicit truncated-token policy as audit records:
 # prefer a visible false positive over leaking rejected credential fragments.
 _KNOWN_TOKEN_RE = compile_known_token_re(match_truncated_provider_tokens=True)
+_RedactionSpan = tuple[int, int]
 
 
 def redact_secrets(text: str) -> str:
@@ -40,6 +42,89 @@ def redact_secrets(text: str) -> str:
     return _KNOWN_TOKEN_RE.sub(REDACTION_MARKER, redacted)
 
 
+def redact_secrets_slice(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    extra_secrets: Iterable[str] = (),
+) -> str:
+    """Return ``text[start:end]`` with any overlapping secret spans redacted."""
+    if not text or start >= end:
+        return ""
+
+    safe_start = min(max(start, 0), len(text))
+    safe_end = min(max(end, safe_start), len(text))
+    if safe_start >= safe_end:
+        return ""
+
+    spans = _secret_redaction_spans(text, extra_secrets=extra_secrets)
+    if not spans:
+        return text[safe_start:safe_end]
+
+    return _render_redacted_slice(text, safe_start, safe_end, spans)
+
+
 def _redact_assignment(match: re.Match[str]) -> str:
     quote = match.group("quote")
     return f"{match.group('key')}{match.group('separator')}{quote}{REDACTION_MARKER}{quote}"
+
+
+def _secret_redaction_spans(
+    text: str,
+    *,
+    extra_secrets: Iterable[str],
+) -> list[_RedactionSpan]:
+    spans: list[_RedactionSpan] = []
+    for secret in sorted({secret for secret in extra_secrets if len(secret) >= 4}, key=len):
+        cursor = 0
+        while True:
+            start = text.find(secret, cursor)
+            if start == -1:
+                break
+            end = start + len(secret)
+            spans.append((start, end))
+            cursor = end
+
+    spans.extend((match.start(2), match.end(2)) for match in _URL_CREDENTIAL_RE.finditer(text))
+    spans.extend((match.start(2), match.end(2)) for match in _AUTHORIZATION_RE.finditer(text))
+    spans.extend(match.span() for match in _PROVIDER_REF_RE.finditer(text))
+    spans.extend(
+        (match.start("value"), match.end("value")) for match in _TOKEN_ASSIGNMENT_RE.finditer(text)
+    )
+    spans.extend((match.start(2), match.end(2)) for match in _BEARER_RE.finditer(text))
+    spans.extend(match.span() for match in _KNOWN_TOKEN_RE.finditer(text))
+    return _merge_redaction_spans(spans)
+
+
+def _merge_redaction_spans(spans: Iterable[_RedactionSpan]) -> list[_RedactionSpan]:
+    merged: list[_RedactionSpan] = []
+    for start, end in sorted(span for span in spans if span[0] < span[1]):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def _render_redacted_slice(
+    text: str,
+    start: int,
+    end: int,
+    spans: list[_RedactionSpan],
+) -> str:
+    pieces: list[str] = []
+    cursor = start
+    for span_start, span_end in spans:
+        if span_end <= cursor:
+            continue
+        if span_start >= end:
+            break
+        literal_end = min(max(span_start, cursor), end)
+        if cursor < literal_end:
+            pieces.append(text[cursor:literal_end])
+        pieces.append(REDACTION_MARKER)
+        cursor = max(cursor, min(span_end, end))
+    if cursor < end:
+        pieces.append(text[cursor:end])
+    return "".join(pieces)

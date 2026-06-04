@@ -14,6 +14,8 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
   backend/ref kind and credential-ref presence diagnostics.
 - Complete: MCP structured payloads, binary/text artifact screening, and
   workspace log reads cannot expose raw setup secrets or provider refs.
+- Complete: MCP workspace log reads redact with enough surrounding context that
+  arbitrary requested offsets cannot reveal substrings of configured secrets.
 - Complete: Existing first-run rendering behavior was left unchanged.
 
 ## Evidence
@@ -51,6 +53,35 @@ uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/servic
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
+
+## Review Thread `PRRT_kwDOSJAM6s6G_-Om` Iteration
+
+Additional files changed:
+
+- `src/awf/common/redaction.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/runtime/test_log_redaction.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
+# failed during collection: ImportError for missing redact_secrets_slice after adding the regression
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
+# 47 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 2 source files
+```
 
 ## Gaps
 

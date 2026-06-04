@@ -12,6 +12,7 @@ cleanly when they show up alongside other MCP servers.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
@@ -28,6 +29,7 @@ from awf.api.schemas import (
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.config import Settings, get_settings
+from awf.common.redaction import redact_secrets_slice
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -44,10 +46,10 @@ from awf.mcp.server import (
     _provided_orphan_resources,
     _provided_readiness,
     _provided_runtime_health,
-    _redact_sensitive_text,
     _tool_result,
 )
 from awf.service import config as service_config
+from awf.service import provider_readiness as provider_readiness_service
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
@@ -101,6 +103,7 @@ RuntimeHealthSummaryProvider = Callable[
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 _MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
+_LOG_REDACTION_CONTEXT_BYTES = 4096
 # sync_release_pr omits base_branch -> target the release branch (main), not the
 # legacy development default, so the release PR is opened development -> main
 # instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
@@ -130,6 +133,52 @@ ProviderFilter = Annotated[str, Field(min_length=1, max_length=64)]
 def _resolve_settings(settings: Settings | None) -> Settings:
     """Return *settings* if provided, otherwise resolve the global default."""
     return settings or get_settings()
+
+
+def _workspace_log_redaction_secrets(
+    settings: Settings,
+    *,
+    service_settings: service_config.ServiceSettings,
+) -> tuple[str, ...]:
+    """Return exact secret values that need context-aware log slice redaction."""
+    secrets: list[str] = []
+    for secret in (
+        settings.api_token,
+        settings.github_token,
+        service_settings.api_token,
+        service_settings.github_token,
+    ):
+        if secret and len(secret) >= 4:
+            secrets.append(secret)
+    for key, value in os.environ.items():
+        if key.upper() in provider_readiness_service.KNOWN_SECRET_ENV_KEYS and len(value) >= 4:
+            secrets.append(value)
+    return tuple(dict.fromkeys(secrets))
+
+
+def _workspace_log_redaction_context_bytes(extra_secrets: tuple[str, ...]) -> int:
+    """Return surrounding bytes to read before applying slice redaction."""
+    secret_context = max(
+        (len(secret.encode("utf-8")) + _LOG_REDACTION_CONTEXT_BYTES for secret in extra_secrets),
+        default=_LOG_REDACTION_CONTEXT_BYTES,
+    )
+    return max(_LOG_REDACTION_CONTEXT_BYTES, secret_context)
+
+
+def _requested_log_window_offsets(
+    *,
+    requested_offset: int,
+    limit_bytes: int,
+    expanded_next_offset: int,
+    expanded_eof: bool,
+) -> tuple[int, bool]:
+    """Project an expanded read result back to the caller's requested byte window."""
+    if expanded_eof:
+        file_size = expanded_next_offset
+        safe_offset = min(requested_offset, file_size)
+        next_offset = min(safe_offset + limit_bytes, file_size)
+        return next_offset, next_offset >= file_size
+    return requested_offset + limit_bytes, False
 
 
 def register_metrics_tools(
@@ -312,25 +361,41 @@ def register_metrics_tools(
         ),
     ) -> dict[str, Any] | None:
         """Read a bounded chunk from an indexed durable log stream."""
-        result = await service.read_log(
-            workspace_id,
-            stream_id,
-            offset=offset,
-            limit_bytes=limit_bytes,
-        )
-        if result is None:
-            return None
         service_settings = service_config.resolve_service_settings(settings_value)
-        data = _redact_sensitive_text(
-            str(result["text"]),
+        extra_secrets = _workspace_log_redaction_secrets(
             settings_value,
             service_settings=service_settings,
         )
+        redaction_context = _workspace_log_redaction_context_bytes(extra_secrets)
+        read_offset = max(offset - redaction_context, 0)
+        read_limit = offset - read_offset + limit_bytes + redaction_context
+        result = await service.read_log(
+            workspace_id,
+            stream_id,
+            offset=read_offset,
+            limit_bytes=read_limit,
+        )
+        if result is None:
+            return None
+        result_offset = int(result["offset"])
+        result_next_offset = int(result["next_offset"])
+        requested_next_offset, requested_eof = _requested_log_window_offsets(
+            requested_offset=offset,
+            limit_bytes=limit_bytes,
+            expanded_next_offset=result_next_offset,
+            expanded_eof=bool(result["eof"]),
+        )
+        data = redact_secrets_slice(
+            str(result["text"]),
+            offset - result_offset,
+            offset - result_offset + limit_bytes,
+            extra_secrets=extra_secrets,
+        )
         return WorkspaceLogReadResponse(
             stream_id=str(result["stream_id"]),
-            offset=int(result["offset"]),
-            next_offset=int(result["next_offset"]),
-            eof=bool(result["eof"]),
+            offset=offset,
+            next_offset=requested_next_offset,
+            eof=requested_eof,
             data=data,
         ).model_dump(mode="json")
 

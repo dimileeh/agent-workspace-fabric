@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from awf.common.redaction import REDACTION_MARKER, redact_secrets
+from awf.common.redaction import REDACTION_MARKER, redact_secrets, redact_secrets_slice
 
 
 @pytest.mark.unit
@@ -63,6 +63,69 @@ def test_redact_secrets_catches_truncated_github_tokens(token: str) -> None:
 
     assert token not in redacted
     assert f"token {REDACTION_MARKER} in stderr" in redacted
+
+
+@pytest.mark.unit
+def test_redact_secrets_slice_masks_overlapping_exact_secret() -> None:
+    secret = "opaque-nonpattern-workspace-secret-value"
+    text = f"before AWF_GITHUB_TOKEN={secret} after"
+    offset = text.index("workspace")
+    limit = len("workspace")
+
+    redacted = redact_secrets_slice(
+        text,
+        offset,
+        offset + limit,
+        extra_secrets=(secret,),
+    )
+
+    assert redacted == REDACTION_MARKER
+    assert "workspace" not in redacted
+
+
+@pytest.mark.unit
+def test_redact_secrets_slice_preserves_nonsecret_requested_text() -> None:
+    secret = "opaque-nonpattern-workspace-secret-value"
+    text = f"before AWF_GITHUB_TOKEN={secret} after"
+    offset = text.index("before")
+    limit = len("before")
+
+    assert (
+        redact_secrets_slice(
+            text,
+            offset,
+            offset + limit,
+            extra_secrets=(secret,),
+        )
+        == "before"
+    )
+
+
+@pytest.mark.unit
+def test_redact_secrets_slice_preserves_text_after_secret_span() -> None:
+    secret = "opaque-nonpattern-workspace-secret-value"
+    text = f"before AWF_GITHUB_TOKEN={secret} after"
+    offset = text.index("after")
+    limit = len("after")
+
+    assert (
+        redact_secrets_slice(
+            text,
+            offset,
+            offset + limit,
+            extra_secrets=(secret,),
+        )
+        == "after"
+    )
+
+
+@pytest.mark.unit
+def test_redact_secrets_slice_returns_plain_text_when_no_secret_matches() -> None:
+    text = "before ordinary output after"
+    offset = text.index("ordinary")
+    limit = len("ordinary")
+
+    assert redact_secrets_slice(text, offset, offset + limit) == "ordinary"
 
 
 @pytest.mark.unit
