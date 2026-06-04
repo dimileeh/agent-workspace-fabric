@@ -205,13 +205,18 @@ def _unknown_leading_log_value_fragment_end(text: str, *, result_offset: int) ->
     if result_offset <= 0 or not text:
         return 0
 
-    text_bytes = text.encode("utf-8")
-    if not text_bytes or text_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
+    characters = iter(text)
+    first_bytes = next(characters).encode("utf-8")
+    if not first_bytes or first_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
         return 0
-    for index, value in enumerate(text_bytes):
-        if value in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
-            return index
-    return len(text_bytes)
+
+    fragment_end = len(first_bytes)
+    for char in characters:
+        char_bytes = char.encode("utf-8")
+        if char_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
+            return fragment_end
+        fragment_end += len(char_bytes)
+    return fragment_end
 
 
 def _workspace_log_slice_starts_in_unknown_leading_fragment(

@@ -30,6 +30,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.mcp import metrics_tools as metrics_tools_mod
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
@@ -71,6 +72,13 @@ _CREATE_ARGS: dict[str, object] = {
     "provider_readiness_override": True,
     "provider_readiness_override_reason": "mcp default create fixture",
 }
+
+
+class _RejectWholeEncodeStr(str):
+    """String sentinel that catches accidental full-buffer encoding."""
+
+    def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+        raise AssertionError("whole expanded log text must not be encoded")
 
 
 def _operation_response() -> OperationResponse:
@@ -120,6 +128,27 @@ def _ok_disk_check(settings: Settings) -> DiskCheck:
         reason="SUFFICIENT_DISK",
         detail=None,
     )
+
+
+@pytest.mark.unit
+def test_unknown_leading_log_value_fragment_end_peeks_before_encoding_expanded_text() -> None:
+    """Avoid encoding an expanded log window when the first byte is a delimiter."""
+    assert (
+        metrics_tools_mod._unknown_leading_log_value_fragment_end(
+            _RejectWholeEncodeStr(" already-delimited"),
+            result_offset=10,
+        )
+        == 0
+    )
+
+
+@pytest.mark.unit
+def test_unknown_leading_log_value_fragment_end_counts_utf8_bytes_to_delimiter() -> None:
+    """Keep leading-fragment offsets in bytes when scanning multibyte text."""
+    assert metrics_tools_mod._unknown_leading_log_value_fragment_end(
+        "αβ done",
+        result_offset=10,
+    ) == len("αβ".encode())
 
 
 async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]

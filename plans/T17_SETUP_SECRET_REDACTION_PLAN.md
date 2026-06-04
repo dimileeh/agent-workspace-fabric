@@ -181,3 +181,54 @@ uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/servic
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 are intentionally left to AWF after agent completion.
+
+## Review-Level Comment `issue:4620175517` Collision/Encoding Repair Plan
+
+### Problem Statement and Scope
+
+The review-level comment identifies two narrow edge cases in the T17 redaction
+work:
+
+- `setup_state.providers` and `setup_state.clients` key entries by redacted
+  provider/client names, so two raw names that both redact to `<redacted>` can
+  silently overwrite each other.
+- `_unknown_leading_log_value_fragment_end` encodes the entire expanded log
+  window before it knows whether the first byte is a delimiter, wasting memory
+  on every MCP log-read call whose expanded projection starts after byte zero.
+
+This repair is limited to those two behaviors and their focused regressions.
+
+### Requirements Checklist
+
+- Preserve every configured provider and client in setup-state output even when
+  multiple raw names redact to the same display key.
+- Keep raw provider/client names and token-like fragments out of support-bundle
+  setup-state output.
+- Preserve existing setup-state payload shape for non-colliding names.
+- Avoid encoding the entire expanded log projection in
+  `_unknown_leading_log_value_fragment_end` just to check the first byte.
+- Preserve existing unknown-leading-fragment delimiter behavior and MCP log
+  read output contracts.
+
+### Implementation Steps
+
+1. Add focused failing tests for setup-state provider/client redacted-name
+   collisions and for the leading-fragment helper's first-character fast path.
+2. Add a small helper that inserts redacted setup-state entries with a stable
+   numeric suffix when a redacted key collision occurs.
+3. Refactor `_unknown_leading_log_value_fragment_end` to inspect the first
+   character before scanning and then encode characters incrementally until a
+   delimiter is found.
+4. Run focused tests and lint/type checks for the touched files only.
+5. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with requirement
+   status and evidence from the focused checks. Full AWF/GitHub validation
+   remains owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_preserves_redacted_name_collisions
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k unknown_leading_log_value_fragment_end
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py src/awf/mcp/metrics_tools.py tests/unit/service/test_support_bundle.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/mcp/metrics_tools.py
+```

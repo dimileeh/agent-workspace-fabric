@@ -249,20 +249,8 @@ def _setup_state(
                 "api_host_port": config.api.host_port,
                 "work_dir_configured": bool(config.work_dir),
             },
-            "providers": {
-                str(_redact_value(name, secrets)): _provider_setup_summary(
-                    provider,
-                    secrets=secrets,
-                )
-                for name, provider in sorted(config.providers.items())
-            },
-            "clients": {
-                str(_redact_value(name, secrets)): {
-                    "status": _redact_text(client.status, secrets),
-                    "updated_at": _isoformat(client.updated_at),
-                }
-                for name, client in sorted(config.clients.items())
-            },
+            "providers": _setup_state_provider_summaries(config, secrets=secrets),
+            "clients": _setup_state_client_summaries(config, secrets=secrets),
             "consent": {
                 "plain_file_secrets": config.consent.plain_file_secrets,
                 "source_checkout_assets": config.consent.source_checkout_assets,
@@ -279,6 +267,50 @@ def _setup_state(
         if details is not None:
             summary_payload["details"] = _redact_value(details, secrets)
         return summary_payload
+
+
+def _setup_state_provider_summaries(
+    config: HostSetupConfig,
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    """Summarize providers without dropping entries on redacted-name collisions."""
+    providers: dict[str, object] = {}
+    for name, provider in sorted(config.providers.items()):
+        providers[_unique_redacted_setup_state_key(name, secrets, providers)] = (
+            _provider_setup_summary(provider, secrets=secrets)
+        )
+    return providers
+
+
+def _setup_state_client_summaries(
+    config: HostSetupConfig,
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    """Summarize clients without dropping entries on redacted-name collisions."""
+    clients: dict[str, object] = {}
+    for name, client in sorted(config.clients.items()):
+        clients[_unique_redacted_setup_state_key(name, secrets, clients)] = {
+            "status": _redact_text(client.status, secrets),
+            "updated_at": _isoformat(client.updated_at),
+        }
+    return clients
+
+
+def _unique_redacted_setup_state_key(
+    name: str,
+    secrets: frozenset[str],
+    existing: Mapping[str, object],
+) -> str:
+    """Return a stable redacted key, suffixing only when redaction collides."""
+    base_key = str(_redact_value(name, secrets))
+    key = base_key
+    suffix = 2
+    while key in existing:
+        key = f"{base_key}#{suffix}"
+        suffix += 1
+    return key
 
 
 def _provider_setup_summary(

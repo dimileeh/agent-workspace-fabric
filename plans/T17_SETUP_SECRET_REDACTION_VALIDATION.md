@@ -262,6 +262,69 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review-Level Comment `issue:4620175517` Collision/Encoding Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: setup-state output preserves every configured provider/client when
+  multiple raw names redact to the same display key, using stable `#2` suffixes
+  only for colliding redacted keys.
+- Complete: raw provider/client names are absent from the setup-state collision
+  regression output.
+- Complete: non-colliding setup-state shape is preserved by the existing
+  setup-state tests.
+- Complete: `_unknown_leading_log_value_fragment_end` checks the first
+  character before scanning and no longer encodes the whole expanded text for
+  the delimiter fast path.
+- Complete: existing MCP workspace-log offset/redaction behavior remains
+  covered by the focused workspace-log subset.
+
+Additional files changed:
+
+- `src/awf/service/support_bundle.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/service/test_support_bundle.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing checks before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_preserves_redacted_name_collisions
+# failed: only one `<redacted>` provider/client entry remained after dict overwrite
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k unknown_leading_log_value_fragment_end
+# failed: `_unknown_leading_log_value_fragment_end` called whole-string encode
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_preserves_redacted_name_collisions
+# 1 passed, 19 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k unknown_leading_log_value_fragment_end
+# 2 passed, 29 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state
+# 5 passed, 15 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'unknown_leading_log_value_fragment_end or read_workspace_log'
+# 9 passed, 22 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py src/awf/mcp/metrics_tools.py tests/unit/service/test_support_bundle.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 2 source files
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

@@ -566,6 +566,66 @@ def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
 
 
 @pytest.mark.unit
+def test_support_bundle_setup_state_preserves_redacted_name_collisions() -> None:
+    """Preserve setup-state entries whose names redact to the same marker."""
+    provider_secret_one = "opaque-provider-name-one"
+    provider_secret_two = "opaque-provider-name-two"
+    client_secret_one = "opaque-client-name-one"
+    client_secret_two = "opaque-client-name-two"
+    config = HostSetupConfig(
+        providers={
+            provider_secret_one: ProviderConfig(status="ready-one"),
+            provider_secret_two: ProviderConfig(status="ready-two"),
+        },
+        clients={
+            client_secret_one: ClientIntegrationConfig(status="configured-one"),
+            client_secret_two: ClientIntegrationConfig(status="configured-two"),
+        },
+    )
+    secrets = frozenset(
+        {
+            provider_secret_one,
+            provider_secret_two,
+            client_secret_one,
+            client_secret_two,
+        }
+    )
+
+    setup_state = support_bundle_mod._setup_state(lambda: config, secrets=secrets)
+
+    assert setup_state["status"] == "loaded"
+    assert setup_state["providers"] == {
+        "<redacted>": {
+            "status": "ready-one",
+            "backend": None,
+            "source": None,
+            "credential_ref_present": False,
+            "credential_ref_kind": None,
+        },
+        "<redacted>#2": {
+            "status": "ready-two",
+            "backend": None,
+            "source": None,
+            "credential_ref_present": False,
+            "credential_ref_kind": None,
+        },
+    }
+    assert setup_state["clients"] == {
+        "<redacted>": {
+            "status": "configured-one",
+            "updated_at": None,
+        },
+        "<redacted>#2": {
+            "status": "configured-two",
+            "updated_at": None,
+        },
+    }
+    serialized = json.dumps(setup_state, sort_keys=True)
+    for raw_name in secrets:
+        assert raw_name not in serialized
+
+
+@pytest.mark.unit
 def test_isoformat_treats_naive_datetime_as_utc() -> None:
     """Treat naive support-bundle timestamps as UTC rather than host-local time."""
     if not hasattr(time, "tzset"):
