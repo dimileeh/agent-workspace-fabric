@@ -1015,6 +1015,7 @@ def _live_overlay_pin_signature(
     if live_lowerdir is None:
         return None
     signature = live_lowerdir.parent.name
+    shared_base = _shared_claude_base_dir(work_dir, signature)
     # Compare in *resolved* form: ``active_lowerdir`` reads the live lowerdir from
     # ``/proc/mounts`` in the kernel-resolved form (the kernel follows symlinks when
     # recording mount paths), while ``_shared_claude_base_dir`` is built from a
@@ -1023,9 +1024,18 @@ def _live_overlay_pin_signature(
     # valid shared base would fail this equality check and no pin would be recorded —
     # leaving a later teardown+remount to recompute against a since-changed host. The
     # GC protection code resolves both sides for exactly this reason.
-    if _shared_claude_base_dir(work_dir, signature).resolve(strict=False) != live_lowerdir.resolve(
-        strict=False
-    ):
+    if shared_base.resolve(strict=False) != live_lowerdir.resolve(strict=False):
+        return None
+    # The live overlay keeps serving off kernel-held inodes even after its lowerdir
+    # *path* is removed or renamed on the host, and ``resolve(strict=False)`` above
+    # matches such a stale ``/proc/mounts`` path without proving the dir still exists.
+    # Returning the signature anyway would have the caller realign ``base`` to that
+    # vanished tree, and ``_reconcile_fallback_edits_into_upper`` — which reads a
+    # missing ``base[rel]`` as "legacy is newer than base" — would then copy the whole
+    # legacy tree into the live overlay. Require the base to still be a real directory,
+    # mirroring ``_pinned_overlay_base``'s ``is_dir`` guard; otherwise return ``None`` so
+    # the caller defers the reconcile (and the legacy reap) and writes no pin.
+    if not shared_base.is_dir():
         return None
     return signature
 

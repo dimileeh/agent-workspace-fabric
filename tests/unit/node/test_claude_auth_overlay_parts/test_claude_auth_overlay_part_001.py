@@ -978,6 +978,91 @@ def test_live_mount_reuse_defers_reconcile_when_lowerdir_unrecoverable(
 
 
 @pytest.mark.unit
+def test_live_mount_reuse_defers_reconcile_when_recovered_base_dir_is_gone(
+    tmp_path: Path,
+) -> None:
+    """Live overlay reused but its recovered lowerdir no longer exists on disk.
+
+    A live overlay keeps serving off kernel-held inodes even after its lowerdir
+    *path* is removed/renamed on the host, and ``active_lowerdir`` still reports that
+    stale path. ``_live_overlay_pin_signature`` resolves it with ``strict=False`` (no
+    existence proof), so without the ``is_dir`` guard ``base`` would be realigned to a
+    vanished tree and ``_reconcile_fallback_edits_into_upper`` — reading every missing
+    ``base[rel]`` as "legacy is newer than base" — would copy the *whole* legacy tree
+    into the live overlay. The recovered base must still be a real directory; otherwise
+    the reconcile and reap are deferred (and no pin is written).
+    """
+
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    # An extra host file present at provision time becomes part of base A.
+    (host_home / ".claude" / "keeper.json").write_text('{"k": 1}\n')
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_gone",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_gone" / "claude"
+    signature_a = _host_claude_signature(host_home)
+    base_a = _shared_claude_base_dir(work_dir, signature_a)
+
+    # The agent accumulated writable overlay data, making ``upper`` non-empty so the
+    # surviving overlay overrides the legacy-copy guard on the retry.
+    (claude_root / "upper" / "agent.json").write_text('{"agent": true}\n')
+
+    # A transient remount failure on a prior provision degraded to a *legacy full copy*
+    # the agent then mutated: an unedited baseline file matching base A plus a genuine
+    # fallback edit absent from base A.
+    legacy = claude_root / ".claude"
+    legacy.mkdir(parents=True)
+    shutil.copy2(base_a / "keeper.json", legacy / "keeper.json")
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    # Worker killed after ``mount()`` (against base A) but before the pin write.
+    (claude_root / "base.signature").unlink()
+
+    # The live overlay's lowerdir *path* was removed on the host (the mount lives on via
+    # kernel-held inodes, and ``active_lowerdir`` still reports the now-stale path). The
+    # operator also changed ``~/.claude`` so a base recomputed now (base B) differs from
+    # base A — base A therefore stays gone across the retry rather than being rebuilt.
+    (host_home / ".claude" / "keeper.json").unlink()
+    assert _host_claude_signature(host_home) != signature_a
+    shutil.rmtree(base_a)
+    assert not base_a.is_dir()
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_gone",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The legacy copy is NOT reaped and its whole tree is NOT copied into the overlay:
+    # a vanished recovered base is treated as untrustworthy, so the reconcile is deferred.
+    assert legacy.exists()
+    assert (legacy / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    merged = claude_root / "merged"
+    upper = claude_root / "upper"
+    assert not (merged / "keeper.json").exists()
+    assert not (merged / "edited.json").exists()
+    assert not (upper / "keeper.json").exists()
+    assert not (upper / "edited.json").exists()
+    # No pin is guessed against a base directory that no longer exists.
+    assert not (claude_root / "base.signature").exists()
+    # The deferral is logged (not silent) so an operator can see the legacy copy lingers.
+    assert any(e.get("event") == "claude_auth_overlay_reconcile_deferred" for e in logs)
+
+
+@pytest.mark.unit
 def test_live_mount_reuse_pins_when_work_dir_is_symlinked(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     # ``AWF_WORK_DIR`` reached through a symlink (e.g. a bind-mount alias): the kernel
