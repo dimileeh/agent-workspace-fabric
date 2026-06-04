@@ -216,6 +216,28 @@ Evidence after Iteration 9:
 - `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_read_workspace_log_redacts_custom_compose_env_file_provider_secret -q`
   passed: `1 passed in 1.89s`.
 
+## Iteration 10
+
+Later MCP log test split commits expanded the PR's Python diff again. The
+focused added-line AST audit reported five PR-added definitions without
+docstrings in `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`.
+This iteration added concise behavior-neutral docstrings only.
+
+Evidence after Iteration 10:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=18`, `added_defs=167`,
+  `missing_docstrings_on_added_defs=5`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=18`, `added_defs=167`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_missing_workspace_or_stream_returns_none -q`
+  passed: `2 passed in 2.77s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring

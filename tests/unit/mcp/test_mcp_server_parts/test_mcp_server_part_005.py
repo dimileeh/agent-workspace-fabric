@@ -26,6 +26,7 @@ from tests.postgres import postgres_test_engine
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield an async session factory backed by the test Postgres database."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -42,6 +43,7 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
 
 
 def _log_redaction_context_for_settings(settings: Settings) -> int:
+    """Resolve the byte context used when redacting workspace log chunks."""
     service_settings = service_config.resolve_service_settings(settings)
     extra_secrets = metrics_tools_mod._workspace_log_redaction_secrets(  # noqa: SLF001
         settings,
@@ -51,12 +53,15 @@ def _log_redaction_context_for_settings(settings: Settings) -> int:
 
 
 class TestWorkspaceLogs:
+    """Coverage for MCP workspace log listing and chunk reads."""
+
     @pytest.mark.unit
     async def test_lists_and_reads_indexed_log_streams(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """List an indexed stream and read a requested byte window from it."""
         service = WorkspaceService(factory, log_root=tmp_path / "logs")
         mcp = build_mcp_server(service=service)
         async with factory() as session:
@@ -418,6 +423,7 @@ class TestWorkspaceLogs:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Return null MCP results for absent workspaces and log streams."""
         service = WorkspaceService(factory, log_root=tmp_path / "logs")
         mcp = build_mcp_server(service=service)
         async with factory() as session:

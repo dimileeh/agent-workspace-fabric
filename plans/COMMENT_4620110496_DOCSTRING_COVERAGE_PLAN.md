@@ -158,6 +158,20 @@ docstring:
 Add a concise behavior-neutral docstring to that helper only, re-run the
 focused audit, and run narrow Ruff plus the affected targeted MCP log test.
 
+### Iteration 10 Update
+
+Later MCP log test split commits expanded the PR's Python diff and the focused
+added-line audit now reports five PR-added definitions without docstrings:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::factory`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::_log_redaction_context_for_settings`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs.test_lists_and_reads_indexed_log_streams`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs.test_missing_workspace_or_stream_returns_none`
+
+Add concise behavior-neutral docstrings to those definitions only, re-run the
+focused audit, and run narrow Ruff plus the affected targeted MCP log tests.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports
