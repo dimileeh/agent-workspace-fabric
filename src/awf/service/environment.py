@@ -29,10 +29,7 @@ _COMPOSE_INTERPOLATION_PATTERN = re.compile(
 _COMPOSE_ENV_LINE_PATTERN = re.compile(
     r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*(?P<value>.*))?$"
 )
-_COMPOSE_ENV_EXPANSION_PATTERN = re.compile(
-    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:-|-|:\+|\+|:\?|\?)(?P<word>[^}]*))?\}|"
-    r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
-)
+_COMPOSE_ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _COMPOSE_ESCAPED_DOLLAR = "\0AWF_ESCAPED_DOLLAR\0"
 _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32
 _COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING = object()
@@ -251,10 +248,22 @@ def _consume_compose_quoted_value(
 
 def _consume_compose_single_quoted_value(raw_value: str) -> str:
     chars: list[str] = []
+    escaped = False
     for char in raw_value[1:]:
+        if escaped:
+            if char != "'":
+                chars.append("\\")
+            chars.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
         if char == "'":
             return "".join(chars)
         chars.append(char)
+    if escaped:
+        chars.append("\\")
     return "".join(chars)
 
 
@@ -298,57 +307,116 @@ def _compose_expand_env_value(
 ) -> str:
     interpolation_context = {**values, **caller_environ}
     escaped_value = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    expanded: list[str] = []
+    index = 0
+    while index < len(escaped_value):
+        char = escaped_value[index]
+        if char != "$":
+            expanded.append(char)
+            index += 1
+            continue
+        if index + 1 < len(escaped_value) and escaped_value[index + 1] == "{":
+            end_index = _find_compose_braced_expression_end(escaped_value, index + 1)
+            if end_index is None:
+                expanded.append(char)
+                index += 1
+                continue
+            expanded.append(
+                _compose_expand_braced_expression(
+                    escaped_value[index + 2 : end_index],
+                    caller_environ=caller_environ,
+                    values=values,
+                    interpolation_context=interpolation_context,
+                )
+            )
+            index = end_index + 1
+            continue
+        plain_match = _COMPOSE_ENV_NAME_PATTERN.match(escaped_value, index + 1)
+        if plain_match is None:
+            expanded.append(char)
+            index += 1
+            continue
+        expanded.append(_compose_env_lookup(interpolation_context, plain_match.group(0)) or "")
+        index = plain_match.end()
 
-    def _replace(match: re.Match[str]) -> str:
-        plain_name = match.group("plain")
-        if plain_name:
-            return _compose_env_lookup(interpolation_context, plain_name) or ""
-        name = match.group("braced")
-        operator = match.group("operator")
-        word = match.group("word") or ""
-        resolved = _compose_env_lookup(interpolation_context, name)
-        is_set = resolved is not None
-        is_non_empty = bool(resolved)
-        if operator is None:
+    return "".join(expanded).replace(_COMPOSE_ESCAPED_DOLLAR, "$")
+
+
+def _find_compose_braced_expression_end(value: str, open_brace_index: int) -> int | None:
+    depth = 1
+    index = open_brace_index + 1
+    while index < len(value):
+        if value[index] == "$" and index + 1 < len(value) and value[index + 1] == "{":
+            depth += 1
+            index += 2
+            continue
+        if value[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _compose_expand_braced_expression(
+    expression: str,
+    *,
+    caller_environ: Mapping[str, str],
+    values: Mapping[str, str],
+    interpolation_context: Mapping[str, str],
+) -> str:
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(expression)
+    if name_match is None:
+        return f"${{{expression}}}"
+    name = name_match.group(0)
+    remainder = expression[name_match.end() :]
+    if not remainder:
+        return _compose_env_lookup(interpolation_context, name) or ""
+    operator = ""
+    word = ""
+    for candidate in (":-", "-", ":+", "+", ":?", "?"):
+        if remainder.startswith(candidate):
+            operator = candidate
+            word = remainder[len(candidate) :]
+            break
+    if not operator:
+        return f"${{{expression}}}"
+    resolved = _compose_env_lookup(interpolation_context, name)
+    is_set = resolved is not None
+    is_non_empty = bool(resolved)
+    if operator == ":-":
+        return (
+            resolved or ""
+            if is_non_empty
+            else _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+        )
+    if operator == "-":
+        return (
+            resolved or ""
+            if is_set
+            else _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+        )
+    if operator == ":+":
+        return (
+            _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+            if is_non_empty
+            else ""
+        )
+    if operator == "+":
+        return (
+            _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+            if is_set
+            else ""
+        )
+    if operator == ":?":
+        if is_non_empty:
             return resolved or ""
-        if operator == ":-":
-            return (
-                resolved or ""
-                if is_non_empty
-                else _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
-            )
-        if operator == "-":
-            return (
-                resolved or ""
-                if is_set
-                else _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
-            )
-        if operator == ":+":
-            return (
-                _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
-                if is_non_empty
-                else ""
-            )
-        if operator == "+":
-            return (
-                _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
-                if is_set
-                else ""
-            )
-        if operator == ":?":
-            if is_non_empty:
-                return resolved or ""
-            raise ComposeEnvInterpolationError(name, word)
-        if operator == "?":
-            if is_set:
-                return resolved or ""
-            raise ComposeEnvInterpolationError(name, word)
-        return resolved or ""
-
-    return _COMPOSE_ENV_EXPANSION_PATTERN.sub(_replace, escaped_value).replace(
-        _COMPOSE_ESCAPED_DOLLAR,
-        "$",
-    )
+        raise ComposeEnvInterpolationError(name, word)
+    if operator == "?":
+        if is_set:
+            return resolved or ""
+        raise ComposeEnvInterpolationError(name, word)
+    return resolved or ""
 
 
 def _compose_env_lookup(environ: Mapping[str, str], key: str) -> str | None:

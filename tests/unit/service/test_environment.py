@@ -149,17 +149,24 @@ def test_compose_env_file_values_preserves_raw_dollar_values(
 
 
 @pytest.mark.unit
-def test_compose_env_file_values_treats_single_quoted_backslashes_as_literal(
+def test_compose_env_file_values_honors_escaped_quote_in_single_quoted_values(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from awf.service.environment import compose_env_file_values
 
     env_file = tmp_path / ".env"
-    env_file.write_text("AWF_API_TOKEN='sup\\'$er'\n", encoding="utf-8")
+    env_file.write_text(
+        "AWF_API_TOKEN='sup\\'$er'\nPHRASE='Let\\'s go!'\nPATH_VALUE='C:\\awf\\service'\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("er", "expanded")
 
-    assert compose_env_file_values(env_file)["AWF_API_TOKEN"] == "sup\\"
+    values = compose_env_file_values(env_file)
+
+    assert values["AWF_API_TOKEN"] == "sup'$er"
+    assert values["PHRASE"] == "Let's go!"
+    assert values["PATH_VALUE"] == r"C:\awf\service"
 
 
 @pytest.mark.unit
@@ -252,6 +259,30 @@ def test_compose_env_file_values_prefers_caller_env_for_interpolation(
 
     assert values["BASE_URL"] == "http://from-file"
     assert values["API_URL"] == "http://from-shell/v1"
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_expands_nested_default_interpolation(
+    tmp_path,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AWF_HOST_WORK_DIR=${CUSTOM_DIR:-${HOME}/.awf/service}",
+                "FALLBACK_CHAIN=${MISSING:-${ALSO_MISSING:-fallback}}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    values = compose_env_file_values(env_file, environ={"HOME": "/home/operator"})
+
+    assert values["AWF_HOST_WORK_DIR"] == "/home/operator/.awf/service"
+    assert values["FALLBACK_CHAIN"] == "fallback"
 
 
 @pytest.mark.unit
