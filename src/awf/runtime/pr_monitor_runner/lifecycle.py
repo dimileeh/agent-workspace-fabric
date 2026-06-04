@@ -902,6 +902,21 @@ async def _gc_completed_workspace_filesystem(
         workspace_id=workspace_id,
         compose_project=compose_project,
     )
+    # Empty/no-delete plans never enter GC's candidate deletion loop, so GC has
+    # no chance to perform its normal post-compose auth overlay unmount. Run the
+    # successful-fallback unmount before any partial-result return; non-compose
+    # side effects can still make GC partial after containers are already down.
+    if compose_teardown is not None and not any(
+        candidate.workspace_id == workspace_id for candidate in result.plan.candidates
+    ):
+        empty_plan_teardown = result.compose_teardowns.get(workspace_id)
+        # A failed fallback teardown may leave agent containers alive. Keep the
+        # overlay mounted in that case so runtime side effects stay preserved
+        # together with the failed compose teardown evidence.
+        if empty_plan_teardown is not None and empty_plan_teardown.ok:
+            await asyncio.to_thread(
+                _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
+            )
     if result.status == "partial":
         log_fields: dict[str, object] = {
             "workspace_id": workspace_id,
@@ -914,19 +929,6 @@ async def _gc_completed_workspace_filesystem(
             log_fields["compose_teardowns"] = failed_compose_teardowns
         _log.warning("monitor.filesystem_gc_failed", **log_fields)
         return
-    # Empty/no-delete plans never enter GC's candidate deletion loop, so GC has
-    # no chance to perform its normal post-compose auth overlay unmount.
-    if compose_teardown is not None and not any(
-        candidate.workspace_id == workspace_id for candidate in result.plan.candidates
-    ):
-        empty_plan_teardown = result.compose_teardowns.get(workspace_id)
-        # A failed fallback teardown may leave agent containers alive. Keep the
-        # overlay mounted in that case so runtime side effects stay preserved
-        # together with the failed compose teardown evidence.
-        if empty_plan_teardown is not None and empty_plan_teardown.ok:
-            await asyncio.to_thread(
-                _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
-            )
     if not result.plan.candidates and result.plan.preserved:
         preserved = result.plan.preserved[0]
         deferred_log_fields: dict[str, object] = {

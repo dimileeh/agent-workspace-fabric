@@ -756,7 +756,7 @@ async def test_completed_workspace_gc_unmounts_auth_overlay_when_plan_is_empty(
 
 
 @pytest.mark.unit
-async def test_completed_workspace_gc_skips_empty_plan_auth_overlay_unmount_on_partial_result(
+async def test_completed_workspace_gc_unmounts_empty_plan_auth_overlay_on_non_compose_partial(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -806,7 +806,7 @@ async def test_completed_workspace_gc_skips_empty_plan_auth_overlay_unmount_on_p
             compose_file=compose_file,
         )
 
-    assert auth_teardowns == []
+    assert auth_teardowns == [(work_dir, ws_id)]
     assert any(
         record.get("event") == "monitor.filesystem_gc_failed"
         and record.get("workspace_id") == ws_id
