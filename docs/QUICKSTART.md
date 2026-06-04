@@ -56,7 +56,7 @@ uv tool upgrade agent-workspace-fabric
 # or:
 pipx upgrade agent-workspace-fabric
 awf start
-awf smoke run --mocked-local --format pretty
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
 Uninstall:
@@ -97,7 +97,7 @@ Upgrade:
 git pull
 uv tool install . --force
 awf start --source-checkout "$PWD"
-awf smoke run --mocked-local --format pretty
+awf smoke run --project ../awf-eval-project --mocked-local --format pretty
 ```
 
 Uninstall:
@@ -138,7 +138,7 @@ Upgrade:
 git pull
 uv sync --extra dev
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
-uv run --python 3.12 --extra dev awf smoke run --mocked-local --format pretty
+uv run --python 3.12 --extra dev awf smoke run --project ../awf-eval-project --mocked-local --format pretty
 ```
 
 Uninstall:

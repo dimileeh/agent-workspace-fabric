@@ -50,6 +50,11 @@ rollback smoke commands in `docs/UPGRADE.md` must pass the project path that was
 initialized during first run because `awf smoke run` defaults `--project` to the
 current working directory.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HAx2p`: Upgrade smoke
+commands in `docs/QUICKSTART.md` must pass the same project paths initialized in
+their lanes because `awf smoke run` defaults `--project` to the current working
+directory.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

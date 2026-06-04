@@ -140,6 +140,34 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 
 Result: `All checks passed!`.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HAx2p`:
+
+- `docs/QUICKSTART.md` now passes the lane's initialized project path to each
+  upgrade smoke command.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Quickstart smoke
+  command lines that omit `--project`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_is_canonical_and_not_a_stub tests/unit/docs/test_public_docs_status.py::test_quickstart_presents_available_complete_first_run_lanes tests/unit/docs/test_public_docs_status.py::test_quickstart_smoke_commands_reuse_initialized_project_paths -q
+```
+
+Red-phase result after updating the focused assertion: failed because
+`docs/QUICKSTART.md` still used bare upgrade smoke commands without `--project`.
+
+Final repair result: `3 passed in 0.56s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `27 passed in 0.91s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.

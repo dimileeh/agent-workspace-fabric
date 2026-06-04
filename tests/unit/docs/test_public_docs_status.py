@@ -116,7 +116,7 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "awf setup" in quickstart_text
     assert "awf start" in quickstart_text
     assert "awf init <path>" in quickstart_text
-    assert "awf smoke run --mocked-local --format pretty" in quickstart_text
+    assert "awf smoke run --project" in quickstart_text
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
@@ -142,7 +142,8 @@ def test_quickstart_presents_available_complete_first_run_lanes() -> None:
         assert "awf setup" in section
         assert "awf start" in section
         assert ("awf init <path>" in section) or re.search(r"(?m)^awf init \.\s*$", section)
-        assert "awf smoke run --mocked-local --format pretty" in section
+        assert "smoke run" in section
+        assert "--mocked-local --format pretty" in section
         assert "Upgrade:" in section
         assert "Uninstall:" in section
 
@@ -156,6 +157,16 @@ def test_quickstart_presents_available_complete_first_run_lanes() -> None:
     assert "AWF_SETUP_PLACEHOLDER" not in quickstart_text
     assert "AWF_START_PLACEHOLDER" not in quickstart_text
     assert not re.search(r"(?m)^awf service bootstrap\s*$", quickstart_text)
+
+
+def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
+    """Assert Quickstart smoke commands validate the lane's initialized project."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+
+    smoke_lines = [line for line in quickstart_text.splitlines() if "smoke run" in line]
+
+    assert smoke_lines
+    assert all("--project " in line for line in smoke_lines)
 
 
 def test_markdown_section_accepts_trailing_heading_whitespace() -> None:
