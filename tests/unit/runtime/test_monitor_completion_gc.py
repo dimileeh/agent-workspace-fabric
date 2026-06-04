@@ -23,6 +23,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor_runner import lifecycle
+from awf.service import gc as gc_service
 from awf.service.gc import (
     COMPOSE_TEARDOWN_CALLBACK_RAISED,
     WorkspaceCleanupExecutionStatus,
@@ -622,6 +623,97 @@ async def test_completed_workspace_gc_tracks_callback_raised_when_gc_raises_afte
 
 
 @pytest.mark.unit
+async def test_completed_workspace_gc_tracks_shared_callback_failure_result_when_gc_raises_after_teardown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    class _ChangingMessageError(RuntimeError):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __str__(self) -> str:
+            self.calls += 1
+            return f"compose unavailable {self.calls}"
+
+    work_dir = tmp_path / "service"
+    ws_id = "ws-gc-shared-compose-callback"
+    compose_file = work_dir / "compose" / ws_id / "compose.yml"
+    runner = SimpleNamespace(
+        _work_dir=work_dir,
+        _deps=SimpleNamespace(session_factory=factory),
+    )
+    compose_patch, _compose_calls = mock_completed_compose_manager(exc=_ChangingMessageError())
+    compose_results: dict[str, WorkspaceGCComposeTeardownResult] = {}
+
+    async def _raise_after_real_compose_teardown_runner(
+        _session_factory: async_sessionmaker[AsyncSession],
+        *,
+        compose_teardown: object,
+        **_kwargs: object,
+    ) -> WorkspaceGCResult:
+        assert callable(compose_teardown)
+        candidate = WorkspaceGCCandidate(
+            workspace_id=ws_id,
+            status=WorkspaceStatus.completed.value,
+            updated_at=datetime.now(UTC),
+            age_hours=0,
+            reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+            worktree=WorkspaceGCPath(
+                kind="worktree",
+                path=work_dir / "git" / "worktrees" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose=WorkspaceGCPath(
+                kind="compose",
+                path=work_dir / "compose" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            auth=WorkspaceGCPath(
+                kind="auth",
+                path=work_dir / "auth" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose_project_name="candidate_project",
+        )
+        plan = WorkspaceGCPlan(
+            work_dir=work_dir,
+            min_age_hours=24,
+            cutoff_at=datetime.now(UTC),
+            include_statuses=(WorkspaceStatus.completed.value,),
+            exclude_statuses=(),
+            candidates=[candidate],
+            preserved=[],
+        )
+        compose_results.update(await gc_service._run_gc_compose_teardowns(plan, compose_teardown))
+        raise RuntimeError("database unavailable after compose callback")
+
+    with (
+        compose_patch,
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=_raise_after_real_compose_teardown_runner,
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="monitor_project",
+            compose_file=compose_file,
+        )
+
+    failed = [
+        record for record in captured if record.get("event") == "monitor.compose_teardown_failed"
+    ]
+    assert failed
+    assert compose_results[ws_id].error is not None
+    assert failed[0].get("error") == compose_results[ws_id].error
+
+
+@pytest.mark.unit
 async def test_completed_workspace_gc_unmounts_auth_overlay_when_plan_is_empty(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -661,6 +753,66 @@ async def test_completed_workspace_gc_unmounts_auth_overlay_when_plan_is_empty(
     expected_compose_calls = [("proj_from_monitor", compose_file, ws_id, True)]
     assert compose_calls == expected_compose_calls
     assert teardown_calls == [(work_dir, ws_id, expected_compose_calls)]
+
+
+@pytest.mark.unit
+async def test_completed_workspace_gc_skips_empty_plan_auth_overlay_unmount_on_partial_result(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-empty-plan-partial-auth"
+    compose_file = work_dir / "compose" / ws_id / "compose.yml"
+    teardown = WorkspaceGCComposeTeardownResult(
+        status="succeeded",
+        reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+    )
+    fake_result = _empty_workspace_gc_result(
+        work_dir,
+        workspace_id=ws_id,
+        compose_teardown=teardown,
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+    )
+    fake_result.reservation_releases[ws_id] = {
+        "released_count": 0,
+        "reason_code": "TERMINAL_GC",
+        "error": "db connection failed",
+    }
+    runner = SimpleNamespace(
+        _work_dir=work_dir,
+        _deps=SimpleNamespace(session_factory=factory),
+    )
+    auth_teardowns: list[tuple[Path, str]] = []
+
+    def _record_auth_teardown(work_dir: Path, workspace_id: str) -> None:
+        auth_teardowns.append((work_dir, workspace_id))
+
+    with (
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=AsyncMock(return_value=fake_result),
+        ),
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle._teardown_completed_workspace_auth_overlay",
+            new=_record_auth_teardown,
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="proj_from_monitor",
+            compose_file=compose_file,
+        )
+
+    assert auth_teardowns == []
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_failed"
+        and record.get("workspace_id") == ws_id
+        and record.get("reservation_releases", {}).get(ws_id, {}).get("error") is not None
+        for record in captured
+    )
 
 
 @pytest.mark.unit

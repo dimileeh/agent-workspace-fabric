@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from pathlib import Path
@@ -136,6 +137,7 @@ _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_STATES: frozenset[tuple[str, str]] = frozen
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
 CLEANUP_EXECUTION_PARTIAL = "CLEANUP_EXECUTION_PARTIAL"
+_COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR = "_awf_compose_teardown_result"
 
 _RUNTIME_INSPECTOR = RuntimeInspector()
 
@@ -149,6 +151,23 @@ WorkspaceGCWorktreeRemove = Callable[
     [WorkspaceGCCandidate],
     WorkspaceGCWorktreeRemoveResult | Awaitable[WorkspaceGCWorktreeRemoveResult],
 ]
+
+
+def _compose_teardown_result_for_exception(exc: Exception) -> WorkspaceGCComposeTeardownResult:
+    cached = getattr(exc, _COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR, None)
+    if isinstance(cached, WorkspaceGCComposeTeardownResult):
+        return cached
+    error = str(exc)
+    error_message = f"{type(exc).__name__}: {error}" if error else type(exc).__name__
+    result = WorkspaceGCComposeTeardownResult(
+        status="failed",
+        reason_code=COMPOSE_TEARDOWN_CALLBACK_RAISED,
+        error=error_message[:400],
+    )
+    with suppress(Exception):
+        setattr(exc, _COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR, result)
+    return result
+
 
 # Prunes stale cached companion images once per GC run (independent of the
 # per-workspace candidates). Returns a small report dict for the GC payload.
@@ -884,13 +903,7 @@ async def _run_gc_compose_teardowns(
         try:
             teardown = await _run_compose_teardown(candidate, compose_teardown)
         except Exception as exc:
-            error = str(exc)
-            error_message = f"{type(exc).__name__}: {error}" if error else type(exc).__name__
-            teardown = WorkspaceGCComposeTeardownResult(
-                status="failed",
-                reason_code=COMPOSE_TEARDOWN_CALLBACK_RAISED,
-                error=error_message[:400],
-            )
+            teardown = _compose_teardown_result_for_exception(exc)
         if teardown is not None:
             compose_teardowns[candidate.workspace_id] = teardown
     return compose_teardowns
@@ -905,6 +918,8 @@ def _workspace_ids_after_compose_teardown(
     for candidate in plan.candidates:
         candidate_ids.add(candidate.workspace_id)
         teardown = compose_teardowns.get(candidate.workspace_id)
+        # No teardown entry means no compose callback was supplied; preserve the
+        # legacy GC semantics where candidate side effects proceed unconditionally.
         if teardown is None or teardown.ok:
             workspace_ids.append(candidate.workspace_id)
     # Non-candidate compose teardowns come from the single-workspace fallback

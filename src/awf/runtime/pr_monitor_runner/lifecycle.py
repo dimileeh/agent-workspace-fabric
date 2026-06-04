@@ -68,11 +68,11 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.service.gc import (
-    COMPOSE_TEARDOWN_CALLBACK_RAISED,
     WorkspaceGCCandidate,
     WorkspaceGCComposeTeardown,
     WorkspaceGCComposeTeardownResult,
     WorkspaceGCResult,
+    _compose_teardown_result_for_exception,
     run_workspace_filesystem_gc,
 )
 
@@ -821,13 +821,7 @@ def _track_completed_workspace_compose_teardown(
             if isawaitable(result):
                 result = await result
         except Exception as exc:
-            error = str(exc)
-            error_message = f"{type(exc).__name__}: {error}" if error else type(exc).__name__
-            tracked_results[candidate.workspace_id] = WorkspaceGCComposeTeardownResult(
-                status="failed",
-                reason_code=COMPOSE_TEARDOWN_CALLBACK_RAISED,
-                error=error_message[:400],
-            )
+            tracked_results[candidate.workspace_id] = _compose_teardown_result_for_exception(exc)
             # Re-raise so ``_run_gc_compose_teardowns`` records the failure in
             # ``result.compose_teardowns``; this tracked copy is only for GC
             # exception paths.
@@ -908,6 +902,18 @@ async def _gc_completed_workspace_filesystem(
         workspace_id=workspace_id,
         compose_project=compose_project,
     )
+    if result.status == "partial":
+        log_fields: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "deleted_path_count": len(result.deleted_paths),
+            "delete_errors": [error.to_dict() for error in result.delete_errors],
+            "reservation_releases": result.reservation_releases,
+        }
+        failed_compose_teardowns = _failed_compose_teardowns_for_gc_log(result)
+        if failed_compose_teardowns:
+            log_fields["compose_teardowns"] = failed_compose_teardowns
+        _log.warning("monitor.filesystem_gc_failed", **log_fields)
+        return
     # Empty/no-delete plans never enter GC's candidate deletion loop, so GC has
     # no chance to perform its normal post-compose auth overlay unmount.
     if compose_teardown is not None and not any(
@@ -921,18 +927,6 @@ async def _gc_completed_workspace_filesystem(
             await asyncio.to_thread(
                 _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
             )
-    if result.status == "partial":
-        log_fields: dict[str, object] = {
-            "workspace_id": workspace_id,
-            "deleted_path_count": len(result.deleted_paths),
-            "delete_errors": [error.to_dict() for error in result.delete_errors],
-            "reservation_releases": result.reservation_releases,
-        }
-        failed_compose_teardowns = _failed_compose_teardowns_for_gc_log(result)
-        if failed_compose_teardowns:
-            log_fields["compose_teardowns"] = failed_compose_teardowns
-        _log.warning("monitor.filesystem_gc_failed", **log_fields)
-        return
     if not result.plan.candidates and result.plan.preserved:
         preserved = result.plan.preserved[0]
         deferred_log_fields: dict[str, object] = {
