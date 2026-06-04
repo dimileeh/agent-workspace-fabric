@@ -456,6 +456,36 @@ def test_package_upgrade_docs_restore_service_env_before_start() -> None:
 def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
     """Assert lowercase fi in unrelated text is not treated as a shell keyword."""
     upgrade_line = "pipx upgrade agent-workspace-fabric"
+    section = (
+        "\n"
+        + "\n".join(
+            [
+                upgrade_line,
+                "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then",
+                (
+                    '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running '
+                    'local Core or persist it in .env before upgrading}"'
+                ),
+                "  export AWF_API_TOKEN",
+                "  # awf_config_file can be configured elsewhere",
+                "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
+                '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"',
+                "  # awf_config_file fallback stays outside persisted .env",
+                "fi",
+                "fi",
+                "awf start",
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.raises(AssertionError, match="must restore missing service env before restart"):
+        _assert_package_upgrade_restores_service_env("example", section, upgrade_line)
+
+
+def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
+    """Assert prose mentions of awf start do not satisfy restart command checks."""
+    upgrade_line = "pipx upgrade agent-workspace-fabric"
     section = "\n".join(
         [
             upgrade_line,
@@ -465,17 +495,15 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
                 'local Core or persist it in .env before upgrading}"'
             ),
             "  export AWF_API_TOKEN",
-            "  # awf_config_file can be configured elsewhere",
+            "fi",
             "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
             '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"',
-            "  # awf_config_file fallback stays outside persisted .env",
             "fi",
-            "fi",
-            "awf start",
+            "Before running awf start, inspect the saved environment.",
         ]
     )
 
-    with pytest.raises(AssertionError, match="must restore missing service env before restart"):
+    with pytest.raises(AssertionError, match="missing restart command"):
         _assert_package_upgrade_restores_service_env("example", section, upgrade_line)
 
 
@@ -1018,9 +1046,10 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     api_export_line = "  export AWF_API_TOKEN"
     unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     setup_line = 'awf setup --source-checkout "$PWD"'
+    start_line = 'awf start --source-checkout "$PWD"'
     global_commands = (
         setup_line,
-        'awf start --source-checkout "$PWD"',
+        start_line,
         "awf service status --format pretty",
         "awf smoke run --project <path> --mocked-local --format pretty",
     )
@@ -1070,6 +1099,7 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
         < password_restore_start_index
         < password_restore_end_index
         < global_section.index(setup_line)
+        < global_section.index(start_line)
     )
     for command in global_commands:
         assert command in global_section
@@ -1490,7 +1520,7 @@ def _assert_package_upgrade_restores_service_env(
     )
     password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
     password_export_line = '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
-    start_line = "awf start"
+    start_line = "\nawf start\n"
 
     assert upgrade_line in section, f"{label} is missing upgrade command"
     assert api_guard_line in section, f"{label} must prefer persisted AWF_API_TOKEN"

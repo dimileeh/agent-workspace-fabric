@@ -186,6 +186,12 @@ the process environment. If neither persisted file carries the password, the
 snippets must require the operator to restore the running local Core password in
 the shell instead of defaulting to `awf_dev`.
 
+Post-review adjustment for review-level comment `issue:4620140358`: package
+upgrade env-restore assertions must match the standalone `awf start` command
+line instead of prose substrings, and the global source-checkout rollback
+assertion must explicitly prove the documented stop, env-restore, setup, and
+start ordering.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -213,6 +219,12 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HIPd1`:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata -q
+```
+
+Focused repair command for review-level comment `issue:4620140358`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_matches_restart_command_line tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata -q
 ```
 
 Focused lint command:

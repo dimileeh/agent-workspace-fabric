@@ -71,6 +71,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address review-level comment `issue:4620140358` by guarding the
   reviewer-cited docs ordering assertions with explicit presence checks, while
   leaving the already-correct source-checkout token restoration docs unchanged.
+- Complete: Address review-level comment `issue:4620140358` by anchoring the
+  package upgrade restart assertion to the standalone `awf start` command line
+  and extending the global source-checkout rollback ordering assertion through
+  `awf start --source-checkout "$PWD"`.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -1011,6 +1015,45 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `47 passed in 1.42s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `tests/unit/docs/test_public_docs_status.py` now rejects package-upgrade docs
+  where only prose, not a standalone command line, mentions `awf start`.
+- `_assert_package_upgrade_restores_service_env` now anchors the restart check
+  to `\nawf start\n`, matching the stricter rollback assertion style.
+- `test_upgrade_global_source_checkout_rollback_refreshes_metadata` now asserts
+  the source-checkout rollback order through
+  `awf start --source-checkout "$PWD"`, not just through metadata refresh.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_matches_restart_command_line -q
+```
+
+Red-phase result after adding the focused regression: failed because a prose
+mention of `awf start` satisfied the package upgrade helper.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_matches_restart_command_line tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword -q
+```
+
+Result: `4 passed in 0.69s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
