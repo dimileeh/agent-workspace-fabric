@@ -1244,6 +1244,62 @@ class TestWorkspaceLogs:
         }
 
     @pytest.mark.unit
+    async def test_read_workspace_log_preserves_leading_invalid_utf8_at_offset_zero(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Return leading invalid UTF-8 bytes when the caller reads from offset zero."""
+        for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+
+        log_root = tmp_path / "logs"
+        service = WorkspaceService(factory, log_root=log_root)
+        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe invalid leading log bytes",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            raw_log = log_root / workspace.id / "agent.stdout.log"
+            raw_log.parent.mkdir(parents=True)
+            raw_bytes = b"\x80prefix\n"
+            raw_log.write_bytes(raw_bytes)
+            await WorkspaceLogStreamRepository(session).create_or_get(
+                workspace_id=workspace.id,
+                stream_id="agent.stdout",
+                source="agent",
+                name="Agent stdout",
+                kind="stdout",
+                path=str(raw_log),
+            )
+            await session.commit()
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": 0,
+                "limit_bytes": len(raw_bytes),
+            },
+        )
+
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": 0,
+            "next_offset": len(raw_bytes),
+            "eof": True,
+            "data": "\ufffdprefix\n",
+        }
+
+    @pytest.mark.unit
     async def test_read_workspace_log_does_not_skip_short_non_eof_expanded_read(
         self,
         factory: async_sessionmaker[AsyncSession],

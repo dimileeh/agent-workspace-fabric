@@ -195,7 +195,7 @@ def _workspace_log_projection_text(
     if not isinstance(raw_bytes, bytes):
         return str(result["text"]), result_offset
 
-    boundary_shift = _leading_utf8_continuation_byte_count(raw_bytes)
+    boundary_shift = _leading_utf8_continuation_byte_count(raw_bytes) if result_offset > 0 else 0
     return raw_bytes[boundary_shift:].decode("utf-8", errors="surrogateescape"), (
         result_offset + boundary_shift
     )
