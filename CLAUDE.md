@@ -77,8 +77,10 @@ code changes.
 ### CI gate
 
 CI requires the `ci-required` rollup job, which depends on `lint-and-type`,
-`python-full-coverage` (Postgres service + 99% coverage), `console`, and `release-artifacts`.
-Coverage runs `pytest -n 8 --dist=loadscope` then `scripts/ci/check_coverage_threshold.py`.
+`python-full-coverage` (aggregate 99% coverage gate), `console`, and `release-artifacts`.
+Coverage execution runs in parallel through `python-coverage-shards`, then
+`python-full-coverage` combines the shard artifacts and runs
+`scripts/ci/check_coverage_threshold.py`.
 
 ## Non-negotiable engineering rules (from AGENTS.md)
 

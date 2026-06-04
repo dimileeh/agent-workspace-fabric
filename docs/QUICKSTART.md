@@ -46,52 +46,52 @@ formula audit.
 
 ## Set Up And Start AWF
 
-The current runnable first-run sequence is local Core startup, health check,
-then project onboarding. Export the required local service values before
-starting Core so Compose can interpolate the API, worker, and Postgres service
-environment:
+The recommended first-run sequence is setup, start, health check, then project
+onboarding. Keep local runtime values in root `.env` so the CLI, worker, MCP
+server, and raw Docker Compose lane all read the same configuration:
 
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf service bootstrap
+cp .env.example .env
+awf setup
+awf start
 awf service status --format pretty
 ```
 
-`awf service bootstrap` starts the local AWF Core stack, and
+`awf setup` checks host readiness and imports any legacy `docker/compose/.env`
+values into root `.env`. `awf start` starts the local AWF Core stack, and
 `awf service status --format pretty` confirms API, database, Docker, image,
 disk, provider, and cleanup health.
 
-`awf setup` and `awf start` are reserved first-run command surfaces. They are
-present in help for the future grammar, but today `awf setup` exits with
-`AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
-`awf service bootstrap` until those setup and start slices land.
+For source checkouts or raw Docker installs, root Compose can bring up the full
+local stack with safe loopback-only defaults:
 
-In source checkouts with local Compose assets, `awf service bootstrap` reads
-`docker/compose/.env` when that file already exists. If you prefer persistent
-values across shells, copy `.env.example` to `docker/compose/.env` and set
-`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and `AWF_GITHUB_TOKEN` there before
-bootstrapping.
+```bash
+docker compose up --build
+```
+
+Open <http://127.0.0.1:3000> for the console, or call the API at
+<http://127.0.0.1:8000>. Protected local API calls use
+`Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
 
 If you set or refresh the GitHub token after starting Core, rerun the service
-bootstrap so Compose recreates the service containers with the updated
+start command so Compose recreates the service containers with the updated
 environment:
 
 ```bash
-awf service bootstrap
+awf start
 ```
 
 ## Open The Console
 
-The local console runs separately from the service stack:
+The raw Docker Compose path starts the console for you. When using
+`awf setup` / `awf start`, or when developing the console itself, run it
+manually:
 
 ```bash
 npm --prefix apps/console run dev
 ```
 
-Open <http://localhost:3000>. AWF uses `localhost` as the default local console
-host in smoke reports.
+Open <http://127.0.0.1:3000>. AWF uses a local console URL in smoke reports.
 
 ## Onboard A Project
 

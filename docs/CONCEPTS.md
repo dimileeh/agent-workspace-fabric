@@ -376,9 +376,8 @@ the shell running Docker Compose does not expose it. Set `AWF_HOST_HOME` if that
 shell does not expose the operator home as `${HOME}`.
 
 Credential values used by Compose interpolation must be present in the shell
-that starts the stack or in a Compose env file such as `docker/compose/.env`.
-The repo-root `.env` is still useful for Python `awf` commands, but the
-control-plane containers only see values that Docker Compose injects. On macOS,
+that starts the stack or in the root `.env`. The same root `.env` is also read
+by Python `awf` commands. On macOS,
 `gh` auth stored only in Keychain-backed `~/.config/gh` is not usable inside the
 containers; set `AWF_GITHUB_TOKEN` or `GH_TOKEN`, commonly from
 `gh auth token`, before starting the stack.
@@ -392,7 +391,7 @@ workspace log store.
 Start from a clean checkout with the repeatable bootstrap command:
 
 ```bash
-cp .env.example docker/compose/.env
+cp .env.example .env
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
@@ -406,9 +405,15 @@ recreated and Alembic upgrades are idempotent.
 The lower-level Compose workflow remains supported:
 
 ```bash
-docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up --build
+docker compose up --build
 ```
+
+That raw Compose path builds the control-plane image, builds
+`awf-agent-runtime:latest`, starts Postgres, runs migrations, starts the API and
+worker, and serves the local console at <http://127.0.0.1:3000>. It uses
+loopback-only local defaults for `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD`;
+set explicit values in root `.env` when you want a non-default local token,
+database password, provider credential, or port.
 
 On Linux, host Ollama is often bound only to `127.0.0.1:11434`, which Docker
 containers cannot reach through `host.docker.internal`. AWF includes a
@@ -417,7 +422,7 @@ socat listener on the Docker bridge address and forwards it to host-local
 Ollama. It is disabled by default and is not needed on macOS Docker Desktop.
 
 ```bash
-cat >> docker/compose/.env <<'EOF'
+cat >> .env <<'EOF'
 COMPOSE_PROFILES=ollama-bridge
 AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 OLLAMA_HOST=http://host.docker.internal:11434
@@ -490,9 +495,10 @@ The service-mode default database URL is local Postgres
 (`postgresql+asyncpg://awf:...@localhost:5433/awf`). Tests, throwaway script
 runs, and the always-on service all use PostgreSQL.
 
-The local Compose stack requires `AWF_API_TOKEN`. Set a local bearer token in
-the shell or `docker/compose/.env` before starting the stack, and use the same
-value in the console `.env.local` file.
+The local Compose stack defaults `AWF_API_TOKEN` to `local-dev-token` for
+loopback-bound source-checkout cold starts. Set a local bearer token in the
+shell or `.env` before starting the stack when you want a non-default token; use
+the same value for manual console development.
 
 The AWF Postgres database is only the control-plane database. Project and
 workspace databases remain separate and profile-isolated; if a workspace
@@ -517,20 +523,20 @@ version label after building them:
 
 ```bash
 export AWF_LOCAL_VERSION="$(git rev-parse --short HEAD)"
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml build
+docker compose build
 docker tag awf-control-plane:local "awf-control-plane:${AWF_LOCAL_VERSION}"
-docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
 docker tag awf-agent-runtime:latest "awf-agent-runtime:${AWF_LOCAL_VERSION}"
 docker image inspect "awf-control-plane:${AWF_LOCAL_VERSION}"
 docker image inspect "awf-agent-runtime:${AWF_LOCAL_VERSION}"
 ```
 
-The explicit `--env-file docker/compose/.env` form is preferred for repeatable
-local operations. If the needed Compose variables are already exported in your
-shell, the equivalent control-plane image rebuild command is:
+Run raw Compose commands from the AWF install/source root so Compose reads the
+same `.env` file as `awf start` and `awf service bootstrap`. If the needed
+Compose variables are already exported in your shell, they still override
+matching `.env` entries:
 
 ```bash
-docker compose -f docker/compose/local-service.yml build
+docker compose build
 ```
 
 The Compose stack still points at `awf-control-plane:local` by default, and
@@ -546,13 +552,12 @@ rerun migrations, and check health:
 ```bash
 export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
 mkdir -p "$AWF_HOST_WORK_DIR/backups"
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d postgres
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
+docker compose up -d postgres
+docker compose exec -T postgres \
   pg_dump -U awf -d awf -Fc \
   > "$AWF_HOST_WORK_DIR/backups/awf-control-plane-pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).dump"
 
-docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml build
+docker compose build
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
@@ -580,17 +585,17 @@ Capture a custom-format backup into the service work directory:
 ```bash
 export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
 mkdir -p "$AWF_HOST_WORK_DIR/backups"
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d postgres
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
+docker compose up -d postgres
+docker compose exec -T postgres \
   pg_dump -U awf -d awf -Fc \
   > "$AWF_HOST_WORK_DIR/backups/awf-control-plane-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
 
-The explicit env-file form avoids depending on shell state. If the needed
-Compose variables are already exported, the equivalent Postgres exec prefix is
-`docker compose -f docker/compose/local-service.yml exec -T postgres`.
-The equivalent pre-restore stop command is
-`docker compose -f docker/compose/local-service.yml stop api worker`.
+Running from the AWF root avoids depending on shell state because Compose reads
+root `.env`. If the needed Compose variables are already exported, they override
+matching `.env` entries. The Postgres exec prefix is
+`docker compose exec -T postgres`, and the pre-restore stop command is
+`docker compose stop api worker`.
 
 Restore only when the API and worker are stopped. This avoids live writes
 during restore and makes the backup the single source of control-plane truth.
@@ -598,16 +603,16 @@ Before restore, stop API and worker.
 
 ```bash
 export AWF_BACKUP="$HOME/.awf/service/backups/awf-control-plane-YYYYmmddTHHMMSSZ.dump"
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop api worker
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d postgres
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
+docker compose stop api worker
+docker compose up -d postgres
+docker compose exec -T postgres \
   dropdb -U awf --maintenance-db=postgres --if-exists awf
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
+docker compose exec -T postgres \
   createdb -U awf --maintenance-db=postgres awf
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
+docker compose exec -T postgres \
   pg_restore -U awf -d awf --no-owner < "$AWF_BACKUP"
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up --build --force-recreate migrate
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d api worker
+docker compose up --build --force-recreate migrate
+docker compose up -d api worker
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
@@ -627,7 +632,7 @@ To roll back images to a saved local version:
 export AWF_ROLLBACK_VERSION=<previous-git-sha-or-local-label>
 docker tag "awf-control-plane:${AWF_ROLLBACK_VERSION}" awf-control-plane:local
 docker tag "awf-agent-runtime:${AWF_ROLLBACK_VERSION}" awf-agent-runtime:latest
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d --force-recreate api worker
+docker compose up -d --force-recreate api worker
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
@@ -651,17 +656,17 @@ containers and networks. The default cleanup command below intentionally does
 not remove the Postgres volume:
 
 ```bash
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml ps
+docker compose ps
 uv run --python 3.12 --extra dev awf service logs --tail 200
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop api worker migrate
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml down --remove-orphans
+docker compose stop api worker migrate
+docker compose down --remove-orphans
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
-The explicit env-file form is preferred. If the needed Compose variables are
-already exported, the equivalent container/network cleanup command is
-`docker compose -f docker/compose/local-service.yml down --remove-orphans`.
+Run cleanup from the AWF root so Compose reads root `.env`; exported variables
+override matching `.env` entries. The container/network cleanup command is
+`docker compose down --remove-orphans`.
 
 Use `down --volumes` only as a last resort after a verified control-plane
 backup exists. Removing the Compose volume destroys the local AWF
@@ -674,7 +679,7 @@ readable:
 ```bash
 export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
 export AWF_QUARANTINE="${AWF_HOST_WORK_DIR}.quarantine.$(date -u +%Y%m%dT%H%M%SZ)"
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop api worker
+docker compose stop api worker
 mv "$AWF_HOST_WORK_DIR" "$AWF_QUARANTINE"
 mkdir -p "$AWF_HOST_WORK_DIR"
 for name in backups logs artifacts auth; do
@@ -997,12 +1002,14 @@ AWF includes a local Next.js console under `apps/console`. It talks to AWF
 through Next.js BFF routes, so `AWF_API_TOKEN` stays server-side and is never
 sent to browser JavaScript.
 
-Start the full local service stack after setting a local bearer token:
+Start the full local service and console stack with root Compose:
 
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-uv run --python 3.12 --extra dev awf service bootstrap
+docker compose up --build
 ```
+
+Open <http://127.0.0.1:3000>. Protected API calls use
+`Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
 
 For API-only throwaway development, start the AWF API with a local token:
 
@@ -1010,7 +1017,7 @@ For API-only throwaway development, start the AWF API with a local token:
 AWF_API_TOKEN="$(openssl rand -hex 32)" uv run --python 3.12 --extra dev awf serve --reload
 ```
 
-Then start the console:
+For manual console development against an already-running AWF API:
 
 ```bash
 cd apps/console

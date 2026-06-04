@@ -24,6 +24,12 @@ from awf.cli.main import app
 _runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cli_local_service_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep developer root `.env` values out of mocked CLI HTTP tests."""
+    monkeypatch.setattr(cli_common, "local_service_environ", lambda _environ: {})
+
+
 def _mock_response(*, status_code: int = 202, payload: object = None, text: str = "") -> MagicMock:
     response = MagicMock(spec=httpx.Response)
     response.status_code = status_code
@@ -584,11 +590,16 @@ class TestWorkspaceObservability:
         }
 
     @pytest.mark.unit
-    def test_runtime_fetches_without_token_header_when_unset(
+    def test_runtime_uses_local_compose_token_for_default_local_target(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        monkeypatch.setattr(
+            cli_common,
+            "local_service_environ",
+            lambda _environ: {"AWF_API_TOKEN": "local-dev-token"},
+        )
         response = _mock_response(
             status_code=200,
             payload={"workspace_id": "ws_obs", "stack_state": "running", "services": []},
@@ -598,6 +609,38 @@ class TestWorkspaceObservability:
 
         assert result.exit_code == 0
         assert "running" in result.stdout
+        headers = mock.call_args.kwargs.get("headers", {})
+        assert headers["Authorization"] == "Bearer local-dev-token"
+
+    @pytest.mark.unit
+    def test_runtime_does_not_send_local_compose_token_to_explicit_remote_target(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        monkeypatch.setattr(
+            cli_common,
+            "local_service_environ",
+            lambda _environ: {"AWF_API_TOKEN": "local-dev-token"},
+        )
+        response = _mock_response(
+            status_code=200,
+            payload={"workspace_id": "ws_obs", "stack_state": "running", "services": []},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "runtime",
+                    "ws_obs",
+                    "--base-url",
+                    "https://awf.example.test",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args[0][1] == "https://awf.example.test/v1/workspaces/ws_obs/runtime"
         headers = mock.call_args.kwargs.get("headers", {})
         assert "Authorization" not in headers
 
@@ -904,6 +947,7 @@ class TestBaseUrlResolution:
         monkeypatch.delenv("AWF_BASE_URL", raising=False)
         monkeypatch.delenv("AWF_CLI_BASE_URL", raising=False)
         monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+        monkeypatch.setattr(cli_common, "local_service_environ", lambda _environ: {})
         monkeypatch.setattr(
             cli_common,
             "_cli_base_url_deprecation_notice_emitted",
@@ -994,6 +1038,26 @@ class TestBaseUrlResolution:
 
         assert result.exit_code == 0, result.output
         assert mock.call_args[0][1].startswith("http://localhost:8800")
+        assert self._DEPRECATION_NOTICE not in result.stderr
+
+    @pytest.mark.unit
+    def test_compose_env_api_host_port_derives_default_host_cli_url(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Derive the default operator URL from the root Compose env file."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setattr(
+            cli_common,
+            "local_service_environ",
+            lambda _environ: {"AWF_API_HOST_PORT": "9100"},
+        )
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0][1].startswith("http://localhost:9100")
         assert self._DEPRECATION_NOTICE not in result.stderr
 
     @pytest.mark.unit

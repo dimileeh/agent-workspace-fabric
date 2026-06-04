@@ -708,7 +708,7 @@ def _check_github(
                 action=(
                     'Run `export AWF_GITHUB_TOKEN="$(gh auth token)"` before '
                     "starting Compose, or put AWF_GITHUB_TOKEN/GH_TOKEN in "
-                    "docker/compose/.env."
+                    "root .env."
                 ),
                 signals=["~/.config/gh"],
                 secrets=secrets,

@@ -21,6 +21,7 @@ import typer
 
 from awf.cli.common import OutputFormat, _emit
 from awf.cli.init_ops import (
+    _migrate_legacy_service_env_file,
     resolve_existing_service_env_file,
     resolve_service_compose_paths,
     resolve_service_runtime_env_files,
@@ -289,13 +290,12 @@ def _run_setup(
                 return _readiness_with_config_write_failure(blocked_payload, error)
         return blocked_payload
 
+    env_migration = _migrate_setup_env_file(probe_source) if not dry_run else None
     # Probe the port/disk ``awf start`` will actually use. The documented
     # local-service flow keeps ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` in
-    # ``docker/compose/.env`` for Compose interpolation; ``_readiness_environ``
-    # merges that file (the resolved source checkout's copy when one is in play —
-    # the ``--source-checkout`` selection or the revalidated persisted checkout)
-    # so setup probes the same values ``awf start`` will honor instead of the
-    # default 8000/work dir.
+    # root ``.env`` for Compose interpolation; ``_readiness_environ`` merges
+    # that file so setup probes the same values ``awf start`` will honor instead
+    # of the default 8000/work dir.
     environ = _readiness_environ(probe_source)
     results = run_system_checks(
         environ=environ,
@@ -309,6 +309,7 @@ def _run_setup(
         source_checkout_error=source_error,
         bootstrap_assets_missing=_default_discovery_bootstrap_assets_missing(probe_source),
     )
+    payload = _payload_with_env_migration(payload, env_migration)
 
     if not dry_run:
         # The guarded read above always resolves ``config`` on a non-dry-run path
@@ -392,7 +393,10 @@ def _run_client_setup(
     multiple are folded into one multi-issue report.
     """
     selected = normalize_clients(clients)
+    env_migration = None
     try:
+        if not dry_run:
+            env_migration = _migrate_client_env_file(source_checkout)
         # Require the resolved env file to exist on a non-dry-run apply: a dry-run
         # only renders a diff and never starts the MCP server, but a real write
         # registers an ``--env-file`` that ``awf mcp serve`` reads and rejects when
@@ -404,9 +408,8 @@ def _run_client_setup(
         # client config diff pointing the MCP server at a non-checkout env file.
         return _client_source_checkout_blocked_payload(error)
     except ClientEnvFileMissingError as error:
-        # A fresh, valid source checkout resolves a docker/compose/.env that is not
-        # seeded until ``awf service bootstrap`` runs. Block the apply instead of
-        # registering an MCP server that cannot start (see the payload helper).
+        # A fresh, valid source checkout resolves root .env before it exists.
+        # Block the apply instead of registering an MCP server that cannot start.
         return _client_env_file_missing_payload(error.env_file)
     home = _client_home()
     # Plan all selected clients before applying any so a single conflicting
@@ -423,70 +426,74 @@ def _run_client_setup(
         env=_client_env(),
     )
     if len(payloads) == 1:
-        return payloads[0]
-    return _combine_client_payloads(selected, payloads)
+        return _payload_with_env_migration(payloads[0], env_migration)
+    return _payload_with_env_migration(_combine_client_payloads(selected, payloads), env_migration)
+
+
+def _migrate_client_env_file(source_checkout: Path | None) -> object | None:
+    """Migrate legacy env values for the checkout used by MCP client setup."""
+    if source_checkout is not None:
+        return _migrate_setup_env_file(validate_source_checkout(source_checkout))
+    persisted = _persisted_client_source_checkout()
+    return _migrate_setup_env_file(persisted)
+
+
+def _migrate_setup_env_file(verified_source: VerifiedSourceCheckout | None) -> object | None:
+    """Run legacy env migration for setup/start-equivalent env resolution."""
+    if verified_source is not None:
+        return _migrate_legacy_service_env_file(
+            verified_source.root / ".env",
+            verified_source.root / ".env.example",
+        )
+    _compose_file, env_file, env_example = resolve_service_compose_paths()
+    return _migrate_legacy_service_env_file(env_file, env_example)
+
+
+def _payload_with_env_migration(
+    payload: FirstRunPayload,
+    env_migration: object | None,
+) -> FirstRunPayload:
+    """Attach secret-free env migration details to a first-run payload."""
+    if env_migration is None:
+        return payload
+    to_dict = getattr(env_migration, "to_dict", None)
+    if not callable(to_dict):
+        return payload
+    migration_payload = to_dict()
+    if not isinstance(migration_payload, dict):
+        return payload
+    return payload.model_copy(
+        update={"details": {**dict(payload.details), "env_migration": migration_payload}}
+    )
 
 
 def _resolve_client_env_file(source_checkout: Path | None, require_existing: bool = False) -> Path:
     """Return the env-file path the registered MCP server should read.
 
     Reuses the same source-checkout / packaged-asset resolution ``awf start``
-    uses so the registered ``--env-file`` matches the ``docker/compose/.env``
-    ``awf start`` / ``awf setup`` actually honor: an explicit ``--source-checkout``
-    is validated (``validate_source_checkout``, exactly like the readiness flow's
-    ``_resolve_setup_source_checkout``) and pins that checkout's
-    ``docker/compose/.env``; otherwise a previously persisted, still-valid source
-    checkout (revalidated like ``awf start``'s ``_resolve_start_source_checkout``)
-    pins *its* compose env; only with neither does it fall back to the
-    packaged/default ``.env`` from ``resolve_service_compose_paths``. All three
-    branches resolve through ``resolve_existing_service_env_file`` so a
-    not-yet-bootstrapped checkout (``docker/compose/.env`` absent but the checkout
-    root ``.env`` present) pins the same root ``.env`` ``awf start`` reads via
-    ``_resolve_start_bootstrap_inputs`` -- including the default-discovery fallback,
-    which (like ``awf start``'s ``_resolve_service_runtime_env_files`` branch) would
-    otherwise register a non-existent compose ``.env`` and make ``awf mcp serve``
-    reject the registered ``--env-file`` with "env file does not exist". Validating
-    the explicit checkout keeps an invalid or stale path from registering an MCP
-    ``--env-file`` that points at a non-checkout env file ``awf start`` would
-    itself reject; the same revalidation applies to a persisted checkout, so a
-    stale/moved persisted checkout blocks rather than defaulting (matching
-    ``awf start``, which exits on that metadata). The failure raises
-    ``SourceCheckoutError`` for the caller to surface as a blocked payload. The
-    file is never opened here -- only its path
-    is threaded into the client config -- so a dry-run diff needs no env file on
-    disk and no provider token is ever read.
+    uses so the registered ``--env-file`` matches the root ``.env`` that
+    ``awf start`` / ``awf setup`` actually honor. The file is never opened here
+    -- only its path is threaded into the client config -- so a dry-run diff
+    needs no env file on disk and no provider token is ever read.
 
     When ``require_existing`` is set (a non-dry-run apply), the resolved path must
     exist on disk: a fresh, valid source checkout (only ``.env.example`` present)
-    resolves a ``docker/compose/.env`` that is not seeded until ``awf service
-    bootstrap`` runs, and registering that absent path as the MCP ``--env-file``
+    resolves root ``.env``, and registering that absent path as the MCP ``--env-file``
     would let setup report success while ``awf mcp serve`` rejects it with "env
     file does not exist". The missing path raises ``ClientEnvFileMissingError`` for
     the caller to surface as a blocked payload; a dry-run keeps resolving the path
     as-is because it never starts the server.
     """
     if source_checkout is not None:
-        compose_env = validate_source_checkout(source_checkout).root / "docker" / "compose" / ".env"
-        return _client_env_file_or_block(
-            resolve_existing_service_env_file(compose_env), require_existing
-        )
+        root_env = validate_source_checkout(source_checkout).root / ".env"
+        return _client_env_file_or_block(root_env, require_existing)
     persisted = _persisted_client_source_checkout()
     if persisted is not None:
-        return _client_env_file_or_block(
-            resolve_existing_service_env_file(persisted.root / "docker" / "compose" / ".env"),
-            require_existing,
-        )
+        return _client_env_file_or_block(persisted.root / ".env", require_existing)
     _compose_file, raw_env_file, _env_example = resolve_service_compose_paths()
-    # ``resolve_service_compose_paths`` points the default fallback at the compose
-    # ``docker/compose/.env``, which is absent until ``awf service bootstrap`` seeds
-    # it. Running from a local source checkout before bootstrap therefore yields a
-    # compose ``.env`` path that does not exist yet while the checkout-root ``.env``
-    # carries the real settings. ``awf start``'s default-discovery branch resolves
-    # that same fallback through ``resolve_existing_service_env_file`` (via
-    # ``_resolve_service_runtime_env_files``) so it reads the root ``.env``; mirror
-    # that here so the registered ``--env-file`` points at the env file that
-    # actually exists -- otherwise ``awf mcp serve`` rejects it with "env file does
-    # not exist" despite setup succeeding.
+    # The default fallback may be root ``.env`` in the current install directory.
+    # Resolve it through the same service path as ``awf start`` so the registered
+    # MCP ``--env-file`` points at the env file the local service actually uses.
     resolved_env_file = resolve_existing_service_env_file(raw_env_file)
     # The packaged/default fallback may still be a relative ``Path(".env")``. The
     # explicit and persisted checkout branches above already pin absolute paths;
@@ -516,11 +523,11 @@ def _client_env_file_or_block(env_file: Path, require_existing: bool) -> Path:
     ``awf mcp serve`` reads the registered ``--env-file`` and exits when it is
     absent (``mcp_commands._resolve_mcp_settings``). ``require_existing`` is set
     only for a non-dry-run ``awf setup --client`` apply so a not-yet-bootstrapped
-    checkout (compose ``.env`` absent, no checkout-root ``.env``) blocks instead of
-    registering an MCP server that cannot start; a dry-run never starts the server
-    and resolves the path as-is. The existence probe mirrors ``awf mcp serve``'s
-    own ``expanduser().resolve().is_file()`` check so setup blocks exactly the
-    paths that command would reject.
+    checkout with no root ``.env`` blocks instead of registering an MCP server
+    that cannot start; a dry-run never starts the server and resolves the path
+    as-is. The existence probe mirrors ``awf mcp serve``'s own
+    ``expanduser().resolve().is_file()`` check so setup blocks exactly the paths
+    that command would reject.
     """
     if require_existing and not env_file.expanduser().resolve().is_file():
         raise ClientEnvFileMissingError(env_file)
@@ -533,7 +540,7 @@ def _persisted_client_source_checkout() -> VerifiedSourceCheckout | None:
     Mirrors ``awf start``'s ``_resolve_start_source_checkout`` so the MCP client
     ``--env-file`` honors source-checkout metadata stored by an earlier
     ``awf setup --source-checkout`` run instead of always defaulting to the
-    packaged ``.env`` while ``awf start`` runs from the checkout's compose env. A
+    packaged ``.env`` while ``awf start`` runs from the checkout's root env. A
     missing/unreadable host config or absent metadata falls back to default
     discovery. Stale metadata (the checkout moved or no longer matches the asset
     contract) is **not** swallowed: ``verified_source_from_metadata`` raises
@@ -585,13 +592,9 @@ def _client_source_checkout_blocked_payload(error: SourceCheckoutError) -> First
 def _client_env_file_missing_payload(env_file: Path) -> FirstRunPayload:
     """Render a blocked client payload when the resolved MCP env file is absent.
 
-    A fresh, valid source checkout (only ``.env.example`` present) resolves a
-    ``docker/compose/.env`` that ``awf service bootstrap`` has not seeded yet, so
-    registering it as the MCP ``--env-file`` would let ``awf setup --client``
-    report success while ``awf mcp serve`` rejects the server with "env file does
-    not exist". Surface the same START_COMPOSE_ASSETS_MISSING blocker the
-    readiness/start flows use for a not-yet-bootstrapped checkout, pointing the
-    operator at the bootstrap step that creates the env file.
+    A fresh, valid source checkout (only ``.env.example`` present) resolves root
+    ``.env``. Registering it before it exists would let ``awf setup --client``
+    report success while ``awf mcp serve`` rejects the server.
     """
     issue = first_run_issue_from_reason_code(
         START_COMPOSE_ASSETS_MISSING,
@@ -602,8 +605,8 @@ def _client_env_file_missing_payload(env_file: Path) -> FirstRunPayload:
             "registered --env-file would make awf mcp serve fail to start."
         ),
         fix=(
-            "Run awf service bootstrap to seed docker/compose/.env (or otherwise "
-            "create the env file), then re-run awf setup --client <client>."
+            "Create root .env from .env.example or run awf start/setup to migrate "
+            "legacy values, then re-run awf setup --client <client>."
         ),
     )
     return first_run_report_payload(
@@ -715,22 +718,20 @@ def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[s
 
     Reading only ``os.environ`` would falsely block on the default 8000 / work
     dir when an operator moved ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` into
-    ``docker/compose/.env``, so merge that file like the service path does.
+    root ``.env``, so merge that file like the service path does.
 
     When a verified source checkout is in play — selected via ``--source-checkout``
     or revalidated from persisted host config (see
-    ``_resolve_setup_source_checkout``) — read *that* checkout's
-    ``docker/compose/.env`` (with the checkout-root ``.env`` fallback, exactly like
-    ``awf start``'s ``_resolve_start_bootstrap_inputs``). Otherwise setup would
-    probe the default-discovered ``.env`` while ``awf start`` later honors the
-    selected/persisted checkout's values, so a checkout-local
+    ``_resolve_setup_source_checkout``) — read *that* checkout's root ``.env``.
+    Otherwise setup would probe the default-discovered ``.env`` while ``awf
+    start`` later honors the selected/persisted checkout's values, so a checkout-local
     ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` could make setup block on a port
     or disk path the matching start would not use.
 
     With no verified source checkout, resolve the env file the same way ``awf
     start``'s default-discovery branch does — through ``resolve_service_compose_paths``
     and ``resolve_service_runtime_env_files`` — so setup honors the packaged
-    bootstrap asset root's ``docker/compose/.env``. A bare ``local_service_environ()``
+    bootstrap asset root's root ``.env``. A bare ``local_service_environ()``
     only searches the cwd and nearby source-tree markers, so from a typical install
     cwd it would probe the default 8000/work dir while ``awf start`` uses the
     bundled env file's values. ``local_service_environ`` falls back to the process
@@ -754,9 +755,8 @@ def _readiness_environ(verified_source: VerifiedSourceCheckout | None) -> dict[s
         )
         return local_service_environ(env_file=default_read_env)
 
-    compose_env_candidate = verified_source.root / "docker" / "compose" / ".env"
-    resolved_read_env = resolve_existing_service_env_file(compose_env_candidate)
-    read_env_file = resolved_read_env if resolved_read_env.exists() else None
+    root_env = verified_source.root / ".env"
+    read_env_file = root_env if root_env.exists() else None
     return local_service_environ(env_file=read_env_file)
 
 

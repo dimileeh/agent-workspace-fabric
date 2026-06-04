@@ -169,7 +169,7 @@ def test_service_config_command_prints_redacted_json(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.unit
-def test_service_status_resolves_settings_from_compose_env(
+def test_service_status_ignores_legacy_compose_env_from_verified_source_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -180,6 +180,7 @@ def test_service_status_resolves_settings_from_compose_env(
     compose_env = tmp_path / "docker" / "compose" / ".env"
     compose_env.parent.mkdir(parents=True)
     (compose_env.parent / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("include:\n  - ./docker/compose/local-service.yml\n")
     compose_database_url = "postgresql+asyncpg://awf:compose-secret@compose-db:5432/awf"
     compose_api_base_url = "http://compose-api:8123"
     compose_env.write_text(
@@ -211,14 +212,14 @@ def test_service_status_resolves_settings_from_compose_env(
     assert result.exit_code == 0, result.output
     settings = captured["settings"]
     assert isinstance(settings, ServiceSettings)
-    assert settings.database_url == compose_database_url
-    assert settings.api_base_url == compose_api_base_url
-    assert captured["compose_file"] == compose_env.parent / "local-service.yml"
-    assert captured["compose_env_file"] == compose_env
+    assert settings.database_url != compose_database_url
+    assert settings.api_base_url != compose_api_base_url
+    assert captured["compose_file"] == tmp_path / "compose.yaml"
+    assert captured["compose_env_file"] is None
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
-    assert provider_environ["AWF_DATABASE_URL"] == compose_database_url
-    assert provider_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
+    assert provider_environ.get("AWF_DATABASE_URL") != compose_database_url
+    assert provider_environ.get("AWF_POSTGRES_PASSWORD") != "compose-secret"
 
 
 @pytest.mark.unit
@@ -263,12 +264,12 @@ def test_service_status_ignores_compose_env_without_verified_source_checkout(
     assert isinstance(settings, ServiceSettings)
     assert settings.database_url != compose_database_url
     assert settings.api_base_url != compose_api_base_url
-    assert captured["compose_file"] == Path("docker/compose/local-service.yml")
+    assert captured["compose_file"] == Path("compose.yaml")
     assert captured["compose_env_file"] is None
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
-    assert "AWF_DATABASE_URL" not in provider_environ
-    assert "AWF_POSTGRES_PASSWORD" not in provider_environ
+    assert provider_environ.get("AWF_DATABASE_URL") != compose_database_url
+    assert provider_environ.get("AWF_POSTGRES_PASSWORD") != "compose-secret"
 
 
 @pytest.mark.unit
@@ -283,6 +284,7 @@ def test_service_status_resolves_settings_from_existing_root_env(
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("include:\n  - ./docker/compose/local-service.yml\n")
     root_database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
     root_api_base_url = "http://root-api:8123"
     (tmp_path / ".env").write_text(
@@ -316,8 +318,8 @@ def test_service_status_resolves_settings_from_existing_root_env(
     assert isinstance(settings, ServiceSettings)
     assert settings.database_url == root_database_url
     assert settings.api_base_url == root_api_base_url
-    assert captured["compose_file"] == compose / "local-service.yml"
-    assert captured["compose_env_file"] is None
+    assert captured["compose_file"] == tmp_path / "compose.yaml"
+    assert captured["compose_env_file"] == tmp_path / ".env"
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
     assert provider_environ["AWF_DATABASE_URL"] == root_database_url
@@ -831,7 +833,7 @@ def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
 
 
 @pytest.mark.unit
-def test_service_doctor_resolves_settings_from_compose_env(
+def test_service_doctor_ignores_legacy_compose_env_from_verified_source_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -842,6 +844,10 @@ def test_service_doctor_resolves_settings_from_compose_env(
     compose = workspace_root / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (workspace_root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
     api_base_url = "http://api.internal:9000"
@@ -886,16 +892,16 @@ def test_service_doctor_resolves_settings_from_compose_env(
 
     assert result.exit_code == 0, result.output
     settings = captured["settings"]
-    assert settings.database_url == database_url
-    assert settings.docker_host == docker_host
-    assert settings.api_base_url == api_base_url
+    assert settings.database_url != database_url
+    assert settings.docker_host != docker_host
+    assert settings.api_base_url != api_base_url
     provider_environ = captured["provider_environ"]
-    assert provider_environ["AWF_DATABASE_URL"] == database_url
-    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
-    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert provider_environ.get("AWF_DATABASE_URL") != database_url
+    assert provider_environ.get("AWF_DOCKER_HOST") != docker_host
+    assert provider_environ.get("AWF_API_BASE_URL") != api_base_url
     assert captured["environ"] is provider_environ
-    assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
-    assert captured["compose_env_file"] == compose / ".env"
+    assert captured["compose_file"] == workspace_root / "compose.yaml"
+    assert captured["compose_env_file"] is None
 
 
 @pytest.mark.unit
@@ -952,8 +958,8 @@ def test_service_doctor_ignores_compose_env_without_verified_source_checkout(
     assert settings.api_base_url != api_base_url
     assert captured["compose_env_file"] is None
     provider_environ = captured["provider_environ"]
-    assert "AWF_DATABASE_URL" not in provider_environ
-    assert "AWF_POSTGRES_PASSWORD" not in provider_environ
+    assert provider_environ.get("AWF_DATABASE_URL") != database_url
+    assert provider_environ.get("AWF_POSTGRES_PASSWORD") != "compose-secret"
 
 
 @pytest.mark.unit
@@ -968,6 +974,10 @@ def test_service_doctor_resolves_settings_from_existing_root_env(
     compose = workspace_root / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (workspace_root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     root_env = workspace_root / ".env"
     database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
@@ -1020,5 +1030,5 @@ def test_service_doctor_resolves_settings_from_existing_root_env(
     assert provider_environ["AWF_DOCKER_HOST"] == docker_host
     assert provider_environ["AWF_API_BASE_URL"] == api_base_url
     assert captured["environ"] is provider_environ
-    assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
-    assert captured["compose_env_file"] is None
+    assert captured["compose_file"] == workspace_root / "compose.yaml"
+    assert captured["compose_env_file"] == root_env

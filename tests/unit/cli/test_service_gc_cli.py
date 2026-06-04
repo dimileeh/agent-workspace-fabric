@@ -307,12 +307,12 @@ def _clear_service_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_service_gc_loads_service_env_token_and_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no flags or process env, the compose ``.env`` token/URL are honoured.
+    """With no flags or process env, the root service ``.env`` token/URL are honoured.
 
     ``service gc`` is the only ``service_*`` command that triggers an
     authenticated REST call, so an ``AWF_API_TOKEN``/API port living only in
-    ``docker/compose/.env`` must still reach the request -- matching sibling
-    commands instead of silently 401-ing.
+    root ``.env`` must still reach the request -- matching sibling commands
+    instead of silently 401-ing.
     """
     _clear_service_env(monkeypatch)
     settings = _service_env_settings_stub(

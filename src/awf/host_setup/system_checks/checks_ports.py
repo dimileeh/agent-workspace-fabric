@@ -434,7 +434,7 @@ def _ollama_bridge_profile_enabled(environ: Mapping[str, str]) -> bool:
     publish it. ``COMPOSE_PROFILES`` is a comma- *or* whitespace-separated list,
     read from the same merged service env ``run_system_checks`` already receives
     (the setup CLI feeds it ``local_service_environ``), so a profile set in
-    ``docker/compose/.env`` is honored. Re-implemented here rather than imported
+    root ``.env`` is honored. Re-implemented here rather than imported
     from ``service.bootstrap`` to avoid coupling host-setup readiness to a private
     bootstrap symbol.
     """
