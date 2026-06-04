@@ -30,6 +30,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address review-level comment `issue:4620140358` by documenting the
   README-supported virtualenv/pip lifecycle path and tightening focused test
   helper diagnostics.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HB-xB` by preventing source
+  checkout uninstall guidance from deleting a checkout while persisted
+  `source_checkout` metadata still points at it.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -264,6 +267,31 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `33 passed in 0.95s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HB-xB`:
+
+- `docs/UNINSTALL.md` now explains that `awf setup --source-checkout` persists
+  source checkout metadata in `~/.awf/config.yml`, and that operators must
+  refresh the persisted path or remove only the top-level `source_checkout:`
+  block before deleting the checkout.
+- `tests/unit/docs/test_public_docs_status.py` now rejects uninstall docs that
+  list `rm -rf` before the persisted source-checkout config guidance.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_and_uninstall_docs_cover_all_first_run_lanes -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/UNINSTALL.md` did not mention `~/.awf/config.yml` before the checkout
+deletion command.
+
+Final repair result: `1 passed in 0.57s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py

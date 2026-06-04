@@ -10,6 +10,19 @@ For destructive cleanup, use the targeted steps in
 [Troubleshooting](TROUBLESHOOTING.md) only when you intentionally want to remove
 local state.
 
+If you ran `awf setup --source-checkout`, AWF records that checkout in
+`~/.awf/config.yml` under `source_checkout`. Later `awf start` without an
+explicit `--source-checkout` revalidates that path and fails if the directory is
+gone. Before deleting a recorded checkout, either refresh the persisted path:
+
+```bash
+awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
+```
+
+or edit `~/.awf/config.yml` and remove only the top-level `source_checkout:` block
+to return to packaged or global install assets. Keep provider, client, and
+consent entries unless you intentionally want to reset host setup state.
+
 ## uv tool
 
 The `uv tool` lane is release-installed and package-manager mediated:
@@ -48,13 +61,16 @@ longer need it.
 ## Source Checkout With Global Tool Install
 
 This lane uses inspectable source plus a global tool installed from that source
-checkout. Remove the global tool first:
+checkout. Remove the global tool when you no longer need a global `awf`
+executable:
 
 ```bash
 uv tool uninstall agent-workspace-fabric
 ```
 
-Then remove the checkout only if you no longer need the inspected source tree:
+After the persisted `source_checkout` metadata no longer points at this
+checkout, remove the checkout only if you no longer need the inspected source
+tree:
 
 ```bash
 rm -rf /path/to/aira-agent-workspace-fabric
@@ -63,7 +79,8 @@ rm -rf /path/to/aira-agent-workspace-fabric
 ## Source Checkout With No Global Install
 
 This lane uses inspectable source with no global install, so there is no global
-`awf` executable to uninstall. Remove the checkout only if you no longer need
+`awf` executable to uninstall. After the persisted `source_checkout` metadata no
+longer points at this checkout, remove the checkout only if you no longer need
 the inspected source tree:
 
 ```bash

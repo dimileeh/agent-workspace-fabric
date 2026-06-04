@@ -408,6 +408,13 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     assert "uv tool uninstall agent-workspace-fabric" in uninstall_text
     assert "pipx uninstall agent-workspace-fabric" in uninstall_text
     assert "rm -rf" in uninstall_text
+    assert "~/.awf/config.yml" in uninstall_text
+    assert uninstall_text.index("~/.awf/config.yml") < uninstall_text.index("rm -rf")
+    assert "source_checkout" in uninstall_text
+    assert "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric" in (
+        uninstall_text
+    )
+    assert "remove only the top-level `source_checkout:` block" in uninstall_text
     assert "does not delete local AWF service state" in uninstall_text
 
 

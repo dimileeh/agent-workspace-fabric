@@ -71,6 +71,12 @@ focused Markdown section helper must reject H3-or-deeper headings instead of
 silently over-capturing, and the hosted-curl omission assertion must fail with a
 clear document-specific message.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HB-xB`: source-checkout
+uninstall guidance must not tell operators to delete a checkout while
+`~/.awf/config.yml` still points `source_checkout` at it. Document how to refresh
+the persisted checkout path or remove only the persisted `source_checkout`
+metadata before deleting that checkout.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
