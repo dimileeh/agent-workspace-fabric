@@ -709,6 +709,73 @@ def test_live_mount_reuse_pins_actual_base_when_host_changed(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_live_mount_reuse_reconciles_against_actual_base_when_host_changed(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    # An extra host file present at provision time becomes part of base A.
+    (host_home / ".claude" / "keeper.json").write_text('{"k": 1}\n')
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_recon",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_recon" / "claude"
+    signature_a = _host_claude_signature(host_home)
+    base_a = _shared_claude_base_dir(work_dir, signature_a)
+
+    # The agent accumulated writable overlay data, making ``upper`` non-empty so the
+    # surviving overlay overrides the legacy-copy guard on the retry.
+    (claude_root / "upper" / "agent.json").write_text('{"agent": true}\n')
+
+    # A transient remount failure on a prior provision degraded to a *legacy full
+    # copy* the agent then mutated. Reconstruct that copy: an unedited baseline file
+    # matching base A (``copy2`` preserves its mtime), plus one genuine fallback edit
+    # that is absent from base A.
+    legacy = claude_root / ".claude"
+    legacy.mkdir(parents=True)
+    shutil.copy2(base_a / "keeper.json", legacy / "keeper.json")
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    # Worker killed after ``mount()`` (against base A) but before the pin write.
+    (claude_root / "base.signature").unlink()
+
+    # The operator *removed* ``keeper.json`` from the host before the retry, so a base
+    # recomputed from the current host (base B) lacks it entirely and has a different
+    # signature than the live overlay's actual base A.
+    (host_home / ".claude" / "keeper.json").unlink()
+    signature_b = _host_claude_signature(host_home)
+    assert signature_b != signature_a
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_recon",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    upper = claude_root / "upper"
+    # Reconciliation compared legacy files against the base the live mount *actually*
+    # uses (base A, recovered from the mount), not the freshly recomputed base B that
+    # is missing ``keeper.json``. The unedited baseline file therefore stays out of
+    # ``upper`` — comparing against base B would have mis-copied it as a "new" edit.
+    assert not (upper / "keeper.json").exists()
+    # A genuine fallback edit (absent from base A) is still forwarded into ``upper``.
+    assert (upper / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    # The legacy copy is reaped once reconciled.
+    assert not legacy.exists()
+    # The pin records the base the live overlay is actually mounted against.
+    assert (claude_root / "base.signature").read_text() == signature_a
+
+
+@pytest.mark.unit
 def test_live_mount_reuse_skips_pin_when_lowerdir_unrecoverable(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"

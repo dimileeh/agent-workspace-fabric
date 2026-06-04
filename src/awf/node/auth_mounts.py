@@ -1160,6 +1160,14 @@ def _prepare_claude_overlay_mount(
             pin_signature = _live_overlay_pin_signature(overlay_mounter, merged, work_dir)
             if pin_signature is not None:
                 _record_overlay_base_pin(sig_marker, pin_signature, claude_root)
+                # ``base`` was recomputed from the *current* host above (no pin
+                # existed), but the live overlay is mounted against whatever base it
+                # was created with — a different one if ``~/.claude`` changed since.
+                # The caller reconciles fallback-era legacy edits against this
+                # returned ``base``; comparing against the host guess would miss real
+                # edits or copy baseline files into ``upper``. Realign it to the
+                # lowerdir the mount actually uses, just recovered for the pin.
+                base = _shared_claude_base_dir(work_dir, pin_signature)
         return (
             AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
             upper,
@@ -1191,6 +1199,13 @@ def _prepare_claude_overlay_mount(
                 pin_signature = _live_overlay_pin_signature(overlay_mounter, merged, work_dir)
                 if pin_signature is not None:
                     _record_overlay_base_pin(sig_marker, pin_signature, claude_root)
+                    # As in the idempotent-retry branch: ``base`` was recomputed from
+                    # the current host, but the racing winner's live overlay runs
+                    # against the base it was mounted with. Realign the returned
+                    # ``base`` to that recovered lowerdir so the caller reconciles
+                    # fallback-era legacy edits against the tree the mount truly uses,
+                    # not a host guess that would mis-copy or drop edits.
+                    base = _shared_claude_base_dir(work_dir, pin_signature)
             return (
                 AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
                 upper,
