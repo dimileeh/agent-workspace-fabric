@@ -153,6 +153,17 @@ def test_quickstart_presents_four_complete_first_run_lanes() -> None:
     assert not re.search(r"(?m)^awf service bootstrap\s*$", quickstart_text)
 
 
+def test_markdown_section_accepts_trailing_heading_whitespace() -> None:
+    text = "Intro\n## Target \t\nbody\n## Next\nother\n"
+
+    assert _markdown_section(text, "## Target") == "body\n"
+
+
+def test_markdown_section_reports_missing_heading_clearly() -> None:
+    with pytest.raises(AssertionError, match=r"Markdown heading '## Missing' not found"):
+        _markdown_section("## Present\nbody\n", "## Missing")
+
+
 def test_getting_started_uses_runnable_startup_path() -> None:
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
     startup_section = getting_started_text.split(
@@ -511,11 +522,19 @@ def test_awf_command_mentions_ignore_missing_readme_linked_docs(
 
 
 def _markdown_section(text: str, heading: str) -> str:
-    start = text.index(f"{heading}\n") + len(heading) + 1
-    next_heading = re.search(r"(?m)^## ", text[start:])
+    normalized_text = text.replace("\r\n", "\n")
+    heading_match = re.search(
+        rf"(?m)^{re.escape(heading)}[ \t]*(?:\n|$)",
+        normalized_text,
+    )
+    if heading_match is None:
+        raise AssertionError(f"Markdown heading {heading!r} not found")
+
+    start = heading_match.end()
+    next_heading = re.search(r"(?m)^## ", normalized_text[start:])
     if next_heading is None:
-        return text[start:]
-    return text[start : start + next_heading.start()]
+        return normalized_text[start:]
+    return normalized_text[start : start + next_heading.start()]
 
 
 def _public_docs() -> set[str]:
