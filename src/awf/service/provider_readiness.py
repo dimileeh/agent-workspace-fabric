@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from awf.db.enums import AgentRuntime
-from awf.node.auth_mounts import claude_auth_isolation_label
+from awf.node.auth_mounts import (
+    claude_auth_isolation_label,
+    force_copy_isolation_requested,
+)
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
 
@@ -914,7 +917,16 @@ def _check_claude(
     # (the resolver never overlays it), so the overlay posture applies only to
     # the directory source — labelling the file source with the overlay label
     # would overstate its isolation/disk posture on ``.claude.json``-only hosts.
-    directory_isolation = claude_auth_isolation_label()
+    #
+    # The force-copy probe reads the *passed* ``environ``, not ``os.environ``:
+    # ``awf service bootstrap`` on a non-propagating host folds
+    # ``AWF_CLAUDE_AUTH_FORCE_COPY=true`` into the readiness ``environ`` dict (the
+    # worker provisions with the copy fallback) rather than the CLI process
+    # environment, so a default probe over ``os.environ`` would miss it and report
+    # ``per_workspace_overlay`` while the worker actually uses per-workspace copies.
+    directory_isolation = claude_auth_isolation_label(
+        force_copy_requested=lambda: force_copy_isolation_requested(environ),
+    )
     file_sources: list[dict[str, str]] = []
     if (host_home / ".claude").exists():
         file_sources.append(
@@ -1370,86 +1382,10 @@ def _check_grok(
     )
 
 
-def _check_docker_provider(
-    settings: ServiceSettings,
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    credential_sources: list[dict[str, str]] = []
-    warnings: list[dict[str, str]] = []
-
-    docker_host_signal = "DOCKER_HOST" if environ.get("DOCKER_HOST") else None
-    if docker_host_signal is None and settings.docker_host:
-        docker_host_signal = "service_settings.docker_host"
-    if docker_host_signal is not None:
-        credential_sources.append(
-            _credential_source(
-                type_="docker_host",
-                signal=docker_host_signal,
-                credential_scope="docker_host_control",
-                isolation="host_daemon",
-            )
-        )
-        warnings.append(
-            _security_warning(
-                "DOCKER_HOST_BROAD_CONTROL",
-                (
-                    "Docker host access grants broad control of the local Docker daemon; "
-                    "AWF reports this as a local least-privilege downgrade."
-                ),
-            )
-        )
-
-    registry_sources = _docker_registry_sources(environ=environ, host_home=host_home)
-    credential_sources.extend(registry_sources)
-    if any(source["signal"] == "DOCKER_AUTH_CONFIG" for source in registry_sources):
-        warnings.append(
-            _security_warning(
-                "STATIC_TOKEN_FALLBACK",
-                "Docker registry auth is supplied by static service environment variable DOCKER_AUTH_CONFIG.",
-            )
-        )
-
-    if credential_sources:
-        reason = (
-            "DOCKER_HOST_CONFIGURED"
-            if docker_host_signal is not None
-            else "DOCKER_REGISTRY_AUTH_PRESENT"
-        )
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason=reason,
-            message="Docker credential and control-plane signals were observed without reading secret values.",
-            signals=[source["signal"] for source in credential_sources],
-            secrets=secrets,
-            credential_sources=credential_sources,
-            credential_scope=_primary_credential_scope(credential_sources),
-            isolation=_primary_isolation(credential_sources),
-            warnings=warnings,
-        )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="DOCKER_AUTH_NOT_OBSERVED",
-        message=(
-            "No Docker host or registry auth signal was visible. Docker daemon "
-            "readiness is still reported by the dedicated Docker resource checks."
-        ),
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
 from awf.service.provider_readiness_helpers import (  # noqa: E402
+    _check_docker_provider,
     _codex_file_sources,
     _credential_source,
-    _docker_registry_sources,
     _existing_credential_sources,
     _first_present_env,
     _github_token,

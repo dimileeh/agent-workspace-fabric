@@ -48,6 +48,12 @@ x-awf-service: &awf-service
     AWF_COMPANION_IMAGE_RETENTION_HOURS: ${AWF_COMPANION_IMAGE_RETENTION_HOURS:-168}
     AWF_WORK_DIR: ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
     AWF_HOST_HOME: ${AWF_HOST_HOME:-${HOME}}
+    # Set by the ``awf service bootstrap`` work-dir mount-propagation preflight
+    # (src/awf/service/bootstrap.py) on hosts where a worker-mounted ``~/.claude``
+    # overlay would never propagate into the agent container (Docker Desktop /
+    # virtiofs / grpcfuse). When ``true`` the worker uses the per-workspace copy
+    # fallback instead of provisioning an empty overlay. Defaults off.
+    AWF_CLAUDE_AUTH_FORCE_COPY: ${AWF_CLAUDE_AUTH_FORCE_COPY:-false}
     GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
@@ -175,8 +181,13 @@ services:
       # ``:rshared`` so an overlay the worker mounts under the work dir is visible
       # to the sibling agent container the host daemon launches; the default
       # ``rprivate`` would leave the agent's bind of the merged view empty. The
-      # host-side work dir must itself be a shared mount.
-      - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:rshared
+      # host-side work dir must itself be a shared mount. The ``awf service
+      # bootstrap`` work-dir mount-propagation preflight gates this flag: it sets
+      # ``AWF_WORK_DIR_BIND_PROPAGATION=rprivate`` (and forces the copy fallback
+      # via ``AWF_CLAUDE_AUTH_FORCE_COPY``) on hosts whose work dir cannot be made
+      # an ``rshared`` mount, so the worker neither fails to start nor silently
+      # provisions an empty ``~/.claude``. Defaults to ``rshared``.
+      - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_WORK_DIR_BIND_PROPAGATION:-rshared}
       - *awf-gh-auth
       - *awf-gcloud-auth
       - *awf-gitconfig-auth

@@ -27,7 +27,10 @@ from awf.db.repositories import (
     WorkspaceEventCreate,
     WorkspaceRepository,
 )
-from awf.node.auth_mounts import teardown_workspace_auth_overlay
+from awf.node.auth_mounts import (
+    OverlayUnmountUnverifiableError,
+    teardown_workspace_auth_overlay,
+)
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_PROCESSED_KEY_PREFIX,
     OPERATOR_HINT_STATE_KEY,
@@ -645,10 +648,28 @@ def _teardown_completed_workspace_auth_overlay(work_dir: Path, workspace_id: str
     the merged mount, so unmount here first. Best-effort: a genuine busy/umount
     error is logged and swallowed (GC's own rmtree surfaces any residual EBUSY)
     so it never masks the completion signal the merge already produced.
+
+    A capability-less completion path raises ``OverlayUnmountUnverifiableError``
+    (a ``RuntimeError``) — not ``OSError``/``SubprocessError`` — when it cannot see
+    the worker's mount namespace. That must be swallowed too: it runs inside the
+    ``asyncio.to_thread`` call *before* the GC ``try`` in
+    ``_gc_completed_workspace_filesystem``, so letting it propagate would skip the
+    whole filesystem GC and strand every pressure/auth dir. The downstream
+    ``run_workspace_filesystem_gc`` re-runs the unmount via
+    ``_unmount_candidate_auth_overlay`` and, on the same unverifiable result,
+    skips only the auth dir while still reclaiming the rest — mirroring the
+    ``service gc`` path.
     """
 
     try:
         teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=workspace_id)
+    except OverlayUnmountUnverifiableError as exc:
+        _log.warning(
+            "monitor.auth_overlay_teardown_incapable",
+            reason_code=exc.reason_code,
+            workspace_id=workspace_id,
+            error=str(exc)[:400],
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning(
             "monitor.auth_overlay_teardown_failed",

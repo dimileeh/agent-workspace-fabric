@@ -412,13 +412,13 @@ async def test_service_gc_skips_overlay_unmount_when_compose_teardown_fails(
 
 
 @pytest.mark.unit
-async def test_service_gc_swallows_and_logs_overlay_unmount_failure(
+async def test_service_gc_fails_loudly_and_skips_auth_dir_on_umount_failure(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A genuine umount failure must be logged with its reason code and swallowed:
-    # the per-path delete still surfaces any residual EBUSY rather than the whole
-    # GC run aborting on the unmount.
+    # A genuine umount failure must be logged with its reason code AND surfaced as
+    # a loud ``partial`` result: the auth dir is left in place (never rmtree'd over
+    # a possibly-live mount), while worktree/compose paths still proceed.
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -428,7 +428,9 @@ async def test_service_gc_swallows_and_logs_overlay_unmount_failure(
         pr=True,
         pr_merge_sha="c" * 40,
     )
-    _write(work_dir / "auth" / workspace_id / "claude" / "merged" / "settings.json", "{}")
+    _write(work_dir / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
+    auth = work_dir / "auth" / workspace_id
+    _write(auth / "claude" / "merged" / "settings.json", "{}")
 
     # ``umount(8)`` exits non-zero with its kernel reason on stderr; ``repr`` of
     # the CalledProcessError drops that text, so the handler must forward stderr
@@ -448,13 +450,122 @@ async def test_service_gc_swallows_and_logs_overlay_unmount_failure(
             now=now,
         )
 
-    # The run is not aborted by the unmount failure ...
-    assert result.status == "succeeded"
-    # ... and the failure is recorded with its reason code and the kernel stderr
-    # rather than swallowed silently or reduced to a bare return code.
+    # Loud, not silent: the run reports ``partial`` with the reason code, and the
+    # auth dir is preserved rather than stranding a live mount.
+    assert result.status == "partial"
+    assert result.reason_code == "CLEANUP_EXECUTION_PARTIAL"
+    assert any(
+        error.kind == "auth_overlay_unmount"
+        and error.reason_code == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"
+        for error in result.delete_errors
+    )
+    auth_outcomes = [outcome for outcome in result.path_outcomes if outcome.kind == "auth"]
+    assert [outcome.status for outcome in auth_outcomes] == ["skipped"]
+    assert auth.exists()
+    # The worktree path is unaffected and still reclaimed.
+    assert not (work_dir / "git" / "worktrees" / workspace_id).exists()
+    # The failure is logged with its reason code and the kernel stderr rather than
+    # reduced to a bare return code.
     assert any(
         entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"
         and entry.get("workspace_id") == workspace_id
         and entry.get("stderr") == kernel_reason
         for entry in logs
     )
+
+
+@pytest.mark.unit
+async def test_service_gc_fails_loudly_when_overlay_unmount_unverifiable(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A capability-less GC process (CLI/API container) that cannot verify the
+    # worker released the overlay must fail loudly and preserve the auth dir,
+    # never report a no-op as success.
+    from awf.node.auth_mounts import OverlayUnmountUnverifiableError
+
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="f" * 40,
+    )
+    auth = work_dir / "auth" / workspace_id
+    _write(auth / "claude" / "upper" / "settings.json", "{}")
+
+    teardown = Mock(
+        side_effect=OverlayUnmountUnverifiableError(
+            reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+            message="no CAP_SYS_ADMIN",
+        )
+    )
+
+    with patch("awf.node.auth_mounts.teardown_workspace_auth_overlay", teardown):
+        result = await run_terminal_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            min_age_hours=24,
+            execute=True,
+            now=now,
+        )
+
+    assert result.status == "partial"
+    assert any(
+        error.kind == "auth_overlay_unmount"
+        and error.reason_code == "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE"
+        for error in result.delete_errors
+    )
+    auth_outcomes = [outcome for outcome in result.path_outcomes if outcome.kind == "auth"]
+    assert [outcome.status for outcome in auth_outcomes] == ["skipped"]
+    assert auth.exists()
+
+
+@pytest.mark.unit
+async def test_service_gc_skips_auth_dir_after_unmount_failure_in_worktree_fail_branch(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # When worktree removal also fails, the auth dir must still be skipped (not
+    # rmtree'd) after an overlay unmount failure, covering the worktree-fail
+    # delete branch's auth guard.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="9" * 40,
+    )
+    auth = work_dir / "auth" / workspace_id
+    _write(auth / "claude" / "merged" / "settings.json", "{}")
+    _write(work_dir / "compose" / workspace_id / "compose.yml", "compose")
+
+    teardown = Mock(side_effect=subprocess.CalledProcessError(32, "umount"))
+
+    async def _worktree_remove(_candidate: object) -> WorkspaceGCWorktreeRemoveResult:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="WORKTREE_REMOVE_FAILED",
+            error="git worktree remove failed",
+        )
+
+    with patch("awf.node.auth_mounts.teardown_workspace_auth_overlay", teardown):
+        result = await run_terminal_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            min_age_hours=24,
+            execute=True,
+            now=now,
+            worktree_remover=_worktree_remove,
+        )
+
+    assert result.status == "partial"
+    auth_outcomes = [outcome for outcome in result.path_outcomes if outcome.kind == "auth"]
+    assert [outcome.status for outcome in auth_outcomes] == ["skipped"]
+    assert auth.exists()
+    # Compose is not auth and still gets removed in the worktree-fail branch.
+    assert not (work_dir / "compose" / workspace_id).exists()

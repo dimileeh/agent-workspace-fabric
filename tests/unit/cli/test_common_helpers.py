@@ -160,3 +160,23 @@ def test_handle_response_covers_empty_pretty_items_and_scalar_emit(capsys) -> No
     assert "--- #1 ---" in output
     assert "id: one" in output
     assert "plain" in output
+
+
+@pytest.mark.unit
+def test_warn_on_overlay_unmount_failure_branches(capsys) -> None:
+    # Non-dict and non-list payloads are tolerated without output.
+    cli_common.warn_on_overlay_unmount_failure("not a dict")
+    cli_common.warn_on_overlay_unmount_failure({"delete_errors": "not a list"})
+    # Delete errors without an overlay-unmount reason code stay quiet.
+    cli_common.warn_on_overlay_unmount_failure(
+        {"delete_errors": [{"reason_code": "PATH_DELETE_FAILED"}, "junk"]}
+    )
+    assert capsys.readouterr().err == ""
+
+    # A matching reason code prints the actionable hint to stderr.
+    cli_common.warn_on_overlay_unmount_failure(
+        {"delete_errors": [{"reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"}]}
+    )
+    err = capsys.readouterr().err
+    assert "could not be unmounted" in err
+    assert "CAP_SYS_ADMIN" in err
