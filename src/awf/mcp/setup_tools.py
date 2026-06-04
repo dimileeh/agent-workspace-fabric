@@ -33,6 +33,7 @@ from awf.cli.start_commands import (
     _source_checkout_failure_payload,
     _start_failure_payload,
     _start_success_payload,
+    _StartBootstrapInputs,
 )
 from awf.common.config import Settings
 from awf.host_setup.clients import (
@@ -274,8 +275,7 @@ async def _start_local_service_result(
 
     source_path = Path(source_checkout).expanduser() if source_checkout is not None else None
     try:
-        verified = _resolve_start_source_checkout(source_path)
-        inputs = _resolve_start_bootstrap_inputs(verified)
+        inputs = await asyncio.to_thread(_resolve_start_bootstrap_inputs_for_mcp, source_path)
         options = ServiceBootstrapOptions(
             timeout_seconds=timeout_seconds,
             skip_agent_runtime_build=skip_agent_runtime_build,
@@ -299,6 +299,13 @@ async def _start_local_service_result(
         return _first_run_result(safe_result, _start_failure_payload(exc), is_error=True)
 
     return _first_run_result(safe_result, _start_success_payload(inputs.settings, result))
+
+
+def _resolve_start_bootstrap_inputs_for_mcp(
+    source_path: Path | None,
+) -> _StartBootstrapInputs:
+    verified = _resolve_start_source_checkout(source_path)
+    return _resolve_start_bootstrap_inputs(verified)
 
 
 def _initialize_project_profile_result(

@@ -135,6 +135,50 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523
+
+### Problem Statement And Scope
+
+The review reports that `_start_local_service_result` still runs synchronous
+start-preparation helpers on the MCP event-loop thread. Those helpers validate
+source checkout metadata and resolve bootstrap inputs with filesystem stats
+before `run_service_bootstrap` is awaited.
+
+Scope is limited to offloading the synchronous preparation block for
+`awf_start_local_service`; the existing async bootstrap delegation and response
+payloads must remain unchanged.
+
+### Requirements Checklist
+
+- Preserve `awf_start_local_service` option validation and response payload
+  behavior.
+- Offload `_resolve_start_source_checkout` and `_resolve_start_bootstrap_inputs`
+  from the event-loop thread with `asyncio.to_thread`.
+- Keep `SourceCheckoutError` and `ServiceBootstrapError` structured error
+  handling unchanged.
+- Add a focused regression proving start-service preparation helpers run away
+  from the event-loop thread.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for start-service preparation
+   offloading.
+2. Wrap source-checkout and bootstrap-input preparation in a synchronous helper
+   and call it via `asyncio.to_thread`.
+3. Run the targeted regression and focused setup-tools checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HAAxL
 
 ### Problem Statement And Scope
