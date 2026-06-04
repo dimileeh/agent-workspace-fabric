@@ -172,6 +172,18 @@ added-line audit now reports five PR-added definitions without docstrings:
 Add concise behavior-neutral docstrings to those definitions only, re-run the
 focused audit, and run narrow Ruff plus the affected targeted MCP log tests.
 
+### Iteration 11 Update
+
+Later MCP artifact redaction commits expanded the PR's Python diff and the
+focused added-line audit now reports two PR-added test methods without
+docstrings:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact.test_read_workspace_artifact_redacts_compose_env_file_provider_secret`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact.test_binary_artifact_containing_compose_env_file_provider_secret_is_blocked`
+
+Add concise behavior-neutral docstrings to those tests only, re-run the focused
+audit, and run narrow Ruff plus the affected targeted MCP artifact tests.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

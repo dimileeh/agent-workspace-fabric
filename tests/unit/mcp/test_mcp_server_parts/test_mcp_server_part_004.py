@@ -617,6 +617,7 @@ class TestReadWorkspaceArtifact:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
+        """Redact compose env-file provider secrets from text artifacts."""
         secret = "opaque-compose-value"
         monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
         compose_env_file = tmp_path / "compose.env"
@@ -889,6 +890,7 @@ class TestReadWorkspaceArtifact:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
+        """Block binary artifacts containing compose env-file provider secrets."""
         secret = "opaque-compose-binary-value"
         monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
         compose_env_file = tmp_path / "compose.env"

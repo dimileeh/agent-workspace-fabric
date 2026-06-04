@@ -238,6 +238,28 @@ Evidence after Iteration 10:
 - `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_missing_workspace_or_stream_returns_none -q`
   passed: `2 passed in 2.77s`.
 
+## Iteration 11
+
+Later MCP artifact redaction commits expanded the PR's Python diff again. The
+focused added-line AST audit reported two PR-added test methods without
+docstrings in `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py`.
+This iteration added concise behavior-neutral docstrings only.
+
+Evidence after Iteration 11:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=20`, `added_defs=180`,
+  `missing_docstrings_on_added_defs=2`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=20`, `added_defs=180`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py`
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact::test_read_workspace_artifact_redacts_compose_env_file_provider_secret tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact::test_binary_artifact_containing_compose_env_file_provider_secret_is_blocked -q`
+  passed: `2 passed in 2.61s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring
