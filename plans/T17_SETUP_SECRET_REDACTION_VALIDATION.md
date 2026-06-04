@@ -16,6 +16,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
   workspace log reads cannot expose raw setup secrets or provider refs.
 - Complete: MCP workspace log reads redact with enough surrounding context that
   arbitrary requested offsets cannot reveal substrings of configured secrets.
+- Complete: MCP workspace log reads do not expose pattern-only secret
+  assignment values when the assignment key prefix is outside the fixed context
+  window.
 - Complete: Existing first-run rendering behavior was left unchanged.
 
 ## Evidence
@@ -109,6 +112,38 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py te
 # All checks passed
 
 uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
+# Success: no issues found in 1 source file
+```
+
+## Review Thread `PRRT_kwDOSJAM6s6HAjVz` Iteration
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k pattern_only_secret_assignment
+# failed: returned raw "deep-secret-fragment" from a long SERVICE_TOKEN= value
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k pattern_only_secret_assignment
+# 1 passed, 25 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
+# 26 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 # Success: no issues found in 1 source file
 ```
 

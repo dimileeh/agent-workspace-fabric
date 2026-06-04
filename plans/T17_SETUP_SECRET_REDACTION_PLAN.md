@@ -27,6 +27,11 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 support-bundle setup-state scope
   and only changes unexpected reader exception handling plus a focused
   regression.
+- Review thread `PRRT_kwDOSJAM6s6HAjVz` identified that MCP log reads can still
+  expose pattern-only secret assignment values when the requested offset starts
+  more than the fixed redaction context into a long `TOKEN=`/`PASSWORD=` value.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes MCP log-read handling plus a focused regression.
 
 ## Requirements Checklist
 
@@ -41,6 +46,8 @@ credential entry, or unrelated refactors are included.
   provider refs.
 - MCP workspace log reads redact with enough surrounding context that arbitrary
   requested offsets cannot reveal substrings of configured secrets.
+- MCP workspace log reads do not expose pattern-only secret assignment values
+  when the assignment key prefix is outside the fixed context window.
 - Existing first-run rendering behavior remains compatible.
 
 ## Implementation Steps
@@ -63,6 +70,10 @@ credential entry, or unrelated refactors are included.
 8. Add a focused regression for an unexpected setup-config reader exception,
    confirm it fails, then return a redacted failed setup-state payload while the
    rest of support-bundle collection succeeds.
+9. Add a focused regression for a raw MCP log whose requested slice starts deep
+   inside a pattern-only `TOKEN=` value, confirm it fails, then ensure the MCP
+   log read redacts an unknown leading token fragment instead of returning it as
+   ordinary text.
 
 ## Verification Commands
 
@@ -87,6 +98,14 @@ Review-thread `PRRT_kwDOSJAM6s6HABmr` repair checks:
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k 'setup_state_degrades_unexpected_config_reader_errors or setup_state_redacts_config_load_errors'
 uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py tests/unit/service/test_support_bundle.py
 uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HAjVz` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k pattern_only_secret_assignment
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```
 
 Focused lint/type checks, adjusted to touched files:

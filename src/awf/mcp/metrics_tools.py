@@ -29,7 +29,7 @@ from awf.api.schemas import (
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.common.redaction import redact_secrets_byte_slice
+from awf.common.redaction import REDACTION_MARKER, redact_secrets_byte_slice
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -104,6 +104,7 @@ _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 _MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
 _LOG_REDACTION_CONTEXT_BYTES = 4096
+_LOG_REDACTION_VALUE_DELIMITER_BYTES = frozenset(b" \t\r\n\v\f\"'`,;)}]")
 # sync_release_pr omits base_branch -> target the release branch (main), not the
 # legacy development default, so the release PR is opened development -> main
 # instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
@@ -163,6 +164,50 @@ def _workspace_log_redaction_context_bytes(extra_secrets: tuple[str, ...]) -> in
         default=_LOG_REDACTION_CONTEXT_BYTES,
     )
     return max(_LOG_REDACTION_CONTEXT_BYTES, secret_context)
+
+
+def _workspace_log_read_offset(*, requested_offset: int, redaction_context: int) -> int:
+    """Return the expanded log read offset, retaining one byte to identify boundaries."""
+    if requested_offset <= redaction_context:
+        return 0
+    return requested_offset - redaction_context - 1
+
+
+def _unknown_leading_log_value_fragment_end(text: str, *, result_offset: int) -> int:
+    """Return the byte end of a possibly mid-token leading fragment."""
+    if result_offset <= 0 or not text:
+        return 0
+
+    text_bytes = text.encode("utf-8")
+    if not text_bytes or text_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
+        return 0
+    for index, value in enumerate(text_bytes):
+        if value in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
+            return index
+    return len(text_bytes)
+
+
+def _redact_workspace_log_byte_slice(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    result_offset: int,
+    extra_secrets: tuple[str, ...],
+) -> str:
+    """Redact a requested log byte slice, masking unknown leading token fragments."""
+    fragment_end = _unknown_leading_log_value_fragment_end(text, result_offset=result_offset)
+    if fragment_end <= start:
+        return redact_secrets_byte_slice(text, start, end, extra_secrets=extra_secrets)
+
+    pieces: list[str] = []
+    if start < fragment_end:
+        pieces.append(REDACTION_MARKER)
+    if end > fragment_end:
+        pieces.append(
+            redact_secrets_byte_slice(text, fragment_end, end, extra_secrets=extra_secrets)
+        )
+    return "".join(pieces)
 
 
 def _requested_log_window_offsets(
@@ -367,7 +412,10 @@ def register_metrics_tools(
             service_settings=service_settings,
         )
         redaction_context = _workspace_log_redaction_context_bytes(extra_secrets)
-        read_offset = max(offset - redaction_context, 0)
+        read_offset = _workspace_log_read_offset(
+            requested_offset=offset,
+            redaction_context=redaction_context,
+        )
         read_limit = offset - read_offset + limit_bytes + redaction_context
         result = await service.read_log(
             workspace_id,
@@ -386,10 +434,11 @@ def register_metrics_tools(
             expanded_eof=bool(result["eof"]),
         )
         result_text = str(result["text"])
-        data = redact_secrets_byte_slice(
+        data = _redact_workspace_log_byte_slice(
             result_text,
             offset - result_offset,
             offset - result_offset + limit_bytes,
+            result_offset=result_offset,
             extra_secrets=extra_secrets,
         )
         return WorkspaceLogReadResponse(
