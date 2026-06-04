@@ -16,6 +16,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict
 
+from awf.node.auth_mounts import force_copy_isolation_requested
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
     LOCAL_SERVICE_COMPOSE_FILE,
@@ -527,13 +528,13 @@ def _resolve_bootstrap_host_work_dir(environ: Mapping[str, str]) -> str | None:
 def _force_copy_already_requested(environ: Mapping[str, str]) -> bool:
     """Return whether ``environ`` already carries an operator force-copy request.
 
-    Mirrors ``auth_mounts._force_copy_isolation_requested``'s truthiness set so
-    the preflight and the per-workspace overlay gate agree on what counts as an
-    operator override.
+    Delegates to ``auth_mounts.force_copy_isolation_requested`` so the preflight
+    and the per-workspace overlay gate share a single source of truth for what
+    counts as an operator override — rather than re-encoding the truthiness set
+    here, where the two could silently drift.
     """
 
-    value = environ.get(AWF_CLAUDE_AUTH_FORCE_COPY_ENV, "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return force_copy_isolation_requested(environ)
 
 
 def _apply_work_dir_propagation_env(
