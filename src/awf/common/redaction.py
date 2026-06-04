@@ -106,6 +106,7 @@ def _secret_redaction_spans(
     spans: list[_RedactionSpan] = []
     spans.extend(_exact_secret_redaction_spans(text, extra_secrets))
 
+    # Group 2 ends with the literal "@"; exclude it so the URL keeps the separator.
     spans.extend((match.start(2), match.end(2) - 1) for match in _URL_CREDENTIAL_RE.finditer(text))
     spans.extend((match.start(2), match.end(2)) for match in _AUTHORIZATION_RE.finditer(text))
     spans.extend(match.span() for match in _PROVIDER_REF_RE.finditer(text))

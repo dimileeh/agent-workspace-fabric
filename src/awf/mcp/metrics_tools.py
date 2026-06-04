@@ -611,6 +611,8 @@ def register_metrics_tools(
             result_text=result_text,
             projection_offset=projection_offset,
         )
+        # The requested end can exceed available bytes when EOF falls inside the window;
+        # redact_secrets_byte_slice clamps that to the decoded text via safe_end.
         data = _redact_workspace_log_byte_slice(
             result_text,
             offset - projection_offset,
