@@ -93,6 +93,7 @@ class ServiceSettings:
     agent_idle_timeout_seconds: float = 3600
     planning_max_iterations_default: int = 3
     host_home: str = "~"
+    claude_base_gc_enabled: bool = True
     node_id: str | None = None
     branch_prefix: str = "awf"
     service_startup_log_tail_lines: int = 200
@@ -222,6 +223,7 @@ def resolve_service_settings(
         work_dir=work_dir,
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
+        claude_base_gc_enabled=settings.claude_base_gc_enabled,
         api_token=_empty_to_none(settings.api_token),
         github_token=_resolve_github_token(settings.github_token, env),
         worker_poll_interval_seconds=settings.worker_poll_interval_seconds,

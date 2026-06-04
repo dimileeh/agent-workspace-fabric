@@ -52,6 +52,7 @@ from awf.service.gc_classify import _agent_service_has_no_work as _agent_service
 from awf.service.gc_classify import _container_command_is_idle as _container_command_is_idle
 from awf.service.gc_classify import _estimate_bytes as _estimate_bytes
 from awf.service.gc_classify import _is_safe_gc_path as _is_safe_gc_path
+from awf.service.gc_claude_base import reap_superseded_claude_bases as reap_superseded_claude_bases
 from awf.service.gc_companions import companion_worktree_paths_for_gc
 from awf.service.gc_time import normalize_statuses as _normalize_statuses
 from awf.service.gc_time import to_utc as _to_utc
@@ -233,6 +234,10 @@ WorkspaceGCWorktreeRemove = Callable[
 # per-workspace candidates). Returns a small report dict for the GC payload.
 CompanionImagePrune = Callable[[], Awaitable[dict[str, object]]]
 
+# Reaps superseded shared ``~/.claude`` overlay bases once per GC run (GC-B, #389),
+# independent of the per-workspace candidates. Returns an inspectable report dict.
+ClaudeBaseReap = Callable[[], Awaitable[dict[str, object]]]
+
 
 @dataclass(frozen=True)
 class WorkspaceGCPlan:
@@ -319,6 +324,7 @@ class WorkspaceGCResult:
     status: WorkspaceCleanupExecutionStatus
     reason_code: str
     companion_image_prune: dict[str, object] | None = None
+    claude_base_reap: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         deleted_paths = set(self.deleted_paths)
@@ -342,6 +348,8 @@ class WorkspaceGCResult:
         )
         if self.companion_image_prune is not None:
             payload["companion_image_prune"] = self.companion_image_prune
+        if self.claude_base_reap is not None:
+            payload["claude_base_reap"] = self.claude_base_reap
         payload["candidates"] = [
             candidate.to_dict(
                 deleted_paths=deleted_paths,
@@ -543,6 +551,7 @@ async def run_terminal_workspace_gc(
     compose_teardown: WorkspaceGCComposeTeardown | None = None,
     worktree_remover: WorkspaceGCWorktreeRemove | None = None,
     companion_image_prune: CompanionImagePrune | None = None,
+    claude_base_reap: ClaudeBaseReap | None = None,
     now: datetime | None = None,
 ) -> WorkspaceGCResult:
     """Plan terminal workspace GC and optionally delete selected directories."""
@@ -559,6 +568,11 @@ async def run_terminal_workspace_gc(
         max_preserved_failed_hours=max_preserved_failed_hours,
         now=current_time,
     )
+    # The shared-base reaper is a host-wide step independent of the per-workspace
+    # candidates, run on both dry-run and execute so the dry-run plan previews which
+    # superseded bases would be reclaimed (the reaper honors the GC ``execute`` flag
+    # via its own closure).
+    claude_base_reap_result = await claude_base_reap() if claude_base_reap is not None else None
     if not execute:
         return _gc_result(
             plan=plan,
@@ -569,6 +583,7 @@ async def run_terminal_workspace_gc(
             compose_teardowns={},
             worktree_removes={},
             reservation_releases={},
+            claude_base_reap=claude_base_reap_result,
         )
 
     resolved_worktree_remover = _resolve_worktree_remover(
@@ -608,6 +623,7 @@ async def run_terminal_workspace_gc(
         worktree_removes=worktree_removes,
         reservation_releases=reservation_releases,
         companion_image_prune=companion_image_prune_result,
+        claude_base_reap=claude_base_reap_result,
     )
 
 
@@ -670,6 +686,8 @@ async def run_service_workspace_gc(
     max_preserved_failed_hours: float = DEFAULT_MAX_PRESERVED_FAILED_HOURS,
     companion_image_cache_enabled: bool = False,
     companion_image_retention_hours: int = DEFAULT_MIN_AGE_HOURS,
+    host_home: Path | str | None = None,
+    reap_claude_bases: bool = False,
     compose_manager: ComposeManager | None = None,
     now: datetime | None = None,
 ) -> WorkspaceGCResult:
@@ -680,6 +698,10 @@ async def run_service_workspace_gc(
     deletion here actually removes root-owned auth dirs (the host CLI, running as
     uid 1000, silently could not) and a volume-removing compose teardown reaps
     the per-workspace Docker volumes that GC previously leaked.
+
+    With ``reap_claude_bases`` enabled (and ``host_home`` provided) a host-wide
+    GC-B step (#389) also reaps superseded shared ``~/.claude`` overlay bases,
+    preserving the current signature and any live-mounted or pinned base.
     """
     normalized_work_dir = Path(work_dir).expanduser().resolve()
     manager = compose_manager
@@ -704,6 +726,19 @@ async def run_service_workspace_gc(
             return await run_companion_image_prune(companion_image_retention_hours)
 
         companion_image_prune = _prune
+    claude_base_reap: ClaudeBaseReap | None = None
+    if reap_claude_bases and host_home is not None:
+        resolved_host_home = Path(host_home).expanduser()
+
+        async def _reap_bases() -> dict[str, object]:
+            return await asyncio.to_thread(
+                reap_superseded_claude_bases,
+                work_dir=normalized_work_dir,
+                host_home=resolved_host_home,
+                execute=execute,
+            )
+
+        claude_base_reap = _reap_bases
     return await run_terminal_workspace_gc(
         session_factory,
         work_dir=normalized_work_dir,
@@ -716,6 +751,7 @@ async def run_service_workspace_gc(
         max_preserved_failed_hours=max_preserved_failed_hours,
         compose_teardown=compose_teardown,
         companion_image_prune=companion_image_prune,
+        claude_base_reap=claude_base_reap,
         now=now,
     )
 
@@ -1176,6 +1212,7 @@ def _gc_result(
     worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] | None = None,
     reservation_releases: dict[str, dict[str, object]] | None = None,
     companion_image_prune: dict[str, object] | None = None,
+    claude_base_reap: dict[str, object] | None = None,
 ) -> WorkspaceGCResult:
     lease_revocations = secret_lease_revocations or {}
     wt_removes = worktree_removes or {}
@@ -1193,14 +1230,22 @@ def _gc_result(
             reservation_releases=res_releases,
             status="dry_run",
             reason_code=CLEANUP_DRY_RUN,
+            claude_base_reap=claude_base_reap,
         )
     companion_prune_failed = (
         companion_image_prune is not None and companion_image_prune.get("status") == "failed"
+    )
+    # A ``partial`` shared-base reap (a permission-denied removal) drives the whole
+    # run partial too — it leaked disk it could not reclaim, so the run must not
+    # report a clean success.
+    claude_base_reap_partial = (
+        claude_base_reap is not None and claude_base_reap.get("status") == "partial"
     )
     has_errors = (
         bool(delete_errors)
         or any(v.get("error") is not None for v in res_releases.values())
         or companion_prune_failed
+        or claude_base_reap_partial
     )
     status: WorkspaceCleanupExecutionStatus = "partial" if has_errors else "succeeded"
     return WorkspaceGCResult(
@@ -1216,6 +1261,7 @@ def _gc_result(
         status=status,
         reason_code=(CLEANUP_EXECUTION_PARTIAL if has_errors else CLEANUP_EXECUTION_SUCCEEDED),
         companion_image_prune=companion_image_prune,
+        claude_base_reap=claude_base_reap,
     )
 
 

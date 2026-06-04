@@ -7,9 +7,9 @@ that part so every test in this package exercises the same fakes.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -19,11 +19,15 @@ from awf.node import auth_mounts as auth_mounts_mod
 from awf.node.auth_mounts import (
     _CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED,
     _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
+    _CLAUDE_BASE_BUILD_LOCK_NAME,
     _OVERLAY_UNMOUNTED_MARKER,
     OverlayUnmountUnverifiableError,
+    _claude_base_staging_build_is_live,
     _has_cap_sys_admin,
     _host_claude_signature,
     _overlay_filesystem_available,
+    _reap_stale_claude_base_staging,
+    _reconcile_fallback_edits_into_upper,
     _shared_claude_base_dir,
     _SubprocessOverlayMounter,
     claude_auth_isolation_label,
@@ -151,7 +155,11 @@ def test_crash_before_mount_does_not_pin_stale_base_for_fresh_provision(
 
 
 @pytest.mark.unit
-def test_prepin_upper_recovers_after_host_reverts_when_mount_failed(tmp_path: Path) -> None:
+def test_pinned_upper_recovers_across_host_metadata_change(tmp_path: Path) -> None:
+    # #382: ``ctime`` is in the signature now, so a content-identical *revert* (or a
+    # metadata-preserving edit) no longer reproduces an old signature/base name. The
+    # pin-based recovery path replaces that fragile recompute-and-match: a surviving
+    # ``upper`` remounts against the *pinned* base regardless of host churn.
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
     _seed_host_claude(host_home)
@@ -173,63 +181,47 @@ def test_prepin_upper_recovers_after_host_reverts_when_mount_failed(tmp_path: Pa
                 raise OSError("overlay upper built against a different lower")
             super().mount(lowerdir=lowerdir, upperdir=upperdir, workdir=workdir, merged=merged)
 
-    # Capture host state A exactly (the signature keys off ``st_mtime_ns``, so a
-    # later revert must restore the mtime too, not just the content).
     settings = host_home / ".claude" / "settings.json"
-    state_a_mtime_ns = settings.stat().st_mtime_ns
 
-    # Provision 1: overlay succeeds against the host-content-A base; the agent
-    # mutates the writable ``upper``.
+    # Provision 1: overlay succeeds against the host-content-A base and records the
+    # ``base.signature`` pin; the agent mutates the writable ``upper``.
     base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
     mounter = BaseMismatchMounter(allowed_base=base_a)
     resolve_service_auth_mounts(
         host_home=host_home,
         work_dir=work_dir,
-        workspace_id="ws_revert",
+        workspace_id="ws_meta",
         host_env={},
         overlay_mounter=mounter,
     )
-    claude_root = work_dir / "auth" / "ws_revert" / "claude"
+    claude_root = work_dir / "auth" / "ws_meta" / "claude"
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
     overlay_data = claude_root / "upper" / "settings.json"
     overlay_data.write_text('{"theme": "agent-edited"}\n')
-    # Simulate a pre-pin overlay: the marker is absent (older build) so the base
-    # is unknowable on the next provision.
-    (claude_root / "base.signature").unlink()
 
-    # Provision 2: the host changed (content B) and the overlay is torn down. The
-    # base recomputed from the changed host does not match the surviving upper, so
-    # the remount fails and we degrade to the legacy copy.
+    # Provision 2: the overlay is torn down and the operator makes a
+    # metadata-preserving edit — same length, mtime restored — so only ``ctime``
+    # moves. The new signature differs (ctime is in the key), so a recomputed base
+    # would mismatch the surviving upper; but recovery flows through the pin, which
+    # records base_a exactly and is immune to host churn.
     mounter.mounted.clear()
-    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+    mtime_ns = settings.stat().st_mtime_ns
+    settings.write_text('{"theme": "DARK"}\n')  # same length, content changed
+    os.utime(settings, ns=(mtime_ns, mtime_ns))
     base_b = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
-    assert base_b != base_a
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_revert",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-    # The failed mount must not have pinned the guessed (host-B) base.
-    assert not (claude_root / "base.signature").exists()
+    assert base_b != base_a  # ctime bump alone changed the signature
 
-    # Provision 3: the operator reverts ``~/.claude`` back to content A. Because
-    # the failed mount did not poison the marker, the base recomputed from the
-    # reverted host matches the surviving upper again and the overlay remounts,
-    # recovering the agent's mutations.
-    mounter.mounted.clear()
-    settings.write_text('{"theme": "dark"}\n')
-    os.utime(settings, ns=(state_a_mtime_ns, state_a_mtime_ns))
-    assert _shared_claude_base_dir(work_dir, _host_claude_signature(host_home)) == base_a
     mounts = resolve_service_auth_mounts(
         host_home=host_home,
         work_dir=work_dir,
-        workspace_id="ws_revert",
+        workspace_id="ws_meta",
         host_env={},
         overlay_mounter=mounter,
     )
 
     by_target = {m.target: m for m in mounts}
+    # The surviving upper remounted against the *pinned* base_a (not the recomputed
+    # base_b), recovering the agent's mutations — ctime-robust via the pin.
     assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
     assert mounter.mounts[-1]["lowerdir"] == base_a
     assert mounter.mounts[-1]["upperdir"] == claude_root / "upper"
@@ -624,31 +616,37 @@ def test_shared_base_build_reaps_stale_orphan_staging_dirs(tmp_path: Path) -> No
     shared_root.mkdir(parents=True)
 
     # A crash-orphaned staging dir from a killed provision: a full copy stranded
-    # under ``_shared`` with an old mtime that GC would never reap.
+    # under ``_shared`` whose build lock is unheld (the kernel freed it on the kill),
+    # so it is reaped regardless of age.
     stale = shared_root / ".claude-base-orphan"
     (stale / ".claude").mkdir(parents=True)
     (stale / ".claude" / "blob").write_text("x" * 4096)
-    old = time.time() - (auth_mounts_mod._STALE_STAGING_MAX_AGE_SECONDS + 60)
-    os.utime(stale, (old, old))
-    # A concurrent provision's in-progress staging dir (fresh mtime) must survive.
+    (stale / _CLAUDE_BASE_BUILD_LOCK_NAME).write_text("")
+    # A concurrent provision's in-progress staging dir holds a live ``flock`` on its
+    # ``.build.lock`` — duration-independent liveness — so it must survive.
     live = shared_root / ".claude-base-live"
     live.mkdir()
-    # A staging entry that stat() cannot resolve (vanished/dangling) is skipped,
-    # never fatal.
+    live_lock_fd = os.open(live / _CLAUDE_BASE_BUILD_LOCK_NAME, os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(live_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # A staging entry that vanishes mid-check (dangling symlink) is skipped, never
+    # fatal: ``rmtree(ignore_errors=True)`` cannot remove a symlink, so it survives.
     dangling = shared_root / ".claude-base-dangle"
     dangling.symlink_to(shared_root / "missing-target")
 
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_reap",
-        host_env={},
-        overlay_mounter=FakeOverlayMounter(supported=True),
-    )
+    try:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_reap",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+    finally:
+        os.close(live_lock_fd)
 
-    # The base built normally (overlay mount uses it as lowerdir) and the stale
-    # orphan is gone, while the live staging dir and the unresolvable symlink are
-    # left untouched.
+    # The base built normally (overlay mount uses it as lowerdir) and the lock-free
+    # orphan is gone, while the lock-held live staging dir and the unresolvable
+    # symlink are left untouched.
     by_target = {m.target: m for m in mounts}
     assert by_target["/home/agent/.claude"].mode == "rw"
     assert base.is_dir()
@@ -674,8 +672,7 @@ def test_shared_base_build_reaps_orphan_staging_under_superseded_signature(
     stale = superseded_root / ".claude-base-orphan"
     (stale / ".claude").mkdir(parents=True)
     (stale / ".claude" / "blob").write_text("x" * 4096)
-    old = time.time() - (auth_mounts_mod._STALE_STAGING_MAX_AGE_SECONDS + 60)
-    os.utime(stale, (old, old))
+    (stale / _CLAUDE_BASE_BUILD_LOCK_NAME).write_text("")
 
     mounts = resolve_service_auth_mounts(
         host_home=host_home,
@@ -710,13 +707,12 @@ def test_shared_base_reuse_still_reaps_stale_orphan_staging(tmp_path: Path) -> N
     base.mkdir(parents=True)
     (base / "marker").write_text("prebuilt")
 
-    # A crash-orphaned staging dir stranded next to the existing base, old enough
-    # that GC would never reap it.
+    # A crash-orphaned staging dir stranded next to the existing base, its build
+    # lock unheld so GC-free liveness marks it reapable.
     stale = shared_root / ".claude-base-orphan"
     (stale / ".claude").mkdir(parents=True)
     (stale / ".claude" / "blob").write_text("x" * 4096)
-    old = time.time() - (auth_mounts_mod._STALE_STAGING_MAX_AGE_SECONDS + 60)
-    os.utime(stale, (old, old))
+    (stale / _CLAUDE_BASE_BUILD_LOCK_NAME).write_text("")
 
     mounts = resolve_service_auth_mounts(
         host_home=host_home,
@@ -937,3 +933,317 @@ def test_subprocess_overlay_mounter_active_lowerdir_unmounted_target_returns_non
     mounter = _SubprocessOverlayMounter(proc_mounts=proc_mounts)
     # No overlay line matches the requested mountpoint, so there is nothing to pin.
     assert mounter.active_lowerdir(tmp_path / "merged") is None
+
+
+# ---------------------------------------------------------------------------
+# #379 — duration-independent in-progress staging lock for the reaper.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_inprogress_staging_lock_survives_arbitrarily_long_build(tmp_path: Path) -> None:
+    # A live builder holds an exclusive ``flock`` on its ``.build.lock``. Even with a
+    # staging mtime backdated a full day past the old 1 h bound, the reaper must not
+    # touch it — liveness, not elapsed time, now decides reapability.
+    base_root = tmp_path / "claude-base"
+    staging = base_root / "sig" / ".claude-base-live"
+    (staging / ".claude").mkdir(parents=True)
+    (staging / ".claude" / "blob").write_text("x" * 4096)
+    lock_fd = os.open(staging / _CLAUDE_BASE_BUILD_LOCK_NAME, os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    old = staging.stat().st_mtime - 86400
+    os.utime(staging, (old, old))
+
+    try:
+        # A separate ``open`` of a held lock is denied even in one process, so the
+        # liveness probe reports the live builder.
+        assert _claude_base_staging_build_is_live(staging) is True
+        _reap_stale_claude_base_staging(base_root)
+    finally:
+        os.close(lock_fd)
+
+    assert staging.exists()
+
+
+@pytest.mark.unit
+def test_orphaned_staging_without_live_lock_is_reaped(tmp_path: Path) -> None:
+    # The ``.build.lock`` exists but no process holds it (the builder crashed; the
+    # kernel freed the lock). The reaper acquires it and reaps the orphan regardless
+    # of age.
+    base_root = tmp_path / "claude-base"
+    staging = base_root / "sig" / ".claude-base-orphan"
+    (staging / ".claude").mkdir(parents=True)
+    (staging / _CLAUDE_BASE_BUILD_LOCK_NAME).write_text("")
+
+    assert _claude_base_staging_build_is_live(staging) is False
+    _reap_stale_claude_base_staging(base_root)
+
+    assert not staging.exists()
+
+
+@pytest.mark.unit
+def test_staging_without_lock_file_is_reaped(tmp_path: Path) -> None:
+    # A pre-upgrade staging dir (older builds locked nothing) has no ``.build.lock``;
+    # with no live builder protecting it, it is reaped.
+    base_root = tmp_path / "claude-base"
+    staging = base_root / "sig" / ".claude-base-preupgrade"
+    (staging / ".claude").mkdir(parents=True)
+
+    assert _claude_base_staging_build_is_live(staging) is False
+    _reap_stale_claude_base_staging(base_root)
+
+    assert not staging.exists()
+
+
+@pytest.mark.unit
+def test_reaper_skips_staging_that_vanishes_midcheck(tmp_path: Path) -> None:
+    # A staging dir whose path no longer resolves (a concurrent reap or a winning
+    # ``replace`` removed it) is treated as not-live, and the reaper sweep is a
+    # harmless no-op — never fatal.
+    base_root = tmp_path / "claude-base"
+    (base_root / "sig").mkdir(parents=True)
+    vanished = base_root / "sig" / ".claude-base-gone"
+
+    assert _claude_base_staging_build_is_live(vanished) is False
+    _reap_stale_claude_base_staging(base_root)  # no staging entries: does not raise
+
+
+# ---------------------------------------------------------------------------
+# #381 — reconcile fallback edits into the surviving overlay ``upper``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fallback_edit_reconciled_into_remounted_upper(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    # Provision 1: overlay succeeds; the agent writes overlay-only data in ``upper``.
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reconcile",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_reconcile" / "claude"
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    (claude_root / "upper" / "agent_note.txt").write_text("overlay-era note\n")
+
+    # Provision 2: teardown, then a transient remount failure degrades to a *fresh*
+    # legacy copy. The agent then mutates a baseline file in that legacy copy (a
+    # fallback edit) with a strictly-newer mtime than the base's copy.
+    mounter.mounted.clear()
+    mounter._mount_error = OSError("transient remount failure")
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reconcile",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    legacy_settings = claude_root / ".claude" / "settings.json"
+    assert legacy_settings.is_file()
+    legacy_settings.write_text('{"theme": "fallback-edited"}\n')
+    base_mtime_ns = (base / "settings.json").stat().st_mtime_ns
+    newer_ns = base_mtime_ns + 1_000_000_000
+    os.utime(legacy_settings, ns=(newer_ns, newer_ns))
+
+    # Provision 3: the mount works again. Before the stale legacy copy is reaped, the
+    # strictly-newer fallback edit is reconciled into ``upper`` so the remounted
+    # overlay does not shadow then drop it.
+    mounter.mounted.clear()
+    mounter._mount_error = None
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reconcile",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The fallback edit was copied into ``upper`` (newer legacy wins over an absent
+    # upper entry), and the agent's overlay-era data is untouched.
+    assert (claude_root / "upper" / "settings.json").read_text() == '{"theme": "fallback-edited"}\n'
+    assert (claude_root / "upper" / "agent_note.txt").read_text() == "overlay-era note\n"
+    # The stale legacy copy is reaped after reconciliation.
+    assert not (claude_root / ".claude").exists()
+
+
+@pytest.mark.unit
+def test_fresh_legacy_copy_is_not_copied_into_upper(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    # Provision 1: overlay; the agent writes overlay-only data in ``upper``.
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_fresh",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_fresh" / "claude"
+    (claude_root / "upper" / "agent_note.txt").write_text("overlay-era note\n")
+
+    # Provision 2: teardown + transient failure → a *fresh, unedited* legacy copy
+    # whose every file mtime equals the base (``copy2`` preserved host mtimes).
+    mounter.mounted.clear()
+    mounter._mount_error = OSError("transient remount failure")
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_fresh",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    assert (claude_root / ".claude" / "settings.json").is_file()
+
+    # Provision 3: remount. Reconciliation must copy *nothing* — the fresh baseline
+    # matches the base mtime, so it is not a fallback edit and the overlay's disk
+    # savings (an empty-ish upper) are preserved.
+    mounter.mounted.clear()
+    mounter._mount_error = None
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_fresh",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    # No baseline file leaked into ``upper``; only the agent's overlay-era data
+    # remains and the stale legacy copy is reaped.
+    assert not (claude_root / "upper" / "settings.json").exists()
+    assert not (claude_root / "upper" / "skills").exists()
+    assert (claude_root / "upper" / "agent_note.txt").read_text() == "overlay-era note\n"
+    assert not (claude_root / ".claude").exists()
+
+
+# ---------------------------------------------------------------------------
+# #382 — ``st_ctime_ns`` in the host signature catches metadata-preserving edits.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_signature_tracks_metadata_preserving_edit(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    before = _host_claude_signature(host_home)
+
+    settings = host_home / ".claude" / "settings.json"
+    mtime_ns = settings.stat().st_mtime_ns
+    new_content = '{"theme": "DARK"}\n'  # same length as the seeded '{"theme": "dark"}\n'
+    assert len(new_content) == len('{"theme": "dark"}\n')
+    settings.write_text(new_content)
+    # Restore the original mtime; size and mode are unchanged, so only ``ctime`` moves.
+    os.utime(settings, ns=(mtime_ns, mtime_ns))
+    assert settings.stat().st_mtime_ns == mtime_ns
+
+    after = _host_claude_signature(host_home)
+    # Size+mtime+mode alone would be unchanged; ``ctime`` flags the hidden rewrite.
+    assert after != before
+
+
+# ---------------------------------------------------------------------------
+# iter_overlay_lowerdirs — enumerate every live overlay lowerdir (for GC-B).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_iter_overlay_lowerdirs_collects_all_overlays(tmp_path: Path) -> None:
+    base_one = tmp_path / "_shared" / "claude-base" / "sig1" / ".claude"
+    base_two = tmp_path / "_shared" / "claude-base" / "sig2" / ".claude"
+    # A space in a path is octal-escaped in ``/proc/mounts`` and must be decoded.
+    spaced = tmp_path / "weird dir" / ".claude"
+    escaped_spaced = str(spaced).replace(" ", "\\040")
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(
+        "proc /proc proc rw 0 0\n"
+        f"overlay {tmp_path / 'm1'} overlay rw,lowerdir={base_one},upperdir=/u,workdir=/w 0 0\n"
+        f"ext4 /data ext4 rw 0 0\n"
+        f"overlay {tmp_path / 'm2'} overlay rw,lowerdir={base_two}:{escaped_spaced} 0 0\n"
+    )
+
+    from awf.node.auth_mounts import iter_overlay_lowerdirs
+
+    assert iter_overlay_lowerdirs(proc_mounts) == {base_one, base_two, spaced}
+
+
+@pytest.mark.unit
+def test_iter_overlay_lowerdirs_handles_missing_and_optionless(tmp_path: Path) -> None:
+    from awf.node.auth_mounts import iter_overlay_lowerdirs
+
+    # Missing ``/proc/mounts`` → empty set.
+    assert iter_overlay_lowerdirs(tmp_path / "absent") == set()
+
+    # An overlay line carrying no ``lowerdir=`` option contributes nothing.
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(f"overlay {tmp_path / 'm'} overlay rw,upperdir=/u,workdir=/w 0 0\n")
+    assert iter_overlay_lowerdirs(proc_mounts) == set()
+
+
+@pytest.mark.unit
+def test_reconcile_skips_unstattable_legacy_file(tmp_path: Path) -> None:
+    # A legacy entry whose ``stat`` fails (a dangling symlink) is skipped, never
+    # fatal, and copies nothing.
+    legacy = tmp_path / "legacy"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, upper, base):
+        directory.mkdir()
+    (legacy / "dangling").symlink_to(tmp_path / "missing-target")
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, upper=upper, base=base)
+
+    assert list(upper.iterdir()) == []
+
+
+@pytest.mark.unit
+def test_reconcile_upper_wins_ties(tmp_path: Path) -> None:
+    # The base lacks the file (so it reads as a fallback edit), but ``upper`` already
+    # holds an equal-or-newer version — the agent's authoritative overlay-era change.
+    # Only a *strictly newer* legacy edit may overwrite it, so the tie leaves ``upper``
+    # untouched.
+    legacy = tmp_path / "legacy"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, upper, base):
+        directory.mkdir()
+    (legacy / "f").write_text("legacy edit\n")
+    (upper / "f").write_text("upper edit\n")
+    legacy_mtime_ns = (legacy / "f").stat().st_mtime_ns
+    os.utime(upper / "f", ns=(legacy_mtime_ns, legacy_mtime_ns))  # equal mtimes
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, upper=upper, base=base)
+
+    assert (upper / "f").read_text() == "upper edit\n"
+
+
+@pytest.mark.unit
+def test_reconcile_per_file_copy_error_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A per-file copy failure is best-effort: it is swallowed so reconciliation never
+    # blocks provisioning.
+    legacy = tmp_path / "legacy"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, upper, base):
+        directory.mkdir()
+    (legacy / "f").write_text("fallback edit\n")  # base lacks it, upper lacks it
+
+    def _copy_fails(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(auth_mounts_mod.shutil, "copy2", _copy_fails)
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, upper=upper, base=base)
+
+    assert not (upper / "f").exists()

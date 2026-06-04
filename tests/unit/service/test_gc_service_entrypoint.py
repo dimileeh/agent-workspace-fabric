@@ -18,10 +18,21 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.node.auth_mounts import _shared_claude_base_dir
 from awf.node.compose_manager import ComposeTeardownResult
+from awf.service import gc_claude_base as gc_claude_base_mod
 from awf.service.gc import WorkspaceGCWorktreeRemoveResult, run_service_workspace_gc
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+def _make_superseded_base(work_dir: Path, signature: str) -> Path:
+    """Create a completed shared ``~/.claude`` base under ``work_dir`` for GC-B tests."""
+
+    base = _shared_claude_base_dir(work_dir.resolve(), signature)
+    base.mkdir(parents=True)
+    (base / "blob").write_text("x" * 512)
+    return base
 
 
 @pytest.fixture
@@ -286,3 +297,135 @@ async def test_service_gc_runs_companion_prune_when_cache_enabled(
         "status": "succeeded",
         "reason_code": "COMPANION_IMAGE_PRUNE_SUCCEEDED",
     }
+
+
+@pytest.mark.unit
+async def test_service_gc_reaps_superseded_claude_bases_when_enabled(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # GC-B wiring (#389): with ``reap_claude_bases`` enabled the entrypoint reaps
+    # superseded shared bases and threads the report into the result payload.
+    work_dir = tmp_path / "service"
+    host_home = tmp_path / "host-home"  # no ~/.claude → no current-signature base
+    host_home.mkdir()
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    superseded = _make_superseded_base(work_dir, "sigsuperseded000")
+    manager = _RecordingComposeManager()
+
+    result = await run_service_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        template_path=_TEMPLATE,
+        execute=True,
+        min_age_hours=24,
+        host_home=host_home,
+        reap_claude_bases=True,
+        compose_manager=manager,  # type: ignore[arg-type]
+        now=now,
+    )
+
+    assert result.claude_base_reap is not None
+    assert result.claude_base_reap["reaped"] == ["sigsuperseded000"]
+    assert result.to_dict()["claude_base_reap"]["reaped"] == ["sigsuperseded000"]
+    assert not superseded.parent.exists()
+    assert result.status == "succeeded"
+
+
+@pytest.mark.unit
+async def test_service_gc_omits_base_reap_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    superseded = _make_superseded_base(work_dir, "sigsuperseded000")
+    manager = _RecordingComposeManager()
+
+    result = await run_service_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        template_path=_TEMPLATE,
+        execute=True,
+        min_age_hours=24,
+        host_home=host_home,
+        reap_claude_bases=False,
+        compose_manager=manager,  # type: ignore[arg-type]
+        now=now,
+    )
+
+    assert result.claude_base_reap is None
+    assert "claude_base_reap" not in result.to_dict()
+    # Disabled: the superseded base is left untouched.
+    assert superseded.is_dir()
+
+
+@pytest.mark.unit
+async def test_service_gc_dry_run_plans_base_reap(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # The reaper honors the GC ``execute`` flag, so a dry-run GC previews which
+    # superseded bases would be reclaimed without deleting them.
+    work_dir = tmp_path / "service"
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    superseded = _make_superseded_base(work_dir, "sigsuperseded000")
+    manager = _RecordingComposeManager()
+
+    result = await run_service_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        template_path=_TEMPLATE,
+        execute=False,
+        min_age_hours=24,
+        host_home=host_home,
+        reap_claude_bases=True,
+        compose_manager=manager,  # type: ignore[arg-type]
+        now=now,
+    )
+
+    assert result.dry_run is True
+    assert result.claude_base_reap is not None
+    assert result.claude_base_reap["planned"] == ["sigsuperseded000"]
+    assert superseded.is_dir()
+
+
+@pytest.mark.unit
+async def test_service_gc_base_reap_permission_failure_is_partial(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A permission-denied base reap (leaked disk it could not reclaim) drives the
+    # whole run ``partial`` even when no per-workspace candidate failed.
+    work_dir = tmp_path / "service"
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    _make_superseded_base(work_dir, "sigsuperseded000")
+    manager = _RecordingComposeManager()
+
+    def _denied(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(gc_claude_base_mod.shutil, "rmtree", _denied)
+
+    result = await run_service_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        template_path=_TEMPLATE,
+        execute=True,
+        min_age_hours=24,
+        host_home=host_home,
+        reap_claude_bases=True,
+        compose_manager=manager,  # type: ignore[arg-type]
+        now=now,
+    )
+
+    assert result.status == "partial"
+    assert result.claude_base_reap is not None
+    assert result.claude_base_reap["status"] == "partial"

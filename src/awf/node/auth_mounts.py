@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
-import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,10 +53,14 @@ _SHARED_AUTH_DIRNAME = "_shared"
 _CLAUDE_BASE_DIRNAME = "claude-base"
 # A hard kill (OOM, SIGKILL) between ``mkdtemp`` and the ``finally`` cleanup in
 # ``_ensure_shared_claude_base`` strands a ``.claude-base-*`` staging dir (a full
-# ~1.7 GB copy of ``~/.claude``) under ``_shared``, which GC never reaps. The next
-# provision sweeps staging dirs older than this; the bound is far above how long a
-# live copy takes so a concurrent provision's in-progress staging dir is never hit.
-_STALE_STAGING_MAX_AGE_SECONDS = 3600.0
+# ~1.7 GB copy of ``~/.claude``) under ``_shared``, which GC never reaps. Each
+# active build holds an exclusive ``flock`` on this marker for the whole copy; the
+# next provision's reaper decides reapability by lock *liveness* (the kernel frees
+# the lock on process death) rather than an elapsed-time heuristic, so a build that
+# legitimately runs for hours — a large or network-mounted ``~/.claude`` — is never
+# reaped out from under itself, while a crash-orphaned staging dir (lock free or
+# marker absent) always is.
+_CLAUDE_BASE_BUILD_LOCK_NAME = ".build.lock"
 _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 _CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED"
 _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
@@ -192,6 +196,39 @@ def _overlay_lowerdir_from_proc_mounts(proc_mounts: Path, merged: Path) -> Path 
                 return Path(_unescape_proc_mount_field(option[len("lowerdir=") :]))
         return None
     return None
+
+
+def iter_overlay_lowerdirs(proc_mounts: Path = _PROC_MOUNTS) -> set[Path]:
+    """Return every live overlay ``lowerdir=`` path from ``/proc/mounts``.
+
+    Generalizes :func:`_overlay_lowerdir_from_proc_mounts` (which resolves a single
+    overlay's lowerdir by mountpoint) to enumerate *all* live overlays' lowers.
+    GC-B (#389) intersects this with the on-disk shared-base dirs so a base still
+    backing a live overlay as its ``lowerdir`` is never reaped — overlayfs forbids
+    removing a live lower. Reuses :func:`_unescape_proc_mount_field` for the octal
+    escapes ``/proc/mounts`` uses; an unreadable file yields an empty set.
+
+    A multi-layer ``lowerdir=a:b:c`` is split on ``:`` so every contributing lower
+    is captured. The Claude overlay uses a single lower today, but splitting keeps
+    the protection correct if that ever changes.
+    """
+
+    try:
+        contents = proc_mounts.read_text()
+    except OSError:
+        return set()
+    lowerdirs: set[Path] = set()
+    for line in contents.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 4 or fields[2] != "overlay":
+            continue
+        for option in fields[3].split(","):
+            if not option.startswith("lowerdir="):
+                continue
+            for entry in option[len("lowerdir=") :].split(":"):
+                if entry:
+                    lowerdirs.add(Path(_unescape_proc_mount_field(entry)))
+    return lowerdirs
 
 
 class OverlayMounter(Protocol):
@@ -353,6 +390,21 @@ def _host_claude_signature(host_home: Path) -> str:
     alone would reuse a stale base that lacks the new mode bits. Including the mode
     rebuilds when permissions change.
 
+    ``st_ctime_ns`` is part of the key too (the #382 design call). size+mtime+mode
+    alone miss a *metadata-preserving* content rewrite — a dotfile manager, ``cp -p``,
+    or a backup restore that replaces a Claude config / skill / token while restoring
+    the original ``st_mtime_ns`` and length. The kernel bumps ``st_ctime`` on *any*
+    inode change, and the final ``utime`` that restores the mtime itself re-bumps
+    ``ctime``, so a ctime that moved while mtime/size held flags exactly the edit the
+    other fields hide, forcing a fresh base. It is a free field from the same
+    ``stat()`` call — no extra I/O, no content read — so the deliberate stat-only /
+    no-1.7 GB-read contract is intact (content-hashing was rejected for that reason).
+    The trade-off: ``ctime`` is not settable from userspace, so a content-identical
+    *revert* no longer reproduces an old signature; recovery of a surviving overlay
+    ``upper`` after host churn instead flows through the ``base.signature`` pin
+    (:func:`_pinned_overlay_base`), which records the exact base and is immune to
+    reverts and metadata edits.
+
     ``followlinks=True`` does not detect symlink cycles, so a circular link in
     ``~/.claude`` (e.g. a skills dir linked back to a parent) would otherwise loop
     forever — and unlike the legacy per-workspace ``copytree`` this runs on every
@@ -381,7 +433,8 @@ def _host_claude_signature(host_home: Path) -> str:
         # itself (e.g. an inaccessible mode to ``0700``) would leave the signature
         # unchanged and keep reusing a base with stale root permissions.
         entries.append(
-            f".\0{source_stat.st_size}\0{source_stat.st_mtime_ns}\0{source_stat.st_mode}"
+            f".\0{source_stat.st_size}\0{source_stat.st_mtime_ns}\0"
+            f"{source_stat.st_ctime_ns}\0{source_stat.st_mode}"
         )
     except OSError:
         ancestors_by_path[os.fspath(source)] = frozenset()
@@ -418,7 +471,9 @@ def _host_claude_signature(host_home: Path) -> str:
             except OSError:
                 entries.append(f"{rel}\0missing")
                 continue
-            entries.append(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}\0{stat.st_mode}")
+            entries.append(
+                f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}\0{stat.st_ctime_ns}\0{stat.st_mode}"
+            )
     digest = hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
     return digest[:16]
 
@@ -731,6 +786,75 @@ def _overlay_upper_has_data(upper: Path) -> bool:
         return False
 
 
+def _safe_mtime_ns(path: Path) -> int | None:
+    """Return ``path``'s ``st_mtime_ns``, or ``None`` if it is absent/unstattable.
+
+    Used by :func:`_reconcile_fallback_edits_into_upper` to compare generations
+    without raising on a file that exists in one tree but not another. ``stat``
+    follows symlinks, matching the legacy copy's ``copytree(symlinks=False)`` which
+    materialized link targets as real files.
+    """
+
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _reconcile_fallback_edits_into_upper(*, legacy: Path, upper: Path, base: Path) -> None:
+    """Forward fallback-era legacy edits into the overlay ``upper`` before reaping it.
+
+    Closes #381: when a surviving non-empty ``upper`` exists but a transient remount
+    failure degraded a provision to the legacy full copy, the agent may have mutated
+    Claude auth/config in that legacy copy. When the overlay later remounts,
+    ``merged`` (``upper`` over ``base``) shadows the legacy copy and the caller
+    ``rmtree``s it — dropping those fallback edits. This reconciles them first.
+
+    Generation/mtime rule, walking every regular file ``rel`` under ``legacy``:
+
+    - It is a **fallback edit** iff ``base[rel]`` is absent OR
+      ``legacy[rel].st_mtime_ns > base[rel].st_mtime_ns``. A *fresh* legacy copy
+      preserves host mtimes via ``copy2``, so an unedited file matches the base and
+      is skipped — this filters the whole baseline tree out, preserving the
+      overlay's disk savings (only the small edited set is ever copied).
+    - A fallback edit is copied into ``upper`` only when ``upper[rel]`` is absent OR
+      ``legacy[rel].st_mtime_ns > upper[rel].st_mtime_ns``. **``upper`` wins ties:**
+      an equal-or-newer upper edit is the agent's authoritative overlay-era change,
+      and only a *strictly newer* legacy edit overwrites it.
+
+    Per-file ``OSError`` is caught and skipped — best-effort, never blocks
+    provisioning. Never logs file contents (no secret leakage).
+
+    Known limitation: if the host ``~/.claude`` changed between when the overlay's
+    base was built and when the fallback copy was taken, unedited legacy files may
+    read as "newer than base" and be copied. There is still no data loss (an
+    equal/newer ``upper`` always wins, and the copy is bounded to the differing
+    set); the mtime comparison is intentionally conservative toward preserving edits.
+    """
+
+    for root, _dirs, files in os.walk(legacy):
+        root_path = Path(root)
+        for name in files:
+            legacy_file = root_path / name
+            legacy_mtime_ns = _safe_mtime_ns(legacy_file)
+            if legacy_mtime_ns is None:
+                continue
+            rel = legacy_file.relative_to(legacy)
+            base_mtime_ns = _safe_mtime_ns(base / rel)
+            is_fallback_edit = base_mtime_ns is None or legacy_mtime_ns > base_mtime_ns
+            if not is_fallback_edit:
+                continue
+            upper_file = upper / rel
+            upper_mtime_ns = _safe_mtime_ns(upper_file)
+            if upper_mtime_ns is not None and legacy_mtime_ns <= upper_mtime_ns:
+                continue
+            try:
+                upper_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_file, upper_file)
+            except OSError:
+                continue
+
+
 def _prepare_isolated_claude_auth(
     *,
     host_home: Path,
@@ -794,7 +918,7 @@ def _prepare_isolated_claude_auth(
             )
         )
         if overlay is not None:
-            mount, upper, work = overlay
+            mount, upper, work, base = overlay
             mounts.append(mount)
             chown_exempt.add(mount.source)
             extra_chown.extend((upper, work))
@@ -805,7 +929,18 @@ def _prepare_isolated_claude_auth(
             # intentionally supersedes. Remove it so it does not leak on disk for
             # the workspace's lifetime. ``ignore_errors`` keeps a stuck reap from
             # failing provisioning — a later provision retries the cleanup.
+            #
+            # Before reaping it, reconcile any *fallback-era edits* it carries back
+            # into ``upper`` (#381): a prior provision that degraded to this legacy
+            # copy may have mutated Claude auth/config there, and the remounted
+            # overlay (``merged`` = upper over ``base``) would otherwise shadow then
+            # drop those edits. Reconciliation copies only the strictly-newer legacy
+            # edits forward (``upper`` wins ties), so the fresh-copy baseline — which
+            # matches ``base`` — is left untouched and the overlay's disk savings hold.
             if legacy_claude_copy.exists():
+                _reconcile_fallback_edits_into_upper(
+                    legacy=legacy_claude_copy, upper=upper, base=base
+                )
                 shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:
             target_dir = legacy_claude_copy
@@ -929,12 +1064,15 @@ def _prepare_claude_overlay_mount(
     overlay_mounter: OverlayMounter,
     workspace_owner_uid: int | None,
     workspace_owner_gid: int | None,
-) -> tuple[AuthMount, Path, Path] | None:
+) -> tuple[AuthMount, Path, Path, Path] | None:
     """Mount a shared-base + per-workspace overlay at ``<claude_root>/merged``.
 
-    Returns ``(merged_mount, upper, work)`` on success, or ``None`` to signal the
-    caller should fall back to the legacy full copy (overlay unsupported or the
-    mount failed). The shared base is built once per host and reused.
+    Returns ``(merged_mount, upper, work, base)`` on success, or ``None`` to signal
+    the caller should fall back to the legacy full copy (overlay unsupported or the
+    mount failed). ``base`` is the resolved ``lowerdir`` (pinned, freshly built, or
+    recovered from a live/raced mount) — the caller needs it to reconcile any
+    fallback-era legacy edits into ``upper`` before reaping the legacy copy (#381).
+    The shared base is built once per host and reused.
     """
 
     if not overlay_mounter.supported():
@@ -1026,6 +1164,7 @@ def _prepare_claude_overlay_mount(
             AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
             upper,
             work,
+            base,
         )
 
     try:
@@ -1056,6 +1195,7 @@ def _prepare_claude_overlay_mount(
                 AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
                 upper,
                 work,
+                base,
             )
         _log.warning(
             "claude_auth_overlay_unavailable",
@@ -1097,6 +1237,7 @@ def _prepare_claude_overlay_mount(
         AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
         upper,
         work,
+        base,
     )
 
 
@@ -1118,17 +1259,16 @@ def _ensure_shared_claude_base(
     to the agent uid/gid (all workspace agents share uid 1000) so the read-only
     lower is readable through the overlay.
 
-    Known limitation (superseded-base accumulation): each distinct host
-    ``~/.claude`` signature builds a new ``<sig>/.claude`` base (~1.7 GB) and
-    leaves prior-signature bases in place. ``_reap_stale_claude_base_staging``
-    only reclaims crash-orphaned ``.claude-base-*`` *staging* dirs, and GC only
-    enumerates ``auth/<workspace_id>`` rows (never ``_shared``), so completed
-    but superseded base dirs are never reclaimed today. With N host-content
-    revisions this strands up to N×1.7 GB under ``_shared``. Reaping them safely
-    is deferred to a follow-up (GC-B): a superseded base may still back a live
-    overlay as its ``lowerdir`` (overlayfs forbids mutating/removing a live
-    lower), so a reaper must skip the current signature and any base referenced
-    by an ``lowerdir=`` in ``/proc/mounts`` before removing it.
+    Superseded-base accumulation: each distinct host ``~/.claude`` signature
+    builds a new ``<sig>/.claude`` base (~1.7 GB) and leaves prior-signature bases
+    in place (``_reap_stale_claude_base_staging`` only reclaims crash-orphaned
+    ``.claude-base-*`` *staging* dirs, and terminal-workspace GC only enumerates
+    ``auth/<workspace_id>`` rows, never ``_shared``). Those completed-but-superseded
+    base dirs are reclaimed by GC-B (:func:`awf.service.gc_claude_base.
+    reap_superseded_claude_bases`), which skips the current signature and any base
+    that is live-mounted (``lowerdir=`` in ``/proc/mounts``) or pinned by a
+    surviving workspace before removing it — overlayfs forbids mutating/removing a
+    live lower.
     """
 
     base = _shared_claude_base_dir(work_dir, signature)
@@ -1150,12 +1290,26 @@ def _ensure_shared_claude_base(
     shared_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".claude-base-", dir=shared_root))
     staged_base = staging / ".claude"
-    # ``finally`` guarantees the staging dir is reclaimed on every exit: a
-    # copytree/chown OSError (disk full, permissions) that propagates to the
-    # caller's legacy-copy fallback, a lost build race, or the success path
-    # (where ``replace`` has already moved ``staged_base`` out). Without it a
-    # failed copy/chown would orphan the staging tree under the shared root.
+    build_lock = staging / _CLAUDE_BASE_BUILD_LOCK_NAME
+    # Hold an exclusive advisory ``flock`` on the staging dir for the whole build.
+    # The reaper keys reapability off this lock's *liveness*, not elapsed time, so a
+    # slow-but-live build (a large or network-mounted ``~/.claude`` running over an
+    # hour) is never reaped out from under itself (#379). Acquiring the lock is the
+    # first action after ``mkdtemp``, so the unlocked window is a sub-millisecond
+    # ``open``; a concurrent reaper that races into it only forces this provision to
+    # rebuild (the staging dir is discarded — no data loss), never corrupts a live
+    # build. The kernel releases the lock automatically on process death
+    # (OOM/SIGKILL/crash) — exactly the orphan case a duration heuristic could not
+    # tell apart from a legitimately long build.
+    lock_fd = os.open(build_lock, os.O_CREAT | os.O_WRONLY, 0o600)
+    # ``finally`` guarantees the lock fd is closed (releasing the lock) and the
+    # staging dir is reclaimed on every exit: a copytree/chown OSError (disk full,
+    # permissions) that propagates to the caller's legacy-copy fallback, a lost
+    # build race, or the success path (where ``replace`` has already moved
+    # ``staged_base`` out). Without it a failed copy/chown would orphan the staging
+    # tree under the shared root.
     try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         shutil.copytree(
             host_home / ".claude",
             staged_base,
@@ -1186,6 +1340,7 @@ def _ensure_shared_claude_base(
             )
             raise
     finally:
+        os.close(lock_fd)
         shutil.rmtree(staging, ignore_errors=True)
     return base
 
@@ -1207,30 +1362,54 @@ def _reap_stale_claude_base_staging(base_root: Path) -> None:
     and a sweep scoped to only the new signature's dir would never revisit — and
     so never reap — the old signature's orphan.
 
-    Only staging dirs older than ``_STALE_STAGING_MAX_AGE_SECONDS`` are removed so a
-    concurrent provision's in-progress staging dir (mtime ~build start, well under
-    the bound) is never clobbered. A staging dir that vanishes from under us (a
-    concurrent reap or its winning ``replace``) is skipped rather than fatal.
+    Reapability is decided by **lock liveness, not elapsed time** (#379). Each
+    active build holds an exclusive ``flock`` on ``<staging>/.build.lock`` for its
+    whole duration; the reaper tries to take that same lock non-blocking:
 
-    Assumption: this keys off the staging dir's *mtime*, which ``mkdtemp`` sets at
-    creation and ``copytree`` bumps again to ~copy start when it creates the
-    ``.claude`` child — so the age below is measured from roughly when the copy
-    began, not when it finished. The bound (1h) assumes a full ``~/.claude`` copy
-    (~1.7 GB) completes far inside that window, which holds for local disks (well
-    under a minute). On pathologically slow I/O (e.g. a network-mounted host
-    ``~/.claude``) a single copy running over an hour would have its own
-    in-progress staging dir reaped by a concurrent provision; raise the bound (or
-    switch to a liveness marker) if that ever becomes a real deployment.
+    - lock held by a live builder (``BlockingIOError``/``EWOULDBLOCK``) → **skip**,
+      so an actively-building base is never reaped regardless of how long the copy
+      runs (the failure mode the old 1 h duration heuristic could not avoid).
+    - lock acquired, or ``.build.lock`` absent (a pre-upgrade staging dir, or a
+      build killed before it locked) → a crash orphan → ``rmtree``.
+    - staging dir vanished mid-check (a concurrent reap or a winning ``replace``)
+      → skipped rather than fatal.
     """
 
-    now = time.time()
     for staging in base_root.glob("*/.claude-base-*"):
-        try:
-            age = now - staging.stat().st_mtime
-        except OSError:
+        if _claude_base_staging_build_is_live(staging):
             continue
-        if age >= _STALE_STAGING_MAX_AGE_SECONDS:
-            shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _claude_base_staging_build_is_live(staging: Path) -> bool:
+    """Return whether a live builder holds ``<staging>/.build.lock``.
+
+    Duration-independent liveness probe for :func:`_reap_stale_claude_base_staging`
+    (#379): an actively-building base holds an exclusive ``flock`` the kernel
+    releases only on close or process death, so a non-blocking re-lock attempt that
+    is denied proves a live builder, and one that succeeds (or finds no marker)
+    proves an orphan. ``flock`` works across distinct open file descriptions even
+    within one process, so a separate ``open`` of a held lock is denied — which is
+    what lets unit tests exercise this without a second process.
+    """
+
+    lock_path = staging / _CLAUDE_BASE_BUILD_LOCK_NAME
+    try:
+        lock_fd = os.open(lock_path, os.O_RDONLY)
+    except OSError:
+        # ``.build.lock`` (or the whole staging dir) is gone: a pre-upgrade staging
+        # dir that locked nothing, a build killed before it created the marker, or a
+        # dir that vanished mid-check. No live builder is protecting it → reapable.
+        return False
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # ``EWOULDBLOCK``/``EAGAIN`` (``BlockingIOError``): a live builder holds the
+        # lock. Never reap an actively-building base, regardless of its duration.
+        return True
+    finally:
+        os.close(lock_fd)
+    return False
 
 
 def _write_overlay_unmounted_marker(claude_root: Path, marker: Path) -> None:
