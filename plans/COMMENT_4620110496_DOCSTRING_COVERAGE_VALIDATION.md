@@ -71,6 +71,29 @@ Evidence after Iteration 3:
 - `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_read_workspace_log_does_not_skip_short_non_eof_expanded_read -q`
   passed: `1 passed in 1.64s`.
 
+## Iteration 4
+
+The current branch state exposed one remaining PR-added nested test sentinel
+method without a docstring:
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::_RejectWholeEncodeStr.encode`.
+This iteration added a concise behavior-neutral docstring only.
+
+Evidence after Iteration 4:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=14`, `added_defs=75`,
+  `missing_docstrings_on_added_defs=1`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=14`, `added_defs=75`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+  passed.
+- `git diff --check` passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_unknown_leading_log_value_fragment_end_peeks_before_encoding_expanded_text -q`
+  passed: `1 passed in 0.78s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring

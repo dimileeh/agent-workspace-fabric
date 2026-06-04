@@ -78,6 +78,7 @@ class _RejectWholeEncodeStr(str):
     """String sentinel that catches accidental full-buffer encoding."""
 
     def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+        """Reject full-buffer encoding in byte-offset fragment tests."""
         raise AssertionError("whole expanded log text must not be encoded")
 
 
