@@ -321,7 +321,11 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     assert "pipx upgrade agent-workspace-fabric" in upgrade_text
     assert "git pull" in upgrade_text
     assert "awf start" in upgrade_text
-    assert "awf smoke run --mocked-local --format pretty" in upgrade_text
+    assert "awf smoke run --project <path> --mocked-local --format pretty" in upgrade_text
+    assert "uv run --python 3.12 --extra dev awf smoke run --project <path>" in upgrade_text
+    upgrade_smoke_lines = [line for line in upgrade_text.splitlines() if "smoke run" in line]
+    assert upgrade_smoke_lines
+    assert all("--project <path>" in line for line in upgrade_smoke_lines)
 
     assert "curl -fsSL https://aira.pro/install.sh" not in uninstall_text
     assert "uv tool uninstall agent-workspace-fabric" in uninstall_text

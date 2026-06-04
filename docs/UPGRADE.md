@@ -1,10 +1,11 @@
 # Upgrade Guide
 
 Use the upgrade path that matches the first-run lane you chose. After upgrading,
-run `awf start` and mocked smoke to refresh local Core and prove the operator
-path still works. The hosted curl installer lane is intentionally omitted until
-its public installer, manifest, checksums, and distribution artifacts are
-published and verified.
+run `awf start` and mocked smoke against the project initialized during first
+run to refresh local Core and prove the operator path still works. Replace
+`<path>` below with that project path. The hosted curl installer lane is
+intentionally omitted until its public installer, manifest, checksums, and
+distribution artifacts are published and verified.
 
 ## uv tool
 
@@ -14,7 +15,7 @@ The `uv tool` lane is release-installed and package-manager mediated:
 uv tool upgrade agent-workspace-fabric
 awf start
 awf service status --format pretty
-awf smoke run --mocked-local --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
 ```
 
 ## pipx
@@ -25,7 +26,7 @@ The `pipx` lane is release-installed and package-manager mediated:
 pipx upgrade agent-workspace-fabric
 awf start
 awf service status --format pretty
-awf smoke run --mocked-local --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
 ```
 
 ## Source Checkout With Global Tool Install
@@ -39,7 +40,7 @@ git pull
 uv tool install . --force
 awf start --source-checkout "$PWD"
 awf service status --format pretty
-awf smoke run --mocked-local --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
 ```
 
 ## Source Checkout With No Global Install
@@ -53,7 +54,7 @@ git pull
 uv sync --extra dev
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf service status --format pretty
-uv run --python 3.12 --extra dev awf smoke run --mocked-local --format pretty
+uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty
 ```
 
 ## Rollback
@@ -64,7 +65,7 @@ If a local upgrade blocks development:
    version for your lane.
 2. Run `awf start` from that lane.
 3. Check `awf service status --format pretty`.
-4. Run `awf smoke run --mocked-local --format pretty`.
+4. Run `awf smoke run --project <path> --mocked-local --format pretty`.
 
 `awf start` is designed to be idempotent for local development. Do not delete
 `.awf` state or Docker volumes unless a specific troubleshooting step requires

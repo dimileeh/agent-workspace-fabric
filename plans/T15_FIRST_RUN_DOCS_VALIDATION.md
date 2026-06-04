@@ -117,6 +117,29 @@ uv run --python 3.12 --extra dev ruff check tests/unit/cli/test_init_parts/test_
 
 Result: `All checks passed!`.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HAl67`:
+
+- `docs/UPGRADE.md` now tells operators to reuse the project path initialized
+  during first run and passes `--project <path>` to every upgrade and rollback
+  smoke command.
+- `tests/unit/docs/test_public_docs_status.py` now rejects bare upgrade-guide
+  `smoke run` lines that would validate the current working directory.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_and_uninstall_docs_cover_all_first_run_lanes -q
+```
+
+Red-phase result after updating the focused assertion: failed because
+`docs/UPGRADE.md` still used bare `awf smoke run --mocked-local --format pretty`.
+
+Final repair result: `1 passed in 0.52s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
