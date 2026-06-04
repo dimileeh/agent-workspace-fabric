@@ -509,6 +509,42 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HFJSc`:
+
+- `docs/GETTING_STARTED.md` now leaves the Recommended First-Run Sequence
+  GitHub token guidance commented and optional for PR creation/monitoring,
+  matching Quickstart's mocked-smoke path.
+- `tests/unit/docs/test_public_docs_status.py` now rejects a Getting Started
+  mocked first-run section that omits optional token guidance or hard-requires
+  `export AWF_GITHUB_TOKEN="$(gh auth token)"` before mocked smoke.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_mocked_smoke_keeps_github_auth_optional -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/GETTING_STARTED.md` did not include optional GitHub token guidance in the
+Recommended First-Run Sequence while the command block still hard-required
+`gh auth token`.
+
+Final repair result: `1 passed in 0.58s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_getting_started_uses_runnable_startup_path tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional -q
+```
+
+Result: `3 passed in 0.60s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

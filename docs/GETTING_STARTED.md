@@ -89,12 +89,14 @@ passing formula audit; it is not a supported install channel yet.
 Once AWF is installed, the runnable first-run sequence is setup, start, project
 onboarding, then mocked smoke. Export the required local service values before
 starting Core so Compose can interpolate the API, worker, and Postgres service
-environment:
+environment. The mocked smoke proof does not require GitHub CLI auth; add a
+GitHub token later when you create or monitor PRs:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_GITHUB_TOKEN="$(gh auth token)"
+# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
+# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup
 awf start
 awf service status --format pretty

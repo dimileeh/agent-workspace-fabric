@@ -441,6 +441,29 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     assert "run `awf start`" in configure_section
 
 
+def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
+    """Assert Getting Started first-run smoke does not require GitHub CLI auth."""
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+    startup_section = getting_started_text.split(
+        "### Recommended First-Run Sequence",
+        maxsplit=1,
+    )[1].split("### Configure Environment", maxsplit=1)[0]
+
+    assert re.search(r"without requiring live GitHub\s+or provider credentials", startup_section)
+    assert (
+        "# [optional] Only needed for PR creation/monitoring; skip for mocked smoke."
+        in startup_section
+    )
+    assert (
+        "# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed."
+        in startup_section
+    )
+    assert not re.search(
+        r'(?m)^export AWF_GITHUB_TOKEN="\$\(gh auth token\)"$',
+        startup_section,
+    )
+
+
 def test_getting_started_cli_host_port_derivation_matches_cli_default() -> None:
     """Assert Getting Started documents the CLI's localhost host-port derivation."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
