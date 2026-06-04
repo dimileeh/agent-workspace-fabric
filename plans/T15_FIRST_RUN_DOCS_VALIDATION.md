@@ -96,6 +96,27 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 
 Result: `All checks passed!`.
 
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `docs/QUICKSTART.md` Lane 1 now describes `awf init <path>` as accepting any
+  path, including an empty eval directory or a checked-out project.
+- `tests/unit/cli/test_init_parts/test_init_part_004.py` now slices the
+  Getting Started section with explicit heading assertions instead of indexed
+  `str.split(...)[1]`; the same focused assertion now matches the documented
+  `--project <path>` smoke command form.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init_parts/test_init_part_004.py::test_getting_started_recommends_setup_start_then_project_init tests/unit/docs/test_public_docs_status.py::test_quickstart_presents_available_complete_first_run_lanes -q
+```
+
+Result: `2 passed in 0.45s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/cli/test_init_parts/test_init_part_004.py
+```
+
+Result: `All checks passed!`.
+
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.

@@ -38,6 +38,13 @@ and verified, `docs/QUICKSTART.md` must steer evaluators to the `uv tool` /
 `pipx` or source-checkout lanes instead of advertising
 `https://aira.pro/install.sh`.
 
+Post-review adjustment for review-level comment `issue:4620140358`: Lane 1
+Quickstart prose must not imply the newly created eval directory is already a
+checked-out repository, and the focused Getting Started grammar test must report
+missing Markdown headings with explicit assertions instead of indexed split
+failures. While validating that test, keep its smoke command assertion aligned
+with the current `--project <path>` Getting Started guidance.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

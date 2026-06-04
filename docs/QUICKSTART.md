@@ -46,7 +46,8 @@ awf init "$HOME/awf-eval-project"
 awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
-This is the `awf init <path>` step for a checked-out project repository.
+This is the `awf init <path>` step. Supply any path, such as an empty eval
+directory or a checked-out project.
 
 Upgrade:
 
