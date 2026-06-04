@@ -996,6 +996,44 @@ async def test_initialize_project_profile_value_error_preview_failure_does_not_s
 
 
 @pytest.mark.unit
+async def test_initialize_project_profile_existing_profile_probe_failure_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    leaked_detail = "/srv/awf/internal/.awf/workspace.yml permission denied"
+
+    def fail_existing_profile_probe(_repository: Path) -> Path | None:
+        raise PermissionError(leaked_detail)
+
+    monkeypatch.setattr(
+        setup_tools,
+        "_existing_project_profile_path",
+        fail_existing_profile_probe,
+    )
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "template": "generic"},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_FAILED"
+    assert payload["message"] == "could not build onboarding preview"
+    assert payload["detail"] == {
+        "project_path": str(project.resolve()),
+        "template": "generic",
+    }
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
 async def test_client_integration_instructions_are_secret_free(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

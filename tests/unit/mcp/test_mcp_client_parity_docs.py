@@ -258,6 +258,7 @@ def test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface()
     cli_cell = _strip_backticks(row.get("CLI surface", ""))
     rest_cell = _strip_backticks(row.get("Canonical REST surface", ""))
     security_cell = row.get("Security Boundary", "")
+    parity_doc = PARITY_DOC.read_text(encoding="utf-8")
     mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
 
     assert tools >= FIRST_RUN_SETUP_TOOLS
@@ -268,6 +269,8 @@ def test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface()
     assert "no credential-value inputs" in security_cell
     assert "no env-file contents" in security_cell
     assert "safe refs/status only" in security_cell
+    assert "source_checkout.marker_count" in parity_doc
+    assert "integer | null" in parity_doc
     for tool_name in FIRST_RUN_SETUP_TOOLS:
         assert tool_name in mcp_ref
 

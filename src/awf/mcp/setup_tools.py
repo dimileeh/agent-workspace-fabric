@@ -342,8 +342,8 @@ def _initialize_project_profile_result(
             repository=repository,
         )
 
-    existing_profile_path = _existing_project_profile_path(repository)
     try:
+        existing_profile_path = _existing_project_profile_path(repository)
         preview = preview_project_onboarding(
             repository,
             template=template,
@@ -568,6 +568,7 @@ def _probed_source_checkout_status(details: Mapping[str, Any]) -> dict[str, Any]
         "present": True,
         "root": root,
         "verified_at": verified_at,
+        # Dry-run probe metadata verifies the checkout but does not enumerate markers.
         "marker_count": None,
     }
     return payload

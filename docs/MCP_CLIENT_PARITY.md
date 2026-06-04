@@ -48,7 +48,10 @@ top-level list.
 They mirror CLI setup/start/init/client intent rather than adding REST routes.
 They do not accept credential-value inputs, do not read env-file contents into
 responses, and return only status, paths, command arguments, and safe
-credential-reference metadata.
+credential-reference metadata. For setup status, `source_checkout.marker_count`
+is `integer | null`: persisted host config supplies an integer marker count,
+while dry-run probe metadata uses `null` because the probe verifies the checkout
+without enumerating markers.
 
 ## Status Vocabulary
 

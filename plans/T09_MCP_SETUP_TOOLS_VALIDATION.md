@@ -53,6 +53,58 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Profile Probe And Marker Count Contract
+
+### Requirement Status
+
+- Preserve project path existence and directory validation behavior: Complete.
+- Convert existing-profile probe filesystem failures into structured
+  `PROJECT_INIT_FAILED` MCP errors without surfacing raw exception text:
+  Complete.
+- Preserve existing onboarding preview and write-profile behavior: Complete.
+- Preserve persisted-config integer `source_checkout.marker_count` behavior:
+  Complete.
+- Preserve probed explicit-checkout `source_checkout.marker_count=null`
+  behavior: Complete.
+- Document the nullable marker-count response contract in the MCP parity docs:
+  Complete.
+- Add focused regressions for the probe guard and marker-count documentation:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `tests/unit/mcp/test_mcp_client_parity_docs.py`
+- `docs/MCP_CLIENT_PARITY.md`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_existing_profile_probe_failure_is_structured tests/unit/mcp/test_mcp_client_parity_docs.py::test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_uses_onboarding_writer tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_value_error_preview_failure_does_not_surface_exception_text tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_existing_profile_probe_failure_is_structured tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_falls_back_when_host_config_read_fails -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_mcp_client_parity_docs.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Pre-implementation regressions failed as expected because the
+  existing-profile probe exception escaped through FastMCP `ToolError`, and the
+  parity docs did not publish the nullable marker-count contract.
+- Targeted regressions after the implementation/doc changes: 2 passed.
+- Adjacent project-init and source-checkout status checks: 6 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Expanduser Fallback
 
 ### Requirement Status

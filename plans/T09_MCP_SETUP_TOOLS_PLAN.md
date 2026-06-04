@@ -84,6 +84,56 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Profile Probe And Marker Count Contract
+
+### Problem Statement And Scope
+
+The review reports two remaining setup-tool contract gaps:
+`_initialize_project_profile_result` probes for an existing project profile
+before the guarded onboarding preview block, and the setup-status
+`source_checkout.marker_count` response contract is implicit when probed
+checkout metadata cannot provide a marker count.
+
+Scope is limited to guarding the existing-profile filesystem probe through the
+same structured MCP error path as onboarding preview failures and documenting
+the existing nullable `source_checkout.marker_count` contract. Existing
+persisted integer and probed null payload behavior stays unchanged.
+
+### Requirements Checklist
+
+- Preserve project path existence and directory validation behavior.
+- Convert existing-profile probe filesystem failures into structured
+  `PROJECT_INIT_FAILED` MCP errors without surfacing raw exception text.
+- Preserve existing onboarding preview and write-profile behavior.
+- Preserve persisted-config integer `source_checkout.marker_count` behavior.
+- Preserve probed explicit-checkout `source_checkout.marker_count=null`
+  behavior.
+- Document the nullable marker-count response contract in the MCP parity docs.
+- Add focused regressions for the probe guard and marker-count documentation.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression for an existing-profile probe
+   `OSError` with path-like exception text.
+2. Add a focused docs assertion for the nullable marker-count response
+   contract.
+3. Move `_existing_project_profile_path(repository)` inside the existing
+   onboarding preview `try` block.
+4. Update the MCP parity docs to state that setup-status
+   `source_checkout.marker_count` is `integer | null`.
+5. Run the targeted regressions and focused checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_existing_profile_probe_failure_is_structured tests/unit/mcp/test_mcp_client_parity_docs.py::test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_mcp_client_parity_docs.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Marker Count Schema
 
 ### Problem Statement And Scope
