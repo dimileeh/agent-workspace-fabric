@@ -1158,6 +1158,48 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HI2vB`:
+
+- `docs/UNINSTALL.md` now restores or requires the running local Core
+  `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` before all source-checkout
+  metadata-refresh Compose stop blocks.
+- `docs/QUICKSTART.md` applies the same guard to the matching source-checkout
+  uninstall snippets, so source-lane users uninstalling from a fresh shell do
+  not hit Compose interpolation failures before Core stops.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  uninstall snippets that run the Compose stop fallback before restoring service
+  secrets.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Red-phase result after tightening the focused assertions: failed because the
+Quickstart and Uninstall source-checkout snippets had no `AWF_API_TOKEN` restore
+guard before the Compose stop fallback.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Final focused repair result: `2 passed in 0.67s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

@@ -185,6 +185,22 @@ Editing `~/.awf/config.yml` remains the no-stop option. To refresh the persisted
 path:
 
 ```bash
+if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before refreshing source-checkout metadata}"
+  export AWF_API_TOKEN
+fi
+AWF_PERSISTED_POSTGRES_PASSWORD=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
+done
+if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
+  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
+else
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  export AWF_POSTGRES_PASSWORD
+fi
 if [ -f docker/compose/.env ]; then
   docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 else
@@ -280,6 +296,22 @@ Core stack still holds them. Editing `~/.awf/config.yml` remains the no-stop
 option. To refresh the persisted path:
 
 ```bash
+if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before refreshing source-checkout metadata}"
+  export AWF_API_TOKEN
+fi
+AWF_PERSISTED_POSTGRES_PASSWORD=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
+done
+if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
+  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
+else
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  export AWF_POSTGRES_PASSWORD
+fi
 if [ -f docker/compose/.env ]; then
   docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 else

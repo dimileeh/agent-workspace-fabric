@@ -186,6 +186,13 @@ the process environment. If neither persisted file carries the password, the
 snippets must require the operator to restore the running local Core password in
 the shell instead of defaulting to `awf_dev`.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HI2vB`: source-checkout
+uninstall metadata-refresh snippets in `docs/UNINSTALL.md` and the matching
+Quickstart source lanes must restore or require the running local Core
+`AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` before the Compose stop fallback.
+This prevents fresh-shell source-checkout uninstalls from failing Compose
+interpolation before Core stops.
+
 Post-review adjustment for review-level comment `issue:4620140358`: package
 upgrade env-restore assertions must match the standalone `awf start` command
 line instead of prose substrings, and the global source-checkout rollback

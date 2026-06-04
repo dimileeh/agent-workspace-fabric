@@ -299,6 +299,13 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
         assert core_stop_guidance in section_words
         assert port_block_guidance in section_words
         assert no_stop_guidance in section_words
+        env_restore_start_index, env_restore_end_index = (
+            _assert_source_checkout_service_env_restore_before_stop(
+                f"{heading} uninstall",
+                uninstall_section,
+                "refreshing source-checkout metadata",
+            )
+        )
         assert stop_guard_line in uninstall_section
         assert stop_env_file_line in uninstall_section
         assert stop_fallback_line in uninstall_section
@@ -307,7 +314,9 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
         stop_fallback_index = uninstall_section.index(stop_fallback_line)
         assert section_words.index(core_stop_guidance) < section_words.index(port_block_guidance)
         assert (
-            uninstall_section.index(stop_guard_line)
+            env_restore_start_index
+            < env_restore_end_index
+            < uninstall_section.index(stop_guard_line)
             < uninstall_section.index(stop_env_file_line)
             < stop_fallback_index
             < uninstall_section.index(stop_guard_end_line, stop_fallback_index)
@@ -970,9 +979,18 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
     assert stop_env_file_line in intro_section
     assert stop_fallback_line in intro_section
     assert stop_guard_end_line in intro_section
+    intro_env_restore_start_index, intro_env_restore_end_index = (
+        _assert_source_checkout_service_env_restore_before_stop(
+            "intro source-checkout uninstall",
+            intro_section,
+            "refreshing source-checkout metadata",
+        )
+    )
     intro_fallback_index = intro_section.index(stop_fallback_line)
     assert (
-        intro_section.index(stop_guard_line)
+        intro_env_restore_start_index
+        < intro_env_restore_end_index
+        < intro_section.index(stop_guard_line)
         < intro_section.index(stop_env_file_line)
         < intro_fallback_index
         < intro_section.index(stop_guard_end_line, intro_fallback_index)
@@ -987,9 +1005,18 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         assert stop_env_file_line in section, f"{label} must stop with compose env file"
         assert stop_fallback_line in section, f"{label} must stop without compose env file"
         assert stop_guard_end_line in section, f"{label} must close the compose stop guard"
+        env_restore_start_index, env_restore_end_index = (
+            _assert_source_checkout_service_env_restore_before_stop(
+                f"{label} uninstall",
+                section,
+                "refreshing source-checkout metadata",
+            )
+        )
         stop_fallback_index = section.index(stop_fallback_line)
         assert (
-            section.index(stop_guard_line)
+            env_restore_start_index
+            < env_restore_end_index
+            < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
             < stop_fallback_index
             < section.index(stop_guard_end_line, stop_fallback_index)
@@ -1552,6 +1579,53 @@ def _assert_source_checkout_postgres_password_restore(
         < password_guard_end_index
     ), f"{label} must restore persisted Postgres password before continuing"
     return password_init_index, password_guard_end_index
+
+
+def _assert_source_checkout_service_env_restore_before_stop(
+    label: str,
+    section: str,
+    lifecycle: str,
+) -> tuple[int, int]:
+    """Assert source-checkout snippets restore service secrets before stopping Core."""
+    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
+    api_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        "or persist it in docker/compose/.env before " + lifecycle + '}"'
+    )
+    api_export_line = "  export AWF_API_TOKEN"
+    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    stop_guard_line = "if [ -f docker/compose/.env ]; then"
+
+    assert api_guard_line in section, f"{label} must prefer persisted AWF_API_TOKEN"
+    assert api_require_line in section, f"{label} must require the existing AWF_API_TOKEN"
+    assert api_export_line in section, f"{label} must export restored AWF_API_TOKEN"
+    assert unsafe_api_generation_line not in section, f"{label} must not regenerate AWF_API_TOKEN"
+
+    api_guard_index = _shell_line_index(section, api_guard_line, label)
+    api_require_index = _shell_line_index(section, api_require_line, label, api_guard_index)
+    api_export_index = _shell_line_index(section, api_export_line, label, api_require_index)
+    api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
+    password_restore_start_index, password_restore_end_index = (
+        _assert_source_checkout_postgres_password_restore(
+            label,
+            section,
+            lifecycle,
+        )
+    )
+    stop_guard_index = _shell_line_index(
+        section, stop_guard_line, label, password_restore_end_index
+    )
+
+    assert (
+        api_guard_index
+        < api_require_index
+        < api_export_index
+        < api_guard_end_index
+        < password_restore_start_index
+        < password_restore_end_index
+        < stop_guard_index
+    ), f"{label} must restore service secrets before stopping Core"
+    return api_guard_index, password_restore_end_index
 
 
 def _assert_package_upgrade_restores_service_env(
