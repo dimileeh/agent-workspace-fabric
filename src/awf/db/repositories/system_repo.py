@@ -7,7 +7,8 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_value
@@ -152,18 +153,71 @@ class WorkerHeartbeatRepository:
             await self._session.flush()
             return cast(WorkerHeartbeat, result.scalar_one())
 
+        heartbeat = await self._update_existing_heartbeat(
+            worker_id=worker_id,
+            node_id=node_id,
+            last_heartbeat_at=last_heartbeat_at,
+            poll_interval_seconds=poll_interval_seconds,
+            updated_at=now,
+        )
+        if heartbeat is not None:
+            return heartbeat
+
+        try:
+            async with self._session.begin_nested():
+                await self._session.execute(
+                    insert(WorkerHeartbeat).values(
+                        **heartbeat_values,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+        except IntegrityError:
+            heartbeat = await self._update_existing_heartbeat(
+                worker_id=worker_id,
+                node_id=node_id,
+                last_heartbeat_at=last_heartbeat_at,
+                poll_interval_seconds=poll_interval_seconds,
+                updated_at=now,
+            )
+            if heartbeat is not None:
+                return heartbeat
+        else:
+            await self._session.flush()
+
         heartbeat = await self.get(worker_id=worker_id)
         if heartbeat is None:
-            heartbeat = WorkerHeartbeat(
-                **heartbeat_values,
-            )
-            self._session.add(heartbeat)
-        else:
-            heartbeat.node_id = node_id
-            heartbeat.last_heartbeat_at = last_heartbeat_at
-            heartbeat.poll_interval_seconds = poll_interval_seconds
-        await self._session.flush()
+            raise RuntimeError("Worker heartbeat fallback did not persist a row.")
         return heartbeat
+
+    async def _update_existing_heartbeat(
+        self,
+        *,
+        worker_id: str,
+        node_id: str,
+        last_heartbeat_at: datetime,
+        poll_interval_seconds: float,
+        updated_at: datetime,
+    ) -> WorkerHeartbeat | None:
+        stmt = (
+            update(WorkerHeartbeat)
+            .where(
+                WorkerHeartbeat.worker_id == worker_id,
+                WorkerHeartbeat.last_heartbeat_at <= last_heartbeat_at,
+            )
+            .values(
+                node_id=node_id,
+                last_heartbeat_at=last_heartbeat_at,
+                poll_interval_seconds=poll_interval_seconds,
+                updated_at=updated_at,
+            )
+        )
+        result = await self._session.execute(stmt)
+        rowcount = getattr(result, "rowcount", 0)
+        if rowcount is None or rowcount <= 0:
+            return None
+        await self._session.flush()
+        return await self.get(worker_id=worker_id)
 
     async def latest_for_node(self, *, node_id: str) -> WorkerHeartbeat | None:
         stmt = (

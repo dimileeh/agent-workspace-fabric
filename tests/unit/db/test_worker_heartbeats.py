@@ -100,6 +100,81 @@ async def test_record_heartbeat_handles_concurrent_first_writes() -> None:
 
 
 @pytest.mark.unit
+async def test_fallback_record_heartbeat_handles_concurrent_first_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        target_worker_id = "worker_fallback_concurrent_first_heartbeat"
+        started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+        first_heartbeat_at = started_at + timedelta(seconds=1)
+        second_heartbeat_at = started_at + timedelta(seconds=2)
+        original_get = WorkerHeartbeatRepository.get
+        missing_gets = 0
+        release_missing_gets = asyncio.Event()
+
+        async def synchronized_missing_get(
+            self: WorkerHeartbeatRepository,
+            *,
+            worker_id: str,
+        ) -> WorkerHeartbeat | None:
+            nonlocal missing_gets
+            heartbeat = await original_get(self, worker_id=worker_id)
+            if worker_id == target_worker_id and heartbeat is None:
+                missing_gets += 1
+                if missing_gets >= 2:
+                    release_missing_gets.set()
+                await asyncio.wait_for(release_missing_gets.wait(), timeout=2.0)
+            return heartbeat
+
+        monkeypatch.setattr(WorkerHeartbeatRepository, "get", synchronized_missing_get)
+
+        async def write_heartbeat(
+            *,
+            node_id: str,
+            last_heartbeat_at: datetime,
+            poll_interval_seconds: float,
+        ) -> None:
+            async with factory() as session, session.begin():
+                await WorkerHeartbeatRepository(
+                    session,
+                    dialect_name="unsupported",
+                ).record_heartbeat(
+                    worker_id=target_worker_id,
+                    node_id=node_id,
+                    started_at=started_at,
+                    last_heartbeat_at=last_heartbeat_at,
+                    poll_interval_seconds=poll_interval_seconds,
+                )
+
+        await asyncio.gather(
+            write_heartbeat(
+                node_id="node-a",
+                last_heartbeat_at=first_heartbeat_at,
+                poll_interval_seconds=5.0,
+            ),
+            write_heartbeat(
+                node_id="node-b",
+                last_heartbeat_at=second_heartbeat_at,
+                poll_interval_seconds=6.0,
+            ),
+        )
+
+        async with factory() as session:
+            heartbeat = await original_get(
+                WorkerHeartbeatRepository(session),
+                worker_id=target_worker_id,
+            )
+
+    assert heartbeat is not None
+    assert heartbeat.worker_id == target_worker_id
+    assert heartbeat.started_at == started_at
+    assert heartbeat.node_id == "node-b"
+    assert heartbeat.last_heartbeat_at == second_heartbeat_at
+    assert heartbeat.poll_interval_seconds == 6.0
+
+
+@pytest.mark.unit
 async def test_record_heartbeat_preserves_newest_conflicting_write() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
