@@ -21,6 +21,7 @@ from awf.cli.setup_commands import (
     _client_env,
     _client_home,
     _client_now,
+    _client_source_checkout_blocked_payload,
     _client_which,
     _config_error_details,
     _reason_coded_payload,
@@ -398,8 +399,6 @@ def _client_integration_instructions_result(
             is_error=True,
         )
     except SourceCheckoutError as exc:
-        from awf.cli.setup_commands import _client_source_checkout_blocked_payload
-
         return _first_run_result(
             safe_result,
             _client_source_checkout_blocked_payload(exc),
