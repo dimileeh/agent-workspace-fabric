@@ -165,7 +165,7 @@ class _ProjectDotenvLookup:
         if values is None:
             values = {
                 env_key: env_value
-                for env_key, env_value in dotenv_values(env_file).items()
+                for env_key, env_value in dotenv_values(env_file, interpolate=False).items()
                 if env_value is not None
             }
             self._values_by_file[cache_key] = values
@@ -231,7 +231,7 @@ def resolve_service_settings(
         work_dir=work_dir,
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
-        api_token=_empty_to_none(settings.api_token),
+        api_token=_resolve_service_api_token(settings, service_env),
         github_token=_resolve_github_token(settings.github_token, env),
         worker_poll_interval_seconds=settings.worker_poll_interval_seconds,
         worker_max_concurrent_provisions=settings.worker_max_concurrent_provisions,
@@ -261,6 +261,16 @@ def resolve_service_settings(
         local_capacity_cpu_cores=settings.local_capacity_cpu_cores,
         local_capacity_memory_gb=settings.local_capacity_memory_gb,
         local_capacity_dind_slots=settings.local_capacity_dind_slots,
+    )
+
+
+def _resolve_service_api_token(
+    settings: Settings, service_environ: Mapping[str, str]
+) -> str | None:
+    """Return the API token visible to local service containers and host CLI calls."""
+
+    return _empty_to_none(settings.api_token) or _empty_to_none(
+        _env_value(service_environ, "AWF_API_TOKEN")
     )
 
 
@@ -300,7 +310,7 @@ def local_service_environ(
         merged.update(
             {
                 key: value
-                for key, value in dotenv_values(resolved_env_file).items()
+                for key, value in dotenv_values(resolved_env_file, interpolate=False).items()
                 if value is not None
             }
         )

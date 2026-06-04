@@ -145,6 +145,8 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.sdist.force-include]
+# Keep this alongside the sdist include entry: hatchling's wheel-from-sdist
+# path can otherwise omit this console source directory from generated wheels.
 "apps/console/lib" = "apps/console/lib"
 
 [tool.ruff]

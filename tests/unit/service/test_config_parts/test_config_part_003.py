@@ -16,7 +16,9 @@ from awf.common.config import (
     Settings,
 )
 from awf.service.config import (
+    DEFAULT_LOCAL_SERVICE_API_TOKEN,
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
+    local_service_environ,
     resolve_service_settings,
     service_config_payload,
 )
@@ -90,6 +92,26 @@ def test_planning_max_iterations_default_flows_from_environment(
     settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
 
     assert settings.planning_max_iterations_default == 4
+
+
+@pytest.mark.unit
+def test_local_compose_default_api_token_flows_into_service_settings() -> None:
+    service_env = local_service_environ(environ={})
+
+    settings = resolve_service_settings(Settings(_env_file=None), environ=service_env)
+
+    assert service_env["AWF_API_TOKEN"] == DEFAULT_LOCAL_SERVICE_API_TOKEN
+    assert settings.api_token == DEFAULT_LOCAL_SERVICE_API_TOKEN
+
+
+@pytest.mark.unit
+def test_explicit_settings_api_token_takes_precedence_over_local_compose_default() -> None:
+    service_env = local_service_environ(environ={})
+    base = Settings(_env_file=None, api_token="operator-token")
+
+    settings = resolve_service_settings(base, environ=service_env)
+
+    assert settings.api_token == "operator-token"
 
 
 @pytest.mark.unit

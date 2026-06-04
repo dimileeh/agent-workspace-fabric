@@ -637,9 +637,11 @@ def test_project_dotenv_value_continues_past_env_without_requested_key(
     read_env_files: list[Path] = []
     real_dotenv_values = service_config.dotenv_values
 
-    def recording_dotenv_values(env_file: Path) -> dict[str, str | None]:
+    def recording_dotenv_values(
+        env_file: Path, *, interpolate: bool = True
+    ) -> dict[str, str | None]:
         read_env_files.append(env_file)
-        return real_dotenv_values(env_file)
+        return real_dotenv_values(env_file, interpolate=interpolate)
 
     monkeypatch.setattr(service_config, "dotenv_values", recording_dotenv_values)
 

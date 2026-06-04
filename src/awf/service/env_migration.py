@@ -60,7 +60,7 @@ def migrate_legacy_compose_env_file(
     canonical_env_file = canonical_env_file.expanduser()
     env_example_file = env_example_file.expanduser()
     legacy_env_file = legacy_env_file.expanduser()
-    if not legacy_env_file.exists():
+    if not legacy_env_file.is_file():
         return EnvMigrationResult(
             status="not_needed",
             canonical_env_file=canonical_env_file,
@@ -68,7 +68,9 @@ def migrate_legacy_compose_env_file(
         )
 
     legacy_values = _dotenv_values_by_identity(legacy_env_file)
-    if canonical_env_file.exists():
+    if canonical_env_file.exists() and not canonical_env_file.is_file():
+        raise IsADirectoryError(f"Root env path is not a regular file: {canonical_env_file}")
+    if canonical_env_file.is_file():
         created_env_file = False
         root_values = _dotenv_values_by_identity(canonical_env_file)
         imported_keys, conflict_keys = _append_missing_legacy_values(
@@ -105,7 +107,7 @@ def default_legacy_compose_env_file(canonical_env_file: Path) -> Path:
 
 def _dotenv_values_by_identity(path: Path) -> dict[str, tuple[str, str]]:
     values: dict[str, tuple[str, str]] = {}
-    for key, value in dotenv_values(path).items():
+    for key, value in dotenv_values(path, interpolate=False).items():
         if value is None or not _ENV_NAME_RE.fullmatch(key):
             continue
         values[key.upper()] = (key, value)
@@ -118,7 +120,7 @@ def _create_root_env_from_example_and_legacy(
     env_example_file: Path,
     legacy_values: dict[str, tuple[str, str]],
 ) -> tuple[list[str], list[str]]:
-    template = env_example_file.read_text(encoding="utf-8") if env_example_file.exists() else ""
+    template = env_example_file.read_text(encoding="utf-8") if env_example_file.is_file() else ""
     template_lines = template.splitlines(keepends=True)
     emitted: set[str] = set()
     output: list[str] = []
@@ -193,6 +195,9 @@ def _append_missing_legacy_values(
 def _format_env_value(value: str) -> str:
     if _UNQUOTED_ENV_VALUE_RE.fullmatch(value):
         return value
+    if "$" in value:
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+        return f"'{escaped}'"
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return f'"{escaped}"'
 

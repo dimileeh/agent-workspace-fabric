@@ -120,3 +120,110 @@ def test_legacy_compose_env_migration_noops_without_legacy_file(tmp_path: Path) 
     assert result.imported_keys == ()
     assert result.backup_path is None
     assert not root_env.exists()
+
+
+@pytest.mark.unit
+def test_legacy_compose_env_migration_noops_when_legacy_path_is_directory(
+    tmp_path: Path,
+) -> None:
+    """A directory named like the legacy env file is not a readable env file."""
+    from awf.service.env_migration import migrate_legacy_compose_env_file
+
+    root_env = tmp_path / ".env"
+    legacy_env = tmp_path / "docker" / "compose" / ".env"
+    legacy_env.mkdir(parents=True)
+
+    result = migrate_legacy_compose_env_file(
+        canonical_env_file=root_env,
+        env_example_file=tmp_path / ".env.example",
+        legacy_env_file=legacy_env,
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert result.status == "not_needed"
+    assert result.imported_keys == ()
+    assert result.backup_path is None
+    assert legacy_env.is_dir()
+    assert not root_env.exists()
+
+
+@pytest.mark.unit
+def test_legacy_compose_env_migration_requires_root_env_to_be_regular_file(
+    tmp_path: Path,
+) -> None:
+    """A root `.env` directory is reported before dotenv tries to parse it."""
+    from awf.service.env_migration import migrate_legacy_compose_env_file
+
+    root_env = tmp_path / ".env"
+    legacy_env = tmp_path / "docker" / "compose" / ".env"
+    root_env.mkdir()
+    legacy_env.parent.mkdir(parents=True)
+    legacy_env.write_text("AWF_API_TOKEN=legacy-token\n", encoding="utf-8")
+
+    with pytest.raises(IsADirectoryError, match="Root env path is not a regular file"):
+        migrate_legacy_compose_env_file(
+            canonical_env_file=root_env,
+            env_example_file=tmp_path / ".env.example",
+            legacy_env_file=legacy_env,
+            now=lambda: _FIXED_NOW,
+        )
+
+    assert legacy_env.exists()
+
+
+@pytest.mark.unit
+def test_legacy_compose_env_migration_ignores_env_example_directory(
+    tmp_path: Path,
+) -> None:
+    """A template path must be a file before the migration reads it."""
+    from awf.service.env_migration import migrate_legacy_compose_env_file
+
+    root_env = tmp_path / ".env"
+    env_example = tmp_path / ".env.example"
+    legacy_env = tmp_path / "docker" / "compose" / ".env"
+    env_example.mkdir()
+    legacy_env.parent.mkdir(parents=True)
+    legacy_env.write_text("AWF_API_TOKEN=legacy-token\n", encoding="utf-8")
+
+    result = migrate_legacy_compose_env_file(
+        canonical_env_file=root_env,
+        env_example_file=env_example,
+        legacy_env_file=legacy_env,
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert result.status == "migrated"
+    assert result.created_env_file is True
+    assert root_env.read_text(encoding="utf-8") == (
+        "# Imported from legacy docker/compose/.env by AWF.\nAWF_API_TOKEN=legacy-token\n"
+    )
+
+
+@pytest.mark.unit
+def test_legacy_compose_env_migration_escapes_dollar_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Migrated secrets with `${...}` survive later python-dotenv reads."""
+    from dotenv import dotenv_values
+
+    from awf.service.env_migration import migrate_legacy_compose_env_file
+
+    monkeypatch.delenv("TOKEN_SUFFIX", raising=False)
+    root_env = tmp_path / ".env"
+    env_example = tmp_path / ".env.example"
+    legacy_env = tmp_path / "docker" / "compose" / ".env"
+    legacy_env.parent.mkdir(parents=True)
+    env_example.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
+    legacy_env.write_text("AWF_API_TOKEN='secret-${TOKEN_SUFFIX}'\n", encoding="utf-8")
+
+    result = migrate_legacy_compose_env_file(
+        canonical_env_file=root_env,
+        env_example_file=env_example,
+        legacy_env_file=legacy_env,
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert result.status == "migrated"
+    assert "AWF_API_TOKEN='secret-${TOKEN_SUFFIX}'" in root_env.read_text(encoding="utf-8")
+    assert dotenv_values(root_env, interpolate=False)["AWF_API_TOKEN"] == ("secret-${TOKEN_SUFFIX}")

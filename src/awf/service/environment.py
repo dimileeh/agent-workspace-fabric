@@ -159,7 +159,9 @@ def compose_env_file_values(compose_env_file: Path | None) -> dict[str, str]:
     if compose_env_file is None or not compose_env_file.exists():
         return {}
     return {
-        key: value for key, value in dotenv_values(compose_env_file).items() if value is not None
+        key: value
+        for key, value in dotenv_values(compose_env_file, interpolate=False).items()
+        if value is not None
     }
 
 

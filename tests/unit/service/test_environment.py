@@ -85,6 +85,38 @@ def test_local_service_environ_preserves_explicit_local_auth_and_password(
 
 
 @pytest.mark.unit
+def test_local_service_environ_preserves_raw_dollar_values_from_env_file(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider tokens containing `${...}` are credentials, not substitutions."""
+    from awf.service.config import local_service_environ
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_API_TOKEN='secret-${TOKEN_SUFFIX}'\n", encoding="utf-8")
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.delenv("TOKEN_SUFFIX", raising=False)
+
+    environ = local_service_environ({}, env_file=env_file)
+
+    assert environ["AWF_API_TOKEN"] == "secret-${TOKEN_SUFFIX}"
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_preserves_raw_dollar_values(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_API_TOKEN='secret-${TOKEN_SUFFIX}'\n", encoding="utf-8")
+    monkeypatch.delenv("TOKEN_SUFFIX", raising=False)
+
+    assert compose_env_file_values(env_file)["AWF_API_TOKEN"] == "secret-${TOKEN_SUFFIX}"
+
+
+@pytest.mark.unit
 def test_compose_interpolation_keys_ignores_unreadable_and_non_utf8_files(
     tmp_path,
 ) -> None:
