@@ -776,6 +776,14 @@ def test_required_index_reports_missing_text_after_start_clearly() -> None:
         _required_index(text, "\nfi\n", "example", start=text.index("fallback"))
 
 
+def test_quickstart_upgrade_section_requires_uninstall_after_upgrade() -> None:
+    """Assert malformed lane labels fail with a targeted assertion."""
+    text = "## Lane\nUninstall:\nremove\nUpgrade:\nupgrade\n## Next\n"
+
+    with pytest.raises(AssertionError, match="## Lane is missing Uninstall block after Upgrade"):
+        _quickstart_upgrade_section(text, "## Lane")
+
+
 def test_getting_started_uses_runnable_startup_path() -> None:
     """Assert Getting Started uses setup/start before project initialization."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
@@ -1573,9 +1581,11 @@ def _markdown_section(text: str, heading: str) -> str:
 def _quickstart_upgrade_section(text: str, heading: str) -> str:
     """Return the lane's upgrade block between upgrade and uninstall labels."""
     section = _markdown_section(text, heading)
-    assert "Upgrade:" in section, f"{heading} is missing Upgrade block"
-    assert "Uninstall:" in section, f"{heading} is missing Uninstall block"
-    return section.split("Upgrade:", maxsplit=1)[1].split("Uninstall:", maxsplit=1)[0]
+    upgrade_start = section.find("Upgrade:")
+    assert upgrade_start != -1, f"{heading} is missing Upgrade block"
+    uninstall_start = section.find("Uninstall:", upgrade_start)
+    assert uninstall_start != -1, f"{heading} is missing Uninstall block after Upgrade"
+    return section[upgrade_start + len("Upgrade:") : uninstall_start]
 
 
 def _required_index(text: str, needle: str, label: str, start: int = 0) -> int:
@@ -1898,7 +1908,7 @@ def _assert_package_upgrade_restores_service_env(
     assert password_export_line in section, f"{label} must export restored AWF_POSTGRES_PASSWORD"
     assert start_line in section, f"{label} is missing restart command"
 
-    upgrade_index = section.index(upgrade_line)
+    upgrade_index = _required_index(section, upgrade_line, label)
     api_guard_index = _shell_line_index(section, api_guard_line, label, upgrade_index)
     api_require_index = _shell_line_index(section, api_require_line, label, api_guard_index)
     api_export_index = _shell_line_index(section, api_export_line, label, api_require_index)
