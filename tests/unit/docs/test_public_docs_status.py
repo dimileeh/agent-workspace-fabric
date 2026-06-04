@@ -471,9 +471,15 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
         source_section = _markdown_section(quickstart_text, heading)
         uninstall_section = source_section.split("\nUninstall:\n", maxsplit=1)[1]
         section_words = " ".join(uninstall_section.split())
-        replacement_setup = (
-            "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
-        )
+        if heading == "## Lane 3: Source Checkout With No Global Install":
+            replacement_setup = (
+                "uv run --python 3.12 --extra dev awf setup "
+                "--source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+            )
+        else:
+            replacement_setup = (
+                "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+            )
         assert "~/.awf/config.yml" in uninstall_section
         assert "remove only the top-level `source_checkout:` block" in uninstall_section
         assert replacement_setup in uninstall_section
