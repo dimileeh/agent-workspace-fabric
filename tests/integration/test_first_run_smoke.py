@@ -11,6 +11,8 @@ from scripts import first_run_smoke as smoke
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow, pytest.mark.timeout(900)]
 
+_SOURCE_COMMAND_TIMEOUT_SECONDS = 120
+
 
 def test_source_uv_run_lane_proves_checkout_from_outside(tmp_path: Path) -> None:
     """The no-global source lane runs setup/start/help from outside the checkout."""
@@ -20,7 +22,7 @@ def test_source_uv_run_lane_proves_checkout_from_outside(tmp_path: Path) -> None
     results = smoke.run_source_uv_run_lane(
         checkout_root=smoke.REPO_ROOT,
         smoke_root=tmp_path,
-        timeout_seconds=600,
+        timeout_seconds=_SOURCE_COMMAND_TIMEOUT_SECONDS,
     )
 
     _assert_no_environmental_skip(results)
@@ -40,7 +42,7 @@ def test_source_tool_install_lane_installs_isolated_awf(tmp_path: Path) -> None:
     results = smoke.run_source_tool_install_lane(
         checkout_root=smoke.REPO_ROOT,
         smoke_root=tmp_path,
-        timeout_seconds=600,
+        timeout_seconds=_SOURCE_COMMAND_TIMEOUT_SECONDS,
     )
 
     _assert_no_environmental_skip(results)
