@@ -860,7 +860,7 @@ def _tool_install_argv(method: str, wheel: Path, *, python: str) -> tuple[str, .
     if method == "uv":
         return ("uv", "tool", "install", "--force", "--python", python, str(wheel))
     if method == "pipx":
-        return ("pipx", "install", "--force", str(wheel))
+        return ("pipx", "install", "--force", "--python", python, str(wheel))
     raise ValueError(f"unsupported tool install method: {method}")
 
 

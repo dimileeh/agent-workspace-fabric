@@ -136,6 +136,27 @@ def test_tool_install_environment_isolated(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method", "expected_prefix"),
+    (
+        ("uv", ("uv", "tool", "install", "--force", "--python", "3.12")),
+        ("pipx", ("pipx", "install", "--force", "--python", "3.12")),
+    ),
+)
+def test_tool_install_command_pins_requested_python(
+    tmp_path: Path,
+    method: str,
+    expected_prefix: tuple[str, ...],
+) -> None:
+    """Tool installs use the caller-selected Python for every install method."""
+    wheel = tmp_path / "agent_workspace_fabric-0.1.0-py3-none-any.whl"
+
+    argv = smoke._tool_install_argv(method, wheel, python="3.12")
+
+    assert argv == (*expected_prefix, str(wheel))
+
+
+@pytest.mark.unit
 def test_copy_source_checkout_preserves_markers_and_excludes_dev_state(tmp_path: Path) -> None:
     """The copied checkout keeps source markers but drops git, caches, and build state."""
     source = _write_source_checkout(tmp_path / "source")
