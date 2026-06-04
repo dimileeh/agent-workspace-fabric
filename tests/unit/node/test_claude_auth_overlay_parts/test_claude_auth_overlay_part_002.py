@@ -1357,6 +1357,38 @@ def test_reconcile_refuses_symlinked_destination(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reconcile_skips_source_symlink_so_target_is_not_disclosed(tmp_path: Path) -> None:
+    # A *fresh* legacy copy is materialized via ``copytree(symlinks=False)`` and so
+    # never contains symlinks; any symlink in the legacy tree was planted by the
+    # (untrusted) agent during the fallback session (the legacy copy is mounted ``rw``
+    # into the agent). ``shutil.copy2`` follows *source* symlinks by default, so as the
+    # root worker reconciling later it would read the link target — possibly outside the
+    # ``.claude`` tree — and write its contents into the agent-visible overlay, an
+    # arbitrary root-read primitive. The destination guard only blocks writes *through* a
+    # dest link, so a source link must be skipped: read nothing, copy nothing.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    for directory in (legacy, merged, upper, base, outside):
+        directory.mkdir()
+    secret = outside / "root-only-secret"
+    secret.write_text("root-only contents\n")
+    # The agent plants a legacy-copy symlink at a path absent from base/upper pointing at
+    # an out-of-tree root-readable target, so it reads as a brand-new "fallback edit".
+    (legacy / "stolen").symlink_to(secret)
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # The link target's contents must NOT be surfaced through the overlay (merged/upper).
+    assert not (merged / "stolen").exists()
+    assert not (upper / "stolen").exists()
+    # The out-of-tree secret is untouched and was never read into the tree.
+    assert secret.read_text() == "root-only contents\n"
+
+
+@pytest.mark.unit
 def test_reconcile_refuses_symlinked_parent_component(tmp_path: Path) -> None:
     # The same escape, planted one level up: an agent-created symlink at a *parent*
     # directory of ``rel``. ``mkdir(parents=True)`` would traverse through it and

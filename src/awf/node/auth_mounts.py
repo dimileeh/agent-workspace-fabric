@@ -878,6 +878,13 @@ def _reconcile_fallback_edits_into_upper(
     destination symlinks, so a planted link would otherwise let this root write escape
     the ``.claude`` tree.
 
+    *Source* symlinks are likewise refused: a fresh legacy copy is materialized via
+    ``copytree(symlinks=False)`` so it never contains symlinks, but the agent can plant
+    one in its ``rw`` legacy copy during the fallback session. ``copy2`` follows source
+    symlinks by default, which would let this root worker read the link target (possibly
+    outside the ``.claude`` tree) and surface its contents through the agent-visible
+    overlay. Any symlink in the legacy tree is therefore skipped before it is stat'd.
+
     Known limitation: if the host ``~/.claude`` changed between when the overlay's
     base was built and when the fallback copy was taken, unedited legacy files may
     read as "newer than base" and be copied. There is still no data loss (an
@@ -908,6 +915,17 @@ def _reconcile_fallback_edits_into_upper(
         root_path = Path(root)
         for name in files:
             legacy_file = root_path / name
+            if legacy_file.is_symlink():
+                # A fresh legacy copy is materialized via ``copytree(symlinks=False)`` and
+                # so never holds symlinks; any symlink here was planted by the (untrusted)
+                # agent in the fallback session (the legacy copy is mounted ``rw`` for it).
+                # ``shutil.copy2`` follows *source* symlinks by default, so the root worker
+                # would read the link target — possibly outside the ``.claude`` tree — and
+                # write its contents into the agent-visible overlay, an arbitrary root-read
+                # primitive. The destination guard below only blocks writes *through* a
+                # dest link, so a source link must be skipped here. Best-effort: drop just
+                # this entry, never block provisioning.
+                continue
             legacy_mtime_ns = _safe_mtime_ns(legacy_file)
             if legacy_mtime_ns is None:
                 continue
