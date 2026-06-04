@@ -19,6 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from awf.api.schemas import OperationResponse
+from awf.cli import common as cli_common
 from awf.cli.main import app
 from tests.unit.mcp._parity_utils import _parity_rows, _strip_backticks
 
@@ -40,6 +41,13 @@ _OPERATION_RESPONSE_FIELDS = (
     "payload",
     "created_at",
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_local_service_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep default CLI URL contracts independent from a developer root `.env`."""
+
+    monkeypatch.setattr(cli_common, "local_service_environ", lambda _environ: {})
 
 
 def _operation_response_payload(

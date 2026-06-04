@@ -42,7 +42,7 @@ def test_valid_source_checkout_returns_verified_asset_paths(tmp_path: Path) -> N
     verified = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
 
     assert verified.root == checkout.resolve()
-    assert verified.compose_file == checkout.resolve() / "docker/compose/local-service.yml"
+    assert verified.compose_file == checkout.resolve() / "compose.yaml"
     assert verified.agent_runtime_dockerfile == (
         checkout.resolve() / "docker/agent-runtime.Dockerfile"
     )

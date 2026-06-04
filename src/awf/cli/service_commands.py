@@ -20,6 +20,8 @@ from awf.cli.common import (
     warn_on_overlay_unmount_failure,
 )
 from awf.cli.init_ops import (
+    _add_env_migration_payload,
+    _migrate_legacy_service_env_file,
     _resolve_service_compose_paths,
     _resolve_service_runtime_env_files,
 )
@@ -343,7 +345,8 @@ def service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
-    compose_file, env_file, _ = _resolve_service_compose_paths()
+    compose_file, env_file, env_example = _resolve_service_compose_paths()
+    env_migration = _migrate_legacy_service_env_file(env_file, env_example)
     env_file, compose_env_file = _resolve_service_runtime_env_files(
         compose_file,
         env_file,
@@ -367,10 +370,14 @@ def service_bootstrap(
     except KeyboardInterrupt:
         raise typer.Exit(code=130) from None
     except ServiceBootstrapError as exc:
-        _emit(exc.to_dict(), fmt)
+        payload = exc.to_dict()
+        _add_env_migration_payload(payload, env_migration)
+        _emit(payload, fmt)
         raise typer.Exit(code=1) from None
 
-    _emit(result.to_dict(), fmt)
+    payload = result.to_dict()
+    _add_env_migration_payload(payload, env_migration)
+    _emit(payload, fmt)
 
 
 @service_app.command("config")
@@ -445,9 +452,9 @@ def _resolve_local_service_gc_target(
 
     ``service gc`` is a thin trigger over ``POST /v1/service/gc``. Like the
     sibling ``service_*`` commands, it must honour an ``AWF_API_TOKEN`` or API
-    port that lives only in ``docker/compose/.env`` (the documented setup path).
+    port that lives only in root ``.env`` (the documented setup path).
     Explicit ``--base-url`` / ``--api-token`` flags and process-environment
-    overrides still win; the compose ``.env`` is consulted only when neither is
+    overrides still win; root ``.env`` is consulted only when neither is
     present, so existing ``AWF_BASE_URL`` / ``AWF_API_TOKEN`` shell overrides
     keep their precedence.
     """

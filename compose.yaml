@@ -1,0 +1,4 @@
+name: awf-local-service
+
+include:
+  - ./docker/compose/local-service.yml

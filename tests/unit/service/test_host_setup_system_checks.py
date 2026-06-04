@@ -407,11 +407,10 @@ def test_default_command_runner_decodes_with_replacement(
 
 @pytest.mark.unit
 def test_default_port_probe_detects_in_use_and_free() -> None:
-    """Verify the default port probe distinguishes in-use from free ports."""
+    """Verify the default API loopback probe distinguishes in-use from free ports."""
     import socket
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     listener.listen(1)
@@ -465,14 +464,13 @@ def test_default_port_probe_classifies_bind_errno() -> None:
 
 
 @pytest.mark.unit
-def test_default_port_probe_detects_non_loopback_listener() -> None:
-    """Verify the probe matches Docker's all-interface bind, not just loopback.
+def test_default_port_probe_ignores_non_loopback_listener() -> None:
+    """Verify the probe matches Docker's loopback-only API bind.
 
-    ``docker/compose/local-service.yml`` publishes the API port without a host
-    IP (``${AWF_API_HOST_PORT:-8000}:8000``), so Docker reserves it on every
-    host interface (``0.0.0.0``). A listener on a non-loopback address must
-    therefore be reported as in-use; a loopback-only (``127.0.0.1``) probe would
-    miss it and let ``awf start`` fail later to publish the port.
+    ``docker/compose/local-service.yml`` publishes the API port on loopback
+    (``127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000``). A listener on a different
+    non-loopback address does not block that bind, so readiness must report the
+    loopback API port free.
     """
     import socket
 
@@ -495,7 +493,7 @@ def test_default_port_probe_detects_non_loopback_listener() -> None:
     port = listener.getsockname()[1]
     listener.listen(1)
     try:
-        assert primitives._default_port_probe(port) is PortProbeResult.IN_USE
+        assert primitives._default_port_probe(port) is PortProbeResult.FREE
     finally:
         listener.close()
 
@@ -506,7 +504,6 @@ def test_loopback_port_probe_detects_in_use_and_free() -> None:
     import socket
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     listener.listen(1)

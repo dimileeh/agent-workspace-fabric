@@ -37,13 +37,13 @@ x-awf-service: &awf-service
     AWF_API_HOST: 0.0.0.0
     AWF_API_PORT: "8000"
     AWF_API_BASE_URL: http://api:8000
-    AWF_API_TOKEN: ${AWF_API_TOKEN:?set AWF_API_TOKEN}
+    AWF_API_TOKEN: ${AWF_API_TOKEN:-local-dev-token}
     AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
     GH_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
     GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
-    AWF_DATABASE_URL: "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+    AWF_DATABASE_URL: "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:-awf_dev}@postgres:5432/awf"
     AWF_DOCKER_HOST: unix:///var/run/docker.sock
-    AWF_AGENT_RUNTIME_IMAGE: awf-agent-runtime:latest
+    AWF_AGENT_RUNTIME_IMAGE: ${AWF_AGENT_RUNTIME_IMAGE:-awf-agent-runtime:latest}
     AWF_COMPANION_IMAGE_CACHE_ENABLED: ${AWF_COMPANION_IMAGE_CACHE_ENABLED:-true}
     AWF_COMPANION_IMAGE_RETENTION_HOURS: ${AWF_COMPANION_IMAGE_RETENTION_HOURS:-168}
     AWF_WORK_DIR: ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
@@ -110,12 +110,20 @@ x-awf-service: &awf-service
     SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
 
 services:
+  agent-runtime:
+    build:
+      context: ../..
+      dockerfile: docker/agent-runtime.Dockerfile
+    image: ${AWF_AGENT_RUNTIME_IMAGE:-awf-agent-runtime:latest}
+    command: sh -c "true"
+    restart: "no"
+
   postgres:
     image: postgres:16-alpine
     shm_size: ${AWF_POSTGRES_SHM_SIZE:-1g}
     environment:
       POSTGRES_USER: awf
-      POSTGRES_PASSWORD: "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
+      POSTGRES_PASSWORD: "${AWF_POSTGRES_PASSWORD:-awf_dev}"
       POSTGRES_DB: awf
     ports:
       - "127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"
@@ -138,6 +146,8 @@ services:
   api:
     <<: *awf-service
     depends_on:
+      agent-runtime:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrate:
@@ -158,12 +168,14 @@ services:
       - *awf-grok-auth
       - *awf-ollama-auth
     ports:
-      - "${AWF_API_HOST_PORT:-8000}:8000"
+      - "127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000"
     command: sh -c "awf serve --host 0.0.0.0 --port 8000"
 
   worker:
     <<: *awf-service
     depends_on:
+      agent-runtime:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrate:
@@ -201,6 +213,26 @@ services:
       - *awf-grok-auth
       - *awf-ollama-auth
     command: sh -c "awf worker"
+
+  console:
+    build:
+      context: ../..
+      dockerfile: apps/console/Dockerfile
+      args:
+        NEXT_PUBLIC_AWF_CONSOLE_POLL_MS: ${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}
+    image: awf-console:local
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      AWF_API_BASE_URL: http://api:8000
+      AWF_API_TOKEN: ${AWF_API_TOKEN:-local-dev-token}
+      NEXT_PUBLIC_AWF_CONSOLE_POLL_MS: ${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:${AWF_CONSOLE_HOST_PORT:-3000}:3000"
 
   ollama-bridge:
     profiles:

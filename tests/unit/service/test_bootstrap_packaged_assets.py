@@ -46,6 +46,7 @@ def _write_packaged_asset_root(awf_dir: Path) -> Path:
     """
     root = awf_dir / "bootstrap_assets"
     markers = (
+        "compose.yaml",
         "docker/agent-runtime.Dockerfile",
         "docker/compose/local-service.yml",
         "docker/control-plane.Dockerfile",
@@ -65,7 +66,7 @@ def test_bootstrap_environment_file_defaults_without_root() -> None:
     assets = bootstrap._BootstrapAssets(  # noqa: SLF001
         root=None,
         agent_runtime_dockerfile=None,
-        compose_file=Path("docker/compose/local-service.yml"),
+        compose_file=Path("compose.yaml"),
         compose_env_file=None,
     )
 

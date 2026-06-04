@@ -147,10 +147,9 @@ def test_guided_project_onboarding_rebuilds_preview_and_collects_validation(
 
 @pytest.mark.unit
 def test_service_compose_env_path_helpers_cover_rejections(tmp_path: Path) -> None:
-    compose_dir = tmp_path / "docker" / "compose"
-    compose_dir.mkdir(parents=True)
-    compose_file = compose_dir / "local-service.yml"
-    compose_env = compose_dir / ".env"
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("include:\n  - ./docker/compose/local-service.yml\n", encoding="utf-8")
+    compose_env = tmp_path / ".env"
     unrelated_env = tmp_path / "other" / ".env"
     unrelated_env.parent.mkdir()
 
