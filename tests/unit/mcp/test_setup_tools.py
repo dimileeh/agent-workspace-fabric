@@ -555,7 +555,7 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
             "checks": [{"name": "docker", "level": "ok"}],
             "source_checkout": {"root": str(checkout), "verified_at": verified_at},
         },
-        next_steps=("Run awf start to start local AWF Core.",),
+        next_steps=("Run awf start: start local AWF Core.",),
     )
     config = HostSetupConfig(
         providers={
@@ -616,7 +616,7 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
     assert payload["status"] == "success"
     assert payload["command"] == expected_setup_command
     assert payload["next_steps"] == [
-        f"Run {expected_start_command} to start local AWF Core.",
+        f"Run {expected_start_command}: start local AWF Core.",
     ]
     assert payload["setup"]["plain_file_consent"] is True
     assert payload["setup"]["source_checkout_assets_consent"] is True
@@ -687,7 +687,9 @@ async def test_get_setup_status_source_checkout_blocked_next_steps_preserve_expl
         status="blocked",
         summary="source checkout blocked",
         details={"check": "docker"},
-        next_steps=("Fix the reported blockers above, then re-run awf setup --dry-run.",),
+        next_steps=(
+            "Fix the reported blockers above, then re-run awf setup --dry-run: inspect again.",
+        ),
     )
 
     monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
@@ -705,7 +707,7 @@ async def test_get_setup_status_source_checkout_blocked_next_steps_preserve_expl
     assert payload["status"] == "blocked"
     assert payload["command"] == expected_setup_command
     assert payload["next_steps"] == [
-        f"Fix the reported blockers above, then re-run {expected_setup_command}.",
+        f"Fix the reported blockers above, then re-run {expected_setup_command}: inspect again.",
     ]
 
 
@@ -1411,7 +1413,7 @@ async def test_initialize_project_profile_value_error_preview_failure_does_not_s
 
 
 @pytest.mark.unit
-async def test_initialize_project_profile_existing_profile_probe_failure_is_structured(
+async def test_initialize_project_profile_existing_profile_probe_failure_logs_probe_context(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1453,7 +1455,8 @@ async def test_initialize_project_profile_existing_profile_probe_failure_is_stru
         record
         for record in caplog.records
         if record.name == "awf.mcp.setup_tools"
-        and record.message == "could not build onboarding preview for MCP project initialization"
+        and record.message
+        == "could not probe existing project profile for MCP project initialization"
     ]
     assert len(records) == 1
     assert records[0].exc_info is not None

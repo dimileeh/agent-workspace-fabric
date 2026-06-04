@@ -84,6 +84,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Command Suffix And Preview Probe Logging
+
+### Problem Statement And Scope
+
+The review reports two small diagnostics/command-guidance issues:
+
+- setup-status source-checkout command rewriting does not match
+  colon-terminated `awf setup --dry-run:` or `awf start:` next-step text;
+- `_initialize_project_profile_result` catches existing-profile probing and
+  onboarding preview failures in one broad `except Exception` block, so probe
+  failures are logged with a preview-specific message.
+
+Scope is limited to colon suffix matching and splitting the project-profile
+probe and preview exception boundaries. External MCP payload shapes and
+redaction behavior stay unchanged.
+
+### Requirements Checklist
+
+- Preserve existing setup-status rewrites for period, comma, semicolon,
+  right-parenthesis, end-of-string, and `to` suffixes.
+- Rewrite colon-terminated `awf setup --dry-run:` and `awf start:` next-step
+  commands to include the explicit source checkout.
+- Preserve the sanitized `PROJECT_INIT_FAILED` response for existing-profile
+  probe failures and onboarding preview failures.
+- Log existing-profile probe failures with a probe-specific message, while
+  continuing to log preview failures with the preview-specific message.
+- Add focused regressions for the colon rewrite and probe-specific logging.
+
+### Implementation Steps
+
+1. Add focused failing regressions for colon-terminated setup/start next-step
+   rewrites and existing-profile probe logging.
+2. Include `:` in the bounded command suffix regexes.
+3. Split `_existing_project_profile_path()` and `preview_project_onboarding()`
+   into separate exception boundaries with distinct log messages.
+4. Run the targeted regressions and focused checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_blocked_next_steps_preserve_explicit_checkout tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_existing_profile_probe_failure_logs_probe_context -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HM47u Bootstrap Preflight Path Expansion
 
 ### Problem Statement And Scope

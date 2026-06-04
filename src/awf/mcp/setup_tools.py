@@ -79,9 +79,9 @@ PROJECT_PROFILE_EXISTS = "PROJECT_PROFILE_EXISTS"
 PROJECT_INIT_FAILED = "PROJECT_INIT_FAILED"
 _LOGGER = logging.getLogger(__name__)
 _SETUP_STATUS_DRY_RUN_STEP_PATTERN = re.compile(
-    r"\bawf setup --dry-run(?P<suffix>[.,;)]|$|\s+to\b)"
+    r"\bawf setup --dry-run(?P<suffix>[.,;):]|$|\s+to\b)"
 )
-_SETUP_STATUS_START_STEP_PATTERN = re.compile(r"\bawf start(?P<suffix>[.,;)]|$|\s+to\b)")
+_SETUP_STATUS_START_STEP_PATTERN = re.compile(r"\bawf start(?P<suffix>[.,;):]|$|\s+to\b)")
 
 
 class SafeResult(Protocol):
@@ -403,6 +403,19 @@ def _initialize_project_profile_result(
 
     try:
         existing_profile_path = _existing_project_profile_path(repository)
+    except Exception:
+        _LOGGER.exception(
+            "could not probe existing project profile for MCP project initialization",
+            extra={"project_path": str(repository), "template": template},
+        )
+        return _error_result(
+            safe_result,
+            PROJECT_INIT_FAILED,
+            "could not build onboarding preview",
+            detail={"project_path": str(repository), "template": template},
+        )
+
+    try:
         preview = preview_project_onboarding(
             repository,
             template=template,

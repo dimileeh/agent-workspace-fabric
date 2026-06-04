@@ -53,6 +53,52 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Command Suffix And Preview Probe Logging
+
+### Requirement Status
+
+- Preserve existing setup-status rewrites for period, comma, semicolon,
+  right-parenthesis, end-of-string, and `to` suffixes: Complete.
+- Rewrite colon-terminated `awf setup --dry-run:` and `awf start:` next-step
+  commands to include the explicit source checkout: Complete.
+- Preserve the sanitized `PROJECT_INIT_FAILED` response for existing-profile
+  probe failures and onboarding preview failures: Complete.
+- Log existing-profile probe failures with a probe-specific message, while
+  continuing to log preview failures with the preview-specific message:
+  Complete.
+- Add focused regressions for the colon rewrite and probe-specific logging:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_blocked_next_steps_preserve_explicit_checkout tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_existing_profile_probe_failure_logs_probe_context -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression tests failed before the implementation change because
+  colon-terminated setup/start next steps were not rewritten and the
+  existing-profile probe failure used the preview-specific log message.
+- Regression tests after the implementation change: 3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HM47u Bootstrap Preflight Path Expansion
 
 ### Requirement Status
