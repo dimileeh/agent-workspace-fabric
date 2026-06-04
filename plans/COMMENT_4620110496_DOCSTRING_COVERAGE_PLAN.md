@@ -147,6 +147,17 @@ test without a docstring:
 Add a concise behavior-neutral docstring to that test only and re-run the same
 focused checks.
 
+### Iteration 9 Update
+
+Later MCP env-file redaction commits expanded the PR's Python diff and the
+focused added-line audit now reports one PR-added nested test helper without a
+docstring:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs.test_read_workspace_log_redacts_custom_compose_env_file_provider_secret._resolve_env_file`
+
+Add a concise behavior-neutral docstring to that helper only, re-run the
+focused audit, and run narrow Ruff plus the affected targeted MCP log test.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

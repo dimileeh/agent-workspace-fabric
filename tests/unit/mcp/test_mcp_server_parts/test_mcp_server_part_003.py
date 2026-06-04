@@ -1643,6 +1643,7 @@ class TestWorkspaceLogs:
         def _resolve_env_file(
             env_file: Path = metrics_tools_mod.service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE,
         ) -> Path | None:
+            """Resolve custom and default compose env files for the redaction test."""
             return custom_env_file if env_file == custom_env_file else default_env_file
 
         monkeypatch.setattr(

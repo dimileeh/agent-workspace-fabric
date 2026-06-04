@@ -193,6 +193,29 @@ Evidence after Iteration 8:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q`
   passed: `22 passed in 0.64s`.
 
+## Iteration 9
+
+Later MCP env-file redaction commits expanded the PR's Python diff again. The
+focused added-line AST audit reported one PR-added nested test helper without a
+docstring in `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`.
+This iteration added a concise behavior-neutral docstring only.
+
+Evidence after Iteration 9:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=17`, `added_defs=160`,
+  `missing_docstrings_on_added_defs=1`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=17`, `added_defs=160`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+  passed.
+- `git diff --check` passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_read_workspace_log_redacts_custom_compose_env_file_provider_secret -q`
+  passed: `1 passed in 1.89s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring
