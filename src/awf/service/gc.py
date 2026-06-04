@@ -153,7 +153,14 @@ WorkspaceGCWorktreeRemove = Callable[
 ]
 
 
-def _compose_teardown_result_for_exception(exc: Exception) -> WorkspaceGCComposeTeardownResult:
+def compose_teardown_result_for_exception(exc: Exception) -> WorkspaceGCComposeTeardownResult:
+    """Return the stable failed compose teardown result for a callback exception.
+
+    Completed-monitor lifecycle tracking may record this before re-raising the
+    exception; GC later catches the same exception and uses the cached result so
+    both logs and the returned GC payload describe the same teardown failure.
+    """
+
     cached = getattr(exc, _COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR, None)
     if isinstance(cached, WorkspaceGCComposeTeardownResult):
         return cached
@@ -903,7 +910,7 @@ async def _run_gc_compose_teardowns(
         try:
             teardown = await _run_compose_teardown(candidate, compose_teardown)
         except Exception as exc:
-            teardown = _compose_teardown_result_for_exception(exc)
+            teardown = compose_teardown_result_for_exception(exc)
         if teardown is not None:
             compose_teardowns[candidate.workspace_id] = teardown
     return compose_teardowns

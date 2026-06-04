@@ -81,3 +81,37 @@ owned by AWF/GitHub after agent completion.
 
 None for the follow-up review points. Broad validation and merge gating remain
 owned by AWF/GitHub after agent completion.
+
+## Iteration 3: Public Compose Teardown Exception Helper
+
+### Requirement Status
+
+- Verify the private-import reviewer claim against current code: Complete.
+  `src/awf/runtime/pr_monitor_runner/lifecycle.py` imported
+  `_compose_teardown_result_for_exception` from `awf.service.gc`.
+- Preserve the existing exception-result caching behavior: Complete.
+  `compose_teardown_result_for_exception` keeps the same exception-attribute
+  cache so lifecycle tracking and GC result recording share one teardown
+  failure result.
+- Stop importing a private GC implementation detail into lifecycle: Complete.
+  Lifecycle now imports and calls the public
+  `compose_teardown_result_for_exception` helper.
+- Keep the existing fallback compose teardown clarification: Complete. The
+  `_gc_result` comment still documents why fallback compose teardown failures
+  can make the result partial even when `delete_errors` is empty.
+- Run only focused local checks: Complete. Full AWF/GitHub validation remains
+  managed after agent completion.
+
+### Evidence
+
+- Focused regression slice:
+  `uv run --python 3.12 --extra dev pytest tests/unit/service/test_gc_parts/test_gc_part_002.py::test_single_workspace_gc_records_raised_missing_workspace_compose_teardown tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_tracks_shared_callback_failure_result_when_gc_raises_after_teardown tests/unit/runtime/test_monitor_completion_gc.py::test_completed_monitor_missing_workspace_compose_teardown_failure_logs_gc_failed_cause -q`
+  passed with 3 tests.
+- Targeted lint:
+  `uv run --python 3.12 --extra dev ruff check src/awf/service/gc.py src/awf/runtime/pr_monitor_runner/lifecycle.py`
+  passed.
+
+### Remaining Gaps
+
+None for this review-level comment. Broad validation and merge gating remain
+owned by AWF/GitHub after agent completion.

@@ -72,7 +72,7 @@ from awf.service.gc import (
     WorkspaceGCComposeTeardown,
     WorkspaceGCComposeTeardownResult,
     WorkspaceGCResult,
-    _compose_teardown_result_for_exception,
+    compose_teardown_result_for_exception,
     run_workspace_filesystem_gc,
 )
 
@@ -821,7 +821,7 @@ def _track_completed_workspace_compose_teardown(
             if isawaitable(result):
                 result = await result
         except Exception as exc:
-            tracked_results[candidate.workspace_id] = _compose_teardown_result_for_exception(exc)
+            tracked_results[candidate.workspace_id] = compose_teardown_result_for_exception(exc)
             # Re-raise so ``_run_gc_compose_teardowns`` records the failure in
             # ``result.compose_teardowns``; this tracked copy is only for GC
             # exception paths.

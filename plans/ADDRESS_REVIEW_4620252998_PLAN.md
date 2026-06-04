@@ -109,3 +109,50 @@ coverage for the compose-only success log.
 - Targeted lint:
   `uv run --python 3.12 --extra dev ruff check src/awf/service/gc.py src/awf/runtime/pr_monitor_runner/lifecycle.py tests/unit/runtime/test_monitor_completion_gc.py`
   should pass.
+
+## Iteration 3: Public Compose Teardown Exception Helper
+
+### Problem Statement And Scope
+
+Follow-up review on the same PR comment identified that
+`src/awf/runtime/pr_monitor_runner/lifecycle.py` imports the private
+`_compose_teardown_result_for_exception` helper from `awf.service.gc`. The
+shared helper is intentionally used by both lifecycle's tracking wrapper and
+GC's teardown loop so a re-raised callback exception maps to the same structured
+`WorkspaceGCComposeTeardownResult`.
+
+Scope is limited to making that shared helper a public GC module API, updating
+the cross-module import to the public name, and keeping the existing fallback
+compose teardown error-status explanation intact.
+
+### Requirements Checklist
+
+- Verify the private-import reviewer claim against current code.
+- Preserve the existing exception-result caching behavior so lifecycle tracking
+  and GC result recording remain consistent for the same exception object.
+- Stop importing a private GC implementation detail into lifecycle.
+- Keep the existing explanatory comment for fallback compose teardown failures
+  that can produce `partial` status with an empty `delete_errors` list.
+- Run only focused local checks; broad AWF/GitHub validation remains managed
+  after agent completion.
+
+### Implementation Steps
+
+1. Promote `_compose_teardown_result_for_exception` to
+   `compose_teardown_result_for_exception` with a short docstring explaining
+   the shared lifecycle/GC contract.
+2. Update GC's internal exception path and lifecycle's tracking wrapper to call
+   the public helper.
+3. Remove the private helper name from code after verifying no local callers
+   remain.
+4. Run the focused regressions that exercise compose teardown exception
+   normalization and completed-monitor GC fallback logging.
+
+### Verification Commands And Pass Criteria
+
+- Focused regression slice:
+  `uv run --python 3.12 --extra dev pytest tests/unit/service/test_gc_parts/test_gc_part_002.py::test_single_workspace_gc_records_raised_missing_workspace_compose_teardown tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_tracks_shared_callback_failure_result_when_gc_raises_after_teardown tests/unit/runtime/test_monitor_completion_gc.py::test_completed_monitor_missing_workspace_compose_teardown_failure_logs_gc_failed_cause -q`
+  should pass.
+- Targeted lint:
+  `uv run --python 3.12 --extra dev ruff check src/awf/service/gc.py src/awf/runtime/pr_monitor_runner/lifecycle.py`
+  should pass.
