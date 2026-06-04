@@ -12,6 +12,7 @@ from typing import Any, Final
 
 from sqlalchemy import (
     and_,
+    case,
     func,
     literal,
     or_,
@@ -402,13 +403,26 @@ def _worker_heartbeat_upsert_stmt(dialect_name: str | None) -> Any | None:
     if dialect_name != "postgresql":
         return None
     inserted = postgresql_insert(WorkerHeartbeat)
+    excluded_is_newer = inserted.excluded.last_heartbeat_at >= WorkerHeartbeat.last_heartbeat_at
     return inserted.on_conflict_do_update(
         index_elements=_WORKER_HEARTBEAT_CONFLICT_COLUMNS,
         set_={
-            "node_id": inserted.excluded.node_id,
-            "last_heartbeat_at": inserted.excluded.last_heartbeat_at,
-            "poll_interval_seconds": inserted.excluded.poll_interval_seconds,
-            "updated_at": inserted.excluded.updated_at,
+            "node_id": case(
+                (excluded_is_newer, inserted.excluded.node_id),
+                else_=WorkerHeartbeat.node_id,
+            ),
+            "last_heartbeat_at": func.greatest(
+                WorkerHeartbeat.last_heartbeat_at,
+                inserted.excluded.last_heartbeat_at,
+            ),
+            "poll_interval_seconds": case(
+                (excluded_is_newer, inserted.excluded.poll_interval_seconds),
+                else_=WorkerHeartbeat.poll_interval_seconds,
+            ),
+            "updated_at": case(
+                (excluded_is_newer, inserted.excluded.updated_at),
+                else_=WorkerHeartbeat.updated_at,
+            ),
         },
     ).returning(WorkerHeartbeat)
 

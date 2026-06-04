@@ -27,10 +27,25 @@ def test_worker_heartbeat_upsert_supports_postgres_only() -> None:
         maxsplit=1,
     )[0]
     assert "ON CONFLICT (worker_id) DO UPDATE" in sql
-    assert "node_id = excluded.node_id" in set_clause
-    assert "last_heartbeat_at = excluded.last_heartbeat_at" in set_clause
-    assert "poll_interval_seconds = excluded.poll_interval_seconds" in set_clause
-    assert "updated_at = excluded.updated_at" in set_clause
+    assert (
+        "node_id = CASE WHEN (excluded.last_heartbeat_at >= "
+        "worker_heartbeats.last_heartbeat_at) THEN excluded.node_id "
+        "ELSE worker_heartbeats.node_id END"
+    ) in set_clause
+    assert (
+        "last_heartbeat_at = greatest(worker_heartbeats.last_heartbeat_at, "
+        "excluded.last_heartbeat_at)"
+    ) in set_clause
+    assert (
+        "poll_interval_seconds = CASE WHEN (excluded.last_heartbeat_at >= "
+        "worker_heartbeats.last_heartbeat_at) THEN excluded.poll_interval_seconds "
+        "ELSE worker_heartbeats.poll_interval_seconds END"
+    ) in set_clause
+    assert (
+        "updated_at = CASE WHEN (excluded.last_heartbeat_at >= "
+        "worker_heartbeats.last_heartbeat_at) THEN excluded.updated_at "
+        "ELSE worker_heartbeats.updated_at END"
+    ) in set_clause
     assert "started_at =" not in set_clause
 
     assert _worker_heartbeat_upsert_stmt(None) is None
@@ -82,6 +97,51 @@ async def test_record_heartbeat_handles_concurrent_first_writes() -> None:
     assert heartbeat.node_id in {"node-a", "node-b"}
     assert heartbeat.last_heartbeat_at in {first_heartbeat_at, second_heartbeat_at}
     assert heartbeat.poll_interval_seconds in {5.0, 6.0}
+
+
+@pytest.mark.unit
+async def test_record_heartbeat_preserves_newest_conflicting_write() -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        worker_id = "worker_monotonic_heartbeat"
+        started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+        older_heartbeat_at = started_at + timedelta(seconds=1)
+        newer_heartbeat_at = started_at + timedelta(seconds=10)
+
+        async with factory() as session, session.begin():
+            await WorkerHeartbeatRepository(session).record_heartbeat(
+                worker_id=worker_id,
+                node_id="node-new",
+                started_at=started_at,
+                last_heartbeat_at=newer_heartbeat_at,
+                poll_interval_seconds=6.0,
+            )
+
+        async with factory() as session:
+            first_heartbeat = await WorkerHeartbeatRepository(session).get(worker_id=worker_id)
+
+        assert first_heartbeat is not None
+        first_updated_at = first_heartbeat.updated_at
+
+        async with factory() as session, session.begin():
+            await WorkerHeartbeatRepository(session).record_heartbeat(
+                worker_id=worker_id,
+                node_id="node-old",
+                started_at=started_at - timedelta(minutes=5),
+                last_heartbeat_at=older_heartbeat_at,
+                poll_interval_seconds=5.0,
+            )
+
+        async with factory() as session:
+            heartbeat = await WorkerHeartbeatRepository(session).get(worker_id=worker_id)
+
+    assert heartbeat is not None
+    assert heartbeat.worker_id == worker_id
+    assert heartbeat.started_at == started_at
+    assert heartbeat.node_id == "node-new"
+    assert heartbeat.last_heartbeat_at == newer_heartbeat_at
+    assert heartbeat.poll_interval_seconds == 6.0
+    assert heartbeat.updated_at == first_updated_at
 
 
 @pytest.mark.unit
