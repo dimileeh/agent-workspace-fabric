@@ -23,6 +23,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector
+from awf.service import gc_classify as _gc_classify
 from awf.service import gc_predicates as _gc_predicates
 from awf.service import gc_results as _gc_results
 from awf.service import gc_worktrees as _gc_worktrees
@@ -30,9 +31,6 @@ from awf.service.gc_auth_overlay import (
     _auth_overlay_unmount_skips_target,
     _auth_unmount_skipped_outcome,
     _unmount_candidate_auth_overlay,
-)
-from awf.service.gc_classify import (
-    FAILED_NO_WORK_TERMINAL_STATUSES as _FAILED_NO_WORK_TERMINAL_STATUSES,
 )
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
@@ -81,6 +79,8 @@ _default_worktree_remover = _gc_worktrees.default_worktree_remover
 _run_worktree_remove = _gc_worktrees.run_worktree_remove
 _worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
 _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
+
+_FAILED_NO_WORK_TERMINAL_STATUSES = _gc_classify.FAILED_NO_WORK_TERMINAL_STATUSES
 
 # Result/data dataclasses live in ``gc_results`` (file-size budget);
 # re-exported so the historical ``awf.service.gc.<name>`` surface is unchanged.
@@ -903,16 +903,23 @@ async def _run_gc_compose_teardowns(
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
     if compose_teardown is None:
         return compose_teardowns
-    candidates = plan.candidates
+    candidates = list(plan.candidates)
     if not candidates and fallback_candidate is not None:
         candidates = [fallback_candidate]
-    for candidate in candidates:
+
+    async def _teardown_candidate(
+        candidate: WorkspaceGCCandidate,
+    ) -> tuple[str, WorkspaceGCComposeTeardownResult | None]:
         try:
             teardown = await _run_compose_teardown(candidate, compose_teardown)
         except Exception as exc:
             teardown = compose_teardown_result_for_exception(exc)
+        return candidate.workspace_id, teardown
+
+    results = await asyncio.gather(*(_teardown_candidate(candidate) for candidate in candidates))
+    for workspace_id, teardown in results:
         if teardown is not None:
-            compose_teardowns[candidate.workspace_id] = teardown
+            compose_teardowns[workspace_id] = teardown
     return compose_teardowns
 
 

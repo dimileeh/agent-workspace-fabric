@@ -879,7 +879,7 @@ async def _gc_completed_workspace_filesystem(
         )
     except Exception as exc:
         _log.warning(
-            "monitor.filesystem_gc_raised",
+            "monitor.filesystem_gc_failed",
             workspace_id=workspace_id,
             error=repr(exc)[:400],
         )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -523,6 +525,77 @@ async def test_batch_terminal_gc_compose_teardown_failure_blocks_runtime_side_ef
     assert released_leases[0].status == "revoked"
     assert failed_reservation is not None
     assert released_reservation is None
+
+
+@pytest.mark.unit
+async def test_gc_compose_teardowns_start_later_candidates_while_first_is_pending(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+
+    def _path(workspace_id: str, kind: str) -> gc.WorkspaceGCPath:
+        return gc.WorkspaceGCPath(
+            kind=kind,
+            path=work_dir / kind / workspace_id,
+            exists=True,
+            estimated_bytes=1,
+        )
+
+    def _candidate(workspace_id: str) -> gc.WorkspaceGCCandidate:
+        return gc.WorkspaceGCCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.completed.value,
+            updated_at=now,
+            age_hours=200,
+            reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+            worktree=_path(workspace_id, "worktree"),
+            compose=_path(workspace_id, "compose"),
+            auth=_path(workspace_id, "auth"),
+        )
+
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    started: list[str] = []
+
+    async def _compose_teardown(
+        candidate: gc.WorkspaceGCCandidate,
+    ) -> WorkspaceGCComposeTeardownResult:
+        started.append(candidate.workspace_id)
+        if candidate.workspace_id == "ws-first":
+            first_started.set()
+            await release_first.wait()
+        if candidate.workspace_id == "ws-second":
+            second_started.set()
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    plan = gc.WorkspaceGCPlan(
+        work_dir=work_dir,
+        min_age_hours=24,
+        cutoff_at=now,
+        include_statuses=(WorkspaceStatus.completed.value,),
+        exclude_statuses=(),
+        candidates=[_candidate("ws-first"), _candidate("ws-second")],
+        preserved=[],
+    )
+
+    task = asyncio.create_task(gc._run_gc_compose_teardowns(plan, _compose_teardown))
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+    finally:
+        release_first.set()
+        with suppress(Exception):
+            await asyncio.wait_for(task, timeout=1)
+
+    results = task.result()
+    assert started == ["ws-first", "ws-second"]
+    assert list(results) == ["ws-first", "ws-second"]
+    assert all(result.ok for result in results.values())
 
 
 @pytest.mark.unit
