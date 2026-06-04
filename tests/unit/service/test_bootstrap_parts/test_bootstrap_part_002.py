@@ -78,6 +78,16 @@ def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         "COMPOSE_PROJECT_NAME",
     ):
         monkeypatch.delenv(key, raising=False)
+    # Skip the work-dir mount-propagation preflight: force the host-work-dir
+    # resolver to the real "no host work dir" path so no preflight stage or
+    # propagation env is folded in. These command-sequence/env tests assert the
+    # docker stage plumbing in isolation; the preflight is covered end-to-end in
+    # test_bootstrap_part_004.
+    monkeypatch.setattr(
+        bootstrap,
+        "_resolve_bootstrap_host_work_dir",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 @pytest.fixture(autouse=True)
