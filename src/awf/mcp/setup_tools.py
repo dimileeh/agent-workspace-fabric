@@ -349,8 +349,6 @@ def _initialize_project_profile_result(
             template=template,
             include_smoke_request=include_smoke_request,
         )
-    except ValueError as exc:
-        return _project_init_path_error(safe_result, str(exc), repository=repository)
     except Exception:
         return _error_result(
             safe_result,

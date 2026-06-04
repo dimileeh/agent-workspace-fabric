@@ -77,6 +77,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 ValueError Preview Redaction
+
+### Problem Statement And Scope
+
+The review reports that `_initialize_project_profile_result` returns
+`str(exc)` from `ValueError` raised by `preview_project_onboarding`, while the
+generic preview-failure path deliberately suppresses raw exception text. A
+`ValueError` can include path-like or internal validation context, and
+`PROJECT_INIT_INVALID_PATH` does not describe template/preview validation
+failures after the project path has already passed the MCP path checks.
+
+Scope is limited to MCP project-initialization preview error handling and its
+focused regression.
+
+### Requirements Checklist
+
+- Preserve explicit project-path existence and directory errors as
+  `PROJECT_INIT_INVALID_PATH`.
+- Treat `ValueError` from onboarding preview like other preview-construction
+  failures.
+- Do not include raw `ValueError` text in MCP response content.
+- Return the fixed preview-failure message and `PROJECT_INIT_FAILED` code with
+  safe project/template context.
+- Add a focused regression for `ValueError` redaction.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression where `preview_project_onboarding`
+   raises a path-like `ValueError`.
+2. Remove the special `ValueError` message passthrough so preview
+   `ValueError`s use the generic preview-failure response.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_value_error_preview_failure_does_not_surface_exception_text -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_value_error_preview_failure_does_not_surface_exception_text -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Source Checkout Config Status
 
 ### Problem Statement And Scope

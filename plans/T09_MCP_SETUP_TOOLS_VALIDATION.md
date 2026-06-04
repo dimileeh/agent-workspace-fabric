@@ -53,6 +53,49 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 ValueError Preview Redaction
+
+### Requirement Status
+
+- Preserve explicit project-path existence and directory errors as
+  `PROJECT_INIT_INVALID_PATH`: Complete.
+- Treat `ValueError` from onboarding preview like other preview-construction
+  failures: Complete.
+- Do not include raw `ValueError` text in MCP response content: Complete.
+- Return the fixed preview-failure message and `PROJECT_INIT_FAILED` code with
+  safe project/template context: Complete.
+- Add a focused regression for `ValueError` redaction: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_value_error_preview_failure_does_not_surface_exception_text -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_value_error_preview_failure_does_not_surface_exception_text -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Pre-implementation regression failed as expected because the MCP response
+  returned `PROJECT_INIT_INVALID_PATH` from a preview `ValueError`.
+- Preview-failure redaction checks after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Source Checkout Config Status
 
 ### Requirement Status
