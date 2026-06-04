@@ -106,6 +106,7 @@ PRESERVED_FAILED_AGE_CAP_RECLAIMED = "PRESERVED_FAILED_AGE_CAP_RECLAIMED"
 COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
 COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
+WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
 
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
@@ -818,7 +819,20 @@ async def run_workspace_filesystem_gc(
             reservation_releases={},
         )
 
-    compose_teardowns = await _run_gc_compose_teardowns(plan, compose_teardown)
+    empty_plan_compose_teardown_candidate = (
+        _missing_workspace_compose_teardown_candidate(
+            workspace_id=workspace_id,
+            work_dir=normalized_work_dir,
+            now=current_time,
+        )
+        if workspace is None
+        else None
+    )
+    compose_teardowns = await _run_gc_compose_teardowns(
+        plan,
+        compose_teardown,
+        empty_plan_candidate=empty_plan_compose_teardown_candidate,
+    )
     side_effect_workspace_ids = _workspace_ids_after_compose_teardown(
         plan,
         compose_teardowns,
@@ -1049,11 +1063,16 @@ async def _delete_gc_plan_paths(
 async def _run_gc_compose_teardowns(
     plan: WorkspaceGCPlan,
     compose_teardown: WorkspaceGCComposeTeardown | None,
+    *,
+    empty_plan_candidate: WorkspaceGCCandidate | None = None,
 ) -> dict[str, WorkspaceGCComposeTeardownResult]:
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
     if compose_teardown is None:
         return compose_teardowns
-    for candidate in plan.candidates:
+    candidates = plan.candidates
+    if not candidates and empty_plan_candidate is not None:
+        candidates = [empty_plan_candidate]
+    for candidate in candidates:
         teardown = await _run_compose_teardown(candidate, compose_teardown)
         if teardown is not None:
             compose_teardowns[candidate.workspace_id] = teardown
@@ -1070,6 +1089,24 @@ def _workspace_ids_after_compose_teardown(
         if teardown is None or teardown.ok:
             workspace_ids.append(candidate.workspace_id)
     return workspace_ids
+
+
+def _missing_workspace_compose_teardown_candidate(
+    *,
+    workspace_id: str,
+    work_dir: Path,
+    now: datetime,
+) -> WorkspaceGCCandidate:
+    return WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.destroyed.value,
+        updated_at=now,
+        age_hours=0,
+        reason_code=WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN,
+        worktree=_gc_path("worktree", work_dir / "git" / "worktrees" / workspace_id),
+        compose=_gc_path("compose", work_dir / "compose" / workspace_id),
+        auth=_gc_path("auth", work_dir / "auth" / workspace_id),
+    )
 
 
 def _worktree_remove_delete_errors(

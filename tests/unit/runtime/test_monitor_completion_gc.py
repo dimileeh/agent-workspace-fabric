@@ -6,6 +6,7 @@ import subprocess
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -223,6 +224,42 @@ async def test_completed_workspace_compose_teardown_callback_uses_candidate_meta
         ("candidate_project", candidate_compose_file, "ws-candidate-meta", True),
         ("monitor_project", monitor_compose_file, "ws-monitor-meta", True),
     ]
+
+
+@pytest.mark.unit
+async def test_completed_workspace_gc_tears_down_compose_when_plan_is_empty(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-empty-plan"
+    compose_file = work_dir / "compose" / ws_id / "compose.yml"
+    runner = SimpleNamespace(
+        _work_dir=work_dir,
+        _deps=SimpleNamespace(session_factory=factory),
+    )
+    compose_patch, compose_calls = mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+
+    with compose_patch, structlog.testing.capture_logs() as captured:
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="proj_from_monitor",
+            compose_file=compose_file,
+        )
+
+    assert compose_calls == [("proj_from_monitor", compose_file, ws_id, True)]
+    assert any(
+        record.get("event") == "monitor.compose_teardown_ok"
+        and record.get("workspace_id") == ws_id
+        and record.get("reason_code") == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+        for record in captured
+    )
 
 
 async def _seed_old_completed_pr_workspace(
