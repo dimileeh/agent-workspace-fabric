@@ -454,7 +454,7 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     configure_section = getting_started_text.split(
         "### Configure Environment",
         maxsplit=1,
-    )[1].split("### Run Locally", maxsplit=1)[0]
+    )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
 
     assert "awf setup" in startup_section
     assert "awf start" in startup_section
@@ -497,7 +497,7 @@ def test_getting_started_cli_host_port_derivation_matches_cli_default() -> None:
     configure_section = getting_started_text.split(
         "### Configure Environment",
         maxsplit=1,
-    )[1].split("### Run Locally", maxsplit=1)[0]
+    )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
 
     assert (
         "`AWF_API_HOST_PORT` is present, the CLI derives `http://localhost:<port>`"
