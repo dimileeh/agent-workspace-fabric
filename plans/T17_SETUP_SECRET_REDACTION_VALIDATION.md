@@ -1399,6 +1399,53 @@ uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maint
 # 1 passed, 8 deselected in 0.51s
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HKi5o` MCP Artifact Custom Secret Key Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP artifact content now redacts bare non-pattern values from
+  custom secret-like Compose env-file keys such as `CUSTOM_CLIENT_SECRET`.
+- Complete: MCP payload/artifact exact-secret discovery now reuses the
+  service-log secret-key predicate, matching MCP workspace log reads and
+  service-log redaction.
+- Complete: existing known provider env-key artifact redaction still passes in
+  the adjacent focused tests.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k custom_compose_env_secret --tb=short -ra
+# failed: returned raw "bare-compose-custom-value" in artifact content
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k custom_compose_env_secret --tb=short -ra
+# 1 passed, 32 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k 'compose_env_file_provider_secret or custom_compose_env_secret' --tb=short -ra
+# 3 passed, 30 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.

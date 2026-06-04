@@ -1005,3 +1005,51 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q --tb=short -ra
 uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HKi5o` MCP Artifact Custom Secret Key Plan
+
+### Problem Statement And Scope
+
+The review thread reports that MCP safe payload and artifact exact-secret
+redaction only treats Compose/provider environment entries as secrets when the
+key is in `KNOWN_SECRET_ENV_KEYS`. MCP workspace log reads and service logs
+already use the broader service secret-key predicate, so a non-token-shaped
+value under a custom key such as `CUSTOM_CLIENT_SECRET` can be redacted in logs
+but still appear in MCP artifact content or structured tool payloads.
+
+This repair is limited to MCP payload/artifact exact-secret discovery, a
+focused MCP artifact regression, and validation evidence. It does not change
+the Compose env loader, shared token patterns, log-read redaction behavior, or
+broad AWF/GitHub validation ownership.
+
+### Requirements Checklist
+
+- MCP artifact content redacts bare non-pattern values from custom
+  secret-like Compose env-file keys.
+- MCP payload/artifact exact-secret discovery uses the same service secret-key
+  predicate already used by service logs and MCP workspace log reads.
+- Existing known provider env-key redaction behavior remains unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP artifact regression using a custom
+   `CUSTOM_CLIENT_SECRET` Compose env-file key with a bare non-token-shaped
+   value.
+2. Reuse the service-log secret-key predicate in `_mcp_secret_values()` when
+   selecting exact Compose/provider env secrets.
+3. Run the targeted regression, adjacent MCP artifact redaction tests, and
+   narrow ruff/mypy checks for touched files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k custom_compose_env_secret --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k 'compose_env_file_provider_secret or custom_compose_env_secret' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```
