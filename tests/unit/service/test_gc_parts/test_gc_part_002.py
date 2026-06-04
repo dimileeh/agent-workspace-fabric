@@ -504,18 +504,18 @@ async def test_single_workspace_gc_records_raised_missing_workspace_compose_tear
 
 
 @pytest.mark.unit
-async def test_single_workspace_gc_cleanup_disabled_skips_missing_workspace_fallback_compose_teardown(
+async def test_single_workspace_gc_cleanup_disabled_runs_missing_workspace_fallback_compose_teardown(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = "ws_missing"
-    calls: list[str] = []
+    calls: list[tuple[str, str, Path]] = []
 
     async def _compose_teardown(candidate: object) -> WorkspaceGCComposeTeardownResult:
         assert isinstance(candidate, gc.WorkspaceGCCandidate)
-        calls.append(candidate.workspace_id)
+        calls.append((candidate.workspace_id, candidate.reason_code, candidate.compose.path))
         return WorkspaceGCComposeTeardownResult(
             status="succeeded",
             reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
@@ -534,8 +534,19 @@ async def test_single_workspace_gc_cleanup_disabled_skips_missing_workspace_fall
     assert result.plan.candidates == []
     assert result.plan.preserved == []
     assert result.plan.cleanup_enabled is False
-    assert calls == []
-    assert result.compose_teardowns == {}
+    assert result.deleted_paths == []
+    assert result.delete_errors == []
+    assert calls == [
+        (
+            workspace_id,
+            "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN",
+            work_dir / "compose" / workspace_id,
+        )
+    ]
+    assert result.compose_teardowns[workspace_id].to_dict() == {
+        "status": "succeeded",
+        "reason_code": "DOCKER_COMPOSE_DOWN_SUCCEEDED",
+    }
 
 
 @pytest.mark.unit

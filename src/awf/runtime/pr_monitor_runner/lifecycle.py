@@ -873,6 +873,9 @@ async def _gc_completed_workspace_filesystem(
                 workspace_id=tracked_workspace_id,
                 compose_project=tracked_compose_projects.get(tracked_workspace_id),
             )
+        # If the teardown callback raises before the tracking wrapper records a
+        # result, this local map can be incomplete. That is safe here: the auth
+        # overlay is unmounted only when we observed a tracked successful teardown.
         raised_teardown = tracked_compose_teardowns.get(workspace_id)
         if compose_teardown is not None and raised_teardown is not None and raised_teardown.ok:
             await asyncio.to_thread(
