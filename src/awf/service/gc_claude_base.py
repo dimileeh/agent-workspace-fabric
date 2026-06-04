@@ -189,6 +189,18 @@ def _has_unverifiable_live_overlay(
             signature = ""
         if not signature:
             return True
+        # A non-empty pin only makes the overlay verifiable when it names a base that
+        # still exists on disk — ``_pinned_base_dirs`` protects exactly that
+        # ``_shared_claude_base_dir(...)`` path. The marker write is not atomic
+        # (``_record_overlay_base_pin`` does a plain ``write_text``), so a worker killed
+        # mid-write can leave a truncated marker; a marker can also name a base already
+        # reaped or never built. In either case the pin protects a path that is *not* the
+        # real live lowerdir, so the base actually backing this (worker-namespace-only)
+        # overlay stays invisible here *and* unprotected — and GC-B could reap the
+        # superseded live base out from under a running agent. Treat that as unverifiable
+        # rather than trust a pin that resolves to nothing (PRRT_kwDOSJAM6s6HLoo2).
+        if not _shared_claude_base_dir(work_dir, signature).exists():
+            return True
     return False
 
 

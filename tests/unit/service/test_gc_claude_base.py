@@ -668,6 +668,37 @@ def test_unverifiable_guard_skipped_when_overlay_scratch_is_pinned(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_unverifiable_guard_fires_when_pin_names_missing_base(tmp_path: Path) -> None:
+    # A non-empty ``base.signature`` only makes an overlay verifiable when it names a
+    # base that still exists on disk: ``_pinned_base_dirs`` protects exactly that
+    # ``_shared_claude_base_dir(...)`` path. A worker killed mid-``write_text`` can leave
+    # a truncated marker, and a marker can name a base that was already reaped or never
+    # built. In those cases the pin protects a path that is *not* the real live lowerdir,
+    # so the base actually backing this worker-namespace overlay is both invisible to the
+    # incapable process and unprotected — exactly the state GC-B must not reap into. The
+    # guard must treat it as unverifiable rather than let an unrelated superseded base be
+    # reaped while the live base hides behind a stale pin.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    # Pin names a base dir that does not exist on disk (truncated/stale marker).
+    _make_overlay_scratch(work_dir, "ws_live", pin="sigtrunc")
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=True,
+        capability_probe=lambda: False,
+    )
+
+    assert report["reaped"] == []
+    assert report["unverifiable"] == ["sigsuper0000000"]
+    assert report["reason_code"] == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+    assert base_super.is_dir()
+
+
+@pytest.mark.unit
 def test_unverifiable_guard_skipped_when_overlay_already_unmounted(tmp_path: Path) -> None:
     # An overlay scratch with the ``.overlay-unmounted`` teardown marker was already
     # released by a capable process, so its old base is no longer a live lower and the
