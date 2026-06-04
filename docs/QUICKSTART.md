@@ -129,11 +129,14 @@ This is the `awf init <path>` step for a checked-out project repository.
 Upgrade:
 
 Run this from the existing `aira-agent-workspace-fabric` checkout. If your shell
-is elsewhere, first `cd /path/to/aira-agent-workspace-fabric`.
+is elsewhere, first `cd /path/to/aira-agent-workspace-fabric`. Stop local Core
+before refreshing source-checkout metadata; `awf setup` checks the API and
+Postgres host ports and blocks while the previous Core stack still holds them.
 
 ```bash
 git pull
 uv tool install . --force
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf smoke run --project ../awf-eval-project --mocked-local --format pretty
@@ -193,11 +196,14 @@ This is the `awf init <path>` step for a checked-out project repository.
 Upgrade:
 
 Run this from the existing `aira-agent-workspace-fabric` checkout. If your shell
-is elsewhere, first `cd /path/to/aira-agent-workspace-fabric`.
+is elsewhere, first `cd /path/to/aira-agent-workspace-fabric`. Stop local Core
+before refreshing source-checkout metadata; `awf setup` checks the API and
+Postgres host ports and blocks while the previous Core stack still holds them.
 
 ```bash
 git pull
 uv sync --extra dev
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf smoke run --project ../awf-eval-project --mocked-local --format pretty

@@ -47,6 +47,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   `awf` first-run commands to lanes that put `awf` on `PATH` and documenting
   the no-global `uv run --python 3.12 --extra dev awf ...` wrapper alongside
   them.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HFXeN` by stopping local Core
+  before source-checkout upgrade snippets refresh persisted `source_checkout`
+  metadata with `awf setup --source-checkout "$PWD"`.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -427,7 +430,8 @@ Red-phase result after adding the focused assertion: failed because
 `docs/QUICKSTART.md` Lane 2 did not refresh `source_checkout` metadata before
 `awf start --source-checkout "$PWD"`.
 
-Final repair result: `1 passed in 0.59s`.
+Final repair result after formatting the edited docs test file:
+`1 passed in 0.58s`.
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
@@ -540,6 +544,45 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 ```
 
 Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HFXeN`:
+
+- `docs/QUICKSTART.md` and `docs/UPGRADE.md` now stop the local Core Compose
+  stack before source-checkout upgrade snippets run `awf setup --source-checkout
+  "$PWD"`, avoiding the API/Postgres occupied-port readiness blocker.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  upgrade docs that refresh metadata before stopping local Core.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+```
+
+Red-phase result after adding the focused assertion: failed because Quickstart
+Lane 2 did not stop local Core before `awf setup --source-checkout "$PWD"`.
+
+Final repair result: `1 passed in 0.59s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `42 passed in 1.12s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

@@ -46,12 +46,15 @@ awf smoke run --project <path> --mocked-local --format pretty
 ## Source Checkout With Global Tool Install
 
 This lane uses an inspectable source checkout and a global tool installed from
-that checkout:
+that checkout. Stop local Core before refreshing source-checkout metadata;
+`awf setup` checks the API and Postgres host ports and blocks while the previous
+Core stack still holds them:
 
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv tool install . --force
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf service status --format pretty
@@ -61,12 +64,15 @@ awf smoke run --project <path> --mocked-local --format pretty
 ## Source Checkout With No Global Install
 
 This lane uses an inspectable source checkout and no global install. Keep
-running AWF through `uv run` from the checkout:
+running AWF through `uv run` from the checkout. Stop local Core before
+refreshing source-checkout metadata; `awf setup` checks the API and Postgres
+host ports and blocks while the previous Core stack still holds them:
 
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv sync --extra dev
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf service status --format pretty

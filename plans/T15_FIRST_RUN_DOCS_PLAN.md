@@ -114,6 +114,12 @@ mocked first-run sequence must not hard-require `gh auth token`; keep GitHub
 token guidance optional there, matching Quickstart, and leave required token
 setup in the PR monitoring/provider sections.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HFXeN`: source-checkout
+upgrade snippets must stop the local Core Compose stack before refreshing
+persisted `source_checkout` metadata with `awf setup --source-checkout "$PWD"`,
+because setup readiness blocks while the running API/Postgres services still
+hold the default host ports.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
