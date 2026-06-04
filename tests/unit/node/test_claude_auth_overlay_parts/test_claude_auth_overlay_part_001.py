@@ -856,6 +856,57 @@ def test_live_mount_reuse_skips_pin_when_lowerdir_not_a_shared_base(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_live_mount_reuse_pins_when_work_dir_is_symlinked(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    # ``AWF_WORK_DIR`` reached through a symlink (e.g. a bind-mount alias): the kernel
+    # records the live overlay lowerdir in ``/proc/mounts`` in resolved form, while
+    # ``_shared_claude_base_dir`` builds the unresolved (symlinked) path.
+    real_work = tmp_path / "real-work"
+    real_work.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.symlink_to(real_work, target_is_directory=True)
+    _seed_host_claude(host_home)
+
+    class ResolvedLowerdirMounter(FakeOverlayMounter):
+        """Mirror the kernel: ``/proc/mounts`` reports the lowerdir resolved."""
+
+        def active_lowerdir(self, merged: Path) -> Path | None:
+            live = super().active_lowerdir(merged)
+            return live.resolve(strict=False) if live is not None else None
+
+    mounter = ResolvedLowerdirMounter(supported=True)
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_symlink",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_symlink" / "claude"
+    signature = _host_claude_signature(host_home)
+    # Worker killed after ``mount()`` but before the pin write: overlay stays live
+    # while ``base.signature`` is missing.
+    (claude_root / "base.signature").unlink()
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_symlink",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The live mount was reused — no remount onto the busy mountpoint.
+    assert len(mounter.mounts) == 1
+    # The pin is recorded even though the resolved live lowerdir and the unresolved
+    # ``_shared_claude_base_dir`` path diverge string-wise: both sides are resolved
+    # before comparing, so the symlinked ``work_dir`` no longer drops a valid base.
+    assert (claude_root / "base.signature").read_text() == signature
+
+
+@pytest.mark.unit
 def test_overlay_retry_after_teardown_pins_original_base_when_host_changed(
     tmp_path: Path,
 ) -> None:

@@ -1188,7 +1188,17 @@ def _live_overlay_pin_signature(
     if live_lowerdir is None:
         return None
     signature = live_lowerdir.parent.name
-    if _shared_claude_base_dir(work_dir, signature) != live_lowerdir:
+    # Compare in *resolved* form: ``active_lowerdir`` reads the live lowerdir from
+    # ``/proc/mounts`` in the kernel-resolved form (the kernel follows symlinks when
+    # recording mount paths), while ``_shared_claude_base_dir`` is built from a
+    # ``work_dir`` that only had ``expanduser()`` applied. When ``AWF_WORK_DIR`` is
+    # reached via a symlink or bind-mount alias the two string forms diverge, so a
+    # valid shared base would fail this equality check and no pin would be recorded —
+    # leaving a later teardown+remount to recompute against a since-changed host. The
+    # GC protection code resolves both sides for exactly this reason.
+    if _shared_claude_base_dir(work_dir, signature).resolve(strict=False) != live_lowerdir.resolve(
+        strict=False
+    ):
         return None
     return signature
 
