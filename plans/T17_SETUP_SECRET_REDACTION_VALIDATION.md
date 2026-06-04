@@ -24,6 +24,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log assignment-context early-break logic compares
   byte offsets to byte offsets when multibyte text appears before an
   assignment.
+- Complete: MCP workspace log exact-secret redaction includes provider
+  credentials loaded from the local Compose env file when they are absent from
+  the MCP process environment.
 - Complete: MCP workspace log reads do not skip data when the expanded log read
   is short without EOF; `next_offset` advances only through bytes actually
   covered by the expanded result.
@@ -725,6 +728,52 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py src/awf
 
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py src/awf/service/logs.py src/awf/service/support_bundle.py
 # Success: no issues found in 3 source files
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
+## Review Thread `PRRT_kwDOSJAM6s6HDTtb` Compose Env Provider Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP workspace log exact-secret discovery now resolves the same
+  local service provider environment used by service readiness/status surfaces.
+- Complete: provider credentials supplied only by the local Compose env file are
+  included in the exact-secret set for context-aware log slice redaction.
+- Complete: a requested MCP log slice containing only the bare Compose-sourced
+  provider token, without a visible `TOKEN=` assignment prefix, is redacted.
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k compose_env_provider_secret
+# failed: returned raw "compose-only-anthropic-provider-secret"
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k compose_env_provider_secret
+# 1 passed, 38 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
+# 39 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+# Success: no issues found in 1 source file
 ```
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds

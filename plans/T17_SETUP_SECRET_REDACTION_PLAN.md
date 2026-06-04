@@ -77,6 +77,12 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 redaction/support-bundle scope and
   only changes the targeted helper, explanatory service-log comment,
   setup-state constants, focused regressions, and this plan/validation evidence.
+- Review thread `PRRT_kwDOSJAM6s6HDTtb` identified that MCP workspace log exact
+  secret redaction scans only the MCP process environment, so provider tokens
+  present only in the local Compose env file can leak when the returned slice
+  contains the bare value without a visible secret assignment prefix.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes Compose-env exact secret discovery plus a focused regression.
 
 ## Requirements Checklist
 
@@ -107,6 +113,9 @@ credential entry, or unrelated refactors are included.
   projection must either show assignment context or a safe token boundary.
 - MCP workspace log assignment-context early-break logic compares byte offsets
   to byte offsets when multibyte text appears before an assignment.
+- MCP workspace log exact-secret redaction includes provider credentials loaded
+  from the local Compose env file, even when those values are not exported in
+  the MCP process environment.
 - Followed service-log streaming documents that the current per-line redaction
   boundary depends on single-line secret/provider-ref patterns.
 - Support-bundle setup-state generic fallback reason codes are centralized.
@@ -172,6 +181,9 @@ credential entry, or unrelated refactors are included.
     line-scoped redaction boundary.
 20. Replace setup-state generic fallback reason string literals with shared
     constants and cover the no-`reason_code` reader fallback.
+21. Add a focused regression for a Compose-only provider token in an MCP log
+    slice without a visible assignment prefix, confirm it fails, then include
+    local Compose provider env secrets in the MCP exact-secret set.
 
 ## Verification Commands
 
@@ -202,6 +214,14 @@ Review-thread `PRRT_kwDOSJAM6s6HAjVz` repair checks:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k pattern_only_secret_assignment
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HDTtb` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k compose_env_provider_secret
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```

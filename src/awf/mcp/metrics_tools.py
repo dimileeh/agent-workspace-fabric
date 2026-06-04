@@ -13,7 +13,7 @@ cleanly when they show up alongside other MCP servers.
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
@@ -156,10 +156,21 @@ def _workspace_log_redaction_secrets(
     ):
         if secret and len(secret) >= 4:
             secrets.append(secret)
-    for key, value in os.environ.items():
+    provider_environ = _workspace_log_redaction_provider_environ()
+    for key, value in provider_environ.items():
         if key.upper() in provider_readiness_service.KNOWN_SECRET_ENV_KEYS and len(value) >= 4:
             secrets.append(value)
     return tuple(dict.fromkeys(secrets))
+
+
+def _workspace_log_redaction_provider_environ() -> Mapping[str, str]:
+    """Return local provider env values whose exact secrets must be redacted."""
+    return service_config.resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ=os.environ,
+        compose_file=service_config.LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file=service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    )
 
 
 def _workspace_log_redaction_context_bytes(extra_secrets: tuple[str, ...]) -> int:
