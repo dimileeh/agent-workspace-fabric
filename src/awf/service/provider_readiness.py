@@ -13,8 +13,8 @@ from typing import Any, Literal, Protocol
 
 from awf.db.enums import AgentRuntime
 from awf.node.auth_mounts import (
-    _force_copy_isolation_requested,
     claude_auth_isolation_label,
+    force_copy_isolation_requested,
 )
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
@@ -925,7 +925,7 @@ def _check_claude(
     # environment, so a default probe over ``os.environ`` would miss it and report
     # ``per_workspace_overlay`` while the worker actually uses per-workspace copies.
     directory_isolation = claude_auth_isolation_label(
-        force_copy_requested=lambda: _force_copy_isolation_requested(environ),
+        force_copy_requested=lambda: force_copy_isolation_requested(environ),
     )
     file_sources: list[dict[str, str]] = []
     if (host_home / ".claude").exists():

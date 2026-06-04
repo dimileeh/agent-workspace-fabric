@@ -28,6 +28,7 @@ from awf.node.auth_mounts import (
     _SubprocessOverlayMounter,
     claude_auth_isolation_label,
     default_overlay_mounter,
+    force_copy_isolation_requested,
     resolve_service_auth_mounts,
     teardown_workspace_auth_overlay,
 )
@@ -782,6 +783,16 @@ def test_isolation_label_reports_copy_under_force_copy_request() -> None:
         )
         == "per_workspace_overlay"
     )
+
+
+@pytest.mark.unit
+def test_force_copy_isolation_requested_public_wrapper_reads_passed_env() -> None:
+    # The public wrapper is the stable cross-package entrypoint (used by
+    # ``service.provider_readiness``); it mirrors the private probe's truthiness
+    # set over the *passed* environ so a force-copy host is reported correctly.
+    assert force_copy_isolation_requested({"AWF_CLAUDE_AUTH_FORCE_COPY": "true"}) is True
+    assert force_copy_isolation_requested({"AWF_CLAUDE_AUTH_FORCE_COPY": "off"}) is False
+    assert force_copy_isolation_requested({}) is False
 
 
 @pytest.mark.unit

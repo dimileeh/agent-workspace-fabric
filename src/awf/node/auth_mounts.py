@@ -117,6 +117,17 @@ def _force_copy_isolation_requested(host_env: Mapping[str, str] | None = None) -
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def force_copy_isolation_requested(host_env: Mapping[str, str] | None = None) -> bool:
+    """Public API: whether ``AWF_CLAUDE_AUTH_FORCE_COPY`` requests the copy fallback.
+
+    A stable wrapper over the module-private probe so callers outside this
+    package (e.g. ``service.provider_readiness``) depend on a public symbol
+    rather than coupling to the underscore-prefixed implementation detail.
+    """
+
+    return _force_copy_isolation_requested(host_env)
+
+
 def _overlay_filesystem_available(proc_filesystems: Path = _PROC_FILESYSTEMS) -> bool:
     """Return whether the kernel advertises overlayfs in ``/proc/filesystems``."""
 
