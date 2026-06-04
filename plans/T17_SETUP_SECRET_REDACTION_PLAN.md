@@ -44,6 +44,13 @@ credential entry, or unrelated refactors are included.
   causing decoded replacement bytes to shift later byte-window projection.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes byte-preserving MCP log-read projection plus a focused regression.
+- Review-level comment `issue:4620175517` identified that MCP workspace log
+  reads assume a non-EOF expanded read always reaches the full requested caller
+  window. If a future log backend returns a short non-EOF expanded read, the MCP
+  response must not advance `next_offset` past bytes actually covered by that
+  expanded result.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes requested-window offset projection plus a focused regression.
 
 ## Requirements Checklist
 
@@ -62,6 +69,9 @@ credential entry, or unrelated refactors are included.
   expansion starts inside a multibyte UTF-8 character.
 - MCP workspace log reads do not expose pattern-only secret assignment values
   when the assignment key prefix is outside the fixed context window.
+- MCP workspace log reads do not skip data if the expanded log read is short
+  without EOF; `next_offset` advances only through the actually covered caller
+  window.
 - Support-bundle setup-state collection returns a redacted failed setup-state
   payload if loaded config summarization raises after the config reader
   succeeds.
@@ -101,6 +111,9 @@ credential entry, or unrelated refactors are included.
 12. Add a focused regression where the expanded MCP log-read context starts
     inside a multibyte character, confirm it fails, then preserve raw log bytes
     through MCP byte-window projection.
+13. Add a focused regression for a short non-EOF expanded MCP log read, confirm
+    it fails, then project the returned `next_offset` to the actual caller-window
+    bytes covered by the expanded result.
 
 ## Verification Commands
 
@@ -149,6 +162,14 @@ Review-thread `PRRT_kwDOSJAM6s6HBBcY` repair checks:
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k expanded_context_starts_inside_multibyte_character
 uv run --python 3.12 --extra dev ruff check src/awf/runtime/logs.py src/awf/service/workspaces.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/runtime/logs.py src/awf/service/workspaces.py src/awf/mcp/metrics_tools.py
+```
+
+Review-level comment `issue:4620175517` short-read repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k short_non_eof_expanded_read
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```
 
 Focused lint/type checks, adjusted to touched files:

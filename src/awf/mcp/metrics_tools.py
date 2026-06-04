@@ -249,7 +249,8 @@ def _requested_log_window_offsets(
         safe_offset = min(requested_offset, file_size)
         next_offset = min(safe_offset + limit_bytes, file_size)
         return next_offset, next_offset >= file_size
-    return requested_offset + limit_bytes, False
+    covered_next_offset = min(requested_offset + limit_bytes, expanded_next_offset)
+    return max(requested_offset, covered_next_offset), False
 
 
 def register_metrics_tools(

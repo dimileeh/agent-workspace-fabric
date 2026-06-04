@@ -1143,6 +1143,62 @@ class TestWorkspaceLogs:
         }
 
     @pytest.mark.unit
+    async def test_read_workspace_log_does_not_skip_short_non_eof_expanded_read(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Advance only through returned caller-window bytes on short non-EOF reads."""
+        for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+
+        service = WorkspaceService(factory)
+
+        async def short_read_log(
+            workspace_id: str,
+            stream_id: str,
+            *,
+            offset: int = 0,
+            limit_bytes: int = 65_536,
+            include_bytes: bool = False,
+        ) -> dict[str, object]:
+            assert workspace_id == "ws_short"
+            assert stream_id == "agent.stdout"
+            assert offset == 0
+            assert limit_bytes > 10
+            assert include_bytes is True
+            return {
+                "stream_id": stream_id,
+                "offset": offset,
+                "next_offset": 8,
+                "eof": False,
+                "text": "01234567",
+                "raw_bytes": b"01234567",
+            }
+
+        monkeypatch.setattr(service, "read_log", short_read_log)
+        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": "ws_short",
+                "stream_id": "agent.stdout",
+                "offset": 5,
+                "limit_bytes": 10,
+            },
+        )
+
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": 5,
+            "next_offset": 8,
+            "eof": False,
+            "data": "567",
+        }
+
+    @pytest.mark.unit
     async def test_missing_workspace_or_stream_returns_none(
         self,
         factory: async_sessionmaker[AsyncSession],

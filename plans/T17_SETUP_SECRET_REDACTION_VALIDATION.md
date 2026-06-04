@@ -21,6 +21,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log reads do not expose pattern-only secret
   assignment values when the assignment key prefix is outside the fixed context
   window.
+- Complete: MCP workspace log reads do not skip data when the expanded log read
+  is short without EOF; `next_offset` advances only through bytes actually
+  covered by the expanded result.
 - Complete: Support-bundle setup-state collection returns a redacted failed
   setup-state payload if loaded config summarization raises after the config
   reader succeeds.
@@ -222,6 +225,38 @@ uv run --python 3.12 --extra dev ruff check src/awf/runtime/logs.py src/awf/serv
 
 uv run --python 3.12 --extra dev mypy src/awf/runtime/logs.py src/awf/service/workspaces.py src/awf/mcp/metrics_tools.py
 # Success: no issues found in 3 source files
+```
+
+## Review-Level Comment `issue:4620175517` Short-Read Iteration
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k short_non_eof_expanded_read
+# failed: returned next_offset=15 for a short non-EOF expanded read that only covered through byte 8
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k short_non_eof_expanded_read
+# 1 passed, 27 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
+# 28 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+# Success: no issues found in 1 source file
 ```
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
