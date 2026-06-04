@@ -451,6 +451,31 @@ def test_reap_one_base_refuses_path_outside_base_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reap_one_base_refuses_symlinked_child(tmp_path: Path) -> None:
+    # The hard guard must also reject a *symlinked* direct child of the base root.
+    # ``Path.parent`` is purely lexical, so a symlink under the base root satisfies the
+    # ``parent == base_root`` check; without an explicit ``is_symlink`` guard the only
+    # thing standing between GC-B and a tree outside the base root would be
+    # ``shutil.rmtree``'s incidental refusal to follow a top-level symlink. Refuse it
+    # structurally instead, and prove the link target survives untouched.
+    base_root = tmp_path / "claude-base"
+    base_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious").write_text("keep me")
+    link = base_root / "evil"
+    link.symlink_to(outside, target_is_directory=True)
+
+    error = _reap_one_base(link, base_root=base_root)
+
+    assert error is not None
+    assert error["reason_code"] == CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT
+    assert link.is_symlink()  # the link itself is left in place, not rmtree'd
+    assert outside.is_dir()  # the link target tree is untouched
+    assert (outside / "precious").read_text() == "keep me"
+
+
+@pytest.mark.unit
 def test_pinned_dir_scan_tolerates_missing_auth_root(tmp_path: Path) -> None:
     # ``work_dir`` with no ``auth`` dir at all (overlay never used): the pin scan is a
     # clean empty set and the whole reaper is a no-op, never an error.

@@ -418,10 +418,14 @@ def _reap_one_base(signature_dir: Path, *, base_root: Path) -> dict[str, str] | 
     and distinguished from other ``OSError``. Base contents/secrets are never logged.
     """
 
-    if signature_dir.parent != base_root:
+    if signature_dir.parent != base_root or signature_dir.is_symlink():
         # Defensive: every candidate comes from ``base_root.iterdir()`` so this
         # cannot trigger in practice, but refuse to ``rmtree`` anything outside the
-        # base root rather than trust the caller.
+        # base root rather than trust the caller. ``Path.parent`` is purely lexical,
+        # so a *symlinked* direct child still satisfies ``parent == base_root``;
+        # reject symlinks explicitly so the guard never relies on ``shutil.rmtree``'s
+        # incidental refusal to follow a top-level link to keep a tree outside the
+        # base root from being reaped.
         return {
             "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
             "error": "refused to reap a base outside the shared base root",
