@@ -187,8 +187,7 @@ been in production locally; it does not change the on-disk ownership layout.
 If a future revision flips the default to a host-UID control plane, the
 migration shape is:
 
-1. Stop the local stack: `docker compose -f docker/compose/local-service.yml
-   stop api worker`.
+1. Stop the local stack from the AWF root: `docker compose stop api worker`.
 2. Repair host ownership of the AWF work dir to the operator UID/GID:
    `sudo chown -R "$(id -u)":"$(id -g)" "${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"`.
 3. Re-bootstrap with the new image: `awf service bootstrap`.

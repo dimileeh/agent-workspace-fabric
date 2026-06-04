@@ -25,8 +25,7 @@ def _default_local_service_compose_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
-    compose_file.parent.mkdir(parents=True)
+    compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}")
     monkeypatch.chdir(tmp_path)
 

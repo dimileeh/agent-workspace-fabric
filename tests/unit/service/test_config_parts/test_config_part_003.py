@@ -28,6 +28,10 @@ def _write_awf_source_root(checkout: Path) -> Path:
     fake_module.write_text("# source module placeholder\n", encoding="utf-8")
     (checkout / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
     (checkout / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    (checkout / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     compose_file = checkout / "docker" / "compose" / "local-service.yml"
     compose_file.parent.mkdir(parents=True, exist_ok=True)
     compose_file.write_text("services: {}\n", encoding="utf-8")
@@ -198,14 +202,13 @@ def test_compose_host_work_dir_takes_precedence_over_shell_awf_work_dir(
 
 
 @pytest.mark.unit
-def test_local_service_work_dir_resolves_from_compose_env_file(
+def test_local_service_work_dir_resolves_from_root_env_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     host_work_dir = tmp_path / "compose-service-state"
     checkout, _ = _write_awf_source_checkout(tmp_path)
-    compose_env_file = checkout / "docker" / "compose" / ".env"
-    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
+    (checkout / ".env").write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
     monkeypatch.chdir(checkout)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("AWF_WORK_DIR", raising=False)
@@ -217,14 +220,13 @@ def test_local_service_work_dir_resolves_from_compose_env_file(
 
 
 @pytest.mark.unit
-def test_project_default_awf_work_dir_does_not_hide_compose_host_work_dir(
+def test_project_default_awf_work_dir_does_not_hide_root_host_work_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     host_work_dir = tmp_path / "compose-service-state"
     checkout, _ = _write_awf_source_checkout(tmp_path)
-    compose_env_file = checkout / "docker" / "compose" / ".env"
-    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
+    (checkout / ".env").write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
     monkeypatch.chdir(checkout)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AWF_WORK_DIR", ".awf")

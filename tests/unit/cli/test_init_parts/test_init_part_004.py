@@ -512,25 +512,22 @@ def test_getting_started_recommends_setup_start_then_project_init() -> None:
     assert "awf start" in readme
     assert "awf init <path>" in readme
     assert "awf service status --format pretty" in readme
-    assert "docker/compose/.env" in readme
+    assert "cp .env.example .env" in readme
     assert "`awf init`. With no arguments it bootstraps" not in readme
-    assert "cp .env.example .env" not in readme
 
 
 @pytest.mark.unit
-def test_getting_started_compose_env_snippet_replaces_token_placeholders() -> None:
-    """Regression: avoid duplicate token keys in docker/compose/.env examples."""
+def test_getting_started_root_env_snippet_replaces_token_placeholders() -> None:
+    """Regression: avoid duplicate token keys in root `.env` examples."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
-    snippet_start = readme.index("env_example=docker/compose/.env.example")
+    snippet_start = readme.index("grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example")
     snippet_end = readme.index("uv run --python 3.12 --extra dev awf service bootstrap")
     snippet = readme[snippet_start:snippet_end]
 
     assert "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)='" in readme
-    assert "} > docker/compose/.env" in readme
-    assert ">> docker/compose/.env" not in readme
-    assert 'echo "Missing env template: docker/compose/.env.example or .env.example" >&2' in snippet
-    assert "exit 1" in snippet
-    assert snippet.index("exit 1") < snippet.index("{")
+    assert "} > .env" in readme
+    assert ">> .env" not in readme
+    assert "docker/compose/.env" not in snippet
 
 
 @pytest.mark.unit
@@ -593,16 +590,13 @@ def test_init_without_path_rejects_unknown_provider_without_traceback(
 
 
 @pytest.mark.unit
-def test_init_without_path_keeps_single_leading_comment_with_overlay_key(
+def test_init_without_path_keeps_existing_root_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A single leading comment should stay with the shared overlay key."""
+    """Existing root `.env` remains canonical and is not rewritten from legacy templates."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text(
+    (tmp_path / ".env.example").write_text(
         "\n".join(
             [
                 "AWF_POSTGRES_PASSWORD=compose-example",
@@ -627,13 +621,13 @@ def test_init_without_path_keeps_single_leading_comment_with_overlay_key(
     result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == (
         "\n".join(
             [
-                "AWF_POSTGRES_PASSWORD=compose-example",
                 "# Existing API token override",
                 "AWF_API_TOKEN=migrated-token",
             ]
         )
         + "\n"
     )
+    assert not (tmp_path / "docker" / "compose" / ".env").exists()

@@ -44,6 +44,47 @@ def test_env_lookup_fallback_uses_stable_case_variant_priority() -> None:
 
 
 @pytest.mark.unit
+def test_local_service_environ_applies_root_compose_local_defaults(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing/empty local auth and Postgres values mirror root Compose defaults."""
+    from awf.service.config import local_service_environ
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_API_TOKEN=\nAWF_POSTGRES_PASSWORD=\n", encoding="utf-8")
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_POSTGRES_PASSWORD", raising=False)
+
+    environ = local_service_environ({}, env_file=env_file)
+
+    assert environ["AWF_API_TOKEN"] == "local-dev-token"
+    assert environ["AWF_POSTGRES_PASSWORD"] == "awf_dev"
+
+
+@pytest.mark.unit
+def test_local_service_environ_preserves_explicit_local_auth_and_password(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit operator values still win over the root Compose local defaults."""
+    from awf.service.config import local_service_environ
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_API_TOKEN=operator-token\nAWF_POSTGRES_PASSWORD=operator-password\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_POSTGRES_PASSWORD", raising=False)
+
+    environ = local_service_environ({}, env_file=env_file)
+
+    assert environ["AWF_API_TOKEN"] == "operator-token"
+    assert environ["AWF_POSTGRES_PASSWORD"] == "operator-password"
+
+
+@pytest.mark.unit
 def test_compose_interpolation_keys_ignores_unreadable_and_non_utf8_files(
     tmp_path,
 ) -> None:
@@ -93,6 +134,43 @@ services:
         compose_file=compose_file,
         compose_env_file=None,
     ) == {"AWF_SEQUENCE_TOKEN": "service-value"}
+
+
+@pytest.mark.unit
+def test_compose_interpolation_keys_follow_included_compose_files(tmp_path) -> None:
+    """The root public compose entrypoint must expose variables in included assets."""
+    from awf.service.environment import compose_interpolation_keys
+
+    root_compose = tmp_path / "compose.yaml"
+    included_compose = tmp_path / "docker" / "compose" / "local-service.yml"
+    included_compose.parent.mkdir(parents=True)
+    root_compose.write_text(
+        """
+include:
+  - ./docker/compose/local-service.yml
+services:
+  api:
+    environment:
+      ROOT_ONLY: ${AWF_ROOT_ONLY:-}
+""",
+        encoding="utf-8",
+    )
+    included_compose.write_text(
+        """
+services:
+  worker:
+    environment:
+      CURSOR_API_KEY: ${CURSOR_API_KEY:-}
+      AWF_API_TOKEN: ${AWF_API_TOKEN:?set AWF_API_TOKEN}
+""",
+        encoding="utf-8",
+    )
+
+    assert compose_interpolation_keys(root_compose) == (
+        "AWF_API_TOKEN",
+        "AWF_ROOT_ONLY",
+        "CURSOR_API_KEY",
+    )
 
 
 @pytest.mark.unit

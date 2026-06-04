@@ -454,12 +454,9 @@ def _resolve_state_directory(
 def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     """Return the compose, env, and env seed source files used by service commands.
 
-    If the verified source checkout contains local Compose assets, return those
-    assets as absolute paths. Compose-specific examples are the seed base when
-    present. Otherwise, the root example remains the seed base when it exists so
-    template-only defaults are preserved; an existing root `.env` is applied as
-    an overlay during seeding and remains the fallback read source until the
-    compose `.env` exists.
+    If the verified source checkout contains local Compose assets, return the
+    public root Compose entrypoint and root `.env` as absolute paths. The legacy
+    `docker/compose/.env` file is handled only by the migration helper.
     """
     from awf.service import bootstrap as bootstrap_mod
     from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE, LOCAL_SERVICE_COMPOSE_FILE
@@ -467,30 +464,12 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is not None:
         resolved_asset_root = asset_root.resolve()
-        compose_local_service = resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
+        compose_file = resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
+        env_file = resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+        env_example = resolved_asset_root / ".env.example"
         if bootstrap_mod.is_packaged_bootstrap_asset_root(resolved_asset_root):
-            return compose_local_service, Path(".env"), resolved_asset_root / ".env.example"
-        # get_bootstrap_asset_root() verifies this in production; keep the
-        # guard so tests or stubs that bypass validation fall back to the
-        # asset-root .env without depending on the launch directory.
-        if not compose_local_service.is_file():
-            return (
-                compose_local_service,
-                resolved_asset_root / ".env",
-                resolved_asset_root / ".env.example",
-            )
-        compose_file = compose_local_service
-        compose_env = resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-        root_env = resolved_asset_root / ".env"
-        compose_example = compose_env.with_name(".env.example")
-        fallback_example = resolved_asset_root / ".env.example"
-        if compose_example.exists():
-            return compose_file, compose_env, compose_example
-        if fallback_example.exists():
-            return compose_file, compose_env, fallback_example
-        if root_env.exists():
-            return compose_file, compose_env, root_env
-        return compose_file, compose_env, fallback_example
+            return compose_file, Path(".env"), env_example
+        return compose_file, env_file, env_example
 
     return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
 
@@ -548,6 +527,36 @@ resolve_service_runtime_env_files = _resolve_service_runtime_env_files
 resolve_existing_service_env_file = _resolve_existing_service_env_file
 
 
+def _migrate_legacy_service_env_file(env_file: Path, env_example: Path) -> object | None:
+    """Migrate legacy compose env values into the canonical root env file."""
+    from awf.service.env_migration import (
+        default_legacy_compose_env_file,
+        migrate_legacy_compose_env_file,
+    )
+
+    canonical_env_file = env_file.expanduser()
+    legacy_env_file = default_legacy_compose_env_file(canonical_env_file)
+    if not legacy_env_file.exists():
+        return None
+    return migrate_legacy_compose_env_file(
+        canonical_env_file=canonical_env_file,
+        env_example_file=env_example,
+        legacy_env_file=legacy_env_file,
+    )
+
+
+def _add_env_migration_payload(
+    payload: dict[str, object],
+    env_migration: object | None,
+) -> None:
+    """Attach secret-free env migration metadata when a migration occurred."""
+    if env_migration is None:
+        return
+    to_dict = getattr(env_migration, "to_dict", None)
+    if callable(to_dict):
+        payload["env_migration"] = to_dict()
+
+
 def _trusted_service_compose_env_file_from_verified_paths(
     compose_file: Path,
     env_file: Path,
@@ -555,8 +564,8 @@ def _trusted_service_compose_env_file_from_verified_paths(
     """Return the Compose env path from already verified local-service paths."""
     from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
 
-    if _compose_root_env_file(env_file) is None:
-        return None
+    if env_file == Path(".env"):
+        return env_file
     resolved_compose_file = compose_file.expanduser().resolve()
     resolved_env_file = env_file.expanduser().resolve()
     if resolved_compose_file.parent != resolved_env_file.parent:
@@ -570,10 +579,10 @@ def _trusted_service_compose_env_file(compose_file: Path, env_file: Path) -> Pat
     """Return the Compose env path from `_resolve_service_compose_paths`, if present."""
     from awf.service.config import _is_local_service_compose_file_path
 
-    if _compose_root_env_file(env_file) is None:
-        return None
     if not _is_local_service_compose_file_path(compose_file):
         return None
+    if env_file == Path(".env"):
+        return env_file
     if compose_file.expanduser().resolve().parent != env_file.expanduser().resolve().parent:
         return None
     return env_file
@@ -1190,6 +1199,7 @@ def _run_init_service_bootstrap(
 
     pretty = fmt == OutputFormat.pretty
     compose_file, env_file, env_example = _resolve_service_compose_paths()
+    env_migration = _migrate_legacy_service_env_file(env_file, env_example) if write_env else None
     env_action = "skipped"
     env_error: dict[str, str] | None = None
     env_overlay_keys: tuple[str, ...] = ()
@@ -1208,6 +1218,10 @@ def _run_init_service_bootstrap(
     if pretty:
         typer.echo("AWF init: local service bootstrap")
         if write_env:
+            if env_migration is not None:
+                typer.echo(
+                    f"  migrated legacy docker/compose/.env into {_init_display_path(env_file)}"
+                )
             if env_action == "write_failed" and env_error is not None:
                 typer.echo(_init_env_warning(env_error))
             elif env_action == "kept_existing":
@@ -1283,6 +1297,7 @@ def _run_init_service_bootstrap(
                 if env_error is not None:
                     docker_payload["env_error"] = env_error
                 _add_init_env_overlay_keys(docker_payload, env_overlay_keys)
+                _add_env_migration_payload(docker_payload, env_migration)
                 _emit(docker_payload, fmt)
             raise typer.Exit(code=1)
 
@@ -1304,6 +1319,7 @@ def _run_init_service_bootstrap(
             if env_error is not None:
                 local_checks_payload["env_error"] = env_error
             _add_init_env_overlay_keys(local_checks_payload, env_overlay_keys)
+            _add_env_migration_payload(local_checks_payload, env_migration)
             _emit(local_checks_payload, fmt)
         raise typer.Exit(code=1) from exc
 
@@ -1334,6 +1350,7 @@ def _run_init_service_bootstrap(
         if env_error is not None:
             payload["env_error"] = env_error
         _add_init_env_overlay_keys(payload, env_overlay_keys)
+        _add_env_migration_payload(payload, env_migration)
         _emit(payload, fmt)
         raise typer.Exit(code=1) from None
 
@@ -1355,4 +1372,5 @@ def _run_init_service_bootstrap(
         if env_error is not None:
             payload["env_error"] = env_error
         _add_init_env_overlay_keys(payload, env_overlay_keys)
+        _add_env_migration_payload(payload, env_migration)
         _emit(payload, fmt)

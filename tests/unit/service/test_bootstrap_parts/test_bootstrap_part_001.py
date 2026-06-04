@@ -55,6 +55,10 @@ def _write_source_checkout(root: Path) -> Path:
         "services: {}\n",
         encoding="utf-8",
     )
+    (root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     (root / "src" / "awf").mkdir(parents=True)
     (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
@@ -219,7 +223,7 @@ def test_bootstrap_runs_expected_command_sequence(
             "docker",
             "compose",
             "-f",
-            str(source_root / "docker/compose/local-service.yml"),
+            str(source_root / "compose.yaml"),
             "up",
             "-d",
             "--build",
@@ -229,7 +233,7 @@ def test_bootstrap_runs_expected_command_sequence(
             "docker",
             "compose",
             "-f",
-            str(source_root / "docker/compose/local-service.yml"),
+            str(source_root / "compose.yaml"),
             "up",
             "--build",
             "--force-recreate",
@@ -239,10 +243,11 @@ def test_bootstrap_runs_expected_command_sequence(
             "docker",
             "compose",
             "-f",
-            str(source_root / "docker/compose/local-service.yml"),
+            str(source_root / "compose.yaml"),
             "up",
             "-d",
             "--build",
+            "--no-deps",
             "api",
             "worker",
         ],
@@ -961,6 +966,10 @@ def test_bootstrap_does_not_overlay_provider_environment_on_cwd_compose_env(
         "services: {}\n",
         encoding="utf-8",
     )
+    (asset_root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (asset_root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     (asset_root / "src" / "awf").mkdir(parents=True)
     (asset_root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
@@ -1045,6 +1054,10 @@ def test_bootstrap_uses_explicit_env_file_instead_of_internally_resolved_compose
     )
     (asset_root / "docker" / "compose" / "local-service.yml").write_text(
         "services: {}\n",
+        encoding="utf-8",
+    )
+    (asset_root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
         encoding="utf-8",
     )
     (asset_root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
@@ -1144,6 +1157,10 @@ def test_bootstrap_falls_back_to_resolved_env_when_explicit_env_file_is_missing(
     )
     (asset_root / "docker" / "compose" / "local-service.yml").write_text(
         "services: {}\n",
+        encoding="utf-8",
+    )
+    (asset_root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
         encoding="utf-8",
     )
     (asset_root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
@@ -1251,7 +1268,7 @@ def test_bootstrap_passes_compose_env_file_when_available(
             "--env-file",
             str(compose_env_file),
             "-f",
-            str(source_root / "docker/compose/local-service.yml"),
+            str(source_root / "compose.yaml"),
         ]
 
 
@@ -1311,7 +1328,7 @@ def test_bootstrap_forwards_compose_context_to_status_collector(
     assert captured == {
         "provider_environ": service_env,
         "environ": service_env,
-        "compose_file": source_checkout_root / "docker/compose/local-service.yml",
+        "compose_file": source_checkout_root / "compose.yaml",
         "compose_env_file": compose_env_file,
     }
 
@@ -1357,7 +1374,7 @@ def test_bootstrap_resolves_source_assets_when_called_outside_checkout(
         "docker",
         "compose",
         "-f",
-        str(source_root / "docker/compose/local-service.yml"),
+        str(source_root / "compose.yaml"),
     ]
 
 
@@ -1416,6 +1433,7 @@ def test_packaged_bootstrap_assets_use_local_env_seed_source(
     (packaged_root / ".env.example").write_text("AWF_API_TOKEN=example\n", encoding="utf-8")
     monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: ())
     monkeypatch.setattr(bootstrap, "_packaged_bootstrap_asset_root", lambda: packaged_root)
+    monkeypatch.setattr(bootstrap, "LOCAL_SERVICE_COMPOSE_ENV_FILE", Path(".env"), raising=False)
 
     assets = bootstrap._resolve_bootstrap_assets(  # noqa: SLF001
         bootstrap.LOCAL_SERVICE_COMPOSE_FILE,

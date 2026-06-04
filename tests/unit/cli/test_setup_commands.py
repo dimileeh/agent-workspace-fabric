@@ -124,14 +124,13 @@ def test_setup_success_next_step_is_provider_free_and_leads_to_start(
 def test_setup_merges_compose_env_when_probing_api_port(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The host checks receive the merged Compose env so an ``AWF_API_HOST_PORT``
-    set only in ``docker/compose/.env`` is honored, not just the process env."""
+    """The host checks receive the merged service env so root `.env` is honored."""
     import awf.service.config as service_config
 
     merged = {"AWF_API_HOST_PORT": "9100"}
     monkeypatch.setattr(service_config, "local_service_environ", lambda *_a, **_kw: merged)
     # The harness stubs _readiness_environ for hermetic isolation; this test
-    # proves the real resolver forwards the merged compose env to the checks.
+    # proves the real resolver forwards the merged root service env to the checks.
     monkeypatch.setattr(setup_commands, "_readiness_environ", _real_readiness_environ)
 
     captured: dict[str, object] = {}
@@ -151,18 +150,17 @@ def test_setup_merges_compose_env_when_probing_api_port(
 def test_setup_probes_selected_source_checkout_env(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The readiness probes read the *selected* checkout's ``docker/compose/.env``.
+    """The readiness probes read the *selected* checkout's root ``.env``.
 
     Regression for PRRT_kwDOSJAM6s6F6Tt0: ``awf setup --source-checkout
     /other/awf`` must resolve ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` from the
-    selected checkout's ``docker/compose/.env`` — the same file ``awf start``
+    selected checkout's root ``.env`` -- the same file ``awf start``
     later honors for the persisted checkout — instead of default ``.env``
     discovery, so setup never probes/blocks on a port or disk path the matching
     ``awf start`` would not use.
     """
     root = _make_source_checkout(tmp_path / "awf")
-    compose_env = root / "docker" / "compose" / ".env"
-    compose_env.parent.mkdir(parents=True, exist_ok=True)
+    compose_env = root / ".env"
     compose_env.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
     # The harness stubs _readiness_environ; this test exercises the real resolver.
     monkeypatch.setattr(setup_commands, "_readiness_environ", _real_readiness_environ)
@@ -194,14 +192,13 @@ def test_setup_probes_persisted_source_checkout_env(
     Regression for PRRT_kwDOSJAM6s6F6Wjh: after a prior run stores source-checkout
     metadata in host config, ``awf setup`` without ``--source-checkout`` must
     resolve ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR`` from that persisted
-    checkout's ``docker/compose/.env`` — the file ``awf start`` revalidates and
+    checkout's root ``.env`` -- the file ``awf start`` revalidates and
     honors via ``_resolve_start_source_checkout`` — instead of default discovery,
     so setup never probes/clears on a port or disk path the matching ``awf start``
     would not use.
     """
     root = _make_source_checkout(tmp_path / "awf")
-    compose_env = root / "docker" / "compose" / ".env"
-    compose_env.parent.mkdir(parents=True, exist_ok=True)
+    compose_env = root / ".env"
     compose_env.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
 
     persisted = HostSetupConfig(source_checkout=validate_source_checkout(root).to_metadata())
@@ -228,21 +225,25 @@ def test_setup_probes_persisted_source_checkout_env(
 def test_setup_no_checkout_probes_bootstrap_asset_root_env(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No source checkout: the probe honors the bootstrap asset root's compose env.
+    """No source checkout: the probe honors the bootstrap asset root's root env.
 
     Regression for PRRT_kwDOSJAM6s6F6ljB: with no verified source checkout in
     play, ``awf setup`` must resolve ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR``
     the same way ``awf start`` does — through ``_resolve_service_compose_paths``/
     ``_resolve_service_runtime_env_files``, which honor the packaged bootstrap
-    asset root's ``docker/compose/.env`` — instead of bare default discovery that
+    asset root's root ``.env`` -- instead of bare default discovery that
     only searches the cwd and nearby source markers. Otherwise setup probes the
     default 8000/work dir while start uses the bundled env file's values.
     """
     asset_root = tmp_path / "assets"
     compose_dir = asset_root / "docker" / "compose"
     compose_dir.mkdir(parents=True, exist_ok=True)
+    (asset_root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (compose_dir / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose_dir / ".env").write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    (asset_root / ".env").write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
 
     import awf.service.bootstrap as bootstrap_mod
 

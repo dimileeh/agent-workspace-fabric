@@ -40,7 +40,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md alembic.ini .env.example openapi.json ./
+COPY pyproject.toml uv.lock README.md alembic.ini .env.example compose.yaml openapi.json ./
 COPY docs ./docs
 COPY migrations ./migrations
 COPY docker/agent-runtime.Dockerfile docker/control-plane.Dockerfile ./docker/

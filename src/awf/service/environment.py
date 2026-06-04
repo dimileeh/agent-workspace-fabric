@@ -164,24 +164,94 @@ def compose_env_file_values(compose_env_file: Path | None) -> dict[str, str]:
 
 
 def compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
-    """Return Compose interpolation variable names referenced by the YAML file."""
+    """Return Compose interpolation variable names referenced by a Compose stack."""
+
+    keys = _compose_interpolation_keys_recursive(compose_file, seen=frozenset())
+    return tuple(sorted(keys))
+
+
+def _compose_interpolation_keys_recursive(
+    compose_file: Path,
+    *,
+    seen: frozenset[Path],
+) -> set[str]:
+    """Return interpolation keys from one Compose file and literal includes."""
 
     compose_file = compose_file.expanduser().resolve()
+    if compose_file in seen:
+        return set()
+    seen = frozenset((*seen, compose_file))
     try:
         contents_bytes = compose_file.read_bytes()
     except OSError:
-        return ()
+        return set()
     try:
         contents = contents_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        return ()
+        return set()
     contents_digest = sha256(contents_bytes).hexdigest()
-    return _cached_compose_interpolation_keys(
-        str(compose_file),
-        contents_digest,
-        len(contents_bytes),
-        contents,
+    keys = set(
+        _cached_compose_interpolation_keys(
+            str(compose_file),
+            contents_digest,
+            len(contents_bytes),
+            contents,
+        )
     )
+    if "include" not in contents:
+        return keys
+    for include_path in _parse_compose_include_paths(contents, base_dir=compose_file.parent):
+        keys.update(_compose_interpolation_keys_recursive(include_path, seen=seen))
+    return keys
+
+
+def _parse_compose_include_paths(contents: str, *, base_dir: Path) -> tuple[Path, ...]:
+    """Return literal Compose include paths relative to ``base_dir``."""
+
+    try:
+        payload: object = yaml.safe_load(contents)
+    except yaml.YAMLError as exc:
+        raise yaml.YAMLError(f"could not parse Compose YAML: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        return ()
+    includes = payload.get("include")
+    return tuple(_compose_include_paths(includes, base_dir=base_dir))
+
+
+def _compose_include_paths(value: object, *, base_dir: Path) -> list[Path]:
+    """Extract literal include paths from supported Compose include shapes."""
+
+    paths: list[Path] = []
+    if isinstance(value, str):
+        resolved = _literal_compose_include_path(value, base_dir=base_dir)
+        if resolved is not None:
+            paths.append(resolved)
+        return paths
+    if isinstance(value, Mapping):
+        nested = value.get("path")
+        if isinstance(nested, Sequence) and not isinstance(nested, str | bytes | bytearray):
+            for item in nested:
+                paths.extend(_compose_include_paths(item, base_dir=base_dir))
+            return paths
+        paths.extend(_compose_include_paths(nested, base_dir=base_dir))
+        return paths
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        for item in value:
+            paths.extend(_compose_include_paths(item, base_dir=base_dir))
+    return paths
+
+
+def _literal_compose_include_path(value: str, *, base_dir: Path) -> Path | None:
+    """Return a literal include path, skipping interpolated include targets."""
+
+    if "$" in value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    if path.is_dir():
+        path = path / "compose.yaml"
+    return path
 
 
 def _cached_compose_interpolation_keys(

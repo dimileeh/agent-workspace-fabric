@@ -57,6 +57,15 @@ def _clear_docker_compose_caller_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(key, raising=False)
 
 
+def _write_root_service_compose(root: Path) -> Path:
+    compose_file = root / "compose.yaml"
+    included = root / "docker" / "compose" / "local-service.yml"
+    included.parent.mkdir(parents=True, exist_ok=True)
+    compose_file.write_text("include:\n  - ./docker/compose/local-service.yml\n", encoding="utf-8")
+    included.write_text("services: {}\n", encoding="utf-8")
+    return compose_file
+
+
 @pytest.fixture
 def _default_local_service_compose_file(
     monkeypatch: pytest.MonkeyPatch,
@@ -64,9 +73,7 @@ def _default_local_service_compose_file(
 ) -> None:
     from awf.service import bootstrap as bootstrap_mod
 
-    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
-    compose_file.parent.mkdir(parents=True)
-    compose_file.write_text("services: {}")
+    _write_root_service_compose(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     _clear_docker_compose_caller_env(monkeypatch)
@@ -76,9 +83,8 @@ def _write_non_source_compose_env(tmp_path: Path, contents: str) -> Path:
     profile_dir = tmp_path / ".awf"
     profile_dir.mkdir(parents=True, exist_ok=True)
     (profile_dir / "workspace.yml").write_text("version: 1\n", encoding="utf-8")
+    _write_root_service_compose(tmp_path)
     compose_env = tmp_path / "docker" / "compose" / ".env"
-    compose_env.parent.mkdir(parents=True)
-    (compose_env.parent / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     compose_env.write_text(contents, encoding="utf-8")
     return compose_env
 
@@ -154,7 +160,7 @@ def test_service_readiness_emits_json_scorecard(
             "strict_providers": frozenset({"codex"}),
             "provider_environ": os.environ,
             "environ": os.environ,
-            "compose_file": Path("docker/compose/local-service.yml"),
+            "compose_file": Path("compose.yaml"),
             "compose_env_file": None,
             "allow_generic_failures": False,
             "allow_slo_breach": False,
@@ -163,7 +169,7 @@ def test_service_readiness_emits_json_scorecard(
 
 
 @pytest.mark.unit
-def test_service_readiness_resolves_settings_from_compose_env(
+def test_service_readiness_resolves_settings_from_root_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -171,15 +177,13 @@ def test_service_readiness_resolves_settings_from_compose_env(
     from awf.service import bootstrap as bootstrap_mod
 
     workspace_root = tmp_path / "workspace"
-    compose = workspace_root / "docker" / "compose"
-    compose.mkdir(parents=True)
-    compose_file = compose / "local-service.yml"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_file = _write_root_service_compose(workspace_root)
+    root_env = workspace_root / ".env"
     database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
     api_base_url = "http://api.internal:9000"
     github_token = "ghp_compose_token"
-    (compose / ".env").write_text(
+    root_env.write_text(
         "\n".join(
             [
                 f"AWF_DATABASE_URL={database_url}",
@@ -240,7 +244,7 @@ def test_service_readiness_resolves_settings_from_compose_env(
     assert provider_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
     assert captured["environ"] is provider_environ
     assert captured["compose_file"] == compose_file
-    assert captured["compose_env_file"] == compose / ".env"
+    assert captured["compose_env_file"] == root_env
 
 
 @pytest.mark.unit
@@ -248,6 +252,7 @@ def test_service_readiness_ignores_compose_env_without_verified_source_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    import awf.service.config as config_module
     import awf.service.readiness as readiness_module
     from awf.service import bootstrap as bootstrap_mod
 
@@ -258,6 +263,10 @@ def test_service_readiness_ignores_compose_env_without_verified_source_checkout(
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    fake_module = tmp_path / "install" / "awf" / "service" / "config.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("# installed module placeholder\n", encoding="utf-8")
+    monkeypatch.setattr(config_module, "__file__", str(fake_module))
     for key in ("AWF_DATABASE_URL", "AWF_API_BASE_URL", "AWF_POSTGRES_PASSWORD"):
         monkeypatch.delenv(key, raising=False)
     captured: dict[str, object] = {}
@@ -288,7 +297,7 @@ def test_service_readiness_ignores_compose_env_without_verified_source_checkout(
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
     assert "AWF_DATABASE_URL" not in provider_environ
-    assert "AWF_POSTGRES_PASSWORD" not in provider_environ
+    assert provider_environ["AWF_POSTGRES_PASSWORD"] == "awf_dev"
 
 
 @pytest.mark.unit
@@ -429,7 +438,7 @@ def test_service_release_readiness_alias_matches_readiness_json(
 def test_service_logs_defaults_to_tail_api_and_worker_logs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compose_file = str(Path("docker/compose/local-service.yml").resolve())
+    compose_file = str(Path("compose.yaml").resolve())
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -444,38 +453,35 @@ def test_service_logs_defaults_to_tail_api_and_worker_logs(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == "api log\nworker log\n"
-    assert calls == [
-        (
-            [
-                "docker",
-                "compose",
-                "-f",
-                compose_file,
-                "logs",
-                "--tail",
-                "100",
-                "api",
-                "worker",
-            ],
-            {"check": False, "capture_output": True, "text": True},
-        )
+    args, kwargs = calls[0]
+    assert args == [
+        "docker",
+        "compose",
+        "-f",
+        compose_file,
+        "logs",
+        "--tail",
+        "100",
+        "api",
+        "worker",
     ]
+    assert kwargs["check"] is False
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    assert isinstance(kwargs["env"], dict)
 
 
 @pytest.mark.unit
-def test_service_logs_passes_source_checkout_compose_env_file(
+def test_service_logs_passes_source_checkout_root_env_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     from awf.service import bootstrap as bootstrap_mod
 
     workspace_root = tmp_path / "workspace"
-    compose = workspace_root / "docker" / "compose"
-    compose.mkdir(parents=True)
-    compose_file = compose / "local-service.yml"
-    compose_env = compose / ".env"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
-    compose_env.write_text("AWF_API_TOKEN=from-compose-env\n", encoding="utf-8")
+    compose_file = _write_root_service_compose(workspace_root)
+    root_env = workspace_root / ".env"
+    root_env.write_text("AWF_API_TOKEN=from-root-env\n", encoding="utf-8")
     project_subdir = workspace_root / "project"
     project_subdir.mkdir()
     calls: list[list[str]] = []
@@ -496,7 +502,7 @@ def test_service_logs_passes_source_checkout_compose_env_file(
             "docker",
             "compose",
             "--env-file",
-            str(compose_env),
+            str(root_env),
             "-f",
             str(compose_file),
             "logs",
@@ -516,12 +522,9 @@ def test_service_logs_reuses_resolved_asset_root_for_compose_env_file(
     from awf.service import bootstrap as bootstrap_mod
 
     workspace_root = tmp_path / "workspace"
-    compose = workspace_root / "docker" / "compose"
-    compose.mkdir(parents=True)
-    compose_file = compose / "local-service.yml"
-    compose_env = compose / ".env"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
-    compose_env.write_text("AWF_API_TOKEN=from-compose-env\n", encoding="utf-8")
+    _write_root_service_compose(workspace_root)
+    root_env = workspace_root / ".env"
+    root_env.write_text("AWF_API_TOKEN=from-root-env\n", encoding="utf-8")
     project_subdir = workspace_root / "project"
     project_subdir.mkdir()
     root_lookups = 0
@@ -570,7 +573,7 @@ def test_service_logs_ignores_compose_env_without_verified_source_checkout(
             "docker",
             "compose",
             "-f",
-            str((tmp_path / "docker" / "compose" / "local-service.yml").resolve()),
+            str((tmp_path / "compose.yaml").resolve()),
             "logs",
             "--tail",
             "100",
@@ -608,7 +611,7 @@ def test_service_logs_ignores_ancestor_compose_env_without_source_checkout(
             "docker",
             "compose",
             "-f",
-            str((project_root / "docker" / "compose" / "local-service.yml").resolve()),
+            str((project_root / "compose.yaml").resolve()),
             "logs",
             "--tail",
             "100",
@@ -625,13 +628,10 @@ def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
     from awf.service import bootstrap as bootstrap_mod
 
     workspace_root = tmp_path / "workspace"
-    compose = workspace_root / "docker" / "compose"
-    compose.mkdir(parents=True)
-    compose_file = compose / "local-service.yml"
-    compose_env = compose / ".env"
+    compose_file = _write_root_service_compose(workspace_root)
+    root_env = workspace_root / ".env"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
-    compose_env.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+    root_env.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -652,7 +652,7 @@ def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
         "docker",
         "compose",
         "--env-file",
-        str(compose_env),
+        str(root_env),
         "-f",
         str(compose_file),
         "logs",
@@ -667,19 +667,16 @@ def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
 
 
 @pytest.mark.unit
-def test_service_logs_omits_root_env_file_when_compose_env_is_missing(
+def test_service_logs_passes_root_env_file_when_it_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     from awf.service import bootstrap as bootstrap_mod
 
     workspace_root = tmp_path / "workspace"
-    compose = workspace_root / "docker" / "compose"
-    compose.mkdir(parents=True)
-    compose_file = compose / "local-service.yml"
+    compose_file = _write_root_service_compose(workspace_root)
     root_env = workspace_root / ".env"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
     root_env.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
     calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -698,6 +695,8 @@ def test_service_logs_omits_root_env_file_when_compose_env_is_missing(
     assert calls[0][0] == [
         "docker",
         "compose",
+        "--env-file",
+        str(root_env),
         "-f",
         str(compose_file),
         "logs",
@@ -716,7 +715,7 @@ def test_service_logs_omits_root_env_file_when_compose_env_is_missing(
 def test_service_logs_accepts_repeated_service_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compose_file = str(Path("docker/compose/local-service.yml").resolve())
+    compose_file = str(Path("compose.yaml").resolve())
     calls: list[list[str]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -760,7 +759,7 @@ def test_service_logs_accepts_repeated_service_filters(
 def test_service_logs_follow_streams_without_capturing_subprocess_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compose_file = str(Path("docker/compose/local-service.yml").resolve())
+    compose_file = str(Path("compose.yaml").resolve())
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -773,22 +772,22 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert calls == [
-        (
-            [
-                "docker",
-                "compose",
-                "-f",
-                compose_file,
-                "logs",
-                "--tail",
-                "100",
-                "--follow",
-                "worker",
-            ],
-            {"check": False, "capture_output": False, "text": True},
-        )
+    args, kwargs = calls[0]
+    assert args == [
+        "docker",
+        "compose",
+        "-f",
+        compose_file,
+        "logs",
+        "--tail",
+        "100",
+        "--follow",
+        "worker",
     ]
+    assert kwargs["check"] is False
+    assert kwargs["capture_output"] is False
+    assert kwargs["text"] is True
+    assert isinstance(kwargs["env"], dict)
 
 
 @pytest.mark.unit
@@ -886,7 +885,7 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
 
 
 @pytest.mark.unit
-def test_service_bootstrap_cli_resolves_settings_from_compose_env(
+def test_service_bootstrap_cli_migrates_legacy_compose_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -894,13 +893,13 @@ def test_service_bootstrap_cli_resolves_settings_from_compose_env(
     from awf.service.bootstrap import ServiceBootstrapResult
 
     workspace_root = tmp_path / "workspace"
-    compose = workspace_root / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_file = _write_root_service_compose(workspace_root)
+    legacy_env = workspace_root / "docker" / "compose" / ".env"
+    root_env = workspace_root / ".env"
     database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
     api_base_url = "http://api.internal:9000"
-    (compose / ".env").write_text(
+    legacy_env.write_text(
         "\n".join(
             [
                 f"AWF_DATABASE_URL={database_url}",
@@ -936,17 +935,32 @@ def test_service_bootstrap_cli_resolves_settings_from_compose_env(
     assert settings.database_url == database_url
     assert settings.docker_host == docker_host
     assert settings.api_base_url == api_base_url
-    assert captured["compose_file"] == compose / "local-service.yml"
-    assert captured["env_file"] == compose / ".env"
+    assert captured["compose_file"] == compose_file
+    assert captured["env_file"] == root_env
     assert "provider_environ" not in captured
     service_environ = captured["service_environ"]
     assert service_environ["AWF_DATABASE_URL"] == database_url
     assert service_environ["AWF_DOCKER_HOST"] == docker_host
     assert service_environ["AWF_API_BASE_URL"] == api_base_url
+    payload = json.loads(result.stdout)
+    env_migration = payload["env_migration"]
+    assert env_migration["status"] == "migrated"
+    assert env_migration["canonical_env_file"] == str(root_env)
+    assert env_migration["legacy_env_file"] == str(legacy_env)
+    assert set(env_migration["imported_keys"]) == {
+        "AWF_DATABASE_URL",
+        "AWF_DOCKER_HOST",
+        "AWF_API_BASE_URL",
+    }
+    assert not legacy_env.exists()
+    assert root_env.exists()
+    serialized = json.dumps(env_migration)
+    assert database_url not in serialized
+    assert docker_host not in serialized
 
 
 @pytest.mark.unit
-def test_service_bootstrap_cli_ignores_compose_env_without_verified_source_checkout(
+def test_service_bootstrap_cli_migrates_legacy_env_from_current_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -956,7 +970,7 @@ def test_service_bootstrap_cli_ignores_compose_env_without_verified_source_check
     database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
     api_base_url = "http://api.internal:9000"
-    _write_non_source_compose_env(
+    legacy_env = _write_non_source_compose_env(
         tmp_path,
         "\n".join(
             [
@@ -988,14 +1002,15 @@ def test_service_bootstrap_cli_ignores_compose_env_without_verified_source_check
 
     assert result.exit_code == 0, result.output
     settings = captured["settings"]
-    assert settings.database_url != database_url
-    assert settings.docker_host != docker_host
-    assert settings.api_base_url != api_base_url
-    assert captured["compose_file"] == Path("docker/compose/local-service.yml")
-    assert captured["env_file"] is None
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    assert captured["compose_file"] == Path("compose.yaml")
+    assert captured["env_file"] == Path(".env")
     service_environ = captured["service_environ"]
-    assert "AWF_DATABASE_URL" not in service_environ
-    assert "AWF_POSTGRES_PASSWORD" not in service_environ
+    assert service_environ["AWF_DATABASE_URL"] == database_url
+    assert service_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
+    assert not legacy_env.exists()
 
 
 @pytest.mark.unit
@@ -1007,9 +1022,7 @@ def test_service_bootstrap_cli_resolves_settings_from_existing_root_env(
     from awf.service.bootstrap import ServiceBootstrapResult
 
     workspace_root = tmp_path / "workspace"
-    compose = workspace_root / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_file = _write_root_service_compose(workspace_root)
     root_env = workspace_root / ".env"
     database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
@@ -1049,8 +1062,8 @@ def test_service_bootstrap_cli_resolves_settings_from_existing_root_env(
     assert settings.database_url == database_url
     assert settings.docker_host == docker_host
     assert settings.api_base_url == api_base_url
-    assert captured["compose_file"] == compose / "local-service.yml"
-    assert captured["env_file"] is None
+    assert captured["compose_file"] == compose_file
+    assert captured["env_file"] == root_env
     assert "provider_environ" not in captured
     service_environ = captured["service_environ"]
     assert service_environ["AWF_DATABASE_URL"] == database_url
@@ -1213,7 +1226,7 @@ def test_readme_documents_service_logs_command() -> None:
     readme = Path("docs/CLI_REFERENCE.md").read_text()
 
     assert "awf service logs" in readme
-    assert "docker/compose/local-service.yml" in readme
+    assert "docker compose logs" in readme
     assert "--tail" in readme
     assert "--service worker" in readme
     assert "--follow" in readme
@@ -1227,12 +1240,9 @@ def test_readme_documents_service_bootstrap_command() -> None:
     assert "awf service bootstrap" in readme
     assert "uv run --python 3.12 --extra dev awf service bootstrap" in readme
     assert "uv run --python 3.12 --extra dev awf service status --format pretty" in readme
-    assert (
-        "docker compose --env-file docker/compose/.env "
-        "-f docker/compose/local-service.yml up --build" in readme
-    )
+    assert "docker compose up --build" in readme
     assert "safe to re-run" in readme
-    assert "docker/compose/.env" in readme
+    assert "cp .env.example .env" in readme
 
 
 @pytest.mark.unit
@@ -1243,12 +1253,12 @@ def test_readme_documents_service_bootstrap_command() -> None:
         Path("docs/GETTING_STARTED.md"),
     ],
 )
-def test_readme_documents_compose_env_bootstrap_path(doc_path: Path) -> None:
-    """Verify onboarding docs mention the compose env bootstrap target."""
+def test_readme_documents_root_env_bootstrap_path(doc_path: Path) -> None:
+    """Verify onboarding docs mention the canonical root env bootstrap target."""
     document = doc_path.read_text(encoding="utf-8")
 
-    assert "docker/compose/.env" in document
-    assert "wrote .env" not in document
+    assert "cp .env.example .env" in document
+    assert "docker/compose/.env" not in document or "legacy" in document.lower()
 
 
 @pytest.mark.unit
@@ -1267,10 +1277,10 @@ def test_readme_documents_control_plane_postgres_backup_restore() -> None:
     assert "### Control-Plane Postgres Backup And Restore" in readme
     assert "AWF control-plane database" in readme
     assert "workspace or project databases" in readme
-    assert "docker compose -f docker/compose/local-service.yml exec -T postgres" in readme
+    assert "docker compose exec -T postgres" in readme
     assert "pg_dump" in readme
     assert "pg_restore" in readme
-    assert "docker compose -f docker/compose/local-service.yml stop api worker" in readme
+    assert "docker compose stop api worker" in readme
     assert "before restore" in readme.lower()
 
 
@@ -1281,9 +1291,9 @@ def test_readme_documents_local_service_upgrade_and_image_versioning() -> None:
     assert "### Local Service Image Versioning" in readme
     assert "### Local Service Upgrade" in readme
     assert "awf-control-plane:local" in readme
-    assert "docker compose -f docker/compose/local-service.yml build" in readme
+    assert "docker compose build" in readme
     assert "uv run --python 3.12 --extra dev awf service bootstrap" in readme
-    assert "docker build -t awf-agent-runtime:latest" in readme
+    assert "docker compose build" in readme
     assert "docker image inspect awf-control-plane:local" in readme
     assert "docker image inspect awf-agent-runtime:latest" in readme
     assert "migrate" in readme
@@ -1307,7 +1317,7 @@ def test_readme_documents_local_disaster_recovery() -> None:
     readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "### Local Disaster Recovery" in readme
-    assert "docker compose -f docker/compose/local-service.yml down --remove-orphans" in readme
+    assert "docker compose down --remove-orphans" in readme
     assert "${AWF_HOST_WORK_DIR}" in readme
     assert "quarantine" in readme.lower()
     assert "logs, artifacts, backups, and auth" in readme

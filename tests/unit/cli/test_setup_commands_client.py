@@ -379,22 +379,18 @@ def test_setup_client_stale_persisted_source_checkout_blocks(
 
 @pytest.mark.unit
 def test_resolve_client_env_file_uses_source_checkout_when_given(tmp_path: Path) -> None:
-    """Verify an explicit, valid source checkout pins its docker/compose/.env path."""
+    """Verify an explicit, valid source checkout pins its root .env path."""
     root = _make_source_checkout(tmp_path / "awf")
     resolved = setup_commands._resolve_client_env_file(root)
 
-    assert resolved == validate_source_checkout(root).root / "docker" / "compose" / ".env"
+    assert resolved == validate_source_checkout(root).root / ".env"
 
 
 @pytest.mark.unit
 def test_resolve_client_env_file_explicit_checkout_falls_back_to_root_env(
     tmp_path: Path,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6G0gfq: a not-yet-bootstrapped source checkout
-    can lack ``docker/compose/.env`` while the checkout root ``.env`` exists. ``awf
-    start`` reads that root fallback via ``_resolve_start_bootstrap_inputs``; the
-    MCP client ``--env-file`` must do the same instead of pinning the absent
-    compose path, which would make ``awf mcp serve`` reject the env file."""
+    """A not-yet-bootstrapped source checkout still registers root ``.env``."""
     root = _make_source_checkout(tmp_path / "awf")
     root_env = root / ".env"
     root_env.write_text("AWF_API_TOKEN=x\n", encoding="utf-8")
@@ -481,12 +477,11 @@ def test_resolve_client_env_file_fallback_uses_existing_root_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Regression for PRRT_kwDOSJAM6s6G1JGR: in the no-checkout/no-metadata path,
-    a local source checkout before bootstrap resolves ``<root>/docker/compose/.env``
-    even though only the checkout-root ``.env`` exists yet. ``awf start``'s
+    a local source checkout before bootstrap resolves root ``.env``. ``awf start``'s
     default-discovery branch routes that fallback through
     ``resolve_existing_service_env_file`` so it reads the root ``.env``; the client
     resolver must do the same, otherwise ``awf mcp serve --env-file
-    .../docker/compose/.env`` rejects a non-existent path despite setup succeeding."""
+    .../.env`` rejects a non-existent path despite setup succeeding."""
     root = tmp_path / "awf"
     (root / "docker" / "compose").mkdir(parents=True)
     root_env = root / ".env"
@@ -509,13 +504,12 @@ def test_resolve_client_env_file_fallback_uses_existing_root_env(
 def test_resolve_client_env_file_honors_persisted_source_checkout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Verify a persisted, still-valid checkout pins its docker/compose/.env.
+    """Verify a persisted, still-valid checkout pins its root .env.
 
     Regression for PRRT_kwDOSJAM6s6GxEX4: ``awf setup --client`` without
     ``--source-checkout`` must honor source-checkout metadata stored by an earlier
     run — the same checkout ``awf start``'s ``_resolve_start_source_checkout``
-    revalidates — instead of always defaulting to the packaged ``.env`` and
-    registering an MCP ``--env-file`` that diverges from the env ``awf start`` uses.
+    revalidates — instead of always defaulting to the packaged ``.env``.
     """
     root = _make_source_checkout(tmp_path / "awf")
     persisted = HostSetupConfig(source_checkout=validate_source_checkout(root).to_metadata())
@@ -523,7 +517,7 @@ def test_resolve_client_env_file_honors_persisted_source_checkout(
 
     resolved = setup_commands._resolve_client_env_file(None)
 
-    assert resolved == validate_source_checkout(root).root / "docker" / "compose" / ".env"
+    assert resolved == validate_source_checkout(root).root / ".env"
 
 
 @pytest.mark.unit

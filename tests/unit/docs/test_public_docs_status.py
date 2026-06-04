@@ -120,18 +120,32 @@ def test_quickstart_uses_runnable_startup_path() -> None:
         maxsplit=1,
     )[0]
 
-    assert (
-        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
-        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
-        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
-        "awf service bootstrap\n"
-        "awf service status --format pretty"
-    ) in startup_section
+    assert "cp .env.example .env" in startup_section
     assert "persists\nCompose-interpolated service values" not in startup_section
-    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
-    assert not re.search(r"(?m)^awf start\s*$", startup_section)
-    assert "AWF_SETUP_PLACEHOLDER" in startup_section
-    assert "AWF_START_PLACEHOLDER" in startup_section
+    assert re.search(r"(?m)^awf setup\s*$", startup_section)
+    assert re.search(r"(?m)^awf start\s*$", startup_section)
+    assert "AWF_SETUP_PLACEHOLDER" not in startup_section
+    assert "AWF_START_PLACEHOLDER" not in startup_section
+
+
+def test_raw_docker_compose_source_path_is_single_command() -> None:
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+
+    for doc_name, text in (
+        ("QUICKSTART.md", quickstart_text),
+        ("GETTING_STARTED.md", getting_started_text),
+    ):
+        section = text.split(
+            "For source checkouts or raw Docker installs",
+            maxsplit=1,
+        )[1].split("If ", maxsplit=1)[0]
+        assert "docker compose up --build" in section, doc_name
+        assert "cp .env.example .env" not in section, doc_name
+        assert "docker build -t awf-agent-runtime:latest" not in section, doc_name
+        assert "127.0.0.1:3000" in section, doc_name
+        assert "127.0.0.1:8000" in section, doc_name
+        assert "local-dev-token" in section, doc_name
 
 
 def test_getting_started_uses_runnable_startup_path() -> None:
@@ -145,20 +159,15 @@ def test_getting_started_uses_runnable_startup_path() -> None:
         maxsplit=1,
     )[1].split("### Run Locally", maxsplit=1)[0]
 
-    assert (
-        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
-        "awf service bootstrap\n"
-        "awf service status --format pretty"
-    ) in startup_section
-    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
-    assert not re.search(r"(?m)^awf start\s*$", startup_section)
-    assert "AWF_SETUP_PLACEHOLDER" in startup_section
-    assert "AWF_START_PLACEHOLDER" in startup_section
+    assert "cp .env.example .env" in startup_section
+    assert re.search(r"(?m)^awf setup\s*$", startup_section)
+    assert re.search(r"(?m)^awf start\s*$", startup_section)
+    assert "AWF_SETUP_PLACEHOLDER" not in startup_section
+    assert "AWF_START_PLACEHOLDER" not in startup_section
     assert "awf init <path> --write-profile --yes" in startup_section
-    assert re.search(r"`awf service bootstrap`\s+uses", configure_section)
-    assert "`awf start` uses" not in configure_section
-    assert "run `awf service bootstrap`" in configure_section
-    assert "run `awf start`" not in configure_section
+    assert "root `.env` is the single local runtime env file" in configure_section.lower()
+    assert "docker/compose/.env" in configure_section
+    assert "migration source" in configure_section
 
 
 def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
@@ -168,21 +177,13 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         maxsplit=1,
     )[0]
 
-    assert len(re.findall(r"(?m)^awf service bootstrap\s*$", prerequisites_section)) == 2
+    assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 2
+    assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 2
     assert (
         len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
     )
-    assert re.search(r"(?m)^} > \.env\s*\nawf service bootstrap$", prerequisites_section)
-    assert re.search(
-        r"(?m)^} > docker/compose/\.env\s*\nawf service bootstrap$",
-        prerequisites_section,
-    )
-    assert (
-        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
-        '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
-    ) in prerequisites_section
-    assert not re.search(r"(?m)^awf setup\s*$", prerequisites_section)
-    assert not re.search(r"(?m)^awf start\s*$", prerequisites_section)
+    assert len(re.findall(r"(?m)^cp \.env\.example \.env$", prerequisites_section)) == 2
+    assert "docker/compose/.env" not in prerequisites_section
 
 
 def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
@@ -192,18 +193,13 @@ def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
         maxsplit=1,
     )[1].split("## One-message prompt", maxsplit=1)[0]
 
-    assert (
-        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
-        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
-        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
-        "awf service bootstrap\n"
-        "awf service status --format pretty\n"
-        "awf init ."
-    ) in first_run_section
-    assert not re.search(r"(?m)^awf setup\s*$", first_run_section)
-    assert not re.search(r"(?m)^awf start\s*$", first_run_section)
-    assert "AWF_SETUP_PLACEHOLDER" in first_run_section
-    assert "AWF_START_PLACEHOLDER" in first_run_section
+    assert "cp .env.example .env" in first_run_section
+    assert re.search(r"(?m)^awf setup\s*$", first_run_section)
+    assert re.search(r"(?m)^awf start\s*$", first_run_section)
+    assert "awf service status --format pretty" in first_run_section
+    assert "awf init ." in first_run_section
+    assert "AWF_SETUP_PLACEHOLDER" not in first_run_section
+    assert "AWF_START_PLACEHOLDER" not in first_run_section
 
 
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
