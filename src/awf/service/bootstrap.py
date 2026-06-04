@@ -524,15 +524,36 @@ def _resolve_bootstrap_host_work_dir(environ: Mapping[str, str]) -> str | None:
     return None
 
 
+def _force_copy_already_requested(environ: Mapping[str, str]) -> bool:
+    """Return whether ``environ`` already carries an operator force-copy request.
+
+    Mirrors ``auth_mounts._force_copy_isolation_requested``'s truthiness set so
+    the preflight and the per-workspace overlay gate agree on what counts as an
+    operator override.
+    """
+
+    value = environ.get(AWF_CLAUDE_AUTH_FORCE_COPY_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _apply_work_dir_propagation_env(
     environ: Mapping[str, str],
     result: WorkDirPropagationResult,
 ) -> dict[str, str]:
-    """Return ``environ`` with the propagation + force-copy vars folded in."""
+    """Return ``environ`` with the propagation + force-copy vars folded in.
+
+    The preflight can only *raise* the force-copy posture: when it concludes copy
+    is unnecessary it must not overwrite an operator's explicit
+    ``AWF_CLAUDE_AUTH_FORCE_COPY`` override (set in the environment or the compose
+    env file), since ``auth_mounts`` treats that variable as an operator
+    force-copy request that wins over overlay capability. So the effective value
+    is the preflight's result OR any pre-existing operator request.
+    """
 
     updated = dict(environ)
     updated[AWF_WORK_DIR_BIND_PROPAGATION_ENV] = result.propagation
-    updated[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = "true" if result.force_copy else "false"
+    force_copy = result.force_copy or _force_copy_already_requested(environ)
+    updated[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = "true" if force_copy else "false"
     return updated
 
 

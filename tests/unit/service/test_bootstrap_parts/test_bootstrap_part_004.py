@@ -690,3 +690,38 @@ def test_unescape_mountinfo_field_decodes_escapes_order_independently() -> None:
     # mangling it into a space the way sequential replacements would (#397 review
     # issue:4620841664).
     assert bootstrap._unescape_mountinfo_field("/a\\134040b") == "/a\\040b"  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_apply_propagation_env_raises_force_copy_but_never_lowers_it() -> None:
+    apply = bootstrap._apply_work_dir_propagation_env  # noqa: SLF001
+    forced = WorkDirPropagationResult(
+        propagation="rprivate",
+        force_copy=True,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+        detail="docker desktop bridge",
+    )
+    shared = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+
+    # The preflight raises the posture when it forces copy.
+    assert apply({}, forced)["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+    # And clears it when nothing requested copy and the preflight is satisfied.
+    assert apply({}, shared)["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
+
+    # But an operator's explicit force-copy override (env or compose env file)
+    # must survive a satisfied preflight — auth_mounts treats this variable as an
+    # operator force-copy request, so the preflight may only raise the posture,
+    # never lower it (#397 review PRRT_kwDOSJAM6s6HDkq0).
+    for truthy in ("true", "1", "yes", "on", "  True  "):
+        env = apply({"AWF_CLAUDE_AUTH_FORCE_COPY": truthy}, shared)
+        assert env["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+    # A falsey existing value does not pin the posture on a satisfied preflight.
+    assert (
+        apply({"AWF_CLAUDE_AUTH_FORCE_COPY": "false"}, shared)["AWF_CLAUDE_AUTH_FORCE_COPY"]
+        == "false"
+    )
