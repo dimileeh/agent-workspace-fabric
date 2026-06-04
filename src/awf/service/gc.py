@@ -570,25 +570,29 @@ async def run_terminal_workspace_gc(
     resolved_worktree_remover = _resolve_worktree_remover(
         worktree_remover, session_factory, work_dir
     )
+    compose_teardowns = await _run_gc_compose_teardowns(plan, compose_teardown)
+    side_effect_workspace_ids = _workspace_ids_after_compose_teardown(
+        plan,
+        compose_teardowns,
+    )
     secret_lease_revocations = await _revoke_gc_secret_leases(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
         now=current_time,
     )
     (
         deleted_paths,
         delete_errors,
         path_outcomes,
-        compose_teardowns,
         worktree_removes,
     ) = await _delete_gc_plan_paths(
         plan,
-        compose_teardown=compose_teardown,
+        compose_teardowns=compose_teardowns,
         worktree_remover=resolved_worktree_remover,
     )
     reservation_releases = await _release_gc_reservations(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
     )
     companion_image_prune_result = (
         await companion_image_prune() if companion_image_prune is not None else None
@@ -814,25 +818,29 @@ async def run_workspace_filesystem_gc(
             reservation_releases={},
         )
 
+    compose_teardowns = await _run_gc_compose_teardowns(plan, compose_teardown)
+    side_effect_workspace_ids = _workspace_ids_after_compose_teardown(
+        plan,
+        compose_teardowns,
+    )
     secret_lease_revocations = await _revoke_gc_secret_leases(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
         now=current_time,
     )
     (
         deleted_paths,
         delete_errors,
         path_outcomes,
-        compose_teardowns,
         worktree_removes,
     ) = await _delete_gc_plan_paths(
         plan,
-        compose_teardown=compose_teardown,
+        compose_teardowns=compose_teardowns,
         worktree_remover=resolved_worktree_remover,
     )
     reservation_releases = await _release_gc_reservations(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
     )
     return _gc_result(
         plan=plan,
@@ -912,47 +920,43 @@ def _unmount_candidate_auth_overlay(
 async def _delete_gc_plan_paths(
     plan: WorkspaceGCPlan,
     *,
-    compose_teardown: WorkspaceGCComposeTeardown | None,
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult],
     worktree_remover: WorkspaceGCWorktreeRemove | None,
 ) -> tuple[
     list[Path],
     list[WorkspaceGCDeleteError],
     list[WorkspaceGCPathOutcome],
-    dict[str, WorkspaceGCComposeTeardownResult],
     dict[str, WorkspaceGCWorktreeRemoveResult],
 ]:
     deleted_paths: list[Path] = []
     delete_errors: list[WorkspaceGCDeleteError] = []
     path_outcomes: list[WorkspaceGCPathOutcome] = []
-    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
     worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] = {}
     for candidate in plan.candidates:
-        teardown = await _run_compose_teardown(candidate, compose_teardown)
-        if teardown is not None:
-            compose_teardowns[candidate.workspace_id] = teardown
-            if not teardown.ok:
-                delete_errors.append(
-                    WorkspaceGCDeleteError(
+        teardown = compose_teardowns.get(candidate.workspace_id)
+        if teardown is not None and not teardown.ok:
+            delete_errors.append(
+                WorkspaceGCDeleteError(
+                    workspace_id=candidate.workspace_id,
+                    kind="compose_teardown",
+                    path=candidate.compose.path,
+                    error=teardown.error or teardown.reason_code,
+                    reason_code=teardown.reason_code,
+                )
+            )
+            for target in candidate.paths():
+                path_outcomes.append(
+                    WorkspaceGCPathOutcome(
                         workspace_id=candidate.workspace_id,
-                        kind="compose_teardown",
-                        path=candidate.compose.path,
-                        error=teardown.error or teardown.reason_code,
+                        kind=target.kind,
+                        path=target.path,
+                        status="skipped",
                         reason_code=teardown.reason_code,
+                        error=teardown.error,
+                        estimated_bytes=target.estimated_bytes,
                     )
                 )
-                for target in candidate.paths():
-                    path_outcomes.append(
-                        WorkspaceGCPathOutcome(
-                            workspace_id=candidate.workspace_id,
-                            kind=target.kind,
-                            path=target.path,
-                            status="skipped",
-                            reason_code=teardown.reason_code,
-                            error=teardown.error,
-                            estimated_bytes=target.estimated_bytes,
-                        )
-                    )
-                continue
+            continue
         # Unmount the Claude auth overlay only *after* the compose stack is torn
         # down. While the agent container is up it bind-mounts the overlay
         # ``merged`` dir, so a pre-teardown umount fails ``EBUSY`` (and is swallowed
@@ -1039,7 +1043,33 @@ async def _delete_gc_plan_paths(
                         reason_code=outcome.reason_code,
                     )
                 )
-    return deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes
+    return deleted_paths, delete_errors, path_outcomes, worktree_removes
+
+
+async def _run_gc_compose_teardowns(
+    plan: WorkspaceGCPlan,
+    compose_teardown: WorkspaceGCComposeTeardown | None,
+) -> dict[str, WorkspaceGCComposeTeardownResult]:
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
+    if compose_teardown is None:
+        return compose_teardowns
+    for candidate in plan.candidates:
+        teardown = await _run_compose_teardown(candidate, compose_teardown)
+        if teardown is not None:
+            compose_teardowns[candidate.workspace_id] = teardown
+    return compose_teardowns
+
+
+def _workspace_ids_after_compose_teardown(
+    plan: WorkspaceGCPlan,
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult],
+) -> list[str]:
+    workspace_ids: list[str] = []
+    for candidate in plan.candidates:
+        teardown = compose_teardowns.get(candidate.workspace_id)
+        if teardown is None or teardown.ok:
+            workspace_ids.append(candidate.workspace_id)
+    return workspace_ids
 
 
 def _worktree_remove_delete_errors(

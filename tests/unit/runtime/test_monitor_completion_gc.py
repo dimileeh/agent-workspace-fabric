@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
+from awf.db.repositories import (
+    SecretLeaseIssue,
+    SecretLeaseRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor_runner import lifecycle
@@ -785,6 +789,8 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
     work_dir = tmp_path / "service"
     worktrees_root = work_dir / "git" / "worktrees"
     ws_id = await seed_monitoring_workspace(factory)
+    now = datetime.now(UTC)
+    await _issue_monitor_secret_lease(factory, ws_id, now=now)
     worktree = worktrees_root / ws_id
     compose_dir = work_dir / "compose" / ws_id
     auth = work_dir / "auth" / ws_id
@@ -831,6 +837,9 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.completed.value
+        leases = await SecretLeaseRepository(session).list_for_workspace(ws_id)
+        assert leases[0].status == "issued"
+        assert leases[0].revoke_reason_code is None
 
 
 @pytest.mark.unit
