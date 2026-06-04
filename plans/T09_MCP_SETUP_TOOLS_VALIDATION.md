@@ -53,6 +53,58 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Source Checkout Config Status
+
+### Requirement Status
+
+- Preserve normal host-config error responses when `source_checkout` is not
+  provided: Complete.
+- When `source_checkout` is provided and host config is valid, include provider
+  status, client status, and consent metadata from disk in the response:
+  Complete.
+- When `source_checkout` is provided and host config is corrupt or unreadable,
+  fall back to an empty `HostSetupConfig()` without failing the explicit
+  checkout probe: Complete.
+- Preserve probed explicit-checkout `source_checkout` metadata from setup
+  readiness details: Complete.
+- Add focused regressions for the valid-config and corrupt-config
+  explicit-checkout branches: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_falls_back_when_host_config_read_fails -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs tests/unit/mcp/test_setup_tools.py::test_get_setup_status_hides_stale_persisted_source_checkout_when_revalidation_blocks tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_falls_back_when_host_config_read_fails -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Pre-implementation regressions failed as expected because the explicit
+  source-checkout path never called `read_host_setup_config()`.
+- This repair supersedes the earlier MCP wrapper skip-read behavior while
+  preserving the corrupt-config fallback for explicit checkout probes.
+- Source-checkout valid-config and corrupt-config regressions after the
+  implementation change: 2 passed.
+- Adjacent setup-status checks after adding the no-source-checkout preservation
+  regression: 5 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HBQTg
 
 ### Requirement Status

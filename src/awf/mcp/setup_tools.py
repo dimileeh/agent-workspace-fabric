@@ -220,7 +220,12 @@ def _get_setup_status_result(
             allow_plain_secrets=False,
             source_checkout=source_path,
         )
-        config = HostSetupConfig() if source_path is not None else read_host_setup_config()
+        try:
+            config = read_host_setup_config()
+        except HostSetupConfigError:
+            if source_path is None:
+                raise
+            config = HostSetupConfig()
     except SetupCheckError as exc:
         return _first_run_result(
             safe_result,
@@ -255,6 +260,7 @@ def _get_setup_status_result(
             config,
             details,
             rendered.get("issues"),
+            prefer_probed=source_path is not None,
         ),
         "issues": _setup_status_issues(rendered.get("issues")),
         "next_steps": _list_of_strings(rendered.get("next_steps")),
@@ -536,19 +542,29 @@ def _setup_status_source_checkout(
     config: HostSetupConfig,
     details: Mapping[str, Any],
     issues: Any,
+    *,
+    prefer_probed: bool = False,
 ) -> dict[str, Any]:
     if _has_blocking_source_checkout_issue(issues):
         return {"present": False}
+
+    probed = _probed_source_checkout_status(details)
+    if prefer_probed:
+        return probed
 
     persisted = _source_checkout_status(config)
     if persisted["present"]:
         return persisted
 
+    return probed
+
+
+def _probed_source_checkout_status(details: Mapping[str, Any]) -> dict[str, Any]:
     probed = _mapping(details.get("source_checkout"))
     root = probed.get("root")
     verified_at = probed.get("verified_at")
     if not isinstance(root, str) or not isinstance(verified_at, str):
-        return persisted
+        return {"present": False}
 
     payload: dict[str, Any] = {
         "present": True,

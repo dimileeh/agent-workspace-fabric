@@ -77,6 +77,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Source Checkout Config Status
+
+### Problem Statement And Scope
+
+The review reports that `_get_setup_status_result` always substitutes an empty
+`HostSetupConfig()` when `source_checkout` is provided. That keeps corrupt host
+config from aborting an explicit-checkout dry-run probe, but it also drops valid
+provider status, client status, and consent metadata from the MCP response.
+
+Scope is limited to the MCP setup-status wrapper. `_run_setup` must keep its
+explicit-checkout dry-run behavior, and corrupt host config must still fall back
+gracefully for explicit checkout probes.
+This supersedes the earlier MCP wrapper skip-read implementation while
+preserving its corrupt-config safety goal.
+
+### Requirements Checklist
+
+- Preserve normal host-config error responses when `source_checkout` is not
+  provided.
+- When `source_checkout` is provided and host config is valid, include provider
+  status, client status, and consent metadata from disk in the response.
+- When `source_checkout` is provided and host config is corrupt or unreadable,
+  fall back to an empty `HostSetupConfig()` without failing the explicit
+  checkout probe.
+- Preserve probed explicit-checkout `source_checkout` metadata from setup
+  readiness details.
+- Add focused regressions for the valid-config and corrupt-config
+  explicit-checkout branches.
+
+### Implementation Steps
+
+1. Add/update focused failing MCP setup-status regressions for explicit
+   `source_checkout` with valid host config and corrupt host config.
+2. Change `_get_setup_status_result` to attempt `read_host_setup_config()` and
+   catch `HostSetupConfigError` as an explicit-checkout-only fallback.
+3. Run targeted regressions and focused setup-tools checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_falls_back_when_host_config_read_fails -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HBQTg
 
 ### Problem Statement And Scope

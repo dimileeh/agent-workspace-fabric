@@ -404,7 +404,141 @@ async def test_get_setup_status_hides_stale_persisted_source_checkout_when_reval
 
 
 @pytest.mark.unit
-async def test_get_setup_status_source_checkout_skips_host_config_read(
+async def test_get_setup_status_host_config_error_without_source_checkout_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="ready",
+        details={"selected_providers": [], "checks": []},
+        next_steps=("Run awf start.",),
+    )
+
+    def fail_read_config() -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code=HOST_SETUP_CONFIG_CORRUPT,
+            message="Host setup config is corrupt or unsupported.",
+            path=tmp_path / ".awf" / "config.yml",
+            details={"error_type": "ParserError"},
+        )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", fail_read_config)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_get_setup_status", {})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
+    assert payload["issues"][0]["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
+    assert payload["issues"][0]["severity"] == "blocked"
+    assert payload["issues"][0]["details"] == {
+        "error_type": "ParserError",
+        "path": str(tmp_path / ".awf" / "config.yml"),
+    }
+
+
+@pytest.mark.unit
+async def test_get_setup_status_source_checkout_reads_host_config_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "awf"
+    verified_at = datetime(2026, 2, 3, tzinfo=UTC).isoformat()
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="source checkout ready",
+        details={
+            "selected_providers": ["github"],
+            "checks": [{"name": "docker", "level": "ok"}],
+            "source_checkout": {"root": str(checkout), "verified_at": verified_at},
+        },
+        next_steps=("Run awf start.",),
+    )
+    config = HostSetupConfig(
+        providers={
+            "github": ProviderConfig(
+                credential_ref="env://GITHUB_TOKEN",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        },
+        clients={
+            "claude": ClientIntegrationConfig(
+                status="configured",
+                updated_at=datetime(2026, 2, 4, tzinfo=UTC),
+            )
+        },
+        consent=ConsentConfig(plain_file_secrets=True, source_checkout_assets=True),
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=tmp_path / "stored-awf",
+            verified_at=datetime(2026, 2, 5, tzinfo=UTC),
+            markers=("pyproject.toml",),
+        ),
+    )
+    run_calls: list[dict[str, Any]] = []
+    read_calls: list[bool] = []
+
+    def fake_run_setup(**kwargs: Any) -> Any:
+        run_calls.append(kwargs)
+        return readiness
+
+    def fake_read_config() -> HostSetupConfig:
+        read_calls.append(True)
+        return config
+
+    monkeypatch.setattr(setup_tools, "_run_setup", fake_run_setup)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", fake_read_config)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"providers": ["github"], "source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+
+    assert result.isError is False
+    assert read_calls == [True]
+    assert run_calls == [
+        {
+            "providers": ["github"],
+            "dry_run": True,
+            "non_interactive": True,
+            "allow_plain_secrets": False,
+            "source_checkout": checkout,
+        }
+    ]
+    assert payload["status"] == "success"
+    assert payload["setup"]["plain_file_consent"] is True
+    assert payload["setup"]["source_checkout_assets_consent"] is True
+    assert payload["providers"]["github"] == {
+        "status": "ready",
+        "backend": "env_ref",
+        "source": "env",
+        "credential_ref": {"present": True, "scheme": "env"},
+    }
+    assert payload["clients"]["claude"] == {
+        "status": "configured",
+        "updated_at": "2026-02-04T00:00:00+00:00",
+    }
+    assert payload["source_checkout"] == {
+        "present": True,
+        "root": str(checkout),
+        "verified_at": verified_at,
+        "marker_count": None,
+    }
+
+
+@pytest.mark.unit
+async def test_get_setup_status_source_checkout_falls_back_when_host_config_read_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -423,12 +557,14 @@ async def test_get_setup_status_source_checkout_skips_host_config_read(
         next_steps=("Run awf start.",),
     )
     run_calls: list[dict[str, Any]] = []
+    read_calls: list[bool] = []
 
     def fake_run_setup(**kwargs: Any) -> Any:
         run_calls.append(kwargs)
         return readiness
 
     def fail_read_config() -> HostSetupConfig:
+        read_calls.append(True)
         raise HostSetupConfigError(
             reason_code=HOST_SETUP_CONFIG_CORRUPT,
             message="Host setup config is corrupt or unsupported.",
@@ -447,6 +583,7 @@ async def test_get_setup_status_source_checkout_skips_host_config_read(
     payload = _payload(result)
 
     assert result.isError is False
+    assert read_calls == [True]
     assert run_calls == [
         {
             "providers": [],
