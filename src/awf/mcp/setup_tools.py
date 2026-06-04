@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -77,6 +78,10 @@ PROJECT_INIT_INVALID_PATH = "PROJECT_INIT_INVALID_PATH"
 PROJECT_PROFILE_EXISTS = "PROJECT_PROFILE_EXISTS"
 PROJECT_INIT_FAILED = "PROJECT_INIT_FAILED"
 _LOGGER = logging.getLogger(__name__)
+_SETUP_STATUS_DRY_RUN_STEP_PATTERN = re.compile(
+    r"\bawf setup --dry-run(?P<suffix>[.,;)]|$|\s+to\b)"
+)
+_SETUP_STATUS_START_STEP_PATTERN = re.compile(r"\bawf start(?P<suffix>[.,;)]|$|\s+to\b)")
 
 
 class SafeResult(Protocol):
@@ -708,9 +713,29 @@ def _setup_status_next_steps(
     )
     start_command = _start_source_checkout_command(source_checkout)
     return [
-        step.replace("awf setup --dry-run", setup_command).replace("awf start", start_command)
+        _setup_status_next_step_for_source_checkout(
+            step,
+            setup_command=setup_command,
+            start_command=start_command,
+        )
         for step in next_steps
     ]
+
+
+def _setup_status_next_step_for_source_checkout(
+    step: str,
+    *,
+    setup_command: str,
+    start_command: str,
+) -> str:
+    step = _SETUP_STATUS_DRY_RUN_STEP_PATTERN.sub(
+        lambda match: f"{setup_command}{match.group('suffix')}",
+        step,
+    )
+    return _SETUP_STATUS_START_STEP_PATTERN.sub(
+        lambda match: f"{start_command}{match.group('suffix')}",
+        step,
+    )
 
 
 def _setup_status_dry_run_command(

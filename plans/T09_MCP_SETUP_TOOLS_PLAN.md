@@ -127,6 +127,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Next-Step Command Rewriting
+
+### Problem Statement And Scope
+
+The review reports that `_setup_status_next_steps` rewrites source-checkout
+commands with blanket substring replacement. That can duplicate
+`--source-checkout` flags when an upstream next-step already includes a
+source-checkout-aware `awf start ...` command, or rewrite descriptive text that
+only happens to contain the command substring.
+
+Scope is limited to setup-status next-step command rewriting when an explicit
+`source_checkout` is supplied. Existing source-checkout command strings and
+response schemas stay unchanged.
+
+### Requirements Checklist
+
+- Preserve existing rewrites for known setup-status next-step command shapes:
+  `awf setup --dry-run` and `awf start`.
+- Do not rewrite `awf start` occurrences that already include trailing command
+  arguments in the same shell token sequence.
+- Do not duplicate `--source-checkout` flags in returned next steps.
+- Add a focused regression for an upstream `awf start --source-checkout ...`
+  next step.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression for an upstream source-checkout-aware
+   `awf start` next step.
+2. Replace blanket substring replacement with bounded command-pattern rewriting.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_next_steps_do_not_duplicate_existing_start_flags -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HHoLm
 
 ### Problem Statement And Scope

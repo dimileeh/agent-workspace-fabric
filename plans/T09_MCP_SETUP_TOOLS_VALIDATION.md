@@ -53,6 +53,52 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Next-Step Command Rewriting
+
+### Requirement Status
+
+- Preserve existing rewrites for known setup-status next-step command shapes:
+  Complete.
+- Do not rewrite `awf start` occurrences that already include trailing command
+  arguments in the same shell token sequence: Complete.
+- Do not duplicate `--source-checkout` flags in returned next steps: Complete.
+- Add a focused regression for an upstream `awf start --source-checkout ...`
+  next step: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_next_steps_do_not_duplicate_existing_start_flags -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_next_steps_do_not_duplicate_existing_start_flags tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_blocked_next_steps_preserve_explicit_checkout -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_codex_invalid_home_override_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `_setup_status_next_steps` rewrote `awf start --source-checkout ...` into a
+  command with duplicate `--source-checkout` flags.
+- New regression plus existing setup-status next-step checks: 3 passed.
+- Existing client-instructions `RuntimeError` structured-error regression:
+  1 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HH2Ia
 
 ### Requirement Status
