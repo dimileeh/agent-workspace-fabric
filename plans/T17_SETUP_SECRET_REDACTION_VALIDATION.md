@@ -27,6 +27,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log exact-secret redaction includes provider
   credentials loaded from the local Compose env file when they are absent from
   the MCP process environment.
+- Complete: Captured and followed service-log output redact exact provider
+  credential values loaded from the selected Compose env file when the log emits
+  the bare value without an assignment or bearer prefix.
 - Complete: MCP workspace log reads do not skip data when the expanded log read
   is short without EOF; `next_offset` advances only through bytes actually
   covered by the expanded result.
@@ -774,6 +777,56 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/u
 
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 # Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
+## Review Thread `PRRT_kwDOSJAM6s6HDiER` Service Log Compose Env Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: captured service-log stdout/stderr redacts exact provider credential
+  values parsed from the selected Compose env file.
+- Complete: if the resolved service environment overrides a secret key from the
+  selected Compose env file, both the env-file value and resolved value are
+  redacted.
+- Complete: followed service-log streaming passes the same exact provider
+  credential values into the streaming redactor before writing to the terminal.
+- Complete: non-secret Compose env values such as `COMPOSE_PROJECT_NAME` remain
+  visible in service-log output.
+
+Additional files changed:
+
+- `src/awf/common/redaction.py`
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k compose_env_provider_secret
+# 2 failed, 19 deselected: both captured and followed service-log output returned the raw Compose-only provider secret.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k compose_env_provider_secret
+# 2 passed, 19 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'redact_secrets or compose_env_provider_secret'
+# 29 passed, 19 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/service/logs.py
+# Success: no issues found in 2 source files
 ```
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds

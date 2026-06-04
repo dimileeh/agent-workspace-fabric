@@ -16,6 +16,7 @@ from awf.service.logs import (
     LOCAL_SERVICE_COMPOSE_FILE,
     ServiceLogName,
     ServiceLogsError,
+    ServiceLogsResult,
     _resolve_local_service_compose_file,
     _run_subprocess,
     run_service_logs,
@@ -324,6 +325,84 @@ def test_service_logs_redacts_captured_output_and_failure_detail() -> None:
     for raw in (token, plain_ref, "/home/user/.awf/secrets/github.default"):
         assert raw not in exc_info.value.detail
     assert "<redacted>" in exc_info.value.detail
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_redacts_compose_env_provider_secret_from_captured_output(
+    tmp_path: Path,
+) -> None:
+    """Redact selected Compose env provider credentials even when logs emit bare values."""
+    secret = "compose-only-anthropic-auth-secret"
+    override_secret = "host-override-anthropic-auth-secret"
+    visible_value = "visible-compose-project"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        (f"ANTHROPIC_AUTH_TOKEN={secret}\nCOMPOSE_PROJECT_NAME={visible_value}\n"),
+        encoding="utf-8",
+    )
+
+    def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            returncode=0,
+            stdout=f"stdout bare {secret}, {override_secret}, and {visible_value}\n",
+            stderr=f"stderr bare {secret} and {override_secret}\n",
+        )
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        compose_env_file=compose_env_file,
+        service_environ={"ANTHROPIC_AUTH_TOKEN": override_secret},
+        run_subprocess=success_run,
+    )
+
+    rendered = result.stdout + result.stderr
+    for raw in (secret, override_secret):
+        assert raw not in rendered
+    assert visible_value in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_follow_redacts_compose_env_provider_secret_from_streamed_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Apply selected Compose env exact-secret redaction to followed log streams."""
+    secret = "compose-only-claude-auth-secret"
+    visible_value = "visible-stream-project"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        (f"ANTHROPIC_AUTH_TOKEN={secret}\nCOMPOSE_PROJECT_NAME={visible_value}\n"),
+        encoding="utf-8",
+    )
+
+    class _FollowProcess:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.stdout = io.StringIO(f"stdout bare {secret} and {visible_value}\n")
+            self.stderr = io.StringIO(f"stderr bare {secret}\n")
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout is None
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FollowProcess)
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+        compose_env_file=compose_env_file,
+    )
+
+    captured = capfd.readouterr()
+    rendered = captured.out + captured.err
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert secret not in rendered
+    assert visible_value in rendered
+    assert "<redacted>" in rendered
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

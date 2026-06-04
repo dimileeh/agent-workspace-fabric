@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -20,17 +20,31 @@ from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.environment import (
     cleared_docker_cli_client_keys,
     compose_cli_environ,
+    compose_env_file_values,
     compose_interpolation_environ,
     docker_cli_client_environ,
     env_lookup,
     non_empty_env_value,
 )
+from awf.service.provider_readiness import KNOWN_SECRET_ENV_KEYS
 
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 _STREAMING_INTERRUPT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
+_SERVICE_SECRET_ENV_KEY_SUFFIXES = (
+    "_TOKEN",
+    "_API_KEY",
+    "_API_TOKEN",
+    "_ACCESS_KEY",
+    "_PASSWORD",
+    "_PASSWD",
+    "_SECRET",
+)
+_SERVICE_SECRET_ENV_KEY_NAMES = {
+    suffix.removeprefix("_") for suffix in _SERVICE_SECRET_ENV_KEY_SUFFIXES
+}
 
 
 def _resolve_local_service_compose_file(compose_file: Path) -> Path:
@@ -140,13 +154,34 @@ def run_service_logs(
 ) -> ServiceLogsResult:
     """Run ``docker compose logs`` for the local service stack."""
 
-    runner = run_subprocess or _run_subprocess
     capture_output = not follow
     compose_file = _resolve_local_service_compose_file(compose_file)
     if compose_file == LOCAL_SERVICE_COMPOSE_FILE and not compose_file.exists():
         raise ServiceLogsError(
             returncode=1, detail=_local_service_compose_not_found_message(compose_file)
         )
+    extra_secrets = _service_log_secret_values(service_environ, compose_env_file)
+    if run_subprocess is None:
+
+        def runner(
+            args: list[str],
+            *,
+            check: bool,
+            capture_output: bool,
+            text: Literal[True],
+            env: Mapping[str, str] | None = None,
+        ) -> CompletedProcessLike:
+            return _run_subprocess(
+                args,
+                check=check,
+                capture_output=capture_output,
+                text=text,
+                env=env,
+                extra_secrets=extra_secrets,
+            )
+
+    else:
+        runner = run_subprocess
     try:
         docker_env = _docker_cli_environ(
             service_environ,
@@ -154,7 +189,10 @@ def run_service_logs(
             compose_env_file=compose_env_file,
         )
     except yaml.YAMLError as exc:
-        raise ServiceLogsError(returncode=1, detail=redact_secrets(str(exc))) from exc
+        raise ServiceLogsError(
+            returncode=1,
+            detail=redact_secrets(str(exc), extra_secrets=extra_secrets),
+        ) from exc
     command = service_logs_command(
         services=services,
         tail=tail,
@@ -173,15 +211,15 @@ def run_service_logs(
     except FileNotFoundError as exc:
         raise ServiceLogsError(returncode=127, detail="docker binary not found on PATH") from exc
     except OSError as exc:
-        detail = redact_secrets(f"{type(exc).__name__}: {exc}")
+        detail = redact_secrets(f"{type(exc).__name__}: {exc}", extra_secrets=extra_secrets)
         raise ServiceLogsError(returncode=1, detail=detail) from exc
     except KeyboardInterrupt:
         if follow:
             return ServiceLogsResult(stdout="", stderr="")
         raise
 
-    stdout = redact_secrets(result.stdout or "")
-    stderr = redact_secrets(result.stderr or "")
+    stdout = redact_secrets(result.stdout or "", extra_secrets=extra_secrets)
+    stderr = redact_secrets(result.stderr or "", extra_secrets=extra_secrets)
     if follow and result.returncode in _FOLLOW_INTERRUPT_RETURN_CODES:
         return ServiceLogsResult(stdout="", stderr="")
     if result.returncode != 0:
@@ -201,11 +239,18 @@ def _run_subprocess(
     capture_output: bool,
     text: Literal[True],
     env: Mapping[str, str] | None = None,
+    extra_secrets: Iterable[str] = (),
 ) -> CompletedProcessLike:
     """Run the logs subprocess, omitting env when no override is needed."""
 
     if not capture_output:
-        return _run_streaming_subprocess(args, check=check, text=text, env=env)
+        return _run_streaming_subprocess(
+            args,
+            check=check,
+            text=text,
+            env=env,
+            extra_secrets=extra_secrets,
+        )
     if env is None:
         return subprocess.run(args, check=check, capture_output=capture_output, text=text)
     return subprocess.run(args, check=check, capture_output=capture_output, text=text, env=env)
@@ -217,8 +262,10 @@ def _run_streaming_subprocess(
     check: bool,
     text: Literal[True],
     env: Mapping[str, str] | None = None,
+    extra_secrets: Iterable[str] = (),
 ) -> CompletedProcessLike:
     """Run a subprocess while streaming redacted stdout and stderr."""
+    extra_secret_values = tuple(extra_secrets)
     process = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -226,8 +273,16 @@ def _run_streaming_subprocess(
         text=text,
         env=env,
     )
-    stdout_thread = _start_redacted_stream_thread(process.stdout, sys.stdout)
-    stderr_thread = _start_redacted_stream_thread(process.stderr, sys.stderr)
+    stdout_thread = _start_redacted_stream_thread(
+        process.stdout,
+        sys.stdout,
+        extra_secrets=extra_secret_values,
+    )
+    stderr_thread = _start_redacted_stream_thread(
+        process.stderr,
+        sys.stderr,
+        extra_secrets=extra_secret_values,
+    )
     try:
         returncode = process.wait()
     except KeyboardInterrupt:
@@ -254,25 +309,59 @@ def _terminate_streaming_subprocess(process: subprocess.Popen[str]) -> None:
 def _start_redacted_stream_thread(
     source: IO[str] | None,
     sink: IO[str],
+    *,
+    extra_secrets: Iterable[str] = (),
 ) -> threading.Thread:
     """Start a thread that redacts a subprocess pipe before writing it."""
     thread = threading.Thread(
         target=_stream_redacted_pipe,
-        args=(source, sink),
+        args=(source, sink, tuple(extra_secrets)),
     )
     thread.start()
     return thread
 
 
-def _stream_redacted_pipe(source: IO[str] | None, sink: IO[str]) -> None:
+def _stream_redacted_pipe(
+    source: IO[str] | None,
+    sink: IO[str],
+    extra_secrets: Iterable[str] = (),
+) -> None:
     """Copy pipe lines to a sink after applying shared secret redaction."""
     if source is None:
         return
+    extra_secret_values = tuple(extra_secrets)
     for line in source:
         # Current token/provider-ref patterns are single-line; multiline
         # patterns will need carry-over context instead of per-line redaction.
-        sink.write(redact_secrets(line))
+        sink.write(redact_secrets(line, extra_secrets=extra_secret_values))
         sink.flush()
+
+
+def _service_log_secret_values(
+    environ: Mapping[str, str] | None,
+    compose_env_file: Path | None,
+) -> tuple[str, ...]:
+    """Return exact service env values that service logs must redact."""
+    secret_values = [
+        value
+        for key, value in compose_env_file_values(compose_env_file).items()
+        if value and _is_service_secret_env_key(key)
+    ]
+    if environ is not None:
+        secret_values.extend(
+            value for key, value in environ.items() if value and _is_service_secret_env_key(key)
+        )
+    return tuple(dict.fromkeys(secret_values))
+
+
+def _is_service_secret_env_key(key: str) -> bool:
+    """Return true when an env key conventionally carries a secret value."""
+    normalized = key.upper().replace("-", "_")
+    return (
+        normalized in KNOWN_SECRET_ENV_KEYS
+        or normalized in _SERVICE_SECRET_ENV_KEY_NAMES
+        or normalized.endswith(_SERVICE_SECRET_ENV_KEY_SUFFIXES)
+    )
 
 
 def _docker_cli_environ(

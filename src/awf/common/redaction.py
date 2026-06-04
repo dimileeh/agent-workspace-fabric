@@ -29,7 +29,7 @@ _KNOWN_TOKEN_RE = compile_known_token_re(match_truncated_provider_tokens=True)
 _RedactionSpan = tuple[int, int]
 
 
-def redact_secrets(text: str) -> str:
+def redact_secrets(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     """Replace common secret value bodies with a stable marker."""
     if not text:
         return text
@@ -39,7 +39,11 @@ def redact_secrets(text: str) -> str:
     redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, redacted)
     redacted = _TOKEN_ASSIGNMENT_RE.sub(_redact_assignment, redacted)
     redacted = _BEARER_RE.sub(r"\1" + REDACTION_MARKER, redacted)
-    return _KNOWN_TOKEN_RE.sub(REDACTION_MARKER, redacted)
+    redacted = _KNOWN_TOKEN_RE.sub(REDACTION_MARKER, redacted)
+    exact_spans = _merge_redaction_spans(_exact_secret_redaction_spans(redacted, extra_secrets))
+    if not exact_spans:
+        return redacted
+    return _render_redacted_slice(redacted, 0, len(redacted), exact_spans)
 
 
 def redact_secrets_slice(
@@ -108,15 +112,7 @@ def _secret_redaction_spans(
 ) -> list[_RedactionSpan]:
     """Find all secret spans that should be masked in the original text."""
     spans: list[_RedactionSpan] = []
-    for secret in sorted({secret for secret in extra_secrets if len(secret) >= 4}, key=len):
-        cursor = 0
-        while True:
-            start = text.find(secret, cursor)
-            if start == -1:
-                break
-            end = start + len(secret)
-            spans.append((start, end))
-            cursor = start + 1
+    spans.extend(_exact_secret_redaction_spans(text, extra_secrets))
 
     spans.extend((match.start(2), match.end(2)) for match in _URL_CREDENTIAL_RE.finditer(text))
     spans.extend((match.start(2), match.end(2)) for match in _AUTHORIZATION_RE.finditer(text))
@@ -127,6 +123,24 @@ def _secret_redaction_spans(
     spans.extend((match.start(2), match.end(2)) for match in _BEARER_RE.finditer(text))
     spans.extend(match.span() for match in _KNOWN_TOKEN_RE.finditer(text))
     return _merge_redaction_spans(spans)
+
+
+def _exact_secret_redaction_spans(
+    text: str,
+    extra_secrets: Iterable[str],
+) -> list[_RedactionSpan]:
+    """Find exact caller-supplied secret values in the original text."""
+    spans: list[_RedactionSpan] = []
+    for secret in sorted({secret for secret in extra_secrets if len(secret) >= 4}, key=len):
+        cursor = 0
+        while True:
+            start = text.find(secret, cursor)
+            if start == -1:
+                break
+            end = start + len(secret)
+            spans.append((start, end))
+            cursor = start + 1
+    return spans
 
 
 def _merge_redaction_spans(spans: Iterable[_RedactionSpan]) -> list[_RedactionSpan]:

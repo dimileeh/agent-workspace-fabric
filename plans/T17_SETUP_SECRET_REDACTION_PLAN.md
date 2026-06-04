@@ -83,6 +83,13 @@ credential entry, or unrelated refactors are included.
   contains the bare value without a visible secret assignment prefix.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes Compose-env exact secret discovery plus a focused regression.
+- Review thread `PRRT_kwDOSJAM6s6HDiER` identified the same exact-secret class
+  in `awf service logs`: captured and followed Docker Compose service-log output
+  only applied pattern redaction, so a provider credential value present only in
+  the selected Compose env file could leak when emitted as a bare string.
+- This repair remains inside the existing T17 service-log redaction scope and
+  only changes Compose-env provider-secret discovery, service-log redaction
+  threading, focused regressions, and this plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -116,6 +123,10 @@ credential entry, or unrelated refactors are included.
 - MCP workspace log exact-secret redaction includes provider credentials loaded
   from the local Compose env file, even when those values are not exported in
   the MCP process environment.
+- Captured and followed service-log output redact exact provider credential
+  values loaded from the selected Compose env file, even when those values do
+  not match token shape patterns and appear without an assignment or bearer
+  prefix.
 - Followed service-log streaming documents that the current per-line redaction
   boundary depends on single-line secret/provider-ref patterns.
 - Support-bundle setup-state generic fallback reason codes are centralized.
@@ -184,6 +195,10 @@ credential entry, or unrelated refactors are included.
 21. Add a focused regression for a Compose-only provider token in an MCP log
     slice without a visible assignment prefix, confirm it fails, then include
     local Compose provider env secrets in the MCP exact-secret set.
+22. Add focused regressions for captured and followed service logs containing a
+    Compose-only provider secret value without a visible assignment prefix,
+    confirm they fail, then include selected Compose env provider secrets in the
+    service-log redactor.
 
 ## Verification Commands
 
@@ -224,6 +239,14 @@ Review-thread `PRRT_kwDOSJAM6s6HDTtb` repair checks:
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k compose_env_provider_secret
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HDiER` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k compose_env_provider_secret
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/service/logs.py
 ```
 
 Review-level comment `issue:4620175517` repair checks:
