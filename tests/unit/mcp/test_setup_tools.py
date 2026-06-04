@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1159,6 +1160,7 @@ async def test_initialize_project_profile_path_value_error_returns_structured_er
 
 @pytest.mark.unit
 async def test_initialize_project_profile_preview_failure_does_not_surface_exception_text(
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1178,6 +1180,7 @@ async def test_initialize_project_profile_preview_failure_does_not_surface_excep
         raise RuntimeError(leaked_detail)
 
     monkeypatch.setattr(setup_tools, "preview_project_onboarding", fail_preview)
+    caplog.set_level(logging.ERROR, logger="awf.mcp.setup_tools")
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
     result = await mcp.call_tool(
@@ -1195,6 +1198,17 @@ async def test_initialize_project_profile_preview_failure_does_not_surface_excep
         "template": "generic",
     }
     assert leaked_detail not in rendered
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "awf.mcp.setup_tools"
+        and record.message == "could not build onboarding preview for MCP project initialization"
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].project_path == str(project.resolve())
+    assert records[0].template == "generic"
 
 
 @pytest.mark.unit
@@ -1239,6 +1253,7 @@ async def test_initialize_project_profile_value_error_preview_failure_does_not_s
 
 @pytest.mark.unit
 async def test_initialize_project_profile_existing_profile_probe_failure_is_structured(
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1256,6 +1271,7 @@ async def test_initialize_project_profile_existing_profile_probe_failure_is_stru
         "_existing_project_profile_path",
         fail_existing_profile_probe,
     )
+    caplog.set_level(logging.ERROR, logger="awf.mcp.setup_tools")
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
     result = await mcp.call_tool(
@@ -1273,6 +1289,17 @@ async def test_initialize_project_profile_existing_profile_probe_failure_is_stru
         "template": "generic",
     }
     assert leaked_detail not in rendered
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "awf.mcp.setup_tools"
+        and record.message == "could not build onboarding preview for MCP project initialization"
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].project_path == str(project.resolve())
+    assert records[0].template == "generic"
 
 
 @pytest.mark.unit

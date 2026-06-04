@@ -53,6 +53,50 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Preview Failure Logging
+
+### Requirement Status
+
+- Preserve the existing `PROJECT_INIT_FAILED` MCP response and redaction
+  behavior: Complete.
+- Record the caught preview/probe exception with exception context before
+  returning the sanitized result: Complete.
+- Include safe operational context in the log entry: project path and template:
+  Complete.
+- Add a focused regression proving the preview/probe failure path emits an
+  exception log while keeping raw exception text out of the MCP response:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_existing_profile_probe_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Pre-implementation regression failed as expected because the preview/probe
+  failure path returned a sanitized MCP error without emitting any
+  `awf.mcp.setup_tools` exception log record.
+- Preview/probe logging regression after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue_4620143523
 
 ### Requirement Status

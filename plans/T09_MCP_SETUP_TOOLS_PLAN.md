@@ -903,6 +903,49 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Preview Failure Logging
+
+### Problem Statement And Scope
+
+The PR review reports that `_initialize_project_profile_result` catches broad
+preview/probe failures and returns a sanitized `PROJECT_INIT_FAILED` MCP
+response without logging the underlying exception. Operators then cannot
+diagnose malformed templates, import failures, serialization errors, or probe
+failures that trigger the safe response path.
+
+Scope is limited to adding structured exception logging for the existing
+preview/probe failure boundary while preserving the redacted MCP response.
+
+### Requirements Checklist
+
+- Preserve the existing `PROJECT_INIT_FAILED` MCP response and redaction
+  behavior.
+- Record the caught preview/probe exception with exception context before
+  returning the sanitized result.
+- Include safe operational context in the log entry: project path and template.
+- Add a focused regression proving the preview/probe failure path emits an
+  exception log while keeping raw exception text out of the MCP response.
+
+### Implementation Steps
+
+1. Extend the focused preview-failure regression to assert an exception log is
+   emitted.
+2. Add module-level logging and call `logger.exception(...)` inside the existing
+   preview/probe `except Exception` clause.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_existing_profile_probe_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HM
 
 ### Problem Statement And Scope

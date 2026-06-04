@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -75,6 +76,7 @@ START_INPUT_RESOLUTION_FAILED = "START_INPUT_RESOLUTION_FAILED"
 PROJECT_INIT_INVALID_PATH = "PROJECT_INIT_INVALID_PATH"
 PROJECT_PROFILE_EXISTS = "PROJECT_PROFILE_EXISTS"
 PROJECT_INIT_FAILED = "PROJECT_INIT_FAILED"
+_LOGGER = logging.getLogger(__name__)
 
 
 class SafeResult(Protocol):
@@ -379,6 +381,10 @@ def _initialize_project_profile_result(
             include_smoke_request=include_smoke_request,
         )
     except Exception:
+        _LOGGER.exception(
+            "could not build onboarding preview for MCP project initialization",
+            extra={"project_path": str(repository), "template": template},
+        )
         return _error_result(
             safe_result,
             PROJECT_INIT_FAILED,
