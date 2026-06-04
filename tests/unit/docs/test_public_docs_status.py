@@ -319,7 +319,12 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
             < uninstall_section.index(stop_guard_line)
             < uninstall_section.index(stop_env_file_line)
             < stop_fallback_index
-            < uninstall_section.index(stop_guard_end_line, stop_fallback_index)
+            < _required_index(
+                uninstall_section,
+                stop_guard_end_line,
+                f"{heading} uninstall",
+                start=stop_fallback_index,
+            )
             < uninstall_section.index(replacement_setup)
         )
         assert uninstall_section.index("~/.awf/config.yml") < uninstall_section.index(
@@ -425,7 +430,7 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
             < stop_fallback_index
-            < section.index(stop_guard_end_line, stop_fallback_index)
+            < _required_index(section, stop_guard_end_line, label, start=stop_fallback_index)
             < section.index(setup_line)
             < section.index(start_line)
         ), f"{label} must guard env-file stop, refresh metadata, then start"
@@ -688,6 +693,14 @@ def test_markdown_section_rejects_h3_or_deeper_headings(heading: str) -> None:
 
     with pytest.raises(ValueError, match=r"Only H2 headings are supported"):
         _markdown_section(text, heading)
+
+
+def test_required_index_reports_missing_text_after_start_clearly() -> None:
+    """Assert ordered doc checks report assertion failures, not ValueError."""
+    text = "if [ -f docker/compose/.env ]; then\nfi\nfallback\n"
+
+    with pytest.raises(AssertionError, match="example is missing required text after offset"):
+        _required_index(text, "\nfi\n", "example", start=text.index("fallback"))
 
 
 def test_getting_started_uses_runnable_startup_path() -> None:
@@ -993,7 +1006,12 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         < intro_section.index(stop_guard_line)
         < intro_section.index(stop_env_file_line)
         < intro_fallback_index
-        < intro_section.index(stop_guard_end_line, intro_fallback_index)
+        < _required_index(
+            intro_section,
+            stop_guard_end_line,
+            "intro source-checkout uninstall",
+            start=intro_fallback_index,
+        )
         < intro_section.index(intro_setup_line)
     ), "intro must provide guarded Core stop commands before metadata refresh"
     for label, section, setup_line in source_cases:
@@ -1019,7 +1037,12 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
             < stop_fallback_index
-            < section.index(stop_guard_end_line, stop_fallback_index)
+            < _required_index(
+                section,
+                stop_guard_end_line,
+                f"{label} uninstall",
+                start=stop_fallback_index,
+            )
             < section.index(setup_line)
         ), f"{label} must provide guarded Core stop commands before metadata refresh"
 
@@ -1090,7 +1113,12 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
         < no_global_section.index(stop_guard_line)
         < no_global_section.index(stop_env_file_line)
         < stop_fallback_index
-        < no_global_section.index(stop_guard_end_line, stop_fallback_index)
+        < _required_index(
+            no_global_section,
+            stop_guard_end_line,
+            "no-global source-checkout rollback",
+            start=stop_fallback_index,
+        )
         < no_global_section.index(setup_line)
     )
     for command in no_global_commands:
@@ -1168,7 +1196,12 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
         < global_section.index(stop_guard_line)
         < global_section.index(stop_env_file_line)
         < stop_fallback_index
-        < global_section.index(stop_guard_end_line, stop_fallback_index)
+        < _required_index(
+            global_section,
+            stop_guard_end_line,
+            "global source-checkout rollback",
+            start=stop_fallback_index,
+        )
         < global_section.index(setup_line)
         < global_section.index(start_line)
     )
@@ -1483,6 +1516,13 @@ def _quickstart_upgrade_section(text: str, heading: str) -> str:
     return section.split("Upgrade:", maxsplit=1)[1].split("Uninstall:", maxsplit=1)[0]
 
 
+def _required_index(text: str, needle: str, label: str, start: int = 0) -> int:
+    """Return a required substring index with assertion-style failure output."""
+    index = text.find(needle, start)
+    assert index != -1, f"{label} is missing required text after offset {start}: {needle!r}"
+    return index
+
+
 def _shell_closing_fi_index(section: str, start: int, label: str) -> int:
     """Return the closing fi index after a shell guard line."""
     closing_match = re.search(r"(?m)^fi$", section[start:])
@@ -1545,19 +1585,50 @@ def _assert_source_checkout_postgres_password_restore(
     )
 
     password_init_index = section.index(password_init_line)
-    password_loop_index = section.index(password_loop_line, password_init_index)
-    password_file_guard_index = section.index(password_file_guard_line, password_loop_index)
-    password_read_index = section.index(password_read_line, password_file_guard_index)
-    password_break_index = section.index(password_break_line, password_read_index)
-    password_loop_end_index = section.index(password_loop_end_line, password_break_index)
-    password_guard_index = section.index(password_guard_line, password_loop_end_index)
-    password_persisted_export_index = section.index(
-        password_persisted_export_line,
-        password_guard_index,
+    password_loop_index = _required_index(section, password_loop_line, label, password_init_index)
+    password_file_guard_index = _required_index(
+        section,
+        password_file_guard_line,
+        label,
+        password_loop_index,
     )
-    password_else_index = section.index(password_else_line, password_persisted_export_index)
-    password_require_index = section.index(password_require_line, password_else_index)
-    password_shell_export_index = section.index(password_shell_export_line, password_require_index)
+    password_read_index = _required_index(
+        section, password_read_line, label, password_file_guard_index
+    )
+    password_break_index = _required_index(section, password_break_line, label, password_read_index)
+    password_loop_end_index = _required_index(
+        section,
+        password_loop_end_line,
+        label,
+        password_break_index,
+    )
+    password_guard_index = _required_index(
+        section, password_guard_line, label, password_loop_end_index
+    )
+    password_persisted_export_index = _required_index(
+        section,
+        password_persisted_export_line,
+        label,
+        start=password_guard_index,
+    )
+    password_else_index = _required_index(
+        section,
+        password_else_line,
+        label,
+        password_persisted_export_index,
+    )
+    password_require_index = _required_index(
+        section,
+        password_require_line,
+        label,
+        password_else_index,
+    )
+    password_shell_export_index = _required_index(
+        section,
+        password_shell_export_line,
+        label,
+        password_require_index,
+    )
     password_guard_end_index = _shell_closing_fi_index(
         section,
         password_shell_export_index,
@@ -1693,7 +1764,7 @@ def _assert_package_upgrade_restores_service_env(
         password_require_index,
     )
     password_guard_end_index = _shell_closing_fi_index(section, password_export_index, label)
-    start_index = section.index(start_line, password_guard_end_index)
+    start_index = _required_index(section, start_line, label, start=password_guard_end_index)
     assert (
         upgrade_index
         < api_guard_index
