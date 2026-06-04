@@ -137,6 +137,11 @@ before `awf start` when no `.env` already persists them. Preserve an existing
 `.env` as the preferred read source so upgrade snippets do not accidentally
 override persisted service secrets.
 
+Post-review adjustment for review comment `issue:4620140358`: the package
+upgrade env-restore assertion must identify only a shell closing `fi` keyword
+anchored on its own line, and `docs/MCP_SETUP.md` prerequisites must provide a
+clear `awf service status --format pretty` check after each `awf start` example.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

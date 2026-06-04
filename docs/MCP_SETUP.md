@@ -26,6 +26,7 @@ export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@127.0
 } > .env
 awf setup
 awf start
+awf service status --format pretty
 ```
 
 For contributor checkouts, install from source instead:
@@ -49,6 +50,7 @@ mkdir -p docker/compose
 } > docker/compose/.env
 awf setup
 awf start
+awf service status --format pretty
 ```
 
 `awf setup` checks the host and selected environment; `awf start` starts local

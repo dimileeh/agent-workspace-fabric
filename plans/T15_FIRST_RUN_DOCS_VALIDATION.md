@@ -705,6 +705,48 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for review comment `issue:4620140358`:
+
+- `tests/unit/docs/test_public_docs_status.py` now anchors package-upgrade guard
+  closure detection to a full-line shell `fi` keyword and includes a regression
+  that lowercase `fi` in unrelated text is ignored.
+- `docs/MCP_SETUP.md` now asks users to run
+  `awf service status --format pretty` immediately after each `awf start`
+  prerequisite snippet, giving a clear local Core readiness check before MCP
+  registration.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_mcp_setup_prerequisites_use_runnable_startup_path tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword -q
+```
+
+Red-phase result after updating the focused assertions: failed because
+`docs/MCP_SETUP.md` did not contain the status command and the helper accepted
+lowercase `fi` inside unrelated text as a closing shell keyword.
+
+Final targeted repair result: `2 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `46 passed in 1.35s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

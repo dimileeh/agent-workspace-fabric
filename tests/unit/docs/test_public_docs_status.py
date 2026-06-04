@@ -435,6 +435,28 @@ def test_package_upgrade_docs_restore_service_env_before_start() -> None:
         _assert_package_upgrade_restores_service_env(label, section, upgrade_line)
 
 
+def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
+    """Assert lowercase fi in unrelated text is not treated as a shell keyword."""
+    upgrade_line = "pipx upgrade agent-workspace-fabric"
+    section = "\n".join(
+        [
+            upgrade_line,
+            "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then",
+            '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"',
+            "  # awf_config_file can be configured elsewhere",
+            "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
+            '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"',
+            "  # awf_config_file fallback stays outside persisted .env",
+            "fi",
+            "fi",
+            "awf start",
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="must restore missing service env before restart"):
+        _assert_package_upgrade_restores_service_env("example", section, upgrade_line)
+
+
 def test_quickstart_source_checkout_upgrades_reuse_existing_checkout() -> None:
     """Assert source-checkout upgrade commands reuse the checkout created earlier."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
@@ -581,9 +603,18 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
 
     assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 2
     assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 2
-    assert re.search(r"(?m)^} > \.env\s*\nawf setup\nawf start$", prerequisites_section)
+    assert (
+        len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
+    )
     assert re.search(
-        r"(?m)^} > docker/compose/\.env\s*\nawf setup\nawf start$",
+        r"(?m)^} > \.env\s*\nawf setup\nawf start\nawf service status --format pretty$",
+        prerequisites_section,
+    )
+    assert re.search(
+        (
+            r"(?m)^} > docker/compose/\.env\s*\nawf setup\nawf start\n"
+            r"awf service status --format pretty$"
+        ),
         prerequisites_section,
     )
     assert (
@@ -1169,6 +1200,12 @@ def _quickstart_upgrade_section(text: str, heading: str) -> str:
     return section.split("Upgrade:", maxsplit=1)[1].split("Uninstall:", maxsplit=1)[0]
 
 
+def _shell_closing_fi_index(section: str, start: int, label: str) -> int:
+    closing_match = re.search(r"(?m)^fi$", section[start:])
+    assert closing_match is not None, f"{label} is missing closing shell fi"
+    return start + closing_match.start()
+
+
 def _assert_package_upgrade_restores_service_env(
     label: str,
     section: str,
@@ -1190,10 +1227,10 @@ def _assert_package_upgrade_restores_service_env(
 
     api_guard_index = section.index(api_guard_line)
     api_export_index = section.index(api_export_line)
-    api_guard_end_index = section.index("fi", api_export_index)
+    api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
     password_guard_index = section.index(password_guard_line)
     password_export_index = section.index(password_export_line)
-    password_guard_end_index = section.index("fi", password_export_index)
+    password_guard_end_index = _shell_closing_fi_index(section, password_export_index, label)
     assert (
         section.index(upgrade_line)
         < api_guard_index
