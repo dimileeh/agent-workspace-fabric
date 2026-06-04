@@ -65,6 +65,34 @@ def redact_secrets_slice(
     return _render_redacted_slice(text, safe_start, safe_end, spans)
 
 
+def redact_secrets_byte_slice(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    extra_secrets: Iterable[str] = (),
+) -> str:
+    """Return the UTF-8 byte slice ``text[start:end]`` with secrets redacted."""
+    if not text or start >= end:
+        return ""
+
+    text_bytes = text.encode("utf-8")
+    safe_start = min(max(start, 0), len(text_bytes))
+    safe_end = min(max(end, safe_start), len(text_bytes))
+    if safe_start >= safe_end:
+        return ""
+
+    spans = _secret_redaction_spans(text, extra_secrets=extra_secrets)
+    if not spans:
+        return text_bytes[safe_start:safe_end].decode("utf-8", errors="replace")
+
+    byte_offsets = _utf8_byte_offsets_by_text_index(text)
+    byte_spans = [
+        (byte_offsets[span_start], byte_offsets[span_end]) for span_start, span_end in spans
+    ]
+    return _render_redacted_byte_slice(text_bytes, safe_start, safe_end, byte_spans)
+
+
 def _redact_assignment(match: re.Match[str]) -> str:
     quote = match.group("quote")
     return f"{match.group('key')}{match.group('separator')}{quote}{REDACTION_MARKER}{quote}"
@@ -130,4 +158,38 @@ def _render_redacted_slice(
         cursor = max(cursor, min(span_end, end))
     if cursor < end:
         pieces.append(text[cursor:end])
+    return "".join(pieces)
+
+
+def _utf8_byte_offsets_by_text_index(text: str) -> list[int]:
+    """Map each Python string index to its UTF-8 byte offset."""
+    offsets = [0]
+    cursor = 0
+    for char in text:
+        cursor += len(char.encode("utf-8"))
+        offsets.append(cursor)
+    return offsets
+
+
+def _render_redacted_byte_slice(
+    text: bytes,
+    start: int,
+    end: int,
+    spans: list[_RedactionSpan],
+) -> str:
+    """Render a requested byte slice while masking intersecting secret spans."""
+    pieces: list[str] = []
+    cursor = start
+    for span_start, span_end in spans:
+        if span_end <= cursor:
+            continue
+        if span_start >= end:
+            break
+        literal_end = min(max(span_start, cursor), end)
+        if cursor < literal_end:
+            pieces.append(text[cursor:literal_end].decode("utf-8", errors="replace"))
+        pieces.append(REDACTION_MARKER)
+        cursor = max(cursor, min(span_end, end))
+    if cursor < end:
+        pieces.append(text[cursor:end].decode("utf-8", errors="replace"))
     return "".join(pieces)

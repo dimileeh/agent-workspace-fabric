@@ -1029,6 +1029,59 @@ class TestWorkspaceLogs:
         }
 
     @pytest.mark.unit
+    async def test_read_workspace_log_uses_byte_offsets_after_multibyte_text(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(service=service)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        prefix = "\U0001f525alpha\n"
+        raw_text = f"{prefix}beta\n"
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+            source="agent",
+            name="Agent stdout",
+            kind="stdout",
+        )
+        await sink.write(raw_text)
+        await sink.close()
+
+        offset = len(prefix.encode())
+        limit_bytes = len(b"beta")
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": offset,
+                "limit_bytes": limit_bytes,
+            },
+        )
+
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": offset,
+            "next_offset": offset + limit_bytes,
+            "eof": False,
+            "data": "beta",
+        }
+
+    @pytest.mark.unit
     async def test_missing_workspace_or_stream_returns_none(
         self,
         factory: async_sessionmaker[AsyncSession],

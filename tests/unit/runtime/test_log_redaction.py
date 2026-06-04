@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from awf.common.redaction import REDACTION_MARKER, redact_secrets, redact_secrets_slice
+from awf.common.redaction import (
+    REDACTION_MARKER,
+    redact_secrets,
+    redact_secrets_byte_slice,
+    redact_secrets_slice,
+)
 
 
 @pytest.mark.unit
@@ -130,6 +135,37 @@ def test_redact_secrets_slice_returns_plain_text_when_no_secret_matches() -> Non
     limit = len("ordinary")
 
     assert redact_secrets_slice(text, offset, offset + limit) == "ordinary"
+
+
+@pytest.mark.unit
+def test_redact_secrets_byte_slice_uses_utf8_byte_offsets() -> None:
+    """Return the requested byte window when earlier text is multi-byte."""
+    prefix = "\U0001f525alpha\n"
+    text = f"{prefix}beta\n"
+    offset = len(prefix.encode())
+    limit = len(b"beta")
+
+    assert redact_secrets_byte_slice(text, offset, offset + limit) == "beta"
+
+
+@pytest.mark.unit
+def test_redact_secrets_byte_slice_masks_secret_after_multibyte_prefix() -> None:
+    """Mask a byte slice overlapping a secret after earlier multi-byte text."""
+    secret = "opaque-nonpattern-workspace-secret-value"
+    prefix = "\U0001f525before "
+    text = f"{prefix}AWF_GITHUB_TOKEN={secret} after"
+    offset = len(f"{prefix}AWF_GITHUB_TOKEN=opaque-nonpattern-".encode())
+    limit = len(b"workspace")
+
+    redacted = redact_secrets_byte_slice(
+        text,
+        offset,
+        offset + limit,
+        extra_secrets=(secret,),
+    )
+
+    assert redacted == REDACTION_MARKER
+    assert "workspace" not in redacted
 
 
 @pytest.mark.unit

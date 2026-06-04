@@ -29,7 +29,7 @@ from awf.api.schemas import (
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.common.redaction import redact_secrets_slice
+from awf.common.redaction import redact_secrets_byte_slice
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -385,8 +385,9 @@ def register_metrics_tools(
             expanded_next_offset=result_next_offset,
             expanded_eof=bool(result["eof"]),
         )
-        data = redact_secrets_slice(
-            str(result["text"]),
+        result_text = str(result["text"])
+        data = redact_secrets_byte_slice(
+            result_text,
             offset - result_offset,
             offset - result_offset + limit_bytes,
             extra_secrets=extra_secrets,
