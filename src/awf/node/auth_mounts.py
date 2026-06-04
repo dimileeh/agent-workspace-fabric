@@ -1208,25 +1208,39 @@ def _reap_stale_claude_base_staging(base_root: Path) -> None:
 def _write_overlay_unmounted_marker(claude_root: Path, marker: Path) -> None:
     """Record that a capable process verified this overlay's teardown.
 
-    Best-effort: the marker is a cross-namespace hint for a later
-    capability-less GC, not a correctness invariant for this process. A write
-    failure only forfeits the hint (the next capable sweep re-writes it), so it
-    is logged and swallowed rather than allowed to fail a teardown that already
-    succeeded. Skipped entirely when the auth dir does not exist (a workspace
-    that was never provisioned), to avoid materializing an empty tree.
+    The ``.overlay-unmounted`` marker is the cross-namespace proof that lets a
+    later capability-less GC distinguish "worker already released this overlay"
+    from "still mounted in another namespace". Skipped entirely when the auth
+    dir does not exist (a workspace that was never provisioned), to avoid
+    materializing an empty tree.
+
+    A marker write can fail (ENOSPC, a transient FS error). The worker's
+    terminal-runtime-release sweep runs *once* per workspace, so — contrary to a
+    "best-effort, the next sweep re-writes it" assumption — no later capable
+    sweep re-records it. Lost silently, the marker leaves a capability-less GC
+    seeing ``upper`` without a marker, treating the (already gone) overlay as
+    unverifiable, and skipping the auth-dir delete indefinitely: a pure leak.
+    Since a capable caller reaches here only after the mount is provably gone,
+    fall back to removing the overlay scratch (``upper``/``work``) directly —
+    that clears the very signal GC keys off, so GC can reclaim the auth dir even
+    without the marker. The fallback is itself best-effort (GC's loud-failure
+    path remains the net if even removal fails).
     """
 
     if not claude_root.exists():
         return
     try:
         marker.write_text("")
-    except OSError as exc:  # pragma: no cover - defensive: marker is a best-effort hint
+        return
+    except OSError as exc:
         _log.warning(
             "claude_auth_overlay_unmounted_marker_write_failed",
             reason_code=_CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
             workspace_auth_root=str(claude_root),
             error=str(exc),
         )
+    for scratch in ("upper", "work"):
+        shutil.rmtree(claude_root / scratch, ignore_errors=True)
 
 
 def teardown_workspace_auth_overlay(

@@ -307,6 +307,54 @@ def test_teardown_records_marker_after_unmount(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_teardown_marker_write_failure_clears_overlay_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A capable unmount whose ``.overlay-unmounted`` marker write fails (e.g.
+    # ENOSPC) must not strand the auth dir: the worker's terminal-runtime-release
+    # sweep is one-shot, so no later capable sweep re-writes the marker, and a
+    # capability-less GC would then see ``upper`` without a marker and skip the
+    # auth delete forever. Falling back to removing the overlay scratch
+    # (``upper``/``work``) clears the very signal GC keys off so it can reclaim.
+    work_dir = tmp_path / "work"
+    claude_root = work_dir / "auth" / "ws_nospc" / "claude"
+    (claude_root / "merged").mkdir(parents=True)
+    (claude_root / "upper").mkdir()
+    (claude_root / "work").mkdir()
+    mounter = FakeOverlayMounter(supported=True)
+    mounter.mounted.add(claude_root / "merged")
+
+    real_write_text = Path.write_text
+
+    def _failing_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == _OVERLAY_UNMOUNTED_MARKER:
+            raise OSError("No space left on device")
+        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", _failing_write_text)
+
+    with capture_logs() as logs:
+        teardown_workspace_auth_overlay(
+            work_dir=work_dir, workspace_id="ws_nospc", overlay_mounter=mounter
+        )
+
+    assert mounter.unmounts == [claude_root / "merged"]
+    assert not (claude_root / _OVERLAY_UNMOUNTED_MARKER).exists()
+    # The scratch GC keys off is gone, so a later capability-less teardown is a
+    # clean no-op instead of an indefinite Unverifiable failure.
+    assert not (claude_root / "upper").exists()
+    assert not (claude_root / "work").exists()
+    assert any(entry.get("reason_code") == _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE for entry in logs)
+
+    teardown_workspace_auth_overlay(
+        work_dir=work_dir,
+        workspace_id="ws_nospc",
+        overlay_mounter=mounter,
+        capability_probe=lambda: False,
+    )
+
+
+@pytest.mark.unit
 def test_teardown_incapable_with_upper_and_no_marker_raises(tmp_path: Path) -> None:
     # CLI/API context (no CAP_SYS_ADMIN) cannot see the worker's mount. A
     # surviving overlay ``upper`` with no teardown marker means the worker may
