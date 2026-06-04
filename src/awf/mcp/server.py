@@ -412,7 +412,7 @@ async def _provided_readiness(
     workspace_view_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
         _workspace_view_for_readyz(
             session_factory,
-            min_retention_hours=settings.completed_workspace_retention_hours,
+            min_retention_hours=service_settings.completed_workspace_retention_hours,
         )
     )
     docker_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
@@ -422,7 +422,7 @@ async def _provided_readiness(
         )
     )
     worktree_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
-        asyncio.to_thread(scan_managed_worktrees, settings.work_dir)
+        asyncio.to_thread(scan_managed_worktrees, service_settings.work_dir)
     )
     orphan_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_orphan_resources_with_concurrent_scans(

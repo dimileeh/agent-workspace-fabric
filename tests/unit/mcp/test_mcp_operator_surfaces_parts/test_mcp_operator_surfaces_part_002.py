@@ -37,6 +37,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
+from awf.service.config import resolve_service_settings
 from awf.service.disk import DiskCheck
 from awf.service.orphan_resources import (
     WorkspaceIdView,
@@ -1141,6 +1142,42 @@ class TestMcpOperatorSurfaceParityPart001:
         )
 
         assert captured["auto_cleanup_orphans"] is True
+
+    @pytest.mark.unit
+    async def test_readiness_fallback_scans_resolved_service_work_dir(
+        self,
+        resource_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """The MCP readiness fallback must scan the *resolved* ``service_settings``
+        work dir, exactly like ``/readyz``. Service-mode resolution can rewrite the
+        effective host work dir (e.g. via ``AWF_HOST_WORK_DIR``); reading the raw
+        ``settings.work_dir`` would inspect a different tree and miss or invent
+        orphan worktrees relative to the REST readiness surface."""
+        import awf.service.orphan_resources as orphan_resources
+
+        host_work_dir = tmp_path / "host-awf-state"
+        monkeypatch.setenv("AWF_HOST_WORK_DIR", str(host_work_dir))
+        service_settings = resolve_service_settings(resource_stack.settings)
+        assert service_settings.work_dir != resource_stack.settings.work_dir
+
+        captured: dict[str, Any] = {}
+        real_scan = orphan_resources.scan_managed_worktrees
+
+        def _capture(work_dir: Any) -> Any:
+            captured["work_dir"] = work_dir
+            return real_scan(work_dir)
+
+        monkeypatch.setattr(orphan_resources, "scan_managed_worktrees", _capture)
+
+        await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=resource_stack.settings,
+            session_factory=resource_stack.factory,
+        )
+
+        assert captured["work_dir"] == service_settings.work_dir
 
     @pytest.mark.unit
     async def test_readiness_fallback_reports_db_failure_when_no_session_factory(
