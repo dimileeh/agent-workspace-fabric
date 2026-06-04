@@ -108,6 +108,11 @@ For the source checkout with no global install lane, run AWF from the checkout:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 uv sync --extra dev
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf service status --format pretty

@@ -650,8 +650,15 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     """Assert no-global checkout rollback does not require a global awf executable."""
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    stop_guard_line = "if [ -f docker/compose/.env ]; then"
+    stop_env_file_line = (
+        "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+    )
+    stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
+    stop_guard_end_line = "fi"
+    setup_line = 'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"'
     no_global_commands = (
-        'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+        setup_line,
         'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"',
         "uv run --python 3.12 --extra dev awf service status --format pretty",
         (
@@ -661,6 +668,19 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     )
 
     assert "source checkout with no global install" in rollback_section.lower()
+    assert stop_guard_line in rollback_section
+    assert stop_env_file_line in rollback_section
+    assert stop_fallback_line in rollback_section
+    assert stop_guard_end_line in rollback_section
+    stop_fallback_index = rollback_section.index(stop_fallback_line)
+    assert (
+        rollback_section.index("uv sync --extra dev")
+        < rollback_section.index(stop_guard_line)
+        < rollback_section.index(stop_env_file_line)
+        < stop_fallback_index
+        < rollback_section.index(stop_guard_end_line, stop_fallback_index)
+        < rollback_section.index(setup_line)
+    )
     for command in no_global_commands:
         assert command in rollback_section
 
