@@ -20,6 +20,11 @@ holds them. Editing `~/.awf/config.yml` remains the no-stop option. Before
 deleting a recorded checkout, either refresh the persisted path:
 
 ```bash
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 
@@ -72,6 +77,11 @@ the API and Postgres host ports and blocks while the previous Core stack still
 holds them. Then run:
 
 ```bash
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 
@@ -101,6 +111,11 @@ API and Postgres host ports and blocks while the previous Core stack still holds
 them. Then run:
 
 ```bash
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 uv run --python 3.12 --extra dev awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 

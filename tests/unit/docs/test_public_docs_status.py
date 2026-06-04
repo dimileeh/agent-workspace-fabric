@@ -822,6 +822,12 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         "Core stack still holds them"
     )
     no_stop_guidance = "Editing `~/.awf/config.yml` remains the no-stop option"
+    stop_guard_line = "if [ -f docker/compose/.env ]; then"
+    stop_env_file_line = (
+        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+    )
+    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
+    stop_guard_end_line = "\nfi\n"
     source_cases = (
         (
             "global tool install",
@@ -848,14 +854,39 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
     assert core_stop_guidance in intro_words
     assert port_block_guidance in intro_words
     assert no_stop_guidance in intro_words
-    assert intro_words.index(core_stop_guidance) < intro_words.index(
+    intro_setup_line = (
         "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
     )
+    assert intro_words.index(core_stop_guidance) < intro_words.index(intro_setup_line)
+    assert stop_guard_line in intro_section
+    assert stop_env_file_line in intro_section
+    assert stop_fallback_line in intro_section
+    assert stop_guard_end_line in intro_section
+    intro_fallback_index = intro_section.index(stop_fallback_line)
+    assert (
+        intro_section.index(stop_guard_line)
+        < intro_section.index(stop_env_file_line)
+        < intro_fallback_index
+        < intro_section.index(stop_guard_end_line, intro_fallback_index)
+        < intro_section.index(intro_setup_line)
+    ), "intro must provide guarded Core stop commands before metadata refresh"
     for label, section, setup_line in source_cases:
         section_words = " ".join(section.split())
         assert core_stop_guidance in section_words, f"{label} must tell users to stop Core"
         assert port_block_guidance in section_words, f"{label} must explain setup port blockers"
         assert section_words.index(core_stop_guidance) < section_words.index(setup_line)
+        assert stop_guard_line in section, f"{label} must provide a compose stop guard"
+        assert stop_env_file_line in section, f"{label} must stop with compose env file"
+        assert stop_fallback_line in section, f"{label} must stop without compose env file"
+        assert stop_guard_end_line in section, f"{label} must close the compose stop guard"
+        stop_fallback_index = section.index(stop_fallback_line)
+        assert (
+            section.index(stop_guard_line)
+            < section.index(stop_env_file_line)
+            < stop_fallback_index
+            < section.index(stop_guard_end_line, stop_fallback_index)
+            < section.index(setup_line)
+        ), f"{label} must provide guarded Core stop commands before metadata refresh"
 
 
 def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:

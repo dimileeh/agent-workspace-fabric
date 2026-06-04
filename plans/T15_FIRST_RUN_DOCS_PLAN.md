@@ -153,6 +153,11 @@ release-installed and virtualenv rollback snippet in `docs/UPGRADE.md` must
 restore `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` from `.env` or the current
 shell before `awf start`, matching the package upgrade guidance.
 
+Post-review adjustment for review-level comment `issue:4620140358`:
+`docs/UNINSTALL.md` must include the guarded Docker Compose stop commands before
+each source-checkout metadata refresh command, including the introductory
+refresh example and both source-checkout uninstall sections.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

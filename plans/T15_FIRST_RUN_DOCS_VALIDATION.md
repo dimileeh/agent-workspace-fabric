@@ -56,6 +56,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address PR thread `PRRT_kwDOSJAM6s6HHCfa` by restoring mandatory
   package and virtualenv service env before the release-installed rollback
   `awf start` command in `docs/UPGRADE.md`.
+- Complete: Address review-level comment `issue:4620140358` by adding guarded
+  Core stop commands before every `docs/UNINSTALL.md` source-checkout metadata
+  refresh example.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -808,6 +811,45 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `47 passed in 1.39s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `docs/UNINSTALL.md` now includes the guarded Docker Compose stop block before
+  the introductory source-checkout metadata refresh command.
+- `docs/UNINSTALL.md` now includes the same guarded stop block before the
+  source-checkout/global-tool and source-checkout/no-global-install refresh
+  commands.
+- `tests/unit/docs/test_public_docs_status.py` now rejects uninstall guidance
+  that tells source-checkout users to stop Core without providing copy-paste
+  stop commands before `awf setup --source-checkout ...`.
+- `docs/UPGRADE.md` already contained the release-installed rollback env guards;
+  the focused rollback regression still passes.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/UNINSTALL.md` had no guarded `docker compose ... stop` block before the
+introductory source-checkout metadata refresh command.
+
+Final focused repair result: `1 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start -q
+```
+
+Result: `1 passed in 0.66s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
