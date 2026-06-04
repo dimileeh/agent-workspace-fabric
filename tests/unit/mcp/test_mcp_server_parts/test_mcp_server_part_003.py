@@ -34,6 +34,7 @@ from awf.mcp import metrics_tools as metrics_tools_mod
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
+from awf.service import config as service_config
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from awf.service.provider_readiness import KNOWN_SECRET_ENV_KEYS
@@ -258,6 +259,15 @@ def _optional_object_schema(schema: dict[str, object]) -> dict[str, object]:
     assert object_schema is not None, f"Could not find object schema in anyOf: {any_of}"
     assert isinstance(object_schema, dict)
     return object_schema
+
+
+def _log_redaction_context_for_settings(settings: Settings) -> int:
+    service_settings = service_config.resolve_service_settings(settings)
+    extra_secrets = metrics_tools_mod._workspace_log_redaction_secrets(  # noqa: SLF001
+        settings,
+        service_settings=service_settings,
+    )
+    return metrics_tools_mod._workspace_log_redaction_context_bytes(extra_secrets)  # noqa: SLF001
 
 
 def _assert_idempotency_key_schema(schema: dict[str, object]) -> None:
@@ -1816,11 +1826,18 @@ class TestWorkspaceLogs:
         for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
             monkeypatch.delenv(key, raising=False)
 
+        settings = Settings(_env_file=None)
         requested_offset = 10_000
         fragment = "visible-secret-fragment"
         requested_limit_bytes = len(fragment.encode())
-        context_bytes = metrics_tools_mod._LOG_REDACTION_CONTEXT_BYTES  # noqa: SLF001
-        first_offset = requested_offset - context_bytes - 1
+        redaction_context = _log_redaction_context_for_settings(settings)
+        first_offset = metrics_tools_mod._workspace_log_read_offset(  # noqa: SLF001
+            requested_offset=requested_offset,
+            redaction_context=redaction_context,
+        )
+        first_read_limit = (
+            requested_offset - first_offset + requested_limit_bytes + redaction_context
+        )
         slice_start = requested_offset - first_offset
         assignment_prefix = b"SERVICE_TOKEN="
         raw_bytes = (
@@ -1850,7 +1867,7 @@ class TestWorkspaceLogs:
             if len(calls) > 1:
                 raise AssertionError("assignment context is already visible")
             assert offset == first_offset
-            assert limit_bytes == context_bytes + 1 + requested_limit_bytes + context_bytes
+            assert limit_bytes == first_read_limit
             return {
                 "stream_id": stream_id,
                 "offset": offset,
@@ -1861,7 +1878,7 @@ class TestWorkspaceLogs:
             }
 
         monkeypatch.setattr(service, "read_log", visible_assignment_read_log)
-        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+        mcp = build_mcp_server(service=service, settings=settings)
 
         chunk = await _call(
             mcp,
@@ -1875,7 +1892,7 @@ class TestWorkspaceLogs:
         )
 
         assert isinstance(chunk, dict)
-        assert calls == [(first_offset, context_bytes + 1 + requested_limit_bytes + context_bytes)]
+        assert calls == [(first_offset, first_read_limit)]
         assert chunk["offset"] == requested_offset
         assert chunk["next_offset"] == requested_offset + requested_limit_bytes
         assert chunk["eof"] is False
@@ -1892,11 +1909,18 @@ class TestWorkspaceLogs:
         for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
             monkeypatch.delenv(key, raising=False)
 
+        settings = Settings(_env_file=None)
         requested_offset = 10_000
         fragment = "leaking-assignment-tail"
         requested_limit_bytes = len(fragment.encode())
-        context_bytes = metrics_tools_mod._LOG_REDACTION_CONTEXT_BYTES  # noqa: SLF001
-        first_offset = requested_offset - context_bytes - 1
+        redaction_context = _log_redaction_context_for_settings(settings)
+        first_offset = metrics_tools_mod._workspace_log_read_offset(  # noqa: SLF001
+            requested_offset=requested_offset,
+            redaction_context=redaction_context,
+        )
+        first_read_limit = (
+            requested_offset - first_offset + requested_limit_bytes + redaction_context
+        )
         leading_bytes = b"x" * (requested_offset - first_offset)
         narrow_bytes = leading_bytes + fragment.encode() + b" done\n"
         first_next_offset = first_offset + len(narrow_bytes)
@@ -1940,7 +1964,7 @@ class TestWorkspaceLogs:
             raise AssertionError("unexpected read_log call")
 
         monkeypatch.setattr(service, "read_log", short_lookback_read_log)
-        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+        mcp = build_mcp_server(service=service, settings=settings)
 
         chunk = await _call(
             mcp,
@@ -1955,7 +1979,7 @@ class TestWorkspaceLogs:
 
         assert isinstance(chunk, dict)
         assert calls == [
-            (first_offset, context_bytes + 1 + requested_limit_bytes + context_bytes),
+            (first_offset, first_read_limit),
             (0, first_next_offset),
         ]
         assert chunk["offset"] == requested_offset
@@ -1974,12 +1998,19 @@ class TestWorkspaceLogs:
         for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
             monkeypatch.delenv(key, raising=False)
 
+        settings = Settings(_env_file=None)
         requested_offset = 100_000
         fragment = "still-leaking-assignment-tail"
         requested_limit_bytes = len(fragment.encode())
-        context_bytes = metrics_tools_mod._LOG_REDACTION_CONTEXT_BYTES  # noqa: SLF001
+        redaction_context = _log_redaction_context_for_settings(settings)
         lookback_bytes = metrics_tools_mod._LOG_REDACTION_ASSIGNMENT_LOOKBACK_BYTES  # noqa: SLF001
-        first_offset = requested_offset - context_bytes - 1
+        first_offset = metrics_tools_mod._workspace_log_read_offset(  # noqa: SLF001
+            requested_offset=requested_offset,
+            redaction_context=redaction_context,
+        )
+        first_read_limit = (
+            requested_offset - first_offset + requested_limit_bytes + redaction_context
+        )
         lookback_offset = first_offset - lookback_bytes
         first_bytes = (b"x" * (requested_offset - first_offset)) + fragment.encode() + b" done\n"
         lookback_result_bytes = (
@@ -2027,7 +2058,7 @@ class TestWorkspaceLogs:
             raise AssertionError("unexpected read_log call")
 
         monkeypatch.setattr(service, "read_log", still_mid_fragment_read_log)
-        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+        mcp = build_mcp_server(service=service, settings=settings)
 
         chunk = await _call(
             mcp,
@@ -2042,7 +2073,7 @@ class TestWorkspaceLogs:
 
         assert isinstance(chunk, dict)
         assert calls == [
-            (first_offset, context_bytes + 1 + requested_limit_bytes + context_bytes),
+            (first_offset, first_read_limit),
             (lookback_offset, first_next_offset - lookback_offset),
         ]
         assert chunk["offset"] == requested_offset

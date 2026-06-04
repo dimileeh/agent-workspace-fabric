@@ -1098,6 +1098,62 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## CI Repair: `python-full-coverage` Cancellation Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: GitHub Actions run `26958642080` was inspected. The aggregate
+  `ci-required` job failed because `python-full-coverage` was cancelled at the
+  60-minute workflow timeout while lint/type, console, and release-artifacts
+  succeeded.
+- Complete: Focused local pytest reproduced the hidden actionable failures in
+  PR-touched tests. The three failing MCP workspace-log tests hard-coded
+  `_LOG_REDACTION_CONTEXT_BYTES` as the first expanded read context even though
+  MCP exact-secret discovery can increase that context from default Compose
+  secret-like values.
+- Complete: The MCP lookback tests now resolve the same exact-secret context
+  used by `awf_read_workspace_log`, preserving the behavior assertions without
+  disabling checks or weakening redaction expectations.
+- Complete: No avoidable T17 runtime overhead was removed in this iteration;
+  focused MCP xdist coverage passed, and the actionable failure was stale
+  offset expectations rather than test setup cost.
+- Complete: Focused verification passed. Broad AWF/GitHub full coverage was not
+  run locally; AWF owns that gate after agent completion.
+
+Additional files changed:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_mcp_cli.py tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/runtime/test_log_redaction.py tests/unit/service/test_doctor.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/service/test_support_bundle.py -q --tb=short -ra
+# failed: 3 MCP workspace-log assignment lookback tests expected offset 5903/95903 but actual expanded read offset was 5896/95896
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'visible_assignment_context or assignment_lookback_failure or assignment_lookback_still_mid_fragment' --tb=short -ra
+# 3 passed, 38 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_mcp_cli.py tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/runtime/test_log_redaction.py tests/unit/service/test_doctor.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/service/test_support_bundle.py -q --tb=short -ra
+# 213 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp -n 8 --dist=loadscope -q --tb=short -ra
+# 281 passed
+
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

@@ -729,3 +729,48 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```
+
+## CI Repair Plan: `python-full-coverage` Cancellation
+
+### Problem Statement And Scope
+
+GitHub Actions run `26958642080` cancelled the `python-full-coverage` job at
+the workflow's 60-minute timeout. The job reached 99% test progress, had
+already printed pytest failure markers, and never reached pytest failure
+reporting or coverage threshold evaluation. The required aggregate job failed
+because `python-full-coverage` was `cancelled`; lint/type, console, and release
+artifact jobs passed.
+
+This repair is limited to the T17 setup-secret redaction branch. It will not
+modify protected workflow gates, skip tests, reduce coverage requirements, or
+run broad/full coverage locally inside the agent phase.
+
+### Requirements Checklist
+
+- Reproduce actionable pytest failures from the PR-touched test areas with
+  focused commands.
+- Fix real behavior or test bugs without weakening assertions or disabling CI.
+- Remove avoidable T17 test/runtime overhead only when the covered behavior
+  remains asserted by focused tests.
+- Record focused verification evidence and state that broad AWF/GitHub
+  validation remains owned by AWF after agent completion.
+
+### Implementation Steps
+
+1. Run focused pytest commands for PR-touched Python test files to expose the
+   failure details hidden by the cancelled full-coverage job.
+2. Inspect any slow T17 tests added by the branch and reduce unnecessary
+   repetition or expensive setup while preserving behavioral assertions.
+3. Implement the smallest source/test fixes required by those focused failures.
+4. Run focused pytest, ruff, and mypy checks for touched files only.
+5. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with requirement
+   status and evidence. Broad AWF/GitHub validation remains owned by AWF after
+   agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest <focused changed tests> -q
+uv run --python 3.12 --extra dev ruff check <touched source/test files>
+uv run --python 3.12 --extra dev mypy <touched source files>
+```
