@@ -813,10 +813,14 @@ def _safe_overlay_dest(merged: Path, rel: Path) -> Path | None:
 
     So walk every component of ``rel`` and refuse (return ``None``) if any is a symlink,
     materializing missing parent dirs one level at a time so ``mkdir`` never traverses
-    through a planted link. The returned destination is guaranteed not to be a symlink,
-    so the subsequent ``copy2`` cannot follow one out of the tree. Returns ``None`` —
-    skip this file, best-effort — on any structural conflict (symlinked or non-dir
-    component) or ``OSError``.
+    through a planted link. The final destination is refused too if it is a symlink *or*
+    an existing directory: ``copy2`` treats a directory ``dst`` as a containing dir and
+    writes ``dst / basename(src)`` inside it, so an agent-created directory holding an
+    inner symlink would still let the root copy escape the tree. The returned destination
+    is therefore guaranteed to be neither a symlink nor a directory, so the subsequent
+    ``copy2`` writes a plain file and cannot follow a link out of the tree. Returns
+    ``None`` — skip this file, best-effort — on any structural conflict (symlinked or
+    non-dir component, or a symlink/directory at the destination) or ``OSError``.
     """
 
     current = merged
@@ -834,6 +838,16 @@ def _safe_overlay_dest(merged: Path, rel: Path) -> Path | None:
     if dest.is_symlink():
         # A planted destination symlink: refuse to follow it (``copy2`` would write
         # through to its target) rather than escape the tree or clobber the agent's link.
+        return None
+    if dest.is_dir():
+        # An agent-created directory occupies the destination of a legacy *file*.
+        # ``shutil.copy2`` treats a directory ``dst`` as a containing directory and
+        # writes ``dst / basename(src)`` inside it — and the agent could have planted a
+        # symlink at that inner path, so the root copy would follow it out of the tree
+        # (the symlink check above only guards ``dest`` itself, not its children). It is
+        # also a file/dir type conflict regardless. Refuse the structural conflict.
+        # (``dest`` is not a symlink here — that is rejected above — so ``is_dir`` cannot
+        # be fooled by a symlink-to-directory.)
         return None
     return dest
 

@@ -1411,3 +1411,36 @@ def test_reconcile_refuses_symlinked_parent_component(tmp_path: Path) -> None:
     # The escaped directory must not receive the forwarded file.
     assert not (outside / "f").exists()
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.unit
+def test_reconcile_refuses_directory_destination(tmp_path: Path) -> None:
+    # The escape via a *directory* destination: the agent (writing the live ``merged``
+    # upper layer) created a directory at the same relative path as a legacy regular
+    # file, holding an inner symlink whose name matches the legacy basename. ``shutil.copy2``
+    # treats a directory ``dst`` as a *containing* directory and writes ``dst / basename(src)``
+    # — i.e. through that planted inner symlink — letting the root copy escape the ``.claude``
+    # tree. ``_safe_overlay_dest`` only rejected symlinks, so the directory dest slipped
+    # through. It must refuse the directory destination and write nothing outside the tree.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    for directory in (legacy, merged, upper, base, outside):
+        directory.mkdir()
+    secret = outside / "secret"
+    secret.write_text("original\n")
+    # A genuine fallback edit (absent from base and upper) the attacker wants written.
+    (legacy / "f").write_text("attacker payload\n")
+    # The agent planted ``merged/f`` as a directory containing ``f`` -> out-of-tree secret;
+    # ``copy2`` into the directory targets ``merged/f/f`` and would follow that inner link.
+    (merged / "f").mkdir()
+    (merged / "f" / "f").symlink_to(secret)
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # copy2 must NOT have written through the inner symlink to the out-of-tree target.
+    assert secret.read_text() == "original\n"
+    # The planted inner symlink is left intact, never materialized into a real file.
+    assert (merged / "f" / "f").is_symlink()
