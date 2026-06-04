@@ -119,21 +119,10 @@ def _emit_deprecated_cli_base_url_notice() -> None:
 
 def _api_token_headers(override: str | None) -> dict[str, str]:
     """Get API token headers."""
-    token = _resolve_api_token(override)
+    token = override if override is not None else os.environ.get("AWF_API_TOKEN")
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
-
-
-def _resolve_api_token(override: str | None) -> str | None:
-    """Return the CLI API token, including local Compose defaults."""
-
-    if override is not None:
-        return override or None
-    shell_token = os.environ.get("AWF_API_TOKEN")
-    if shell_token:
-        return shell_token
-    return local_service_environ(os.environ).get("AWF_API_TOKEN")
 
 
 def _api_token_option() -> Any:

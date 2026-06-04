@@ -24,6 +24,12 @@ from awf.cli.main import app
 _runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cli_local_service_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep developer root `.env` values out of mocked CLI HTTP tests."""
+    monkeypatch.setattr(cli_common, "local_service_environ", lambda _environ: {})
+
+
 def _mock_response(*, status_code: int = 202, payload: object = None, text: str = "") -> MagicMock:
     response = MagicMock(spec=httpx.Response)
     response.status_code = status_code

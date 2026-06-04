@@ -196,10 +196,18 @@ def _format_env_value(value: str) -> str:
     if _UNQUOTED_ENV_VALUE_RE.fullmatch(value):
         return value
     if "$" in value:
-        escaped = value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
-        return f"'{escaped}'"
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    return f'"{escaped}"'
+        if "'" not in value and "\n" not in value and "\r" not in value:
+            return f"'{value}'"
+        return f'"{_format_double_quoted_env_value(value, escape_dollars=True)}"'
+    return f'"{_format_double_quoted_env_value(value)}"'
+
+
+def _format_double_quoted_env_value(value: str, *, escape_dollars: bool = False) -> str:
+    escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace('"', '\\"')
+    if escape_dollars:
+        escaped = escaped.replace("$", "\\$")
+    return escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
 
 
 def _backup_legacy_env_file(

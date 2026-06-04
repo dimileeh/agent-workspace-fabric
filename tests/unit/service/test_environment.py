@@ -149,6 +149,20 @@ def test_compose_env_file_values_preserves_raw_dollar_values(
 
 
 @pytest.mark.unit
+def test_compose_env_file_values_treats_single_quoted_backslashes_as_literal(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_API_TOKEN='sup\\'$er'\n", encoding="utf-8")
+    monkeypatch.setenv("er", "expanded")
+
+    assert compose_env_file_values(env_file)["AWF_API_TOKEN"] == "sup\\"
+
+
+@pytest.mark.unit
 def test_compose_env_file_values_expands_unquoted_and_double_quoted_references(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,6 +194,104 @@ def test_compose_env_file_values_expands_unquoted_and_double_quoted_references(
     assert values["AWF_API_BASE_URL"] == "http://127.0.0.1:9123"
     assert values["FALLBACK"] == "fallback-value"
     assert values["LITERAL"] == "secret-${TOKEN_SUFFIX}"
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_preserves_double_quoted_escapes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                r'NEWLINE="line\nnext"',
+                r'CARRIAGE_RETURN="line\rnext"',
+                r'TAB="left\tright"',
+                r'BACKSLASH="C:\\awf\\service"',
+                r'QUOTE="quoted-\"value"',
+                r'LITERAL_DOLLAR="literal-\$TOKEN"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TOKEN", "expanded")
+
+    values = compose_env_file_values(env_file)
+
+    assert values["NEWLINE"] == "line\nnext"
+    assert values["CARRIAGE_RETURN"] == "line\rnext"
+    assert values["TAB"] == "left\tright"
+    assert values["BACKSLASH"] == r"C:\awf\service"
+    assert values["QUOTE"] == 'quoted-"value'
+    assert values["LITERAL_DOLLAR"] == "literal-$TOKEN"
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_prefers_caller_env_for_interpolation(
+    tmp_path,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "BASE_URL=http://from-file",
+                "API_URL=${BASE_URL}/v1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    values = compose_env_file_values(env_file, environ={"BASE_URL": "http://from-shell"})
+
+    assert values["BASE_URL"] == "http://from-file"
+    assert values["API_URL"] == "http://from-shell/v1"
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_raises_for_missing_mandatory_interpolation(
+    tmp_path,
+) -> None:
+    from awf.service.environment import ComposeEnvInterpolationError, compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("API_TOKEN=${MISSING_TOKEN:?set MISSING_TOKEN}\n", encoding="utf-8")
+
+    with pytest.raises(ComposeEnvInterpolationError, match="set MISSING_TOKEN"):
+        compose_env_file_values(env_file, environ={})
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_raises_for_empty_colon_mandatory_interpolation(
+    tmp_path,
+) -> None:
+    from awf.service.environment import ComposeEnvInterpolationError, compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("API_TOKEN=${EMPTY_TOKEN:?set EMPTY_TOKEN}\n", encoding="utf-8")
+
+    with pytest.raises(ComposeEnvInterpolationError, match="set EMPTY_TOKEN"):
+        compose_env_file_values(env_file, environ={"EMPTY_TOKEN": ""})
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_allows_empty_plain_mandatory_interpolation(
+    tmp_path,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("API_TOKEN=${EMPTY_TOKEN?set EMPTY_TOKEN}\n", encoding="utf-8")
+
+    values = compose_env_file_values(env_file, environ={"EMPTY_TOKEN": ""})
+
+    assert values["API_TOKEN"] == ""
 
 
 @pytest.mark.unit

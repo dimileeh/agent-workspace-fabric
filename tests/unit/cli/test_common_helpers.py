@@ -15,7 +15,7 @@ def test_request_context_handles_response_without_request() -> None:
 
 
 @pytest.mark.unit
-def test_api_token_headers_fall_back_to_local_compose_default(
+def test_api_token_headers_do_not_fall_back_to_local_compose_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("AWF_API_TOKEN", raising=False)
@@ -25,9 +25,7 @@ def test_api_token_headers_fall_back_to_local_compose_default(
         lambda _environ: {"AWF_API_TOKEN": "local-dev-token"},
     )
 
-    assert cli_common._api_token_headers(None) == {  # noqa: SLF001
-        "Authorization": "Bearer local-dev-token"
-    }
+    assert cli_common._api_token_headers(None) == {}  # noqa: SLF001
 
 
 @pytest.mark.unit

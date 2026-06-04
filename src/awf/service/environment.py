@@ -46,6 +46,14 @@ class _ComposeInterpolationKeysCacheFailure:
         self.message = message
 
 
+class ComposeEnvInterpolationError(ValueError):
+    """Raised when Compose env-file interpolation requires a missing value."""
+
+    def __init__(self, variable: str, message: str) -> None:
+        self.variable = variable
+        super().__init__(message or f"{variable} is required")
+
+
 _COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[
     tuple[str, str, int],
     tuple[str, ...] | _ComposeInterpolationKeysCacheFailure,
@@ -203,21 +211,30 @@ def _parse_compose_env_line(line: str) -> tuple[str, str, str | None] | None:
 
     leading = raw_value.lstrip()
     if leading.startswith("'"):
-        return key, _consume_compose_quoted_value(leading, "'"), "single"
+        return key, _consume_compose_single_quoted_value(leading), "single"
     if leading.startswith('"'):
         return (
             key,
-            _decode_compose_double_quoted_value(_consume_compose_quoted_value(leading, '"')),
+            _decode_compose_double_quoted_value(
+                _consume_compose_quoted_value(leading, '"', preserve_escapes=True)
+            ),
             "double",
         )
     return key, _strip_compose_inline_comment(leading).strip(), None
 
 
-def _consume_compose_quoted_value(raw_value: str, quote: str) -> str:
+def _consume_compose_quoted_value(
+    raw_value: str,
+    quote: str,
+    *,
+    preserve_escapes: bool = False,
+) -> str:
     chars: list[str] = []
     escaped = False
     for char in raw_value[1:]:
         if escaped:
+            if preserve_escapes:
+                chars.append("\\")
             chars.append(char)
             escaped = False
             continue
@@ -225,6 +242,17 @@ def _consume_compose_quoted_value(raw_value: str, quote: str) -> str:
             escaped = True
             continue
         if char == quote:
+            return "".join(chars)
+        chars.append(char)
+    if escaped and preserve_escapes:
+        chars.append("\\")
+    return "".join(chars)
+
+
+def _consume_compose_single_quoted_value(raw_value: str) -> str:
+    chars: list[str] = []
+    for char in raw_value[1:]:
+        if char == "'":
             return "".join(chars)
         chars.append(char)
     return "".join(chars)
@@ -237,7 +265,7 @@ def _decode_compose_double_quoted_value(value: str) -> str:
         "t": "\t",
         "\\": "\\",
         '"': '"',
-        "$": "$",
+        "$": _COMPOSE_ESCAPED_DOLLAR,
     }
     decoded: list[str] = []
     escaped = False
@@ -268,7 +296,7 @@ def _compose_expand_env_value(
     caller_environ: Mapping[str, str],
     values: Mapping[str, str],
 ) -> str:
-    interpolation_context = {**caller_environ, **values}
+    interpolation_context = {**values, **caller_environ}
     escaped_value = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
 
     def _replace(match: re.Match[str]) -> str:
@@ -308,9 +336,13 @@ def _compose_expand_env_value(
                 else ""
             )
         if operator == ":?":
-            return (resolved or "") if is_non_empty else ""
+            if is_non_empty:
+                return resolved or ""
+            raise ComposeEnvInterpolationError(name, word)
         if operator == "?":
-            return (resolved or "") if is_set else ""
+            if is_set:
+                return resolved or ""
+            raise ComposeEnvInterpolationError(name, word)
         return resolved or ""
 
     return _COMPOSE_ENV_EXPANSION_PATTERN.sub(_replace, escaped_value).replace(

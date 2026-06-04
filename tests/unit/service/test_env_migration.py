@@ -227,3 +227,34 @@ def test_legacy_compose_env_migration_escapes_dollar_values(
     assert result.status == "migrated"
     assert "AWF_API_TOKEN='secret-${TOKEN_SUFFIX}'" in root_env.read_text(encoding="utf-8")
     assert dotenv_values(root_env, interpolate=False)["AWF_API_TOKEN"] == ("secret-${TOKEN_SUFFIX}")
+
+
+@pytest.mark.unit
+def test_legacy_compose_env_migration_uses_compose_safe_quotes_for_dollar_single_quote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Migrated values with `$` and `'` must not rely on `\'` in single quotes."""
+    from awf.service.env_migration import migrate_legacy_compose_env_file
+    from awf.service.environment import compose_env_file_values
+
+    monkeypatch.setenv("er", "expanded")
+    root_env = tmp_path / ".env"
+    env_example = tmp_path / ".env.example"
+    legacy_env = tmp_path / "docker" / "compose" / ".env"
+    legacy_env.parent.mkdir(parents=True)
+    env_example.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
+    legacy_env.write_text('AWF_API_TOKEN="sup\'$er"\n', encoding="utf-8")
+
+    result = migrate_legacy_compose_env_file(
+        canonical_env_file=root_env,
+        env_example_file=env_example,
+        legacy_env_file=legacy_env,
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert result.status == "migrated"
+    root_text = root_env.read_text(encoding="utf-8")
+    assert 'AWF_API_TOKEN="sup\'\\$er"' in root_text
+    assert "AWF_API_TOKEN='sup\\'$er'" not in root_text
+    assert compose_env_file_values(root_env)["AWF_API_TOKEN"] == "sup'$er"
