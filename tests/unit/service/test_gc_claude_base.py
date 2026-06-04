@@ -391,6 +391,45 @@ def test_live_lowerdir_outside_base_root_does_not_protect(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+def test_live_base_protected_when_work_dir_reached_via_symlink(tmp_path: Path) -> None:
+    # Live ``lowerdir`` paths from ``/proc/mounts`` are kernel-resolved (symlinks
+    # followed), while the reaper's ``base_root`` derives from ``work_dir``. If
+    # ``work_dir`` is a symlink (a bind-mount alias), an unresolved comparison would
+    # drop the live base from the protected set and the reaper would try to ``rmtree``
+    # a live lower — a spurious ``partial`` on every execute pass. The base root and
+    # each candidate are resolved so the symlinked and kernel-resolved forms match.
+    real_work = tmp_path / "real-work"
+    real_work.mkdir()
+    work_dir = tmp_path / "sym-work"
+    work_dir.symlink_to(real_work, target_is_directory=True)
+    host_home = tmp_path / "empty-home"
+    host_home.mkdir()  # no ``.claude``: isolate the live-mount protection
+
+    # Bases are created through the symlinked ``work_dir`` …
+    base_live = _make_base(work_dir, "siglive00000000")
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    # … but ``/proc/mounts`` records the kernel-resolved (real-path) lowerdir.
+    resolved_live = _shared_claude_base_dir(real_work, "siglive00000000")
+    assert resolved_live != base_live  # the symlinked and resolved forms differ
+    proc_mounts = _proc_mounts_with_lowerdir(tmp_path, resolved_live)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=proc_mounts,
+        execute=True,
+    )
+
+    assert report["status"] == "ok"
+    assert report["reaped"] == ["sigsuper0000000"]
+    assert report["protected"] == ["siglive00000000"]
+    assert report["errors"] == []
+    # The live base survives; only the genuinely superseded one is reclaimed.
+    assert base_live.is_dir()
+    assert not base_super.parent.exists()
+
+
+@pytest.mark.unit
 def test_reap_one_base_refuses_path_outside_base_root(tmp_path: Path) -> None:
     # The hard guard: ``_reap_one_base`` refuses to ``rmtree`` a dir that is not a
     # direct child of the base root, even if a caller hands it one.

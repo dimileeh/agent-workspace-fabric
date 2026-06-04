@@ -201,9 +201,19 @@ def _protected_signature_dirs(
     for base in protected_bases:
         # A live ``lowerdir`` may point anywhere (other overlays on the host); keep
         # only those that resolve to a ``<signature>/.claude`` base under our root.
+        # Compare in *resolved* form: live lowerdirs read from ``/proc/mounts`` are
+        # kernel-resolved (the kernel follows symlinks when recording mount paths),
+        # while host/pinned bases are built from a ``work_dir`` that only had
+        # ``expanduser()`` applied. If ``work_dir`` is reached via a symlink (e.g. a
+        # bind-mount alias) the two string forms diverge; without resolving, a live
+        # base would silently drop out of the protected set and the reaper would
+        # ``rmtree`` a live lower — overlayfs refuses with ``EBUSY``, so no data is
+        # lost, but every execute pass would report a spurious ``partial``. ``base_root``
+        # is already resolved by the caller, so resolving each candidate keeps the
+        # comparison (and the membership test in the scan loop) consistent.
         signature_dir = base.parent
-        if signature_dir.parent == base_root:
-            protected_dirs.add(signature_dir)
+        if signature_dir.parent.resolve(strict=False) == base_root:
+            protected_dirs.add(signature_dir.resolve(strict=False))
     return protected_dirs
 
 
@@ -245,7 +255,11 @@ def reap_superseded_claude_bases(
 
     work_dir = Path(work_dir).expanduser()
     host_home = Path(host_home).expanduser()
-    base_root = _claude_base_root(work_dir)
+    # Resolve the base root to its canonical form so it matches the kernel-resolved
+    # lowerdir paths read from ``/proc/mounts`` in ``_protected_signature_dirs`` even
+    # when ``work_dir`` is reached via a symlink. ``iterdir()`` below then yields
+    # canonical ``<signature>`` dirs and ``_reap_one_base``'s parent guard stays exact.
+    base_root = _claude_base_root(work_dir).resolve(strict=False)
 
     report: dict[str, object] = {
         "status": "skipped",
