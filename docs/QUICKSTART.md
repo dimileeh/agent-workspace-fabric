@@ -104,12 +104,9 @@ awf smoke run --project ../awf-eval-project --mocked-local --format pretty
 
 Uninstall:
 
-```bash
-uv tool uninstall agent-workspace-fabric
-```
-
-Before deleting the checkout, make sure `~/.awf/config.yml` no longer records it
-under `source_checkout`. Either refresh the persisted path:
+Before uninstalling the global tool or deleting the checkout, make sure
+`~/.awf/config.yml` no longer records it under `source_checkout`. Either refresh
+the persisted path:
 
 ```bash
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
@@ -118,6 +115,10 @@ awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 or edit `~/.awf/config.yml` and remove only the top-level `source_checkout:` block.
 Keep provider, client, and consent entries unless you intentionally want to reset
 host setup state.
+
+```bash
+uv tool uninstall agent-workspace-fabric
+```
 
 ```bash
 cd ..

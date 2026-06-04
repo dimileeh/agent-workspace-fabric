@@ -234,15 +234,19 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
 
     for heading in source_lane_headings:
         source_section = _markdown_section(quickstart_text, heading)
+        replacement_setup = (
+            "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+        )
         assert "~/.awf/config.yml" in source_section
         assert "remove only the top-level `source_checkout:` block" in source_section
-        assert (
-            "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
-            in source_section
-        )
+        assert replacement_setup in source_section
         assert source_section.index("~/.awf/config.yml") < source_section.index(
             "rm -rf aira-agent-workspace-fabric"
         )
+        if heading == "## Lane 2: Source Checkout With Global Tool Install":
+            assert source_section.index(replacement_setup) < source_section.index(
+                "uv tool uninstall agent-workspace-fabric"
+            )
 
 
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
