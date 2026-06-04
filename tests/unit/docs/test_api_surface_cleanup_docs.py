@@ -32,10 +32,11 @@ RETIRED_OPERATOR_SCRIPTS = (
 )
 
 SUPPORTED_SCRIPTS = {
+    "check_release_artifacts.py",
+    "first_run_smoke.py",
     "generate_install_manifest.py",
     "generate_openapi.py",
     "generate_reason_catalog.py",
-    "check_release_artifacts.py",
     "release_smoke.py",
 }
 
