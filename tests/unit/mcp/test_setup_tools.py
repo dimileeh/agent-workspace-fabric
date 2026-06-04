@@ -669,9 +669,11 @@ async def test_get_setup_status_source_checkout_next_steps_do_not_duplicate_exis
     payload = _payload(result)
 
     assert result.isError is False
+    expected_step = f"Run awf start --source-checkout '{checkout}'."
     assert payload["next_steps"] == [
-        f"Run awf start --source-checkout '{upstream_checkout}'.",
+        expected_step,
     ]
+    assert payload["next_steps"][0].count("--source-checkout") == 1
 
 
 @pytest.mark.unit

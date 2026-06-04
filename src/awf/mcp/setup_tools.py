@@ -82,6 +82,11 @@ _LOGGER = logging.getLogger(__name__)
 _SETUP_STATUS_DRY_RUN_STEP_PATTERN = re.compile(
     r"\bawf setup --dry-run(?P<suffix>[.,;):]|$|\s+to\b)"
 )
+_SETUP_STATUS_START_SOURCE_CHECKOUT_STEP_PATTERN = re.compile(
+    r"\bawf start\s+--source-checkout(?:=|\s+)"
+    r"(?:'[^']*'|\"[^\"]*\"|\S)+?"
+    r"(?P<suffix>[.,;):](?=\s|$)|$|\s+to\b)"
+)
 _SETUP_STATUS_START_STEP_PATTERN = re.compile(r"\bawf start(?P<suffix>[.,;):]|$|\s+to\b)")
 
 
@@ -758,6 +763,10 @@ def _setup_status_next_step_for_source_checkout(
 ) -> str:
     step = _SETUP_STATUS_DRY_RUN_STEP_PATTERN.sub(
         lambda match: f"{setup_command}{match.group('suffix')}",
+        step,
+    )
+    step = _SETUP_STATUS_START_SOURCE_CHECKOUT_STEP_PATTERN.sub(
+        lambda match: f"{start_command}{match.group('suffix')}",
         step,
     )
     return _SETUP_STATUS_START_STEP_PATTERN.sub(

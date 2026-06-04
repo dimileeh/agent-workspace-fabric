@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HOFU3
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` can return coherent
+`source_checkout` metadata for the explicit checkout being probed while leaving
+an upstream `awf start --source-checkout ...` next-step command pointed at a
+different checkout.
+
+Scope is limited to setup-status next-step rewriting when an explicit
+`source_checkout` is supplied. The fix must continue to avoid duplicate
+`--source-checkout` flags.
+
+### Requirements Checklist
+
+- Preserve bare `awf start` next-step rewriting for explicit checkout status
+  probes.
+- Rewrite existing `awf start --source-checkout ...` next-step commands to the
+  explicit checkout being probed.
+- Do not duplicate `--source-checkout` flags in returned next steps.
+- Add a focused regression for an upstream `awf start --source-checkout ...`
+  next step that names a different checkout.
+
+### Implementation Steps
+
+1. Update the focused setup-status next-step regression so it expects the
+   explicit checkout path and still proves no duplicate flag is emitted.
+2. Extend setup-status start-command rewriting to replace an existing
+   source-checkout-aware start command with the normalized explicit checkout
+   command.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_next_steps_do_not_duplicate_existing_start_flags -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_next_steps_do_not_duplicate_existing_start_flags tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_blocked_next_steps_preserve_explicit_checkout -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Bootstrap Execution Failure Reason Code
 
 ### Problem Statement And Scope
