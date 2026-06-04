@@ -709,12 +709,12 @@ def _resolve_user_supplied_path(raw_path: str) -> Path:
     candidate = Path(raw_path)
     try:
         expanded = candidate.expanduser()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return candidate.absolute()
 
     try:
         return expanded.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return expanded.absolute()
 
 

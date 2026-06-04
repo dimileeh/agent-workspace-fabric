@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HDuez
+
+### Problem Statement And Scope
+
+The PR review reports that `_resolve_user_supplied_path()` catches
+`OSError`/`RuntimeError` around `Path.resolve()` but lets `ValueError` escape
+for malformed user path strings such as embedded NUL bytes. Because MCP setup
+tools normalize `project_path` and `source_checkout` before their structured
+error handling can run, malformed input can surface as a FastMCP tool exception
+instead of a safe structured payload.
+
+Scope is limited to guarded user-supplied path normalization and focused MCP
+regressions for malformed init/setup/start path inputs.
+
+### Requirements Checklist
+
+- Preserve normal resolved-path behavior for valid absolute and relative paths.
+- Treat `ValueError` from user path expansion/resolution like the existing
+  guarded normalization failures.
+- Return structured MCP errors for malformed `project_path` values passed to
+  `awf_initialize_project_profile`.
+- Preserve structured MCP behavior for malformed `source_checkout` values passed
+  to setup/start tools.
+- Keep response payloads secret-free and avoid broad validation in the agent
+  phase.
+
+### Implementation Steps
+
+1. Add focused failing MCP regressions for embedded-NUL `project_path` and
+   `source_checkout` inputs.
+2. Include `ValueError` in `_resolve_user_supplied_path()` guarded fallbacks.
+3. Run the targeted regressions plus focused lint/type checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_path_value_error_returns_structured_error tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_value_error_uses_guarded_fallback tests/unit/mcp/test_setup_tools.py::test_start_local_service_source_checkout_value_error_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HDeYw Start Input Resolution Errors
 
 ### Problem Statement And Scope

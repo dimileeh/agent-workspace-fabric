@@ -714,6 +714,49 @@ async def test_get_setup_status_source_checkout_expanduser_failure_uses_guarded_
 
 
 @pytest.mark.unit
+async def test_get_setup_status_source_checkout_value_error_uses_guarded_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    source_checkout = "bad\0path"
+    expected_source_path = tmp_path / source_checkout
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="source checkout ready",
+        details={"selected_providers": [], "checks": []},
+        next_steps=("Run awf start.",),
+    )
+    run_calls: list[dict[str, Any]] = []
+
+    def fake_run_setup(**kwargs: Any) -> Any:
+        run_calls.append(kwargs)
+        return readiness
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_tools, "_run_setup", fake_run_setup)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", HostSetupConfig)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"source_checkout": source_checkout},
+    )
+
+    assert result.isError is False
+    assert run_calls == [
+        {
+            "providers": [],
+            "dry_run": True,
+            "non_interactive": True,
+            "allow_plain_secrets": False,
+            "source_checkout": expected_source_path,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_start_local_service_reuses_bootstrap_and_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -840,6 +883,48 @@ async def test_start_local_service_input_resolution_failure_is_structured(
     assert payload["error_code"] == "START_INPUT_RESOLUTION_FAILED"
     assert payload["message"] == "could not resolve local service startup inputs"
     assert payload["detail"] == {"error_type": "ValueError"}
+    assert bootstrap_calls == []
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
+async def test_start_local_service_source_checkout_value_error_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    source_checkout = "bad\0path"
+    expected_source_path = tmp_path / source_checkout
+    leaked_detail = "lstat: embedded null character in path"
+    resolve_calls: list[Path | None] = []
+    bootstrap_calls: list[bool] = []
+
+    def fail_source_checkout(source_path: Path | None) -> object:
+        resolve_calls.append(source_path)
+        raise ValueError(leaked_detail)
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", fail_source_checkout)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_start_local_service",
+        {"source_checkout": source_checkout},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "START_INPUT_RESOLUTION_FAILED"
+    assert payload["message"] == "could not resolve local service startup inputs"
+    assert payload["detail"] == {"error_type": "ValueError"}
+    assert resolve_calls == [expected_source_path]
     assert bootstrap_calls == []
     assert leaked_detail not in rendered
 
@@ -1018,6 +1103,29 @@ async def test_initialize_project_profile_path_resolve_failure_returns_structure
     assert payload["message"] == "project path does not exist"
     assert payload["detail"] == {"project_path": str(expected_project_path)}
     assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
+async def test_initialize_project_profile_path_value_error_returns_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_path = "bad\0path"
+    expected_project_path = tmp_path / project_path
+
+    monkeypatch.chdir(tmp_path)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": project_path, "template": "generic"},
+    )
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_INVALID_PATH"
+    assert payload["message"] == "project path does not exist"
+    assert payload["detail"] == {"project_path": str(expected_project_path)}
 
 
 @pytest.mark.unit
