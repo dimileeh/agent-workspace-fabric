@@ -53,6 +53,50 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Expanduser Fallback
+
+### Requirement Status
+
+- Preserve existing setup-status and start-service behavior for normal explicit
+  `source_checkout` values: Complete.
+- When `expanduser()` raises during setup-status path resolution, fall back to
+  the guarded absolute path behavior instead of escaping from the MCP tool:
+  Complete.
+- When `expanduser()` raises during start-service path resolution, fall back to
+  the guarded absolute path behavior instead of escaping from the MCP tool:
+  Complete.
+- Add focused regressions for both MCP tools: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_expanduser_failure_uses_guarded_fallback tests/unit/mcp/test_setup_tools.py::test_start_local_service_source_checkout_expanduser_failure_uses_guarded_fallback -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Pre-implementation regressions failed as expected because both tools escaped
+  through FastMCP `ToolError` from the raw `RuntimeError` raised by
+  `Path.expanduser()`.
+- Regression tests after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: Implemented Parity Coverage Reference
 
 ### Requirement Status

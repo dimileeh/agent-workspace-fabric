@@ -211,7 +211,7 @@ def _get_setup_status_result(
     providers: list[str],
     source_checkout: str | None,
 ) -> CallToolResult:
-    source_path = Path(source_checkout).expanduser() if source_checkout is not None else None
+    source_path = _resolve_client_source_checkout_path(source_checkout)
     try:
         readiness = _run_setup(
             providers=providers,
@@ -284,7 +284,7 @@ async def _start_local_service_result(
             detail={"rebuild": rebuild, "skip_agent_runtime_build": skip_agent_runtime_build},
         )
 
-    source_path = Path(source_checkout).expanduser() if source_checkout is not None else None
+    source_path = _resolve_client_source_checkout_path(source_checkout)
     try:
         inputs = await asyncio.to_thread(_resolve_start_bootstrap_inputs_for_mcp, source_path)
         options = ServiceBootstrapOptions(

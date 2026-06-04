@@ -234,6 +234,62 @@ async def test_start_local_service_offloads_sync_preparation(
 
 
 @pytest.mark.unit
+async def test_start_local_service_source_checkout_expanduser_failure_uses_guarded_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    source_checkout = "source checkout"
+    expected_source_path = tmp_path / source_checkout
+    verified = object()
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(
+            api_base_url="http://localhost:8000",
+            console_url="http://localhost:3000",
+        ),
+        compose_file=tmp_path / "compose.yml",
+        compose_env_file=tmp_path / ".env",
+        asset_root=tmp_path,
+        service_env={"AWF_API_HOST_PORT": "8000"},
+    )
+    source_calls: list[Path | None] = []
+
+    def fake_resolve_start_source_checkout(source_path: Path | None) -> object:
+        source_calls.append(source_path)
+        return verified
+
+    original_expanduser = setup_tools.Path.expanduser
+
+    def fail_expanduser(_path: Path) -> Path:
+        if str(_path) != source_checkout:
+            return original_expanduser(_path)
+        raise RuntimeError("home directory unavailable")
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        setup_tools,
+        "_resolve_start_source_checkout",
+        fake_resolve_start_source_checkout,
+    )
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _item: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+    monkeypatch.setattr(setup_tools.Path, "expanduser", fail_expanduser)
+
+    result = await mcp.call_tool(
+        "awf_start_local_service",
+        {"source_checkout": source_checkout},
+    )
+
+    assert result.isError is False
+    assert source_calls == [expected_source_path]
+
+
+@pytest.mark.unit
 async def test_get_setup_status_returns_only_status_and_safe_refs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -604,6 +660,57 @@ async def test_get_setup_status_source_checkout_falls_back_when_host_config_read
         "verified_at": verified_at,
         "marker_count": None,
     }
+
+
+@pytest.mark.unit
+async def test_get_setup_status_source_checkout_expanduser_failure_uses_guarded_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    source_checkout = "source checkout"
+    expected_source_path = tmp_path / source_checkout
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="source checkout ready",
+        details={"selected_providers": [], "checks": []},
+        next_steps=("Run awf start.",),
+    )
+    run_calls: list[dict[str, Any]] = []
+
+    def fake_run_setup(**kwargs: Any) -> Any:
+        run_calls.append(kwargs)
+        return readiness
+
+    original_expanduser = setup_tools.Path.expanduser
+
+    def fail_expanduser(_path: Path) -> Path:
+        if str(_path) != source_checkout:
+            return original_expanduser(_path)
+        raise RuntimeError("home directory unavailable")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_tools, "_run_setup", fake_run_setup)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", HostSetupConfig)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+    monkeypatch.setattr(setup_tools.Path, "expanduser", fail_expanduser)
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"source_checkout": source_checkout},
+    )
+
+    assert result.isError is False
+    assert run_calls == [
+        {
+            "providers": [],
+            "dry_run": True,
+            "non_interactive": True,
+            "allow_plain_secrets": False,
+            "source_checkout": expected_source_path,
+        }
+    ]
 
 
 @pytest.mark.unit

@@ -41,6 +41,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/ser
 Full AWF/GitHub validation and coverage gates are intentionally left to AWF
 after the agent phase.
 
+## Review Repair: issue:4620143523 Expanduser Fallback
+
+### Problem Statement And Scope
+
+The review reports that `awf_get_setup_status` and
+`awf_start_local_service` resolve explicit `source_checkout` values with direct
+`Path(...).expanduser()` calls, while the client-instruction tool already uses
+a guarded resolver that catches `OSError` and `RuntimeError` from path
+expansion/resolution.
+
+Scope is limited to making all three MCP setup tools use the same defensive
+source-checkout path resolver. The existing helper behavior, response schemas,
+and first-run error handling stay unchanged.
+
+### Requirements Checklist
+
+- Preserve existing setup-status and start-service behavior for normal explicit
+  `source_checkout` values.
+- When `expanduser()` raises during setup-status path resolution, fall back to
+  the guarded absolute path behavior instead of escaping from the MCP tool.
+- When `expanduser()` raises during start-service path resolution, fall back to
+  the guarded absolute path behavior instead of escaping from the MCP tool.
+- Add focused regressions for both MCP tools.
+
+### Implementation Steps
+
+1. Add focused failing MCP regressions that force `Path.expanduser()` to raise
+   during setup-status and start-service source-checkout resolution.
+2. Replace the direct setup-status and start-service `expanduser()` call sites
+   with the existing guarded source-checkout resolver.
+3. Run the targeted regressions and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_expanduser_failure_uses_guarded_fallback tests/unit/mcp/test_setup_tools.py::test_start_local_service_source_checkout_expanduser_failure_uses_guarded_fallback -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Marker Count Schema
 
 ### Problem Statement And Scope
