@@ -1034,6 +1034,7 @@ class TestWorkspaceLogs:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Read workspace logs from byte offsets after multibyte text."""
         service = WorkspaceService(factory, log_root=tmp_path / "logs")
         mcp = build_mcp_server(service=service)
         async with factory() as session:

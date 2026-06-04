@@ -24,6 +24,26 @@ Plan reference: `plans/COMMENT_4620110496_DOCSTRING_COVERAGE_PLAN.md`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/service/test_support_bundle.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q`
   passed: `81 passed in 25.50s`.
 
+## Iteration 2
+
+Later review-cycle commits introduced one additional PR-added test function
+without a docstring:
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_read_workspace_log_uses_byte_offsets_after_multibyte_text`.
+This iteration added a concise behavior-neutral docstring only.
+
+Evidence after Iteration 2:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=12`, `missing_docstrings_on_added_defs=1`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=12`, `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_read_workspace_log_uses_byte_offsets_after_multibyte_text -q`
+  passed: `1 passed in 1.95s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring
