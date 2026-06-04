@@ -691,17 +691,25 @@ async def _release_terminal_runtime_for_candidate(
 async def _teardown_terminal_auth_overlay(
     self: Any,
     candidate: _TerminalRuntimeCandidate,
-) -> bool:
+) -> bool | None:
     """Unmount a terminal workspace's Claude auth overlay in the worker namespace.
 
-    Returns whether the overlay was unmounted (or there was nothing to release).
+    Returns a three-valued unmount outcome for the release audit:
+
+    - ``True``  — the overlay teardown ran and succeeded.
+    - ``False`` — teardown was attempted but failed (logged); the release still
+      proceeds so port reclaim is not blocked and GC's loud-failure path is the
+      backstop for any residual.
+    - ``None``  — not applicable: no auth-overlay work dir is wired (a
+      copy-fallback workspace never provisioned an overlay), so there was
+      nothing to unmount. Distinguishing this from ``False`` keeps log-based
+      alerting from conflating a healthy no-overlay workspace with a real
+      umount error.
+
     The worker is the only context that can see the per-workspace overlay mount,
     so it releases it on the terminal-runtime-release sweep — before GC, running
     capability-less in the API container, would otherwise fail loudly trying to
-    remove a still-mounted auth dir. Any teardown failure is logged and returns
-    ``False`` rather than blocking the release (port reclaim must still proceed);
-    GC's loud-failure path is the backstop for any residual. Skipped when no work
-    dir is wired.
+    remove a still-mounted auth dir.
 
     A worker downgraded from ``CAP_SYS_ADMIN`` (overlay capable → copy fallback)
     may still hold surviving overlay ``upper`` dirs from a capable past life; in
@@ -712,7 +720,7 @@ async def _teardown_terminal_auth_overlay(
 
     work_dir = getattr(self, "_auth_overlay_work_dir", None)
     if work_dir is None:
-        return False
+        return None
 
     from awf.node.auth_mounts import (
         OverlayUnmountUnverifiableError,
@@ -746,7 +754,7 @@ async def _record_terminal_runtime_released(
     candidate: _TerminalRuntimeCandidate,
     cleanup: WorkspaceCleanupResult,
     *,
-    auth_overlay_unmounted: bool = False,
+    auth_overlay_unmounted: bool | None = None,
 ) -> None:
     """Record a ``workspace.terminal_runtime_released`` event after terminal cleanup completes.
 
@@ -762,8 +770,10 @@ async def _record_terminal_runtime_released(
         "workspace_status": candidate.status.value,
         "cleanup": cleanup.to_dict(),
         # Audit whether the worker released the per-workspace Claude overlay in its
-        # own mount namespace (the only context that can). ``False`` when no work
-        # dir is wired or the umount failed — GC's loud-failure path is the net.
+        # own mount namespace (the only context that can). Three-valued so alerting
+        # can tell apart a real failure from a no-overlay workspace: ``True`` =
+        # unmounted, ``False`` = umount attempted but failed (GC's loud-failure path
+        # is the net), ``None`` = not applicable (no overlay work dir was wired).
         "auth_overlay_unmounted": auth_overlay_unmounted,
     }
 

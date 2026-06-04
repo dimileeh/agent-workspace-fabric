@@ -972,7 +972,8 @@ async def test_release_candidate_skips_overlay_when_no_work_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no auth-overlay work dir wired, the overlay teardown is skipped and
-    the release records ``auth_overlay_unmounted=False`` without crashing."""
+    the release records ``auth_overlay_unmounted=None`` (not-applicable, distinct
+    from a ``False`` umount failure) without crashing."""
     candidate = _candidate("ws_overlay_skip")
 
     def _teardown(**_kwargs: Any) -> None:  # pragma: no cover - must not be called
@@ -987,13 +988,13 @@ async def test_release_candidate_skips_overlay_when_no_work_dir(
         async def cleanup(self, **_kwargs: Any) -> WorkspaceCleanupResult:
             return WorkspaceCleanupResult.skipped()
 
-    recorded: list[bool] = []
+    recorded: list[bool | None] = []
 
     async def _record(
         _candidate: _TerminalRuntimeCandidate,
         _cleanup: WorkspaceCleanupResult,
         *,
-        auth_overlay_unmounted: bool,
+        auth_overlay_unmounted: bool | None,
     ) -> None:
         recorded.append(auth_overlay_unmounted)
 
@@ -1005,4 +1006,4 @@ async def test_release_candidate_skips_overlay_when_no_work_dir(
 
     await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
 
-    assert recorded == [False]
+    assert recorded == [None]
