@@ -235,8 +235,11 @@ WorkspaceGCWorktreeRemove = Callable[
 CompanionImagePrune = Callable[[], Awaitable[dict[str, object]]]
 
 # Reaps superseded shared ``~/.claude`` overlay bases once per GC run (GC-B, #389),
-# independent of the per-workspace candidates. Returns an inspectable report dict.
-ClaudeBaseReap = Callable[[], Awaitable[dict[str, object]]]
+# independent of the per-workspace candidates. The argument is the set of candidate
+# auth dirs to treat as already pruned (their ``base.signature`` pins ignored) so a
+# dry-run preview matches what the same candidate set frees on execute. Returns an
+# inspectable report dict.
+ClaudeBaseReap = Callable[[frozenset[Path]], Awaitable[dict[str, object]]]
 
 
 @dataclass(frozen=True)
@@ -569,11 +572,17 @@ async def run_terminal_workspace_gc(
         now=current_time,
     )
     # The shared-base reaper is a host-wide step independent of the per-workspace
-    # candidates. On a dry run nothing is deleted, so previewing which superseded
-    # bases would be reclaimed against the current on-disk state is order-independent
-    # (the reaper honors the GC ``execute`` flag via its own closure).
+    # candidates. On execute the candidate auth dirs (and their ``base.signature``
+    # pins) are deleted *before* the reaper runs (see below), so a base pinned only by
+    # a candidate is reaped in the same pass. A dry run deletes nothing, so the pins
+    # are still on disk; tell the reaper to treat those candidate auth dirs as already
+    # pruned so a base the matching execute pass would free is previewed as ``planned``
+    # rather than mislabeled ``protected`` (PRRT_kwDOSJAM6s6HIepf).
     if not execute:
-        claude_base_reap_result = await claude_base_reap() if claude_base_reap is not None else None
+        pruned_auth_dirs = frozenset(candidate.auth.path for candidate in plan.candidates)
+        claude_base_reap_result = (
+            await claude_base_reap(pruned_auth_dirs) if claude_base_reap is not None else None
+        )
         return _gc_result(
             plan=plan,
             dry_run=True,
@@ -615,8 +624,12 @@ async def run_terminal_workspace_gc(
     # Reap superseded shared bases *after* the candidate auth dirs (and their
     # ``base.signature`` pins) are deleted above, so a base pinned only by a workspace
     # just reclaimed in this pass is reaped now instead of leaking until the next GC
-    # (PRRT_kwDOSJAM6s6HIHN6).
-    claude_base_reap_result = await claude_base_reap() if claude_base_reap is not None else None
+    # (PRRT_kwDOSJAM6s6HIHN6). The pins are already gone from disk here, so no auth dirs
+    # are pruned explicitly: relying on the actual on-disk state means a base whose
+    # candidate delete failed stays protected (its ``upper`` must not be stranded).
+    claude_base_reap_result = (
+        await claude_base_reap(frozenset()) if claude_base_reap is not None else None
+    )
     return _gc_result(
         plan=plan,
         dry_run=False,
@@ -735,12 +748,13 @@ async def run_service_workspace_gc(
     if reap_claude_bases and host_home is not None:
         resolved_host_home = Path(host_home).expanduser()
 
-        async def _reap_bases() -> dict[str, object]:
+        async def _reap_bases(pruned_auth_dirs: frozenset[Path]) -> dict[str, object]:
             return await asyncio.to_thread(
                 reap_superseded_claude_bases,
                 work_dir=normalized_work_dir,
                 host_home=resolved_host_home,
                 execute=execute,
+                pruned_auth_dirs=pruned_auth_dirs,
             )
 
         claude_base_reap = _reap_bases

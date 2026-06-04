@@ -66,7 +66,9 @@ def _claude_base_root(work_dir: Path) -> Path:
     return work_dir / "auth" / _SHARED_AUTH_DIRNAME / _CLAUDE_BASE_DIRNAME
 
 
-def _pinned_base_dirs(work_dir: Path) -> set[Path]:
+def _pinned_base_dirs(
+    work_dir: Path, *, pruned_auth_dirs: frozenset[Path] = frozenset()
+) -> set[Path]:
     """Return the shared base dirs pinned by surviving workspaces' ``base.signature``.
 
     A torn-down overlay leaves its ``upper`` and a ``base.signature`` marker on
@@ -74,9 +76,16 @@ def _pinned_base_dirs(work_dir: Path) -> set[Path]:
     a pinned base would strand the surviving ``upper`` (it could never recover the
     agent's mutations), so every pinned base is protected. The ``_shared`` tree
     itself is skipped — it holds the bases, not a workspace's auth dir.
+
+    ``pruned_auth_dirs`` lists auth dirs that the caller will delete in this GC pass
+    (the terminal candidates). On execute their pins are already gone from disk before
+    the reaper runs; on a dry run nothing is deleted, so their pins are skipped here so
+    the preview matches what the same candidate set frees on execute
+    (PRRT_kwDOSJAM6s6HIepf).
     """
 
     auth_root = work_dir / "auth"
+    pruned = {auth_dir.resolve(strict=False) for auth_dir in pruned_auth_dirs}
     pinned: set[Path] = set()
     try:
         workspace_dirs = list(auth_root.iterdir())
@@ -84,6 +93,8 @@ def _pinned_base_dirs(work_dir: Path) -> set[Path]:
         return pinned
     for workspace_dir in workspace_dirs:
         if workspace_dir.name == _SHARED_AUTH_DIRNAME:
+            continue
+        if workspace_dir.resolve(strict=False) in pruned:
             continue
         marker = workspace_dir / "claude" / _BASE_SIGNATURE_MARKER
         try:
@@ -102,6 +113,7 @@ def _protected_signature_dirs(
     host_home: Path,
     base_root: Path,
     proc_mounts: Path,
+    pruned_auth_dirs: frozenset[Path] = frozenset(),
 ) -> set[Path]:
     """Return the ``<signature>`` dirs that must never be reaped.
 
@@ -113,13 +125,14 @@ def _protected_signature_dirs(
     Computed in full *before* any removal so a base that becomes protected mid-scan
     is never reaped. An unreadable ``host_home`` simply omits the current-signature
     protection; live-mounted and pinned bases are still protected unconditionally.
+    ``pruned_auth_dirs`` are excluded from pin computation (see ``_pinned_base_dirs``).
     """
 
     protected_bases: set[Path] = set()
     if (host_home / ".claude").exists():
         protected_bases.add(_shared_claude_base_dir(work_dir, _host_claude_signature(host_home)))
     protected_bases.update(iter_overlay_lowerdirs(proc_mounts))
-    protected_bases.update(_pinned_base_dirs(work_dir))
+    protected_bases.update(_pinned_base_dirs(work_dir, pruned_auth_dirs=pruned_auth_dirs))
 
     protected_dirs: set[Path] = set()
     for base in protected_bases:
@@ -137,13 +150,17 @@ def reap_superseded_claude_bases(
     host_home: Path,
     proc_mounts: Path = _PROC_MOUNTS,
     execute: bool = False,
+    pruned_auth_dirs: frozenset[Path] = frozenset(),
 ) -> dict[str, object]:
     """Reap superseded shared ``~/.claude`` overlay bases under ``work_dir`` (#389).
 
     Scans ``auth/_shared/claude-base/<signature>`` dirs and removes those that hold
     a completed base (a ``.claude`` child) and are **not** protected — i.e. not the
     current host signature, not live-mounted, not pinned. ``execute=False`` (the
-    default) plans without deleting. Returns an inspectable report:
+    default) plans without deleting. ``pruned_auth_dirs`` lists auth dirs the caller
+    deletes in this GC pass; their ``base.signature`` pins are ignored so a dry-run
+    preview matches what the same candidate set frees on execute. Returns an
+    inspectable report:
 
     ``status`` (``ok`` / ``partial`` / ``skipped``), ``execute``, ``base_root``,
     ``scanned`` / ``protected`` / ``reaped`` / ``planned`` signature lists, and
@@ -179,6 +196,7 @@ def reap_superseded_claude_bases(
         host_home=host_home,
         base_root=base_root,
         proc_mounts=proc_mounts,
+        pruned_auth_dirs=pruned_auth_dirs,
     )
 
     scanned: list[str] = []
