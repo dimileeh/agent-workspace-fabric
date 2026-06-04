@@ -53,6 +53,51 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HH2Ia
+
+### Requirement Status
+
+- Preserve existing structured handling for `SetupCheckError`,
+  `SourceCheckoutError`, and `OSError`: Complete.
+- Convert client-instruction planning `RuntimeError` failures into a structured
+  `CLIENT_CONFIG_CONFLICT` blocked MCP result without exposing raw exception
+  text: Complete.
+- Convert client-instruction planning `ValueError` failures into the same
+  structured blocked result: Complete.
+- Add focused regressions covering the newly handled exception types: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_codex_invalid_home_override_is_structured tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_value_error_is_generic -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_oserror_is_generic tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_codex_invalid_home_override_is_structured tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_value_error_is_generic -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- The two new regressions failed before the implementation change because
+  `RuntimeError` from `CODEX_HOME=~nosuchuser` and planner `ValueError`
+  escaped through FastMCP as tool errors.
+- New targeted regressions after the implementation change: 2 passed.
+- Neighboring OSError plus new planning exception regressions: 3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HHoLm
 
 ### Requirement Status

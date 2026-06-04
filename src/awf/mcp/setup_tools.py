@@ -483,7 +483,7 @@ def _client_integration_instructions_result(
             _client_source_checkout_blocked_payload(exc),
             is_error=True,
         )
-    except OSError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         return _first_run_result(
             safe_result,
             _reason_coded_payload(

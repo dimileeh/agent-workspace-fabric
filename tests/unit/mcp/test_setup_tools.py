@@ -1619,3 +1619,68 @@ async def test_client_integration_instructions_planning_oserror_is_generic(
     assert payload["issues"][0]["details"] == {"error_type": "OSError"}
     assert leaked_detail not in rendered
     assert raw_token not in rendered
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_codex_invalid_home_override_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    env_file = tmp_path / ".env"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
+    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
+    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
+    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(setup_tools, "_client_env", lambda: {"CODEX_HOME": "~nosuchuser"})
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["codex"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
+    assert "Could not determine home directory" not in rendered
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_planning_value_error_is_generic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "f" * 40
+    leaked_detail = f"{tmp_path}/config.toml contains {raw_token}"
+
+    def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
+        raise ValueError(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["codex"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["issues"][0]["details"] == {"error_type": "ValueError"}
+    assert leaked_detail not in rendered
+    assert raw_token not in rendered

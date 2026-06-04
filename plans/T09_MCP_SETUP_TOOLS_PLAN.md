@@ -84,6 +84,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HH2Ia
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` catches
+only `OSError` while planning client instructions. Codex config planning can
+raise `RuntimeError` from `Path.expanduser()` when `CODEX_HOME` contains an
+invalid home override such as `~nosuchuser`, and similar invalid path/config
+planning failures can raise `ValueError`. Those should return the same
+structured, redacted client-config blocked payload as `OSError`.
+
+Scope is limited to the client-instruction planning exception boundary.
+
+### Requirements Checklist
+
+- Preserve existing structured handling for `SetupCheckError`,
+  `SourceCheckoutError`, and `OSError`.
+- Convert client-instruction planning `RuntimeError` failures into a structured
+  `CLIENT_CONFIG_CONFLICT` blocked MCP result without exposing raw exception
+  text.
+- Convert client-instruction planning `ValueError` failures into the same
+  structured blocked result.
+- Add focused regressions covering the newly handled exception types.
+
+### Implementation Steps
+
+1. Add focused failing MCP regressions for `RuntimeError` and `ValueError`
+   during client instruction planning.
+2. Extend the existing client-instruction planning catch block to include
+   `RuntimeError` and `ValueError`.
+3. Run the targeted regressions and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_codex_invalid_home_override_is_structured tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_value_error_is_generic -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HHoLm
 
 ### Problem Statement And Scope
