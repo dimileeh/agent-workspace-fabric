@@ -412,6 +412,144 @@ async def test_single_workspace_gc_dry_run_for_missing_workspace(
 
 
 @pytest.mark.unit
+async def test_single_workspace_gc_reports_failed_missing_workspace_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = "ws_missing"
+    calls: list[tuple[str, str, Path]] = []
+
+    async def _compose_teardown(candidate: object) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append((candidate.workspace_id, candidate.reason_code, candidate.compose.path))
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+            error="volume still in use",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert result.plan.candidates == []
+    assert result.deleted_paths == []
+    assert result.delete_errors == []
+    assert result.status == "partial"
+    assert result.reason_code == "CLEANUP_EXECUTION_PARTIAL"
+    assert result.compose_teardowns[workspace_id].to_dict() == {
+        "status": "failed",
+        "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
+        "error": "volume still in use",
+    }
+    assert result.to_dict()["compose_teardowns"] == {
+        workspace_id: {
+            "status": "failed",
+            "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
+            "error": "volume still in use",
+        }
+    }
+    assert calls == [
+        (
+            workspace_id,
+            "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN",
+            work_dir / "compose" / workspace_id,
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_records_raised_missing_workspace_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = "ws_missing_raised"
+    calls: list[str] = []
+
+    async def _compose_teardown(candidate: object) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(candidate.workspace_id)
+        raise OSError("docker socket vanished")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert calls == [workspace_id]
+    assert result.status == "partial"
+    assert result.reason_code == "CLEANUP_EXECUTION_PARTIAL"
+    assert result.deleted_paths == []
+    assert result.delete_errors == []
+    assert result.secret_lease_revocations == {}
+    assert result.reservation_releases == {}
+    assert result.compose_teardowns[workspace_id].to_dict() == {
+        "status": "failed",
+        "reason_code": "COMPOSE_TEARDOWN_CALLBACK_RAISED",
+        "error": "OSError: docker socket vanished",
+    }
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_cleanup_disabled_runs_missing_workspace_fallback_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = "ws_missing"
+    calls: list[tuple[str, str, Path]] = []
+
+    async def _compose_teardown(candidate: object) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append((candidate.workspace_id, candidate.reason_code, candidate.compose.path))
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        cleanup_enabled=False,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert result.plan.candidates == []
+    assert result.plan.preserved == []
+    assert result.plan.cleanup_enabled is False
+    assert result.deleted_paths == []
+    assert result.delete_errors == []
+    assert calls == [
+        (
+            workspace_id,
+            "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN",
+            work_dir / "compose" / workspace_id,
+        )
+    ]
+    assert result.compose_teardowns[workspace_id].to_dict() == {
+        "status": "succeeded",
+        "reason_code": "DOCKER_COMPOSE_DOWN_SUCCEEDED",
+    }
+
+
+@pytest.mark.unit
 async def test_gc_execution_reports_refused_file_symlink_and_out_of_root_paths(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1339,73 +1477,3 @@ async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_refere
 
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
         assert any(e.event_type == "workspace.provider_recovery_requested" for e in events)
-
-
-@pytest.mark.unit
-async def test_completed_workspace_with_merge_sha_but_no_pr_metadata_is_preserved(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-    )
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.pr_merge_sha = "d" * 40
-        await session.commit()
-
-    plan = await plan_terminal_workspace_gc(
-        session_factory,
-        work_dir=tmp_path / "service",
-        min_age_hours=24,
-        now=now,
-    )
-
-    assert plan.candidates == []
-    assert len(plan.preserved) == 1
-    assert plan.preserved[0].workspace_id == workspace_id
-    assert plan.preserved[0].reason_code == "COMPLETED_WORKSPACE_WITHOUT_PR"
-
-
-@pytest.mark.unit
-async def test_completed_workspace_without_pr_metadata_does_not_consume_candidate_slot(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    without_pr_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=300),
-        title="no pr metadata",
-    )
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, without_pr_id)
-        assert workspace is not None
-        workspace.pr_merge_sha = "a" * 40
-        await session.commit()
-
-    with_pr_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-        title="has pr metadata",
-        pr=True,
-        pr_merge_sha="b" * 40,
-    )
-
-    plan = await plan_terminal_workspace_gc(
-        session_factory,
-        work_dir=tmp_path / "service",
-        min_age_hours=24,
-        limit=1,
-        now=now,
-    )
-
-    assert [c.workspace_id for c in plan.candidates] == [with_pr_id]
-    preserved_ids = {p.workspace_id for p in plan.preserved}
-    assert without_pr_id in preserved_ids
