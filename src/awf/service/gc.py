@@ -113,8 +113,10 @@ WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
 COMPOSE_TEARDOWN_CALLBACK_RAISED = "COMPOSE_TEARDOWN_CALLBACK_RAISED"
 
-# Extension point: add preserved-workspace reason/status pairs here when future
-# states should allow compose teardown before their filesystem retention expires.
+# Extension point: add preserved-workspace reason/status pairs here only when
+# future states should allow compose teardown and the follow-on runtime side
+# effects (secret lease revocation and reservation release) before filesystem
+# retention expires.
 _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_STATES: frozenset[tuple[str, str]] = frozenset(
     {
         (WORKSPACE_WITHIN_RETENTION, WorkspaceStatus.completed.value),
