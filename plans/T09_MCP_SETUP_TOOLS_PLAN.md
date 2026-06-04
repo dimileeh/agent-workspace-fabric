@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HOWVn
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` intentionally falls back to
+default host setup config when `source_checkout` is explicit and
+`read_host_setup_config()` cannot resolve/read host config, but then renders
+`setup.config_path` by calling `default_host_setup_config_path()` again outside
+that guarded path. If home/config path resolution is unavailable, the second
+call escapes the MCP tool instead of returning structured source-checkout
+status.
+
+Scope is limited to guarding setup-status config path rendering on the explicit
+source checkout fallback path.
+
+### Requirements Checklist
+
+- Preserve normal setup-status payloads with `setup.config_path` when the host
+  setup config path is available.
+- Preserve explicit `source_checkout` fallback behavior when host config
+  resolution/read fails.
+- Omit `setup.config_path` when the fallback path cannot safely resolve it
+  instead of re-raising.
+- Add a focused regression for explicit source checkout status when both the
+  config read and default config path rendering fail.
+
+### Implementation Steps
+
+1. Add the focused failing regression for the guarded config path rendering
+   fallback.
+2. Carry an optional guarded config path value through `_get_setup_status_result`
+   and only include `setup.config_path` when present.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_omits_unresolvable_config_path_on_fallback -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_falls_back_when_host_config_read_fails tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_omits_unresolvable_config_path_on_fallback -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: Coverage Shard 8 Maintainability Guard
 
 ### Problem Statement And Scope

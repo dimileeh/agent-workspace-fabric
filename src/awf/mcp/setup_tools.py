@@ -228,6 +228,7 @@ def _get_setup_status_result(
     source_checkout: str | None,
 ) -> CallToolResult:
     source_path = _resolve_client_source_checkout_path(source_checkout)
+    config_path: Path | None = None
     try:
         readiness = _run_setup(
             providers=providers,
@@ -238,6 +239,7 @@ def _get_setup_status_result(
         )
         try:
             config = read_host_setup_config()
+            config_path = default_host_setup_config_path()
         except HostSetupConfigError:
             if source_path is None:
                 raise
@@ -268,6 +270,15 @@ def _get_setup_status_result(
     rendered = render_first_run_json(readiness)
     details = _mapping(rendered.get("details"))
     selected_providers = _list_of_strings(details.get("selected_providers"))
+    setup_payload: dict[str, Any] = {
+        "dry_run": True,
+        "selected_providers": selected_providers,
+        "checks": _safe_setup_checks(details.get("checks")),
+        "plain_file_consent": config.consent.plain_file_secrets,
+        "source_checkout_assets_consent": config.consent.source_checkout_assets,
+    }
+    if config_path is not None:
+        setup_payload["config_path"] = str(config_path)
     payload = {
         "status": rendered.get("status", "unknown"),
         "command": _setup_status_command(
@@ -277,14 +288,7 @@ def _get_setup_status_result(
         ),
         "summary": rendered.get("summary", ""),
         "reason_code": rendered.get("reason_code"),
-        "setup": {
-            "dry_run": True,
-            "selected_providers": selected_providers,
-            "checks": _safe_setup_checks(details.get("checks")),
-            "plain_file_consent": config.consent.plain_file_secrets,
-            "source_checkout_assets_consent": config.consent.source_checkout_assets,
-            "config_path": str(default_host_setup_config_path()),
-        },
+        "setup": setup_payload,
         "providers": _provider_statuses(config.providers),
         "clients": _client_statuses(config.clients),
         "source_checkout": _setup_status_source_checkout(

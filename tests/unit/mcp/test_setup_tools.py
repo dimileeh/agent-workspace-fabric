@@ -785,6 +785,56 @@ async def test_get_setup_status_source_checkout_falls_back_when_host_config_read
 
 
 @pytest.mark.unit
+async def test_get_setup_status_source_checkout_omits_unresolvable_config_path_on_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "awf"
+    verified_at = datetime(2026, 2, 3, tzinfo=UTC).isoformat()
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="source checkout ready",
+        details={
+            "selected_providers": [],
+            "checks": [{"name": "docker", "level": "ok"}],
+            "source_checkout": {"root": str(checkout), "verified_at": verified_at},
+        },
+        next_steps=("Run awf start.",),
+    )
+
+    def fail_config_path() -> Path:
+        raise HostSetupConfigError(
+            reason_code=HOST_SETUP_CONFIG_CORRUPT,
+            message="Host setup config path could not be resolved.",
+            path=Path("~/.awf/config.yml"),
+            details={"error_type": "RuntimeError"},
+        )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", fail_config_path)
+    monkeypatch.setattr(setup_tools, "default_host_setup_config_path", fail_config_path)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+
+    assert result.isError is False
+    assert payload["status"] == "success"
+    assert "config_path" not in payload["setup"]
+    assert payload["source_checkout"] == {
+        "present": True,
+        "root": str(checkout),
+        "verified_at": verified_at,
+        "marker_count": None,
+    }
+
+
+@pytest.mark.unit
 async def test_get_setup_status_source_checkout_expanduser_failure_uses_guarded_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
