@@ -39,6 +39,7 @@ def _settings(
     *,
     database_url: str = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
     api_token: str | None = None,
+    work_dir: str | None = None,
 ) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
@@ -47,7 +48,7 @@ def _settings(
         database_url=database_url,
         docker_host=f"unix://{tmp_path / 'docker.sock'}",
         agent_runtime_image="awf-agent-runtime:latest",
-        work_dir=str(tmp_path / "work"),
+        work_dir=str(tmp_path / "work") if work_dir is None else work_dir,
         api_token=api_token,
         github_token=None,
         worker_poll_interval_seconds=0.1,
@@ -216,6 +217,45 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
     assert "log_pointers" in bundle
     assert "issue_template_pointer" in bundle
     assert bundle["issue_template_pointer"] == ISSUE_TEMPLATE_PATH
+
+
+@pytest.mark.unit
+def test_support_bundle_log_pointers_omit_work_dir_path(tmp_path: Path) -> None:
+    raw_work_dir = "/home/alice/client/.awf/service"
+    settings = _settings(tmp_path, work_dir=raw_work_dir)
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=lambda: HostSetupConfig(work_dir=raw_work_dir),
+        )
+    )
+
+    assert bundle["log_pointers"] == [
+        "Service logs: run `awf service logs --tail 100`",
+        "Worker logs: run `awf service logs --service worker --tail 100`",
+        "State directory: configured",
+    ]
+    config_fingerprint = bundle["config_fingerprint"]
+    assert isinstance(config_fingerprint, dict)
+    assert config_fingerprint["work_dir_configured"] is True
+    assert "work_dir" not in config_fingerprint
+    assert raw_work_dir not in json.dumps(bundle, sort_keys=True)
 
 
 @pytest.mark.unit

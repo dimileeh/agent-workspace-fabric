@@ -1461,3 +1461,52 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
+
+## Review-Level Comment `4431520377` Support Bundle State Path Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports that support-bundle `log_pointers` still
+include the raw local `settings.work_dir` path. First-time evaluators may share
+support bundles externally, so this can expose host usernames, checkout names,
+or customer directory layout details. The existing setup-state summary already
+reports only `work_dir_configured`, and `config_fingerprint` is also a
+support-bundle surface, so this repair keeps those diagnostics useful without
+embedding the absolute state path.
+
+This repair is limited to support-bundle state-path privacy. It does not change
+setup-state schema, service configuration, doctor/status diagnostics, log
+collection commands, or broad AWF/GitHub validation ownership.
+
+### Requirements Checklist
+
+- Support-bundle `log_pointers` do not include the raw `settings.work_dir`
+  value.
+- Support-bundle `config_fingerprint` reports whether `work_dir` is configured
+  without including the raw path.
+- The state-directory pointer still indicates whether a state directory is
+  configured.
+- Existing service and worker log command pointers remain unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing support-bundle regression that uses a host-like
+   `work_dir` path and asserts the serialized bundle omits it while preserving
+   a configured/not-configured state pointer.
+2. Replace the raw state-directory log pointer and support-bundle
+   `config_fingerprint["work_dir"]` with configured/not-configured markers
+   derived from `settings.work_dir`.
+3. Run the targeted regression, adjacent support-bundle test subset, and narrow
+   ruff/mypy checks for touched files. Broad AWF/GitHub validation remains
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k log_pointers_omit_work_dir --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k 'log_pointers_omit_work_dir or collects_required_sections or redacts_secrets' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py tests/unit/service/test_support_bundle.py
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
+```

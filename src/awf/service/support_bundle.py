@@ -181,15 +181,16 @@ async def collect_support_bundle(
             "since_hours": failure_window_hours,
         }
 
-    config_fingerprint = service_config_payload(settings)
+    config_fingerprint = _support_bundle_config_fingerprint(settings)
     if setup_config_reader is None:
         setup_config_reader = _default_setup_config_reader
     setup_state = _setup_state(setup_config_reader, secrets=secrets)
+    state_directory_status = "configured" if settings.work_dir else "not configured"
 
     log_pointers = [
         "Service logs: run `awf service logs --tail 100`",
         "Worker logs: run `awf service logs --service worker --tail 100`",
-        f"State directory: {settings.work_dir}",
+        f"State directory: {state_directory_status}",
     ]
 
     bundle: dict[str, object] = {
@@ -207,6 +208,13 @@ async def collect_support_bundle(
     }
 
     return bundle
+
+
+def _support_bundle_config_fingerprint(settings: ServiceSettings) -> dict[str, object]:
+    """Return service config metadata without exposing local state paths."""
+    payload = service_config_payload(settings)
+    payload["work_dir_configured"] = bool(payload.pop("work_dir", None))
+    return payload
 
 
 def _default_setup_config_reader() -> HostSetupConfig:

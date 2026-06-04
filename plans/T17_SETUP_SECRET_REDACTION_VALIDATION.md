@@ -1849,6 +1849,53 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py src/awf/mcp/metric
 # Success: no issues found in 2 source files
 ```
 
+## Review-Level Comment `4431520377` Support Bundle State Path Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: support-bundle `log_pointers` no longer include the raw
+  `settings.work_dir` value.
+- Complete: support-bundle `config_fingerprint` replaces raw `work_dir` with
+  `work_dir_configured`.
+- Complete: the state-directory log pointer still reports
+  configured/not-configured status.
+- Complete: service and worker log command pointers remain unchanged.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/support_bundle.py`
+- `tests/unit/service/test_support_bundle.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k log_pointers_omit_work_dir --tb=short -ra
+# failed: log_pointers contained `State directory: /home/alice/client/.awf/service`
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k log_pointers_omit_work_dir --tb=short -ra
+# 1 passed, 21 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k 'log_pointers_omit_work_dir or collects_required_sections or redacts_secrets' --tb=short -ra
+# 3 passed, 19 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py tests/unit/service/test_support_bundle.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.
