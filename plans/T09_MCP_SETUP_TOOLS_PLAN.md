@@ -40,3 +40,44 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/ser
 
 Full AWF/GitHub validation and coverage gates are intentionally left to AWF
 after the agent phase.
+
+## Review Repair: PRRT_kwDOSJAM6s6G_-HK
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` diverges from
+`awf setup --dry-run --source-checkout` by reading host setup config after
+`_run_setup` even when an explicit `source_checkout` was provided. The CLI
+intentionally skips that read on explicit-checkout dry-runs so a corrupt or
+secret-bearing `~/.awf/config.yml` cannot abort a read-only checkout probe.
+
+Scope is limited to MCP setup status parity and its focused regression test.
+
+### Requirements Checklist
+
+- Preserve normal `awf_get_setup_status` behavior when `source_checkout` is not
+  provided, including safe persisted provider/client/config metadata.
+- For explicit `source_checkout`, do not call `read_host_setup_config()` after
+  `_run_setup`.
+- Keep the MCP response schema stable and secret-free on the explicit-checkout
+  path.
+- Add a regression proving a corrupt host config cannot turn an explicit
+  checkout status probe into an MCP error.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for explicit source-checkout status.
+2. Change `_get_setup_status_result` to use an empty in-memory
+   `HostSetupConfig` when `source_checkout` is explicit, matching the CLI's
+   dry-run config-read skip while preserving response keys.
+3. Run the targeted regression and focused setup-tools test file.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_skips_host_config_read -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.

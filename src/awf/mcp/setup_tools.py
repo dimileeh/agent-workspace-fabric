@@ -211,7 +211,7 @@ def _get_setup_status_result(
             allow_plain_secrets=False,
             source_checkout=source_path,
         )
-        config = read_host_setup_config()
+        config = HostSetupConfig() if source_path is not None else read_host_setup_config()
     except SetupCheckError as exc:
         return _first_run_result(
             safe_result,

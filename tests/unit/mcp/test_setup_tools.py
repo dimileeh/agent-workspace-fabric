@@ -15,9 +15,11 @@ from mcp.types import CallToolResult
 from awf.common.audit import REDACTION_MARKER
 from awf.common.config import Settings
 from awf.host_setup.config import (
+    HOST_SETUP_CONFIG_CORRUPT,
     ClientIntegrationConfig,
     ConsentConfig,
     HostSetupConfig,
+    HostSetupConfigError,
     ProviderConfig,
 )
 from awf.host_setup.rendering import (
@@ -159,6 +161,65 @@ async def test_get_setup_status_returns_only_status_and_safe_refs(
     assert raw_token not in rendered
     assert "GITHUB_TOKEN" not in rendered
     assert "env://GITHUB_TOKEN" not in rendered
+
+
+@pytest.mark.unit
+async def test_get_setup_status_source_checkout_skips_host_config_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "awf"
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="source checkout ready",
+        details={
+            "selected_providers": [],
+            "checks": [{"name": "docker", "level": "ok"}],
+        },
+        next_steps=("Run awf start.",),
+    )
+    run_calls: list[dict[str, Any]] = []
+
+    def fake_run_setup(**kwargs: Any) -> Any:
+        run_calls.append(kwargs)
+        return readiness
+
+    def fail_read_config() -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code=HOST_SETUP_CONFIG_CORRUPT,
+            message="Host setup config is corrupt or unsupported.",
+            path=tmp_path / ".awf" / "config.yml",
+            details={"error_type": "ParserError"},
+        )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", fake_run_setup)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", fail_read_config)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+
+    assert result.isError is False
+    assert run_calls == [
+        {
+            "providers": [],
+            "dry_run": True,
+            "non_interactive": True,
+            "allow_plain_secrets": False,
+            "source_checkout": checkout,
+        }
+    ]
+    assert payload["status"] == "success"
+    assert payload["setup"]["plain_file_consent"] is False
+    assert payload["setup"]["source_checkout_assets_consent"] is False
+    assert payload["providers"] == {}
+    assert payload["clients"] == {}
+    assert payload["source_checkout"] == {"present": False}
 
 
 @pytest.mark.unit
