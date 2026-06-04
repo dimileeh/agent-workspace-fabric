@@ -33,6 +33,9 @@ Branch protection for `main` and `development` must require the CI
 `ci-required` job. That rollup job depends on `lint-and-type`,
 `python-full-coverage`, `console`, and `release-artifacts`, so the 99%
 coverage gate cannot be bypassed by other green jobs in the workflow.
+The long Python coverage run is fanned out by `python-coverage-shards`;
+`python-full-coverage` downloads those shard artifacts, combines them, and
+enforces the exact 99% threshold.
 
 Before a local Core release, run:
 

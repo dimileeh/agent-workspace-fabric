@@ -59,6 +59,7 @@ def _write_full_source_checkout(root: Path) -> Path:
         "alembic.ini": "[alembic]\n",
         ".env.example": "AWF_API_TOKEN=example\n",
         "openapi.json": "{}\n",
+        "compose.yaml": "include:\n  - ./docker/compose/local-service.yml\n",
         "README.md": "# AWF\n",
         "RELEASING.md": "# Releasing\n",
         "src/awf/__init__.py": "",
@@ -66,9 +67,12 @@ def _write_full_source_checkout(root: Path) -> Path:
         "docker/compose/workspace.base.yml.j2": "services: {}\n",
         "docker/agent-runtime.Dockerfile": "FROM scratch\n",
         "docker/control-plane.Dockerfile": "FROM scratch\n",
+        "apps/console/Dockerfile": "FROM scratch\n",
     }
     for relative, content in files.items():
-        (root / relative).write_text(content, encoding="utf-8")
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
     return root
 
 
@@ -92,14 +96,14 @@ def _patch_start_wiring(
     monkeypatch.setattr(
         "awf.cli.init_ops._resolve_service_compose_paths",
         lambda: (
-            Path("/repo/docker/compose/local-service.yml"),
+            Path("/repo/compose.yaml"),
             Path("/repo/.env"),
             Path("/repo/.env.example"),
         ),
     )
     monkeypatch.setattr(
         "awf.cli.init_ops._resolve_service_runtime_env_files",
-        lambda *_a, **_k: (Path("/repo/.env"), Path("/repo/docker/compose/.env")),
+        lambda *_a, **_k: (Path("/repo/.env"), Path("/repo/.env")),
     )
     monkeypatch.setattr("awf.service.config.local_service_environ", lambda **_k: {})
     resolved_settings = settings or SimpleNamespace(
@@ -267,7 +271,7 @@ def test_start_with_valid_source_checkout_pins_assets(
 
     assert result.exit_code == 0, result.output
     assert records[0]["asset_root"] == checkout.resolve()
-    assert records[0]["compose_file"] == checkout.resolve() / "docker/compose/local-service.yml"
+    assert records[0]["compose_file"] == checkout.resolve() / "compose.yaml"
 
 
 @pytest.mark.unit
@@ -275,23 +279,16 @@ def test_resolve_start_inputs_source_checkout_falls_back_to_root_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Verified source checkout reads the root .env when the compose .env is unseeded.
-
-    Regression for PRRT_kwDOSJAM6s6F5crG: before ``docker/compose/.env`` is
-    seeded the checkout root ``.env`` holds tokens and DB settings, exactly the
-    file ``awf service bootstrap`` reads via ``_resolve_existing_service_env_file``.
-    ``awf start`` must read the same fallback while never forwarding the root
-    ``.env`` to Docker as the compose ``--env-file``.
-    """
+    """Verified source checkout reads and forwards root .env to Docker Compose."""
     root = (tmp_path / "checkout").resolve()
     (root / "docker" / "compose").mkdir(parents=True)
     root_env = root / ".env"
     root_env.write_text("AWF_API_TOKEN=from-root\n", encoding="utf-8")
-    # Intentionally no docker/compose/.env: the compose env is not seeded yet.
+    # Intentionally no legacy compose env: root .env is the active service env.
 
     verified = SimpleNamespace(
         root=root,
-        compose_file=root / "docker/compose/local-service.yml",
+        compose_file=root / "compose.yaml",
     )
 
     captured: dict[str, object] = {}
@@ -315,8 +312,7 @@ def test_resolve_start_inputs_source_checkout_falls_back_to_root_env(
 
     assert captured["environ_env_file"] == root_env
     assert captured["settings_env_file"] == root_env
-    # The root .env is the read source only; it is never forwarded to Compose.
-    assert inputs.compose_env_file is None
+    assert inputs.compose_env_file == root_env
 
 
 @pytest.mark.unit
@@ -901,7 +897,7 @@ def test_service_compose_paths_resolve_from_packaged_root(
 
     compose_file, env_file, env_example = init_ops._resolve_service_compose_paths()  # noqa: SLF001
 
-    assert compose_file == packaged_root / "docker/compose/local-service.yml"
+    assert compose_file == packaged_root / "compose.yaml"
     assert env_file == Path(".env")
     assert env_example == packaged_root / ".env.example"
 
@@ -917,14 +913,14 @@ def test_resolve_start_inputs_none_delegates_to_packaged_discovery(
     which includes the packaged fallback, while the compose file is sourced from
     ``_resolve_service_compose_paths`` (the packaged-root selector above).
     """
-    packaged_compose = tmp_path / "awf" / "bootstrap_assets" / "docker/compose/local-service.yml"
+    packaged_compose = tmp_path / "awf" / "bootstrap_assets" / "compose.yaml"
     monkeypatch.setattr(
         "awf.cli.init_ops._resolve_service_compose_paths",
         lambda: (packaged_compose, Path(".env"), packaged_compose.parent / ".env.example"),
     )
     monkeypatch.setattr(
         "awf.cli.init_ops._resolve_service_runtime_env_files",
-        lambda *_a, **_k: (Path(".env"), None),
+        lambda *_a, **_k: (Path(".env"), Path(".env")),
     )
     monkeypatch.setattr("awf.service.config.local_service_environ", lambda **_k: {})
     monkeypatch.setattr("awf.common.config.Settings", lambda **_k: object())
@@ -937,4 +933,4 @@ def test_resolve_start_inputs_none_delegates_to_packaged_discovery(
 
     assert inputs.asset_root is None
     assert inputs.compose_file == packaged_compose
-    assert inputs.compose_env_file is None
+    assert inputs.compose_env_file == Path(".env")

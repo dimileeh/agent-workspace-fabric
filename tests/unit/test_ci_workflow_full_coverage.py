@@ -152,12 +152,17 @@ def test_ci_cancels_superseded_branch_and_pr_runs() -> None:
 
 
 @pytest.mark.unit
-def test_ci_has_authoritative_python_full_coverage_job() -> None:
-    """The coverage job produces XML and enforces the exact threshold."""
+def test_ci_has_parallel_python_coverage_shards() -> None:
+    """Coverage execution runs in balanced GitHub Actions matrix shards."""
     workflow = _workflow()
-    job = _job(workflow, "python-full-coverage")
+    job = _job(workflow, "python-coverage-shards")
 
     assert job.get("runs-on") == GITHUB_HOSTED_RUNNER
+    assert job.get("timeout-minutes") == 45
+    assert job.get("strategy") == {
+        "fail-fast": False,
+        "matrix": {"shard": [1, 2, 3, 4, 5, 6, 7, 8]},
+    }
 
     services = job.get("services", {})
     assert isinstance(services, dict)
@@ -173,38 +178,32 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     commands = _run_steps(job)
     assert "docker version" in commands
     assert "docker compose version" in commands
-    assert (
-        "docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile ." in commands
-    )
+    assert "docker build -t awf-agent-runtime:latest" not in commands
 
-    full_coverage_run = _step_run(job, "Full coverage")
-    assert "uv run --python 3.12 pytest" in full_coverage_run
-    assert "-n 8" in full_coverage_run
-    assert "--dist=loadscope" in full_coverage_run
-    assert "--timeout=300" in full_coverage_run
-    assert "--timeout=120" not in full_coverage_run
-    assert "--cov=awf" in full_coverage_run
-    assert "--cov-report=term-missing" in full_coverage_run
-    assert "--cov-report=xml" in full_coverage_run
-    assert "--cov-fail-under=99" in full_coverage_run
-    assert "--cov-fail-under=0" not in full_coverage_run
-    assert "pytest tests/unit" not in full_coverage_run
+    shard_run = _step_run(job, "Run coverage shard")
+    assert "uv run --python 3.12 coverage run --parallel-mode -m pytest" in shard_run
+    assert "shopt -s nullglob" in shard_run
+    assert "--splits 8" in shard_run
+    assert '--group "${{ matrix.shard }}"' in shard_run
+    assert "--timeout=300" in shard_run
+    assert "--timeout=120" not in shard_run
+    assert "-n 8" not in shard_run
+    assert "--dist=loadscope" not in shard_run
+    assert "--cov=awf" not in shard_run
+    assert "--cov-fail-under" not in shard_run
+    assert "pytest tests/unit" not in shard_run
 
-    exact_threshold_run = _step_run(job, "Enforce exact coverage threshold")
-    assert exact_threshold_run == (
-        "uv run --python 3.12 python scripts/ci/check_coverage_threshold.py "
-        "coverage.xml --minimum-percent 99"
-    )
+    upload_step = _named_step(job, "Upload coverage shard")
+    assert upload_step.get("if") == "${{ always() }}"
+    assert upload_step.get("uses") == "actions/upload-artifact@v4"
+    assert upload_step.get("with") == {
+        "name": "python-coverage-shard-${{ matrix.shard }}",
+        "path": "coverage-artifacts/.coverage.shard-${{ matrix.shard }}",
+        "include-hidden-files": True,
+        "retention-days": 14,
+    }
 
-    step_names = [str(step.get("name")) for step in _steps(job)]
-    assert step_names.index("Enforce exact coverage threshold") == (
-        step_names.index("Full coverage") + 1
-    )
-    assert step_names.index("Upload full coverage artifact") > step_names.index(
-        "Enforce exact coverage threshold"
-    )
-
-    coverage_step = _named_step(job, "Full coverage")
+    coverage_step = _named_step(job, "Run coverage shard")
     env = _effective_env(workflow, job, coverage_step)
     assert env.get("CI") == "true"
     assert env.get("AWF_DATABASE_URL") == DB_URL
@@ -213,10 +212,64 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
 
 
 @pytest.mark.unit
+def test_ci_has_authoritative_python_full_coverage_gate() -> None:
+    """The aggregate coverage gate combines shard artifacts and enforces 99%."""
+    workflow = _workflow()
+    job = _job(workflow, "python-full-coverage")
+
+    assert job.get("runs-on") == GITHUB_HOSTED_RUNNER
+    assert job.get("timeout-minutes") == 15
+    assert job.get("if") == "${{ always() }}"
+    assert _job_needs(job) == {"python-coverage-shards"}
+    assert "services" not in job
+    assert "strategy" not in job
+
+    commands = _run_steps(job)
+    assert "pytest" not in commands
+    assert "--cov-fail-under=99" not in commands
+    assert "coverage combine" in commands
+    assert "coverage xml" in commands
+    assert "coverage report --show-missing --fail-under=99" in commands
+    assert "shopt -s nullglob" in _step_run(job, "Combine coverage and enforce threshold")
+    assert (
+        "uv run --python 3.12 python scripts/ci/check_coverage_threshold.py "
+        "coverage.xml --minimum-percent 99"
+    ) in commands
+
+    verify_run = _step_run(job, "Verify coverage shards passed")
+    assert "needs.python-coverage-shards.result" in verify_run
+    assert "exit 1" in verify_run
+
+    download_step = _named_step(job, "Download coverage shards")
+    assert download_step.get("uses") == "actions/download-artifact@v4"
+    assert download_step.get("with") == {
+        "pattern": "python-coverage-shard-*",
+        "path": "coverage-artifacts",
+        "merge-multiple": True,
+    }
+
+    step_names = [str(step.get("name")) for step in _steps(job)]
+    assert step_names.index("Verify coverage shards passed") < step_names.index(
+        "Download coverage shards"
+    )
+    assert step_names.index("Combine coverage and enforce threshold") > step_names.index(
+        "Download coverage shards"
+    )
+    assert step_names.index("Upload full coverage artifact") > step_names.index(
+        "Combine coverage and enforce threshold"
+    )
+
+
+@pytest.mark.unit
 def test_setup_uv_steps_avoid_github_token_release_lookup() -> None:
     workflow = _workflow()
 
-    for job_name in ("lint-and-type", "python-full-coverage", "release-artifacts"):
+    for job_name in (
+        "lint-and-type",
+        "python-coverage-shards",
+        "python-full-coverage",
+        "release-artifacts",
+    ):
         step = _setup_uv_step(workflow, job_name)
         with_config = step.get("with")
 
@@ -284,7 +337,7 @@ def test_full_coverage_is_the_only_python_test_job() -> None:
     python_test_jobs = [
         name for name, job in jobs.items() if isinstance(job, dict) and "pytest" in _run_steps(job)
     ]
-    assert python_test_jobs == ["python-full-coverage"]
+    assert python_test_jobs == ["python-coverage-shards"]
 
 
 @pytest.mark.unit
@@ -374,6 +427,7 @@ def test_contributor_docs_require_ci_rollup_status_check() -> None:
     assert "branch protection" in docs.lower()
     assert "ci-required" in docs
     assert "lint-and-type" in docs
+    assert "python-coverage-shards" in docs
     assert "python-full-coverage" in docs
     assert "release-artifacts" in docs
     assert "lint-and-test" not in docs

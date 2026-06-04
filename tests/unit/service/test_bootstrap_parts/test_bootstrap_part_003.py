@@ -44,6 +44,10 @@ def _write_source_checkout(root: Path) -> Path:
         "services: {}\n",
         encoding="utf-8",
     )
+    (root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     (root / "src" / "awf").mkdir(parents=True)
     (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
@@ -271,5 +275,5 @@ def test_run_service_bootstrap_pins_root_and_forces_rebuild(tmp_path: Path) -> N
         "docker",
         "compose",
         "-f",
-        str(root / "docker/compose/local-service.yml"),
+        str(root / "compose.yaml"),
     ]
