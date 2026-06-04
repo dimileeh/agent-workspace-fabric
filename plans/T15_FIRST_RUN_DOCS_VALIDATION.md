@@ -75,6 +75,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   package upgrade restart assertion to the standalone `awf start` command line
   and extending the global source-checkout rollback ordering assertion through
   `awf start --source-checkout "$PWD"`.
+- Complete: Address review-level comment `issue:4620140358` follow-up by
+  splitting mixed Quickstart and Getting Started URL assertions and requiring
+  exact, ordered package-upgrade shell anchors for `AWF_API_TOKEN` exports.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -475,6 +478,12 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 ```
 
 Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `50 passed in 1.51s`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
@@ -1100,6 +1109,44 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `3 passed in 0.67s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `tests/unit/docs/test_public_docs_status.py` now has separate Quickstart and
+  Getting Started smoke-default URL tests, so failures identify the edited
+  document directly.
+- `_assert_package_upgrade_restores_service_env` now resolves exact shell lines
+  with lower-bound start offsets for the package upgrade env-restore anchors,
+  preventing a prefixed `AWF_API_TOKEN` export from satisfying the guard.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_rejects_prefixed_api_export_line -q
+```
+
+Red-phase result after adding the focused regression: failed because
+`export AWF_API_TOKEN_BACKUP` still satisfied the unbounded substring lookup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_rejects_prefixed_api_export_line tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start -q
+```
+
+Result: `4 passed in 0.70s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_matches_restart_command_line tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_rejects_prefixed_api_export_line -q
+```
+
+Result: `3 passed in 0.70s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py

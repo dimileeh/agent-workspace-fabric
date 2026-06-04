@@ -515,6 +515,37 @@ def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
         _assert_package_upgrade_restores_service_env("example", section, upgrade_line)
 
 
+def test_package_upgrade_env_restore_rejects_prefixed_api_export_line() -> None:
+    """Assert prefixed AWF_API_TOKEN export lines do not satisfy shell guards."""
+    upgrade_line = "pipx upgrade agent-workspace-fabric"
+    section = (
+        "\n".join(
+            [
+                upgrade_line,
+                "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then",
+                (
+                    '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running '
+                    'local Core or persist it in .env before upgrading}"'
+                ),
+                "  export AWF_API_TOKEN_BACKUP",
+                "fi",
+                "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
+                (
+                    '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used '
+                    'for the running local Core or persist it in .env before upgrading}"'
+                ),
+                "  export AWF_POSTGRES_PASSWORD",
+                "fi",
+                "awf start",
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.raises(AssertionError, match="missing shell line"):
+        _assert_package_upgrade_restores_service_env("example", section, upgrade_line)
+
+
 def test_upgrade_release_installed_rollback_restores_service_env_before_start() -> None:
     """Assert release-installed rollback keeps mandatory service env available."""
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
@@ -595,6 +626,20 @@ def test_quickstart_source_checkout_upgrades_reuse_existing_checkout() -> None:
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
     """Assert Quickstart local URLs match the default smoke probe targets."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    api_url = DEFAULT_LOCAL_SERVICE_API_BASE_URL
+    readyz_url = f"{api_url.rstrip('/')}/readyz"
+    console_url = DEFAULT_LOCAL_CONSOLE_URL
+
+    assert f"`{api_url}` by default" in quickstart_text
+    assert f"`{console_url}` when the console is running" in quickstart_text
+    assert f"`{console_url}` for the console" in quickstart_text
+    assert f"`{readyz_url}`" in quickstart_text
+    assert "http://127.0.0.1:8000" not in quickstart_text
+    assert "http://127.0.0.1:3000" not in quickstart_text
+
+
+def test_getting_started_first_run_urls_match_smoke_defaults() -> None:
+    """Assert Getting Started local URL prose matches smoke probe defaults."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
@@ -606,16 +651,7 @@ def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
         configure_heading,
         maxsplit=1,
     )[0]
-    api_url = DEFAULT_LOCAL_SERVICE_API_BASE_URL
-    readyz_url = f"{api_url.rstrip('/')}/readyz"
-    console_url = DEFAULT_LOCAL_CONSOLE_URL
 
-    assert f"`{api_url}` by default" in quickstart_text
-    assert f"`{console_url}` when the console is running" in quickstart_text
-    assert f"`{console_url}` for the console" in quickstart_text
-    assert f"`{readyz_url}`" in quickstart_text
-    assert "http://127.0.0.1:8000" not in quickstart_text
-    assert "http://127.0.0.1:3000" not in quickstart_text
     assert not re.search(
         r"using\s+`127\.0\.0\.1`\s+for host-facing loopback",
         startup_section,
@@ -1427,6 +1463,13 @@ def _shell_closing_fi_index(section: str, start: int, label: str) -> int:
     return start + closing_match.start()
 
 
+def _shell_line_index(section: str, line: str, label: str, start: int = 0) -> int:
+    """Return the exact shell line index at or after start."""
+    line_match = re.search(rf"(?m)^{re.escape(line)}$", section[start:])
+    assert line_match is not None, f"{label} is missing shell line: {line}"
+    return start + line_match.start()
+
+
 def _assert_source_checkout_postgres_password_restore(
     label: str,
     section: str,
@@ -1552,16 +1595,33 @@ def _assert_package_upgrade_restores_service_env(
     assert password_export_line in section, f"{label} must export restored AWF_POSTGRES_PASSWORD"
     assert start_line in section, f"{label} is missing restart command"
 
-    api_guard_index = section.index(api_guard_line)
-    api_require_index = section.index(api_require_line)
-    api_export_index = section.index(api_export_line)
+    upgrade_index = section.index(upgrade_line)
+    api_guard_index = _shell_line_index(section, api_guard_line, label, upgrade_index)
+    api_require_index = _shell_line_index(section, api_require_line, label, api_guard_index)
+    api_export_index = _shell_line_index(section, api_export_line, label, api_require_index)
     api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
-    password_guard_index = section.index(password_guard_line)
-    password_require_index = section.index(password_require_line)
-    password_export_index = section.index(password_export_line, password_require_index)
+    password_guard_index = _shell_line_index(
+        section,
+        password_guard_line,
+        label,
+        api_export_index,
+    )
+    password_require_index = _shell_line_index(
+        section,
+        password_require_line,
+        label,
+        password_guard_index,
+    )
+    password_export_index = _shell_line_index(
+        section,
+        password_export_line,
+        label,
+        password_require_index,
+    )
     password_guard_end_index = _shell_closing_fi_index(section, password_export_index, label)
+    start_index = section.index(start_line, password_guard_end_index)
     assert (
-        section.index(upgrade_line)
+        upgrade_index
         < api_guard_index
         < api_require_index
         < api_export_index
@@ -1570,7 +1630,7 @@ def _assert_package_upgrade_restores_service_env(
         < password_require_index
         < password_export_index
         < password_guard_end_index
-        < section.index(start_line)
+        < start_index
     ), f"{label} must restore missing service env before restart"
 
 

@@ -199,6 +199,12 @@ and virtualenv package upgrade snippets in `docs/QUICKSTART.md` and
 must not default the password to `awf_dev`, because an existing Postgres volume
 may have been initialized with a non-default password.
 
+Post-review adjustment for review-level comment `issue:4620140358`: split the
+mixed Quickstart and Getting Started first-run URL assertions so failures point
+at the changed document, and tighten package upgrade env-restore anchor lookup
+so the `AWF_API_TOKEN` export match is an exact shell line found after the
+preceding guard/require anchors.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -232,6 +238,13 @@ Focused repair command for review-level comment `issue:4620140358`:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_matches_restart_command_line tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata -q
+```
+
+Focused repair command for review-level comment `issue:4620140358` mixed-doc and
+anchor follow-up:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_rejects_prefixed_api_export_line tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start -q
 ```
 
 Focused lint command:
