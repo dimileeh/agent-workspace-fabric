@@ -111,3 +111,47 @@ outside the source-checkout proof this smoke lane is meant to perform.
   must pass.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HCQeo
+
+### Problem Statement And Scope
+
+Inline review thread `PRRT_kwDOSJAM6s6HCQeo` reports that source-lane probes
+and post-install `awf` command probes classify offline dependency resolution
+failures as hard failures through `_basic_result`, while tool-install setup
+already treats the same environmental failures as skips. The fix is scoped to
+the first-run smoke result classifiers so offline/unreachable indexes do not
+produce false harness failures, while non-environmental command regressions and
+source-checkout validation failures continue to fail.
+
+### Requirements Checklist
+
+- Add focused regression coverage for environmental source command failures.
+- Add focused regression coverage for environmental installed `awf` probe
+  failures.
+- Treat non-zero source/post-install probe results with recognized network or
+  offline signatures as `skipped`.
+- Preserve hard failures for ordinary non-environmental probe failures and
+  source-checkout reason-code failures.
+
+### Implementation Steps
+
+1. Add unit tests in `tests/unit/scripts/test_first_run_smoke.py` for
+   environmental failures in non-setup source/post-install probes and setup
+   dry-run probes that fail before emitting JSON.
+2. Run the focused new tests and confirm they fail before implementation.
+3. Update `scripts/first_run_smoke.py` result classification to reuse the
+   environmental failure signatures for source/post-install probes.
+4. Re-run the focused smoke harness unit tests touched by this repair and
+   file-scoped lint.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regressions:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_result_skips_environmental_dependency_failures tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_skips_unparseable_environmental_failure -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_result_skips_environmental_dependency_failures tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_skips_unparseable_environmental_failure tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_accepts_non_source_readiness_blocker_exit_one -q`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.

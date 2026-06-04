@@ -35,6 +35,9 @@ CHECKSUM_VERIFIED_MARKER = "Checksum verified"
 RELEASE_GATE_REASON = (
     "release lane requires --allow-release, --release-dist-dir, and --release-manifest"
 )
+_ENVIRONMENTAL_COMMAND_SKIP_REASON = (
+    "smoke command could not resolve dependencies in this environment"
+)
 SOURCE_CHECKOUT_REASON_CODES = {
     "SOURCE_CHECKOUT_INVALID",
     "SOURCE_CHECKOUT_ASSETS_STALE",
@@ -730,10 +733,13 @@ def _source_setup_result(
 ) -> SmokeResult:
     stdout_tail = _tail(completed.stdout)
     stderr_tail = _tail(completed.stderr)
+    combined = _combined_output(completed)
     # Host-readiness blockers can make setup dry-run exit 1 even when the
     # selected source checkout is correct, so parse JSON before deciding whether
     # this source-checkout smoke proof failed.
     if completed.returncode not in {0, 1}:
+        if _is_environmental_failure(combined):
+            return _environmental_skip_result(lane, command, completed)
         return SmokeResult(
             lane=lane,
             status="failed",
@@ -745,6 +751,8 @@ def _source_setup_result(
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
+        if completed.returncode != 0 and _is_environmental_failure(combined):
+            return _environmental_skip_result(lane, command, completed)
         return SmokeResult(
             lane=lane,
             status="failed",
@@ -810,7 +818,7 @@ def _tool_install_result(
     command: CommandSpec,
     completed: subprocess.CompletedProcess[str],
 ) -> SmokeResult:
-    combined = "\n".join(part for part in (completed.stderr, completed.stdout) if part)
+    combined = _combined_output(completed)
     if completed.returncode == 0:
         return SmokeResult(
             lane=lane,
@@ -844,7 +852,24 @@ def _basic_result(
             stdout_tail=_tail(completed.stdout),
             stderr_tail=_tail(completed.stderr),
         )
+    if _is_environmental_failure(_combined_output(completed)):
+        return _environmental_skip_result(lane, command, completed)
     return _failed_completed(lane, command, completed, f"command exited {completed.returncode}")
+
+
+def _environmental_skip_result(
+    lane: Lane,
+    command: CommandSpec,
+    completed: subprocess.CompletedProcess[str],
+) -> SmokeResult:
+    return SmokeResult(
+        lane=lane,
+        status="skipped",
+        command=command.argv,
+        reason=_ENVIRONMENTAL_COMMAND_SKIP_REASON,
+        stdout_tail=_tail(completed.stdout),
+        stderr_tail=_tail(completed.stderr),
+    )
 
 
 def _failed_completed(
@@ -933,6 +958,10 @@ def _source_checkout_root(source_checkout: Mapping[str, object] | None) -> str |
 def _is_environmental_failure(output: str) -> bool:
     lowered = output.lower()
     return any(signature in lowered for signature in _ENVIRONMENTAL_FAILURE_SIGNATURES)
+
+
+def _combined_output(completed: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(part for part in (completed.stderr, completed.stdout) if part)
 
 
 def _ignore_source_names(_directory: str, names: list[str]) -> set[str]:

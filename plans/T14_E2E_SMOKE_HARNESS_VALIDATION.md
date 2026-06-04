@@ -98,3 +98,40 @@ validation, provenance, logs, and merge gating after completion.
 
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HCQeo
+
+### Requirement Status
+
+- Complete: Added focused regression coverage in
+  `tests/unit/scripts/test_first_run_smoke.py` for environmental failures in
+  source `uv run` probes.
+- Complete: Added focused regression coverage for environmental failures in
+  installed `awf` post-install command probes.
+- Complete: `scripts/first_run_smoke.py` now classifies recognized network or
+  offline failures from non-zero source/post-install probes as `skipped`.
+- Complete: Preserved hard-failure behavior for ordinary non-environmental
+  probe failures and source-checkout reason-code failures; existing focused
+  tests still cover those paths.
+
+### Evidence
+
+- Confirmed pre-fix focused regressions:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_result_skips_environmental_dependency_failures tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_skips_unparseable_environmental_failure -q`
+  failed with status assertions; the classifier returned `failed` instead of
+  `skipped`.
+- Post-fix review-specific tests:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_result_skips_environmental_dependency_failures tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_skips_unparseable_environmental_failure tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_accepts_non_source_readiness_blocker_exit_one -q`
+  passed with `6 passed`.
+- Focused module test:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py -q`
+  passed with `18 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+- File-scoped format check:
+  `uv run --python 3.12 --extra dev ruff format --check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.

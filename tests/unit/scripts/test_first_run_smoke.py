@@ -270,6 +270,37 @@ def test_source_uv_run_commands_use_project_and_outside_cwd(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("lane", "argv"),
+    (
+        (smoke.Lane.SOURCE_UV_RUN, ("uv", "run", "awf", "--help")),
+        (smoke.Lane.TOOL_INSTALL, ("/tmp/awf-smoke/bin/awf", "--help")),
+    ),
+)
+def test_source_command_result_skips_environmental_dependency_failures(
+    tmp_path: Path,
+    lane: smoke.Lane,
+    argv: tuple[str, ...],
+) -> None:
+    """Offline resolver failures skip source and installed-command probes."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(argv=argv, env={}, cwd=tmp_path / "outside")
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=1,
+        stdout="",
+        stderr="error: failed to fetch dependency\nTemporary failure in name resolution\n",
+    )
+
+    result = smoke._source_command_result(lane, command, completed, checkout)
+
+    assert result.status == "skipped"
+    assert result.reason == "smoke command could not resolve dependencies in this environment"
+    assert result.command == command.argv
+
+
+@pytest.mark.unit
 def test_run_command_reports_timeout_as_failed_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -367,6 +398,46 @@ def test_source_setup_result_accepts_non_source_readiness_blocker_exit_one(
 
     assert result.status == "passed"
     assert result.source_checkout == {"root": str(checkout.resolve())}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("returncode", [1, 2])
+def test_source_setup_result_skips_unparseable_environmental_failure(
+    tmp_path: Path,
+    returncode: int,
+) -> None:
+    """Setup dry-run dependency fetch failures skip when AWF JSON never runs."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(
+        argv=(
+            "uv",
+            "run",
+            "--project",
+            str(checkout),
+            "awf",
+            "setup",
+            "--dry-run",
+            "--source-checkout",
+            str(checkout),
+            "--format",
+            "json",
+        ),
+        env={},
+        cwd=tmp_path / "outside",
+    )
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=returncode,
+        stdout="",
+        stderr="error: failed to fetch dependency\nTemporary failure in name resolution\n",
+    )
+
+    result = smoke._source_setup_result(smoke.Lane.SOURCE_UV_RUN, command, completed, checkout)
+
+    assert result.status == "skipped"
+    assert result.reason == "smoke command could not resolve dependencies in this environment"
+    assert result.command == command.argv
 
 
 def _record_run(
