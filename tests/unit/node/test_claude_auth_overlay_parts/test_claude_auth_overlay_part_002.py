@@ -763,6 +763,28 @@ def test_isolation_label_reflects_worker_overlay_capability() -> None:
 
 
 @pytest.mark.unit
+def test_isolation_label_reports_copy_under_force_copy_request() -> None:
+    # A force-copy request (bootstrap propagation preflight on a non-propagating
+    # host) flips the worker to the copy fallback even while overlayfs stays
+    # advertised. The label must fold in the same signal so readiness/status report
+    # per_workspace_copy and not overstate the isolation/disk posture as overlay.
+    assert (
+        claude_auth_isolation_label(
+            overlay_filesystem_available=lambda: True,
+            force_copy_requested=lambda: True,
+        )
+        == "per_workspace_copy"
+    )
+    assert (
+        claude_auth_isolation_label(
+            overlay_filesystem_available=lambda: True,
+            force_copy_requested=lambda: False,
+        )
+        == "per_workspace_overlay"
+    )
+
+
+@pytest.mark.unit
 def test_default_overlay_mounter_is_subprocess_backed() -> None:
     assert isinstance(default_overlay_mounter(), _SubprocessOverlayMounter)
 

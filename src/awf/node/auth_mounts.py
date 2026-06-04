@@ -265,7 +265,9 @@ def default_overlay_mounter() -> OverlayMounter:
 
 
 def claude_auth_isolation_label(
-    *, overlay_filesystem_available: Callable[[], bool] | None = None
+    *,
+    overlay_filesystem_available: Callable[[], bool] | None = None,
+    force_copy_requested: Callable[[], bool] | None = None,
 ) -> str:
     """Return the isolation posture label for Claude file auth on this host.
 
@@ -284,9 +286,19 @@ def claude_auth_isolation_label(
     worker's ``CAP_SYS_ADMIN`` as the deployment invariant it is. Best effort: an
     individual mount can still fall back to copy, which keeps provisioning correct
     either way.
+
+    An ``AWF_CLAUDE_AUTH_FORCE_COPY`` request wins over real overlayfs capability,
+    exactly as it does in ``_SubprocessOverlayMounter.supported`` — on a
+    non-propagating host bootstrap sets this so the worker provisions with the copy
+    fallback even while overlayfs stays advertised. The label must fold in the same
+    signal or readiness/status would report ``per_workspace_overlay`` while the
+    worker actually uses per-workspace copies, misstating the isolation/disk posture.
     """
 
     probe = overlay_filesystem_available or _overlay_filesystem_available
+    force_copy = force_copy_requested or _force_copy_isolation_requested
+    if force_copy():
+        return _ISOLATION_COPY
     return _ISOLATION_OVERLAY if probe() else _ISOLATION_COPY
 
 
