@@ -819,19 +819,25 @@ async def run_workspace_filesystem_gc(
             reservation_releases={},
         )
 
-    empty_plan_compose_teardown_candidate = (
-        _missing_workspace_compose_teardown_candidate(
-            workspace_id=workspace_id,
-            work_dir=normalized_work_dir,
-            now=current_time,
-        )
-        if workspace is None
-        else None
-    )
+    fallback_compose_teardown_candidate: WorkspaceGCCandidate | None = None
+    if not candidates:
+        if workspace is None:
+            fallback_compose_teardown_candidate = _missing_workspace_compose_teardown_candidate(
+                workspace_id=workspace_id,
+                work_dir=normalized_work_dir,
+                now=current_time,
+            )
+        elif preserved:
+            fallback_compose_teardown_candidate = _candidate_for_workspace(
+                workspace,
+                work_dir=normalized_work_dir,
+                now=current_time,
+                reason_code=preserved[0].reason_code,
+            )
     compose_teardowns = await _run_gc_compose_teardowns(
         plan,
         compose_teardown,
-        empty_plan_candidate=empty_plan_compose_teardown_candidate,
+        fallback_candidate=fallback_compose_teardown_candidate,
     )
     side_effect_workspace_ids = _workspace_ids_after_compose_teardown(
         plan,
@@ -1064,14 +1070,14 @@ async def _run_gc_compose_teardowns(
     plan: WorkspaceGCPlan,
     compose_teardown: WorkspaceGCComposeTeardown | None,
     *,
-    empty_plan_candidate: WorkspaceGCCandidate | None = None,
+    fallback_candidate: WorkspaceGCCandidate | None = None,
 ) -> dict[str, WorkspaceGCComposeTeardownResult]:
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
     if compose_teardown is None:
         return compose_teardowns
     candidates = plan.candidates
-    if not candidates and empty_plan_candidate is not None:
-        candidates = [empty_plan_candidate]
+    if not candidates and fallback_candidate is not None:
+        candidates = [fallback_candidate]
     for candidate in candidates:
         teardown = await _run_compose_teardown(candidate, compose_teardown)
         if teardown is not None:

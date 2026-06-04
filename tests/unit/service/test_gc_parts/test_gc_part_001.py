@@ -29,6 +29,7 @@ from awf.service.gc import (
     FAILED_WORKSPACE_NO_WORK,
     FAILED_WORKSPACE_TRIAGE_PRESERVED,
     WORKSPACE_WITHIN_RETENTION,
+    WorkspaceGCComposeTeardownResult,
     WorkspaceGCWorktreeRemoveResult,
     plan_terminal_workspace_gc,
     run_terminal_workspace_gc,
@@ -1223,6 +1224,79 @@ async def test_single_workspace_gc_ignore_retention_still_preserves_unmerged_wor
         COMPLETED_PR_NOT_MERGED,
     ]
     assert worktree.exists()
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_tears_down_compose_for_preserved_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    compose_file = work_dir / "compose" / "stored-preserved" / "compose.yml"
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        compose_file_path=str(compose_file),
+        pr=True,
+        pr_merge_sha=None,
+    )
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        compose_project_name="awf_preserved_compose",
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(compose_file, "compose")
+    calls: list[tuple[str, str, str | None, str | None, Path]] = []
+
+    async def _compose_teardown(
+        candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(
+            (
+                candidate.workspace_id,
+                candidate.reason_code,
+                candidate.compose_project_name,
+                candidate.compose_file_path,
+                candidate.compose.path,
+            )
+        )
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        ignore_retention=True,
+        compose_teardown=_compose_teardown,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        COMPLETED_PR_NOT_MERGED,
+    ]
+    assert result.compose_teardowns[workspace_id].reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert calls == [
+        (
+            workspace_id,
+            COMPLETED_PR_NOT_MERGED,
+            "awf_preserved_compose",
+            str(compose_file),
+            compose_file.parent,
+        )
+    ]
+    assert worktree.exists()
+    assert compose_file.exists()
 
 
 @pytest.mark.unit
