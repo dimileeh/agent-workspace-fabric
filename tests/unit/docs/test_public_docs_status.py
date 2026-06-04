@@ -305,6 +305,20 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         ), f"{label} must refresh metadata after upgrade and before start"
 
 
+def test_quickstart_lane_2_upgrade_enters_checkout_before_pull() -> None:
+    """Assert Lane 2 upgrade commands are valid from a fresh shell."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_section = _quickstart_upgrade_section(
+        quickstart_text,
+        "## Lane 2: Source Checkout With Global Tool Install",
+    )
+
+    checkout_cd = "cd aira-agent-workspace-fabric"
+    assert checkout_cd in upgrade_section
+    assert "git pull" in upgrade_section
+    assert upgrade_section.index(checkout_cd) < upgrade_section.index("git pull")
+
+
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
     """Assert Quickstart local URLs match the default smoke probe targets."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
