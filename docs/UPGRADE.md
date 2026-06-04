@@ -54,7 +54,11 @@ Core stack still holds them:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv tool install . --force
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf service status --format pretty
@@ -72,7 +76,11 @@ host ports and blocks while the previous Core stack still holds them:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv sync --extra dev
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf service status --format pretty

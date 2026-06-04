@@ -295,9 +295,12 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     """Assert source-checkout upgrades refresh persisted asset metadata."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
-    stop_core_line = (
-        "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+    stop_guard_line = "if [ -f docker/compose/.env ]; then"
+    stop_env_file_line = (
+        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
     )
+    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
+    stop_guard_end_line = "\nfi\n"
     cases = (
         (
             "Quickstart Lane 2",
@@ -306,7 +309,6 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
                 "## Lane 2: Source Checkout With Global Tool Install",
             ),
             "uv tool install . --force",
-            stop_core_line,
             'awf setup --source-checkout "$PWD"',
             'awf start --source-checkout "$PWD"',
         ),
@@ -317,7 +319,6 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
                 "## Lane 3: Source Checkout With No Global Install",
             ),
             "uv sync --extra dev",
-            stop_core_line,
             'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
             'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"',
         ),
@@ -328,7 +329,6 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
                 "## Source Checkout With Global Tool Install",
             ),
             "uv tool install . --force",
-            stop_core_line,
             'awf setup --source-checkout "$PWD"',
             'awf start --source-checkout "$PWD"',
         ),
@@ -339,23 +339,29 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
                 "## Source Checkout With No Global Install",
             ),
             "uv sync --extra dev",
-            stop_core_line,
             'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
             'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"',
         ),
     )
 
-    for label, section, refresh_prereq, stop_line, setup_line, start_line in cases:
+    for label, section, refresh_prereq, setup_line, start_line in cases:
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
-        assert stop_line in section, f"{label} must stop local Core before setup"
+        assert stop_guard_line in section, f"{label} must guard optional compose env file"
+        assert stop_env_file_line in section, f"{label} must reuse compose env file if present"
+        assert stop_fallback_line in section, f"{label} must stop Core without compose env file"
+        assert stop_guard_end_line in section, f"{label} must close compose env guard"
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
+        stop_fallback_index = section.index(stop_fallback_line)
         assert (
             section.index(refresh_prereq)
-            < section.index(stop_line)
+            < section.index(stop_guard_line)
+            < section.index(stop_env_file_line)
+            < stop_fallback_index
+            < section.index(stop_guard_end_line, stop_fallback_index)
             < section.index(setup_line)
             < section.index(start_line)
-        ), f"{label} must stop Core, refresh metadata, then start"
+        ), f"{label} must guard env-file stop, refresh metadata, then start"
 
 
 def test_quickstart_source_checkout_upgrades_reuse_existing_checkout() -> None:

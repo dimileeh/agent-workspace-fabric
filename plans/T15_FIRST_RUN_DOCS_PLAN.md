@@ -120,6 +120,11 @@ persisted `source_checkout` metadata with `awf setup --source-checkout "$PWD"`,
 because setup readiness blocks while the running API/Postgres services still
 hold the default host ports.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HFn6N`: source-checkout
+upgrade snippets must not require `docker/compose/.env` when the source-checkout
+first-run lane only exported shell values. Guard `--env-file docker/compose/.env`
+behind an existence check and provide a fallback stop command that omits it.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

@@ -136,7 +136,11 @@ Postgres host ports and blocks while the previous Core stack still holds them.
 ```bash
 git pull
 uv tool install . --force
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf smoke run --project ../awf-eval-project --mocked-local --format pretty
@@ -203,7 +207,11 @@ Postgres host ports and blocks while the previous Core stack still holds them.
 ```bash
 git pull
 uv sync --extra dev
-docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf smoke run --project ../awf-eval-project --mocked-local --format pretty

@@ -588,6 +588,43 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HFn6N`:
+
+- `docs/QUICKSTART.md` and `docs/UPGRADE.md` now guard source-checkout upgrade
+  stop commands so `docker/compose/.env` is passed to Docker Compose only when
+  it exists.
+- The same snippets now provide a fallback `docker compose -f
+  docker/compose/local-service.yml stop` command, matching source-checkout
+  first-run lanes that exported shell values without creating the compose env
+  file.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  upgrade docs that require the compose env file without a no-env-file fallback.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+```
+
+Red-phase result after adding the focused assertion: failed because Quickstart
+Lane 2 did not guard the optional compose env file before stopping Core.
+
+Final repair result: `1 passed in 0.58s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `42 passed in 1.15s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
