@@ -1607,3 +1607,48 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HNTqp` MCP Exact Extra-Secret Plan
+
+### Problem Statement And Scope
+
+The inline review reports that MCP structured JSON redaction applies
+provider-readiness token/URL rewrites before matching exact extra secrets loaded
+from Compose/provider environments. If a configured extra secret is an opaque
+value that contains a token-shaped substring, `_safe_result` can return only
+that substring redacted and leak the non-token prefix/suffix of the exact
+secret.
+
+This repair is limited to the MCP structured-payload text redaction order. It
+does not change artifact byte-level redaction, MCP log redaction, service logs,
+provider readiness snapshots, or broad validation ownership.
+
+### Requirements Checklist
+
+- MCP structured JSON redaction computes exact configured secret matches on the
+  original text before provider-readiness token/URL rewrites.
+- Compose-env-only provider secrets are redacted as a whole when they appear in
+  `_safe_result` payloads.
+- Existing provider token/URL pattern redaction remains in place for values
+  that are not configured exact secrets.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression using a Compose env-file secret whose
+   value contains a GitHub-token-shaped substring inside a structured event
+   payload returned by `_safe_result`.
+2. Update `_redact_sensitive_text()` so configured exact secrets are redacted
+   before provider-readiness rewrites run.
+3. Run the targeted regression, adjacent MCP event redaction checks, and narrow
+   ruff/mypy checks for touched files. Broad AWF/GitHub validation remains
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceEvents::test_workspace_events_redact_exact_compose_secret_before_provider_rewrites -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```

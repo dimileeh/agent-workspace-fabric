@@ -1950,6 +1950,57 @@ uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/
 
 None found.
 
+## Review Thread `PRRT_kwDOSJAM6s6HNTqp` MCP Exact Extra-Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP structured JSON redaction now runs exact configured secret
+  matching on the original text before provider-readiness token/URL rewrites.
+- Complete: Compose-env-only provider secrets are redacted as a whole in
+  `_safe_result` payloads even when they contain a GitHub-token-shaped
+  substring.
+- Complete: provider-readiness token/URL pattern redaction still runs after
+  exact configured secret redaction for non-exact pattern matches.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceEvents::test_workspace_events_redact_exact_compose_secret_before_provider_rewrites -q --tb=short -ra
+# failed: structured event payload returned `prefix-<redacted>-suffix`
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceEvents::test_workspace_events_redact_exact_compose_secret_before_provider_rewrites -q --tb=short -ra
+# 1 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceEvents -q --tb=short -ra
+# 5 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+# Success: no issues found in 1 source file
+```
+
+## Gaps
+
+None found.
+
 ## Review Thread `PRRT_kwDOSJAM6s6HNCRx` Service Log Env Sentinel Iteration
 
 Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`

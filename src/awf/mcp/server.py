@@ -780,12 +780,22 @@ def _redact_sensitive_text(
 ) -> str:
     """Redact known secrets and provider tokens from a text string."""
     extra_secret_values = tuple(extra_secrets)
-    redacted = value
-    for secret in (settings.api_token, settings.github_token):
-        if secret and len(secret) >= 4:
-            redacted = redacted.replace(secret, "<redacted>")
+    exact_secret_values = tuple(
+        dict.fromkeys(
+            secret
+            for secret in (
+                settings.api_token,
+                settings.github_token,
+                service_settings.api_token,
+                service_settings.github_token,
+                *extra_secret_values,
+            )
+            if secret and len(secret) >= 4
+        )
+    )
+    redacted = redact_secrets(value, extra_secrets=exact_secret_values)
     redacted = provider_readiness_service.redact_launch_preflight_text(service_settings, redacted)
-    return redact_secrets(redacted, extra_secrets=extra_secret_values)
+    return redact_secrets(redacted, extra_secrets=exact_secret_values)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:

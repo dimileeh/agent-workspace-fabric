@@ -549,6 +549,62 @@ class TestWorkspaceEvents:
             assert item["event_type"] == "workspace.phase_started"
 
     @pytest.mark.unit
+    async def test_workspace_events_redact_exact_compose_secret_before_provider_rewrites(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Redact whole Compose-only secrets before provider token regex rewrites."""
+        env_key = "ANTHROPIC_AUTH_TOKEN"
+        secret = "prefix-ghp_mcpStructuredSecret123456-suffix"
+        monkeypatch.delenv(env_key, raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"{env_key}={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        ws_id = _workspace_id(created)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type="test.workspace_events.compose_secret",
+                reason_code="COMPOSE_SECRET",
+                payload={
+                    "line": f"provider emitted {secret}",
+                    "nested": {"secret": secret},
+                },
+            )
+            await session.commit()
+
+        result = await mcp.call_tool(
+            "awf_list_workspace_events",
+            {
+                "workspace_id": ws_id,
+                "event_type": "test.workspace_events.compose_secret",
+                "limit": 50,
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        payload = result.structuredContent
+        assert payload is not None
+        event_payload = payload["items"][0]["payload"]
+        assert event_payload["line"] == "provider emitted <redacted>"
+        assert event_payload["nested"]["secret"] == "<redacted>"
+        assert secret not in str(payload)
+        assert "prefix-<redacted>-suffix" not in str(payload)
+
+    @pytest.mark.unit
     async def test_workspace_events_event_type_validation_bounds(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = {tool.name: tool for tool in await mcp.list_tools()}
         props = tools["awf_list_workspace_events"].inputSchema["properties"]
