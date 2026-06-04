@@ -33,14 +33,17 @@ def test_installer_fixture_command_is_local_dry_run(tmp_path: Path, method: str)
     assert command.env == {"AWF_INSTALL_MANIFEST": str(tmp_path / "fixture-manifest.json")}
 
     manifest = json.loads((tmp_path / "fixture-manifest.json").read_text(encoding="utf-8"))
-    wheel = tmp_path / "dist" / "agent_workspace_fabric-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "dist" / f"agent_workspace_fabric-{smoke._FIXTURE_VERSION}-py3-none-any.whl"
     wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     wheel_artifact = next(
         artifact for artifact in manifest["artifacts"] if artifact["kind"] == "wheel"
     )
 
     assert manifest["channel"] == "stable"
+    assert manifest["version"] == smoke._FIXTURE_VERSION
+    assert manifest["source"]["tag"] == f"v{smoke._FIXTURE_VERSION}"
     assert wheel_artifact["url"] == f"file://{wheel.resolve()}"
+    assert wheel_artifact["name"] == wheel.name
     assert wheel_artifact["sha256"] == wheel_digest
     assert "tool install" not in " ".join(command.argv)
 
@@ -387,6 +390,36 @@ def test_source_command_sequence_runs_setup_proof_after_environmental_skip(
     assert [command.argv for command in calls] == [help_command.argv, setup_command.argv]
     assert [result.status for result in results] == ["skipped", "passed"]
     assert results[-1].source_checkout == {"root": str(checkout.resolve())}
+
+
+@pytest.mark.unit
+def test_source_command_result_requires_adjacent_format_json_for_setup_proof(
+    tmp_path: Path,
+) -> None:
+    """A stray json token must not route a non-JSON setup command through proof parsing."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(
+        argv=("awf", "setup", "--dry-run", "--format", "text", "--output", "json"),
+        env={},
+        cwd=tmp_path / "outside",
+    )
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=0,
+        stdout="plain dry run\n",
+        stderr="",
+    )
+
+    result = smoke._source_command_result(
+        smoke.Lane.SOURCE_UV_RUN,
+        command,
+        completed,
+        checkout,
+    )
+
+    assert result.status == "passed"
+    assert result.source_checkout is None
 
 
 @pytest.mark.unit

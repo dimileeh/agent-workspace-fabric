@@ -32,6 +32,7 @@ DEFAULT_PYTHON = "3.12"
 DEFAULT_TIMEOUT_SECONDS = 600.0
 DEFAULT_LANES = ("installer-fixture", "source-uv-run")
 CHECKSUM_VERIFIED_MARKER = "Checksum verified"
+_FIXTURE_VERSION = "0.1.0"
 RELEASE_GATE_REASON = (
     "release lane requires --allow-release, --release-dist-dir, and --release-manifest"
 )
@@ -145,7 +146,7 @@ def installer_fixture_command(
     smoke_root.mkdir(parents=True, exist_ok=True)
     dist_dir = smoke_root / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)
-    wheel = dist_dir / "agent_workspace_fabric-0.1.0-py3-none-any.whl"
+    wheel = dist_dir / f"agent_workspace_fabric-{_FIXTURE_VERSION}-py3-none-any.whl"
     wheel.write_bytes(b"awf first-run smoke fixture wheel\n")
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     manifest = {
@@ -164,9 +165,9 @@ def installer_fixture_command(
         "source": {
             "commit": None,
             "repository": "https://github.com/dimileeh/aira-agent-workspace-fabric",
-            "tag": "v0.1.0",
+            "tag": f"v{_FIXTURE_VERSION}",
         },
-        "version": "0.1.0",
+        "version": _FIXTURE_VERSION,
     }
     manifest_path = smoke_root / "fixture-manifest.json"
     _write_json(manifest, manifest_path)
@@ -908,11 +909,15 @@ def _timeout_output_text(output: str | bytes | None) -> str:
 
 
 def _is_setup_dry_run_json(command: CommandSpec) -> bool:
+    try:
+        fmt_idx = command.argv.index("--format")
+    except ValueError:
+        return False
     return (
         "setup" in command.argv
         and "--dry-run" in command.argv
-        and "--format" in command.argv
-        and "json" in command.argv
+        and fmt_idx + 1 < len(command.argv)
+        and command.argv[fmt_idx + 1] == "json"
     )
 
 
