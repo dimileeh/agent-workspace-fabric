@@ -94,9 +94,17 @@ create or monitor PRs.
 
 For package-manager or virtualenv installs:
 
+Persist the generated local service values in the current first-run directory's
+`.env` before setup/start so later upgrades can restore the same running Core
+token and password.
+
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+} > .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup
@@ -108,9 +116,16 @@ awf smoke run --project <path> --mocked-local --format pretty
 
 For a source checkout with a global `awf` executable, run from the checkout:
 
+Persist the generated local service values into the checkout's Compose env file
+before setup/start so later upgrades can restore them.
+
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+} > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup --source-checkout "$PWD"
@@ -122,9 +137,16 @@ awf smoke run --project <path> --mocked-local --format pretty
 
 For a source checkout with no global install, run from the checkout:
 
+Persist the generated local service values into the checkout's Compose env file
+before setup/start so later upgrades can restore them.
+
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+} > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"

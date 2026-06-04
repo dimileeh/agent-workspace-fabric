@@ -252,6 +252,13 @@ source-checkout lanes must persist the first-run `AWF_API_TOKEN` and
 fresh-shell upgrade, rollback, and uninstall paths can restore the same running
 local Core service values.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKFwX`: Getting Started's
+recommended first-run sequence must persist the generated `AWF_API_TOKEN` and
+`AWF_POSTGRES_PASSWORD` before setup/start. Package-manager and virtualenv
+installs should write `.env`; source-checkout snippets should write
+`docker/compose/.env`, matching the later upgrade guide's fresh-shell restore
+requirements.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

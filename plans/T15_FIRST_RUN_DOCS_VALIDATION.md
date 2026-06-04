@@ -91,6 +91,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   to `docker/compose/.env` before source-checkout setup/start commands, so later
   fresh-shell upgrade, rollback, and uninstall paths can restore the same
   running local Core service values.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HKFwX` by persisting Getting
+  Started package/virtualenv first-run `AWF_API_TOKEN` and
+  `AWF_POSTGRES_PASSWORD` values to `.env`, and persisting source-checkout
+  first-run values to `docker/compose/.env`, before setup/start commands.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -1450,6 +1454,43 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Shell syntax result: `1 passed in 0.83s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HKFwX`:
+
+- `docs/GETTING_STARTED.md` now writes generated package/virtualenv first-run
+  `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` values to `.env` before
+  `awf setup`.
+- `docs/GETTING_STARTED.md` now writes generated source-checkout first-run
+  service values to `docker/compose/.env` before both source-checkout
+  setup/start snippets.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Getting Started
+  first-run snippets that generate service values without persisting them before
+  setup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade -q
+```
+
+Red-phase result after adding the focused assertion: failed because Getting
+Started still omitted first-run `.env` / `docker/compose/.env` persistence before
+setup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_uses_runnable_startup_path tests/unit/docs/test_public_docs_status.py::test_getting_started_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Final focused repair result: `4 passed in 0.76s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py

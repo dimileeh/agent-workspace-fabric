@@ -838,6 +838,74 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     assert "run `awf start`" in configure_section
 
 
+def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
+    """Assert Getting Started first-run secrets remain available to later upgrades."""
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
+        encoding="utf-8",
+    )
+    startup_section = getting_started_text.split(
+        "### Recommended First-Run Sequence",
+        maxsplit=1,
+    )[1].split("### Configure Environment", maxsplit=1)[0]
+    package_heading = "For package-manager or virtualenv installs:"
+    source_global_heading = (
+        "For a source checkout with a global `awf` executable, run from the checkout:"
+    )
+    source_no_global_heading = (
+        "For a source checkout with no global install, run from the checkout:"
+    )
+    api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
+    password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
+    password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
+
+    assert package_heading in startup_section
+    assert source_global_heading in startup_section
+    assert source_no_global_heading in startup_section
+    cases = (
+        (
+            "package-manager or virtualenv installs",
+            startup_section.split(package_heading, maxsplit=1)[1].split(
+                source_global_heading,
+                maxsplit=1,
+            )[0],
+            "} > .env",
+            "\nawf setup\n",
+        ),
+        (
+            "source checkout with global executable",
+            startup_section.split(source_global_heading, maxsplit=1)[1].split(
+                source_no_global_heading,
+                maxsplit=1,
+            )[0],
+            "} > docker/compose/.env",
+            '\nawf setup --source-checkout "$PWD"\n',
+        ),
+        (
+            "source checkout with no global install",
+            startup_section.split(source_no_global_heading, maxsplit=1)[1],
+            "} > docker/compose/.env",
+            '\nuv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"\n',
+        ),
+    )
+
+    for label, section, persist_target, setup_command in cases:
+        assert "persist" in section.lower(), f"{label} should explain env persistence"
+        assert api_export in section, f"{label} is missing AWF_API_TOKEN generation"
+        assert password_export in section, f"{label} is missing AWF_POSTGRES_PASSWORD generation"
+        assert api_persist in section, f"{label} must persist AWF_API_TOKEN"
+        assert password_persist in section, f"{label} must persist AWF_POSTGRES_PASSWORD"
+        assert persist_target in section, f"{label} must write the expected env file"
+        assert (
+            section.index(api_export)
+            < section.index(password_export)
+            < section.index(api_persist)
+            < section.index(password_persist)
+            < section.index(persist_target)
+            < section.index(setup_command)
+        ), f"{label} must persist service env before setup"
+
+
 def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
     """Assert Getting Started first-run smoke does not require GitHub CLI auth."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
