@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -27,7 +28,13 @@ def test_source_uv_run_lane_proves_checkout_from_outside(tmp_path: Path) -> None
     assert all(result.status == "passed" for result in results), results
     setup_results = [result for result in results if "setup" in result.command]
     assert setup_results
-    assert "source_checkout" in setup_results[-1].stdout_tail
+    payload = json.loads(setup_results[-1].stdout_tail)
+    assert isinstance(payload, dict)
+    details = payload.get("details")
+    assert isinstance(details, dict)
+    source_checkout = details.get("source_checkout")
+    assert isinstance(source_checkout, dict)
+    assert source_checkout.get("root") == str((tmp_path / "source-checkout").resolve())
     assert "SOURCE_CHECKOUT_INVALID" not in setup_results[-1].stdout_tail
 
 
