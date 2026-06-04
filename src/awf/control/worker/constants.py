@@ -249,6 +249,9 @@ _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
 _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE = "ORPHAN_DIR_RECONCILE_FAILED"
 """Reason code logged when an orphan-dir reconcile sweep fails non-transiently."""
 
+_CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE = "CLASSIFIED_ORPHAN_REAP_FAILED"
+"""Reason code logged when a classified-orphan reaper sweep fails non-transiently."""
+
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
