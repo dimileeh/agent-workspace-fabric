@@ -174,6 +174,14 @@ def test_parse_args_deduplicates_repeat_lanes_in_order() -> None:
 
 
 @pytest.mark.unit
+def test_parse_args_deduplicates_repeat_methods_in_order() -> None:
+    """Duplicate method args are idempotent while preserving first-seen order."""
+    config = smoke._parse_args(["--method", "uv", "--method", "pipx", "--method", "uv"])
+
+    assert config.methods == ("uv", "pipx")
+
+
+@pytest.mark.unit
 def test_tool_install_lane_stops_after_first_post_install_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -267,8 +275,6 @@ def test_source_uv_run_commands_use_project_and_outside_cwd(tmp_path: Path) -> N
         str(checkout),
         "--python",
         "3.12",
-        "--extra",
-        "dev",
         "awf",
         "--help",
     )

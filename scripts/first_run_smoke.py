@@ -358,8 +358,6 @@ def source_uv_run_commands(
         str(checkout),
         "--python",
         python,
-        "--extra",
-        "dev",
         "awf",
     )
     return (
@@ -650,7 +648,7 @@ def _parse_args(argv: Sequence[str] | None) -> SmokeConfig:
     lanes = tuple(dict.fromkeys(Lane(raw) for raw in (args.lane or DEFAULT_LANES)))
     return SmokeConfig(
         lanes=lanes,
-        methods=tuple(args.method or ("uv",)),
+        methods=tuple(dict.fromkeys(args.method or ("uv",))),
         checkout_root=args.checkout_root.resolve(),
         installer=args.installer.resolve(),
         release_dist_dir=args.release_dist_dir.resolve() if args.release_dist_dir else None,
