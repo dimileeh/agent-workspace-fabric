@@ -25,11 +25,11 @@ The `uv tool` lane is release-installed and package-manager mediated:
 
 ```bash
 uv tool upgrade agent-workspace-fabric
-if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
-if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
@@ -44,11 +44,11 @@ The `pipx` lane is release-installed and package-manager mediated:
 
 ```bash
 pipx upgrade agent-workspace-fabric
-if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
-if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
@@ -66,11 +66,11 @@ Use this path only when you installed AWF into an active virtualenv with
 cd /path/to/project-or-env
 . .venv/bin/activate
 pip install --upgrade agent-workspace-fabric
-if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
-if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
@@ -91,7 +91,7 @@ cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -103,7 +103,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -138,7 +138,7 @@ cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -150,7 +150,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -184,11 +184,11 @@ For release-installed lanes, and for virtualenv/pip installs after activating
 the restored environment:
 
 ```bash
-if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before rollback}"
   export AWF_API_TOKEN
 fi
-if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before rollback}"
   export AWF_POSTGRES_PASSWORD
 fi
@@ -206,7 +206,7 @@ uv tool install . --force
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -218,7 +218,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -246,7 +246,7 @@ uv sync --extra dev
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -258,7 +258,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then

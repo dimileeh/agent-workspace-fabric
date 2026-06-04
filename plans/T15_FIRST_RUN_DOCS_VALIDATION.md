@@ -1892,6 +1892,46 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HLiZ5`:
+
+- `docs/UPGRADE.md` upgrade and rollback snippets now recognize persisted
+  `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` entries written with optional
+  leading whitespace and optional `export`, matching dotenv reader behavior.
+- `docs/QUICKSTART.md` applies the same package-upgrade guard pattern because
+  the focused package upgrade docs assertion covers that matching first-run
+  upgrade snippet.
+- Source-checkout lifecycle snippets in both docs now use the same
+  optional-export/whitespace pattern when reading persisted service secrets from
+  `docker/compose/.env` or `.env`.
+- `tests/unit/docs/test_public_docs_status.py` now runs the documented package
+  guard against an exported `.env` fixture and centralizes the expected package
+  guard/source-checkout read lines.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_accepts_export_prefixed_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start -q
+```
+
+Red-phase result after adding the focused regression: failed because the uv tool
+upgrade guard still used `grep -q '^AWF_API_TOKEN=.'` and did not match
+`export AWF_API_TOKEN=token-from-dotenv`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_accepts_export_prefixed_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Final focused repair result: `7 passed in 0.88s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

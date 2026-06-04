@@ -40,6 +40,29 @@ OPTIONAL_PUBLIC_GUIDES = {
 COPY_PASTE_DOC_HINTS = {
     "docs/PROJECT_ONBOARDING.md",
 }
+PACKAGE_ENV_GUARD_LINES = {
+    "AWF_API_TOKEN": (
+        "if ! grep -q '^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        "AWF_API_TOKEN[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then"
+    ),
+    "AWF_POSTGRES_PASSWORD": (
+        "if ! grep -q '^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        "AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]' .env "
+        "2>/dev/null; then"
+    ),
+}
+SOURCE_CHECKOUT_ENV_READ_LINES = {
+    "AWF_API_TOKEN": (
+        "  AWF_PERSISTED_API_TOKEN=\"$(sed -n 's/^[[:space:]]*"
+        "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        'AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+    ),
+    "AWF_POSTGRES_PASSWORD": (
+        "  AWF_PERSISTED_POSTGRES_PASSWORD=\"$(sed -n 's/^[[:space:]]*"
+        "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        'AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+    ),
+}
 
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\((?P<target>[^)]+)\)")
 FENCE_DELIMITER_RE = re.compile(r"^ {0,3}```", re.MULTILINE)
@@ -641,6 +664,54 @@ def test_package_upgrade_docs_restore_service_env_before_start() -> None:
         _assert_package_upgrade_restores_service_env(label, section, upgrade_line)
 
 
+def test_package_upgrade_env_restore_accepts_export_prefixed_dotenv_entries(
+    tmp_path: Path,
+) -> None:
+    """Assert package upgrade guards recognize dotenv entries with export prefixes."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "  export AWF_API_TOKEN=token-from-dotenv",
+                "export AWF_POSTGRES_PASSWORD=password-from-dotenv",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    release_rollback_section = rollback_section.split(
+        "For release-installed lanes",
+        maxsplit=1,
+    )[1].split(
+        "For the source checkout with global tool install lane",
+        maxsplit=1,
+    )[0]
+    cases = (
+        ("Upgrade uv tool", _markdown_section(upgrade_text, "## uv tool")),
+        ("Upgrade pipx", _markdown_section(upgrade_text, "## pipx")),
+        ("Upgrade virtualenv / pip", _markdown_section(upgrade_text, "## Virtualenv / pip")),
+        ("Release-installed rollback", release_rollback_section),
+    )
+
+    for label, section in cases:
+        for key in ("AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"):
+            guard_line = _package_env_guard_line(section, key, label)
+            grep_command = _grep_command_from_shell_guard(guard_line)
+            result = subprocess.run(  # noqa: S602
+                ["bash", "-c", grep_command],
+                cwd=tmp_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0, (
+                f"{label} must accept export-prefixed persisted {key}: "
+                f"{guard_line!r}; stderr={result.stderr!r}"
+            )
+
+
 def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
     """Assert lowercase fi in unrelated text is not treated as a shell keyword."""
     upgrade_line = "pipx upgrade agent-workspace-fabric"
@@ -649,14 +720,14 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
         + "\n".join(
             [
                 upgrade_line,
-                "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then",
+                PACKAGE_ENV_GUARD_LINES["AWF_API_TOKEN"],
                 (
                     '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running '
                     'local Core or persist it in .env before upgrading}"'
                 ),
                 "  export AWF_API_TOKEN",
                 "  # awf_config_file can be configured elsewhere",
-                "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
+                PACKAGE_ENV_GUARD_LINES["AWF_POSTGRES_PASSWORD"],
                 (
                     '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used '
                     'for the running local Core or persist it in .env before upgrading}"'
@@ -681,14 +752,14 @@ def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
     section = "\n".join(
         [
             upgrade_line,
-            "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then",
+            PACKAGE_ENV_GUARD_LINES["AWF_API_TOKEN"],
             (
                 '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running '
                 'local Core or persist it in .env before upgrading}"'
             ),
             "  export AWF_API_TOKEN",
             "fi",
-            "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
+            PACKAGE_ENV_GUARD_LINES["AWF_POSTGRES_PASSWORD"],
             (
                 '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used '
                 'for the running local Core or persist it in .env before upgrading}"'
@@ -710,14 +781,14 @@ def test_package_upgrade_env_restore_rejects_prefixed_api_export_line() -> None:
         "\n".join(
             [
                 upgrade_line,
-                "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then",
+                PACKAGE_ENV_GUARD_LINES["AWF_API_TOKEN"],
                 (
                     '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running '
                     'local Core or persist it in .env before upgrading}"'
                 ),
                 "  export AWF_API_TOKEN_BACKUP",
                 "fi",
-                "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
+                PACKAGE_ENV_GUARD_LINES["AWF_POSTGRES_PASSWORD"],
                 (
                     '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used '
                     'for the running local Core or persist it in .env before upgrading}"'
@@ -740,7 +811,7 @@ def test_upgrade_release_installed_rollback_restores_service_env_before_start() 
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
     release_heading = "For release-installed lanes"
     source_heading = "For the source checkout with global tool install lane"
-    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then"
+    api_guard_line = PACKAGE_ENV_GUARD_LINES["AWF_API_TOKEN"]
     api_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
         'or persist it in .env before rollback}"'
@@ -749,7 +820,7 @@ def test_upgrade_release_installed_rollback_restores_service_env_before_start() 
     unsafe_api_generation_line = (
         '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     )
-    password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
+    password_guard_line = PACKAGE_ENV_GUARD_LINES["AWF_POSTGRES_PASSWORD"]
     password_require_line = (
         '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
         'the running local Core or persist it in .env before rollback}"'
@@ -1895,6 +1966,24 @@ def _shell_line_index(section: str, line: str, label: str, start: int = 0) -> in
     return start + line_match.start()
 
 
+def _package_env_guard_line(section: str, key: str, label: str) -> str:
+    """Return the package-lane grep guard for a persisted service env key."""
+    matching_lines = [
+        line for line in section.splitlines() if line.startswith("if ! grep -q ") and key in line
+    ]
+    assert matching_lines, f"{label} is missing {key} persisted dotenv guard"
+    return matching_lines[0]
+
+
+def _grep_command_from_shell_guard(guard_line: str) -> str:
+    """Extract the grep command from an `if ! grep ...; then` shell guard."""
+    prefix = "if ! "
+    suffix = "; then"
+    assert guard_line.startswith(prefix), f"unexpected guard prefix: {guard_line!r}"
+    assert guard_line.endswith(suffix), f"unexpected guard suffix: {guard_line!r}"
+    return guard_line.removeprefix(prefix).removesuffix(suffix)
+
+
 def _assert_source_checkout_api_token_restore(
     label: str,
     section: str,
@@ -1908,9 +1997,7 @@ def _assert_source_checkout_api_token_restore(
     token_init_line = 'AWF_PERSISTED_API_TOKEN=""'
     token_loop_line = "for env_file in docker/compose/.env .env; do"
     token_file_guard_line = '  [ -f "$env_file" ] || continue'
-    token_read_line = (
-        '  AWF_PERSISTED_API_TOKEN="$(sed -n \'s/^AWF_API_TOKEN=//p\' "$env_file" | head -n 1)"'
-    )
+    token_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_API_TOKEN"]
     token_break_line = '  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break'
     token_loop_end_line = "done"
     token_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
@@ -2014,11 +2101,7 @@ def _assert_source_checkout_postgres_password_restore(
     password_init_line = 'AWF_PERSISTED_POSTGRES_PASSWORD=""'
     password_loop_line = "for env_file in docker/compose/.env .env; do"
     password_file_guard_line = '  [ -f "$env_file" ] || continue'
-    password_read_line = (
-        '  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n '
-        "'s/^AWF_POSTGRES_PASSWORD=//p' "
-        '"$env_file" | head -n 1)"'
-    )
+    password_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"]
     password_break_line = '  [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break'
     password_loop_end_line = "done"
     password_guard_line = 'if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then'
@@ -2159,7 +2242,7 @@ def _assert_package_upgrade_restores_service_env(
     upgrade_line: str,
 ) -> None:
     """Assert package upgrade snippets restore service environment before restart."""
-    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then"
+    api_guard_line = PACKAGE_ENV_GUARD_LINES["AWF_API_TOKEN"]
     api_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
         'or persist it in .env before upgrading}"'
@@ -2168,7 +2251,7 @@ def _assert_package_upgrade_restores_service_env(
     unsafe_api_generation_line = (
         '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     )
-    password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
+    password_guard_line = PACKAGE_ENV_GUARD_LINES["AWF_POSTGRES_PASSWORD"]
     password_require_line = (
         '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
         'the running local Core or persist it in .env before upgrading}"'

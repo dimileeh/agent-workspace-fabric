@@ -440,6 +440,20 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HLWjk`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HLiZ5`: Upgrade and
+rollback snippets in `docs/UPGRADE.md`, plus the matching Quickstart upgrade
+snippets covered by the same focused docs assertions, must recognize persisted
+dotenv service secrets written with optional leading whitespace and optional
+`export`, matching the first-run `.env` preservation behavior and the service
+dotenv reader. Apply the same optional-export/whitespace extraction to
+source-checkout persisted secret reads in these lifecycle snippets.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HLiZ5`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_accepts_export_prefixed_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.
