@@ -1305,3 +1305,50 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HMFlI` Followed Service Logs Blocked Sink Plan
+
+### Problem Statement And Scope
+
+The inline review reports that `awf service logs --follow` can hang when the
+redaction reader thread blocks writing to a downstream stdout/stderr pipe that
+is full but still open. In that state the thread stops draining the subprocess
+pipe, Docker can block on its own stdout/stderr pipe, and the main thread keeps
+waiting on the followed process.
+
+This repair is limited to followed service-log streaming. It does not change
+non-follow log capture, redaction patterns, Docker Compose command construction,
+or broad validation ownership.
+
+### Requirements Checklist
+
+- A blocked downstream followed-log write is detected and treated like a closed
+  downstream pipe for process cleanup.
+- The followed Docker logs subprocess is terminated once, rather than leaving
+  `process.wait()` stuck behind a full subprocess pipe.
+- Normal followed-log redaction and existing broken-pipe handling remain
+  unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing regression where a followed stdout sink blocks without
+   raising `BrokenPipeError`, and expect the default streaming runner to
+   terminate the followed process.
+2. Track active stream sink writes and add a short watchdog that terminates the
+   followed process when a write remains blocked past the configured timeout.
+3. Make blocked stream threads non-blocking for runner shutdown after the
+   process has been terminated.
+4. Run the targeted regression, adjacent followed-log tests, and narrow
+   ruff/mypy checks for touched files. Broad AWF/GitHub validation remains
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k blocked_downstream_write --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'blocked_downstream_write or broken_stdout_pipe or downstream_stdout_error or simultaneous_broken_pipes or default_follow_runner' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```

@@ -371,6 +371,98 @@ def test_service_logs_follow_downstream_stdout_error_terminates_default_process(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_follow_blocked_downstream_write_terminates_default_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full downstream stdout pipe must not leave the followed process running."""
+
+    class _BlockedWriteSink:
+        """Sink that blocks a write while keeping the downstream pipe open."""
+
+        def __init__(self) -> None:
+            """Initialize synchronization points for the blocked write."""
+            self.write_started = threading.Event()
+            self.release_write = threading.Event()
+
+        def write(self, text: str) -> int:
+            """Block long enough for the streaming runner to detect the stall."""
+            self.write_started.set()
+            self.release_write.wait(timeout=0.5)
+            return len(text)
+
+        def flush(self) -> None:
+            """Flush successfully when the blocked write is released."""
+
+    class _FollowProcess:
+        """Follow process double that must be terminated while stdout is blocked."""
+
+        stdout = io.StringIO("line before downstream blocks\n")
+        stderr = io.StringIO("")
+
+        def __init__(self) -> None:
+            """Track termination and kill calls made by the streaming runner."""
+            self.terminated = threading.Event()
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Return only after the runner terminates the followed process."""
+            wait_timeout = 0.25 if timeout is None else timeout
+            if not self.terminated.wait(wait_timeout):
+                raise AssertionError(
+                    "follow process was not terminated after downstream stdout blocked"
+                )
+            return -signal.SIGTERM
+
+        def terminate(self) -> None:
+            """Record graceful termination from the streaming runner."""
+            self.terminated.set()
+
+        def kill(self) -> None:
+            """Record forced termination from the streaming runner."""
+            self.killed = True
+            self.terminated.set()
+
+    processes: list[_FollowProcess] = []
+
+    def _popen(_args: list[str], **kwargs: object) -> _FollowProcess:
+        """Create a follow-process double with piped stdout and stderr."""
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        process = _FollowProcess()
+        processes.append(process)
+        return process
+
+    sink = _BlockedWriteSink()
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(sys, "stdout", sink)
+    monkeypatch.setattr(
+        "awf.service.logs._STREAMING_DOWNSTREAM_WRITE_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "awf.service.logs._STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS",
+        0.005,
+        raising=False,
+    )
+
+    try:
+        result = run_service_logs(
+            services=[ServiceLogName.api],
+            follow=True,
+        )
+    finally:
+        sink.release_write.set()
+
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert sink.write_started.is_set()
+    assert len(processes) == 1
+    assert processes[0].terminated.is_set()
+    assert processes[0].killed is False
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_follow_simultaneous_broken_pipes_terminate_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

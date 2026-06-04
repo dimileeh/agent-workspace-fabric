@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -32,6 +33,9 @@ DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 _STREAMING_INTERRUPT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_STREAMING_DOWNSTREAM_WRITE_TIMEOUT_SECONDS = 5.0
+_STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS = 0.05
+_STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS = 0.05
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
 
 
@@ -267,6 +271,9 @@ def _run_streaming_subprocess(
 
     stream_broken_pipe = threading.Event()
     stream_broken_pipe_lock = threading.Lock()
+    stream_write_lock = threading.Lock()
+    active_stream_writes: dict[int, float] = {}
+    stream_watch_stop = threading.Event()
 
     def _handle_stream_broken_pipe() -> None:
         """Stop the streaming child after the downstream pipe closes."""
@@ -276,26 +283,80 @@ def _run_streaming_subprocess(
             stream_broken_pipe.set()
             _terminate_streaming_subprocess(process)
 
+    def _mark_stream_write_start() -> None:
+        """Record a stream thread entering a downstream write."""
+        with stream_write_lock:
+            active_stream_writes[threading.get_ident()] = time.monotonic()
+
+    def _mark_stream_write_end() -> None:
+        """Clear a stream thread's active downstream write marker."""
+        with stream_write_lock:
+            active_stream_writes.pop(threading.get_ident(), None)
+
+    def _has_blocked_downstream_write() -> bool:
+        """Return whether any stream write has exceeded the blocked-write timeout."""
+        now = time.monotonic()
+        with stream_write_lock:
+            return any(
+                now - started_at >= _STREAMING_DOWNSTREAM_WRITE_TIMEOUT_SECONDS
+                for started_at in active_stream_writes.values()
+            )
+
+    def _watch_blocked_downstream_writes() -> None:
+        """Terminate the followed child if a downstream log sink stops draining."""
+        while not stream_watch_stop.wait(_STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS):
+            if stream_broken_pipe.is_set():
+                return
+            if _has_blocked_downstream_write():
+                _handle_stream_broken_pipe()
+                return
+
+    def _join_stream_threads(threads: tuple[threading.Thread, ...]) -> None:
+        """Join stream threads without hanging behind an already-blocked sink write."""
+        while any(thread.is_alive() for thread in threads):
+            for thread in threads:
+                thread.join(timeout=_STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS)
+            if stream_broken_pipe.is_set():
+                for thread in threads:
+                    thread.join(timeout=_STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS)
+                return
+
     stdout_thread = _start_redacted_stream_thread(
         process.stdout,
         sys.stdout,
         extra_secrets=extra_secret_values,
         on_broken_pipe=_handle_stream_broken_pipe,
+        on_write_start=_mark_stream_write_start,
+        on_write_end=_mark_stream_write_end,
     )
     stderr_thread = _start_redacted_stream_thread(
         process.stderr,
         sys.stderr,
         extra_secrets=extra_secret_values,
         on_broken_pipe=_handle_stream_broken_pipe,
+        on_write_start=_mark_stream_write_start,
+        on_write_end=_mark_stream_write_end,
     )
+    watchdog_thread = threading.Thread(
+        target=_watch_blocked_downstream_writes,
+        daemon=True,
+    )
+    watchdog_thread.start()
     try:
         returncode = process.wait()
     except KeyboardInterrupt:
         _terminate_streaming_subprocess(process)
         raise
     finally:
-        stdout_thread.join()
-        stderr_thread.join()
+        _join_stream_threads((stdout_thread, stderr_thread))
+        stream_watch_stop.set()
+        watchdog_thread.join(
+            timeout=(
+                _STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS
+                if stream_broken_pipe.is_set()
+                else None
+            )
+        )
     if stream_broken_pipe.is_set():
         return subprocess.CompletedProcess(args, 0, stdout=None, stderr=None)
     if check and returncode != 0:
@@ -319,11 +380,21 @@ def _start_redacted_stream_thread(
     *,
     extra_secrets: Iterable[str] = (),
     on_broken_pipe: Callable[[], None],
+    on_write_start: Callable[[], None],
+    on_write_end: Callable[[], None],
 ) -> threading.Thread:
     """Start a thread that redacts a subprocess pipe before writing it."""
     thread = threading.Thread(
         target=_stream_redacted_pipe,
-        args=(source, sink, tuple(extra_secrets), on_broken_pipe),
+        args=(
+            source,
+            sink,
+            tuple(extra_secrets),
+            on_broken_pipe,
+            on_write_start,
+            on_write_end,
+        ),
+        daemon=True,
     )
     thread.start()
     return thread
@@ -334,6 +405,8 @@ def _stream_redacted_pipe(
     sink: IO[str],
     extra_secrets: Iterable[str],
     on_broken_pipe: Callable[[], None],
+    on_write_start: Callable[[], None],
+    on_write_end: Callable[[], None],
 ) -> None:
     """Copy pipe lines to a sink after applying shared secret redaction."""
     if source is None:
@@ -345,8 +418,12 @@ def _stream_redacted_pipe(
             # patterns will need carry-over context instead of per-line redaction.
             redacted_line = redact_secrets(line, extra_secrets=extra_secret_values)
             try:
-                sink.write(redacted_line)
-                sink.flush()
+                on_write_start()
+                try:
+                    sink.write(redacted_line)
+                    sink.flush()
+                finally:
+                    on_write_end()
             except (OSError, ValueError):
                 try:
                     source.close()

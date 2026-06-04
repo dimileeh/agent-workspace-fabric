@@ -1694,6 +1694,58 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/mcp/metrics_
 # Success: no issues found in 2 source files
 ```
 
+## Inline Review Thread `PRRT_kwDOSJAM6s6HMFlI` Followed Service Logs Blocked Sink Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: blocked downstream followed-log writes are now detected by a
+  stream-write watchdog and handled through the existing downstream-pipe cleanup
+  path.
+- Complete: the followed Docker logs subprocess is terminated once when a
+  downstream sink blocks, so the main `process.wait()` call is not left behind a
+  full subprocess pipe.
+- Complete: existing followed-log redaction, broken-pipe cleanup, simultaneous
+  pipe cleanup, and default follow streaming behavior remain covered by focused
+  adjacent tests.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k blocked_downstream_write --tb=short -ra
+# failed: follow process was not terminated after downstream stdout blocked
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k blocked_downstream_write --tb=short -ra
+# 1 passed, 29 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'blocked_downstream_write or broken_stdout_pipe or downstream_stdout_error or simultaneous_broken_pipes or default_follow_runner' --tb=short -ra
+# 7 passed, 23 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q --tb=short -ra
+# 30 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.
