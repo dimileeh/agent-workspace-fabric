@@ -794,6 +794,55 @@ class TestReadWorkspaceArtifact:
         assert b"abc" not in decoded
 
     @pytest.mark.unit
+    async def test_read_workspace_artifact_coalesces_adjacent_exact_secret_bytes(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Coalesce adjacent exact secret spans before returning text artifacts."""
+        api_secret = "alpha-secret-value"
+        github_secret = "bravo-secret-value"
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path),
+            api_token=api_secret,
+            github_token=github_secret,
+        )
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact adjacent exact secret redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "adjacent.txt").write_bytes(
+            f"prefix {api_secret}{github_secret} suffix".encode()
+        )
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "adjacent.txt",
+                "limit_bytes": 1024,
+            },
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"prefix <redacted> suffix"
+        assert api_secret.encode() not in decoded
+        assert github_secret.encode() not in decoded
+
+    @pytest.mark.unit
     async def test_read_workspace_artifact_does_not_redact_base64_content(
         self,
         factory: async_sessionmaker[AsyncSession],

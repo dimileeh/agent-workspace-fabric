@@ -683,7 +683,7 @@ def _redact_exact_secret_bytes(
 
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
-        if not merged or start >= merged[-1][1]:
+        if not merged or start > merged[-1][1]:
             merged.append((start, end))
             continue
         merged[-1] = (merged[-1][0], max(merged[-1][1], end))
