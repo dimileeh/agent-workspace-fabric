@@ -189,14 +189,23 @@ def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
 
     assert "does not require live GitHub or provider access" in quickstart_text
+    assert "gh auth token" not in quickstart_text
     assert not re.search(
         r'(?m)^export AWF_GITHUB_TOKEN="\$\(gh auth token\)"$',
         quickstart_text,
     )
     assert (
-        quickstart_text.count("# Optional: only needed for PR creation/monitoring features.") == 3
+        quickstart_text.count(
+            "# [optional] Only needed for PR creation/monitoring; skip for mocked smoke."
+        )
+        == 3
     )
-    assert quickstart_text.count('# export AWF_GITHUB_TOKEN="$(gh auth token)"') == 3
+    assert (
+        quickstart_text.count(
+            "# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed."
+        )
+        == 3
+    )
 
 
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:

@@ -37,8 +37,8 @@ pipx install agent-workspace-fabric
 
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-# Optional: only needed for PR creation/monitoring features.
-# export AWF_GITHUB_TOKEN="$(gh auth token)"
+# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
+# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup
 awf start
 
@@ -81,8 +81,8 @@ uv tool install . --force
 
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-# Optional: only needed for PR creation/monitoring features.
-# export AWF_GITHUB_TOKEN="$(gh auth token)"
+# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
+# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 
@@ -123,8 +123,8 @@ uv sync --extra dev
 
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-# Optional: only needed for PR creation/monitoring features.
-# export AWF_GITHUB_TOKEN="$(gh auth token)"
+# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
+# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 
