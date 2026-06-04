@@ -20,8 +20,16 @@ holds them. Editing `~/.awf/config.yml` remains the no-stop option. Before
 deleting a recorded checkout, either refresh the persisted path:
 
 ```bash
-if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before refreshing source-checkout metadata}"
+AWF_PERSISTED_API_TOKEN=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+done
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
@@ -93,8 +101,16 @@ the API and Postgres host ports and blocks while the previous Core stack still
 holds them. Then run:
 
 ```bash
-if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before refreshing source-checkout metadata}"
+AWF_PERSISTED_API_TOKEN=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+done
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
@@ -143,8 +159,16 @@ API and Postgres host ports and blocks while the previous Core stack still holds
 them. Then run:
 
 ```bash
-if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before refreshing source-checkout metadata}"
+AWF_PERSISTED_API_TOKEN=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+done
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""

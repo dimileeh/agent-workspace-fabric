@@ -355,13 +355,6 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
-    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
-    api_require_line = (
-        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
-        'or persist it in docker/compose/.env before upgrading}"'
-    )
-    api_export_line = "  export AWF_API_TOKEN"
-    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     cases = (
         (
             "Quickstart Lane 2",
@@ -407,14 +400,12 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
 
     for label, section, refresh_prereq, setup_line, start_line in cases:
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
-        assert api_guard_line in section, f"{label} must prefer persisted AWF_API_TOKEN"
-        assert api_require_line in section, f"{label} must require the existing AWF_API_TOKEN"
-        assert api_export_line in section, f"{label} must export restored AWF_API_TOKEN"
-        assert unsafe_api_generation_line not in section, (
-            f"{label} must not regenerate AWF_API_TOKEN"
-        )
-        password_restore_start_index, password_restore_end_index = (
-            _assert_source_checkout_postgres_password_restore(label, section, "upgrading")
+        env_restore_start_index, env_restore_end_index = (
+            _assert_source_checkout_service_env_restore_before_stop(
+                label,
+                section,
+                "upgrading",
+            )
         )
         assert stop_guard_line in section, f"{label} must guard optional compose env file"
         assert stop_env_file_line in section, f"{label} must reuse compose env file if present"
@@ -422,19 +413,11 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         assert stop_guard_end_line in section, f"{label} must close compose env guard"
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
-        api_guard_index = section.index(api_guard_line)
-        api_require_index = section.index(api_require_line)
-        api_export_index = section.index(api_export_line)
-        api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
         stop_fallback_index = section.index(stop_fallback_line)
         assert (
             section.index(refresh_prereq)
-            < api_guard_index
-            < api_require_index
-            < api_export_index
-            < api_guard_end_index
-            < password_restore_start_index
-            < password_restore_end_index
+            < env_restore_start_index
+            < env_restore_end_index
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
             < stop_fallback_index
@@ -1112,13 +1095,6 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
-    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
-    api_require_line = (
-        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
-        'or persist it in docker/compose/.env before rollback}"'
-    )
-    api_export_line = "  export AWF_API_TOKEN"
-    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     setup_line = 'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"'
     no_global_commands = (
         setup_line,
@@ -1136,34 +1112,18 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     assert stop_env_file_line in no_global_section
     assert stop_fallback_line in no_global_section
     assert stop_guard_end_line in no_global_section
-    assert api_guard_line in no_global_section
-    assert api_require_line in no_global_section
-    assert api_export_line in no_global_section
-    assert unsafe_api_generation_line not in no_global_section
-    password_restore_start_index, password_restore_end_index = (
-        _assert_source_checkout_postgres_password_restore(
+    env_restore_start_index, env_restore_end_index = (
+        _assert_source_checkout_service_env_restore_before_stop(
             "no-global source-checkout rollback",
             no_global_section,
             "rollback",
         )
     )
-    api_guard_index = no_global_section.index(api_guard_line)
-    api_require_index = no_global_section.index(api_require_line)
-    api_export_index = no_global_section.index(api_export_line)
-    api_guard_end_index = _shell_closing_fi_index(
-        no_global_section,
-        api_export_index,
-        "no-global source-checkout rollback",
-    )
     stop_fallback_index = no_global_section.index(stop_fallback_line)
     assert (
         no_global_section.index("uv sync --extra dev")
-        < api_guard_index
-        < api_require_index
-        < api_export_index
-        < api_guard_end_index
-        < password_restore_start_index
-        < password_restore_end_index
+        < env_restore_start_index
+        < env_restore_end_index
         < no_global_section.index(stop_guard_line)
         < no_global_section.index(stop_env_file_line)
         < stop_fallback_index
@@ -1191,13 +1151,6 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
-    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
-    api_require_line = (
-        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
-        'or persist it in docker/compose/.env before rollback}"'
-    )
-    api_export_line = "  export AWF_API_TOKEN"
-    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     setup_line = 'awf setup --source-checkout "$PWD"'
     start_line = 'awf start --source-checkout "$PWD"'
     global_commands = (
@@ -1219,34 +1172,18 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     assert stop_env_file_line in global_section
     assert stop_fallback_line in global_section
     assert stop_guard_end_line in global_section
-    assert api_guard_line in global_section
-    assert api_require_line in global_section
-    assert api_export_line in global_section
-    assert unsafe_api_generation_line not in global_section
-    password_restore_start_index, password_restore_end_index = (
-        _assert_source_checkout_postgres_password_restore(
+    env_restore_start_index, env_restore_end_index = (
+        _assert_source_checkout_service_env_restore_before_stop(
             "global source-checkout rollback",
             global_section,
             "rollback",
         )
     )
-    api_guard_index = global_section.index(api_guard_line)
-    api_require_index = global_section.index(api_require_line)
-    api_export_index = global_section.index(api_export_line)
-    api_guard_end_index = _shell_closing_fi_index(
-        global_section,
-        api_export_index,
-        "global source-checkout rollback",
-    )
     stop_fallback_index = global_section.index(stop_fallback_line)
     assert (
         global_section.index("uv tool install . --force")
-        < api_guard_index
-        < api_require_index
-        < api_export_index
-        < api_guard_end_index
-        < password_restore_start_index
-        < password_restore_end_index
+        < env_restore_start_index
+        < env_restore_end_index
         < global_section.index(stop_guard_line)
         < global_section.index(stop_env_file_line)
         < stop_fallback_index
@@ -1591,6 +1528,115 @@ def _shell_line_index(section: str, line: str, label: str, start: int = 0) -> in
     return start + line_match.start()
 
 
+def _assert_source_checkout_api_token_restore(
+    label: str,
+    section: str,
+    lifecycle: str,
+) -> tuple[int, int]:
+    """Assert source-checkout snippets export persisted API tokens before use."""
+    unsafe_default_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    unsafe_shared_guard_line = (
+        "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
+    )
+    token_init_line = 'AWF_PERSISTED_API_TOKEN=""'
+    token_loop_line = "for env_file in docker/compose/.env .env; do"
+    token_file_guard_line = '  [ -f "$env_file" ] || continue'
+    token_read_line = (
+        '  AWF_PERSISTED_API_TOKEN="$(sed -n \'s/^AWF_API_TOKEN=//p\' "$env_file" | head -n 1)"'
+    )
+    token_break_line = '  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break'
+    token_loop_end_line = "done"
+    token_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
+    token_persisted_export_line = '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"'
+    token_else_line = "else"
+    token_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        "or persist it in docker/compose/.env or .env before " + lifecycle + '}"'
+    )
+    token_shell_export_line = "  export AWF_API_TOKEN"
+
+    assert unsafe_default_line not in section, f"{label} must not regenerate AWF_API_TOKEN"
+    assert unsafe_shared_guard_line not in section, (
+        f"{label} must not let root .env satisfy the compose env guard without export"
+    )
+    assert token_init_line in section, f"{label} must initialize persisted API token lookup"
+    assert token_loop_line in section, f"{label} must inspect source checkout env files"
+    assert token_file_guard_line in section, f"{label} must skip absent env files"
+    assert token_read_line in section, f"{label} must read persisted AWF_API_TOKEN"
+    assert token_break_line in section, f"{label} must prefer the first persisted API token"
+    assert token_guard_line in section, f"{label} must branch on persisted API token"
+    assert token_persisted_export_line in section, (
+        f"{label} must export the persisted AWF_API_TOKEN"
+    )
+    assert token_require_line in section, (
+        f"{label} must require AWF_API_TOKEN when no persisted value exists"
+    )
+    assert token_shell_export_line in section, f"{label} must export restored shell AWF_API_TOKEN"
+
+    token_init_index = section.index(token_init_line)
+    token_loop_index = _required_index(section, token_loop_line, label, token_init_index)
+    token_file_guard_index = _required_index(
+        section,
+        token_file_guard_line,
+        label,
+        token_loop_index,
+    )
+    token_read_index = _required_index(section, token_read_line, label, token_file_guard_index)
+    token_break_index = _required_index(section, token_break_line, label, token_read_index)
+    token_loop_end_index = _required_index(
+        section,
+        token_loop_end_line,
+        label,
+        token_break_index,
+    )
+    token_guard_index = _required_index(section, token_guard_line, label, token_loop_end_index)
+    token_persisted_export_index = _required_index(
+        section,
+        token_persisted_export_line,
+        label,
+        start=token_guard_index,
+    )
+    token_else_index = _required_index(
+        section,
+        token_else_line,
+        label,
+        token_persisted_export_index,
+    )
+    token_require_index = _required_index(
+        section,
+        token_require_line,
+        label,
+        token_else_index,
+    )
+    token_shell_export_index = _required_index(
+        section,
+        token_shell_export_line,
+        label,
+        token_require_index,
+    )
+    token_guard_end_index = _shell_closing_fi_index(
+        section,
+        token_shell_export_index,
+        label,
+    )
+
+    assert (
+        token_init_index
+        < token_loop_index
+        < token_file_guard_index
+        < token_read_index
+        < token_break_index
+        < token_loop_end_index
+        < token_guard_index
+        < token_persisted_export_index
+        < token_else_index
+        < token_require_index
+        < token_shell_export_index
+        < token_guard_end_index
+    ), f"{label} must restore persisted API token before continuing"
+    return token_init_index, token_guard_end_index
+
+
 def _assert_source_checkout_postgres_password_restore(
     label: str,
     section: str,
@@ -1712,24 +1758,13 @@ def _assert_source_checkout_service_env_restore_before_stop(
     lifecycle: str,
 ) -> tuple[int, int]:
     """Assert source-checkout snippets restore service secrets before stopping Core."""
-    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
-    api_require_line = (
-        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
-        "or persist it in docker/compose/.env before " + lifecycle + '}"'
-    )
-    api_export_line = "  export AWF_API_TOKEN"
-    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     stop_guard_line = "if [ -f docker/compose/.env ]; then"
 
-    assert api_guard_line in section, f"{label} must prefer persisted AWF_API_TOKEN"
-    assert api_require_line in section, f"{label} must require the existing AWF_API_TOKEN"
-    assert api_export_line in section, f"{label} must export restored AWF_API_TOKEN"
-    assert unsafe_api_generation_line not in section, f"{label} must not regenerate AWF_API_TOKEN"
-
-    api_guard_index = _shell_line_index(section, api_guard_line, label)
-    api_require_index = _shell_line_index(section, api_require_line, label, api_guard_index)
-    api_export_index = _shell_line_index(section, api_export_line, label, api_require_index)
-    api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
+    api_restore_start_index, api_restore_end_index = _assert_source_checkout_api_token_restore(
+        label,
+        section,
+        lifecycle,
+    )
     password_restore_start_index, password_restore_end_index = (
         _assert_source_checkout_postgres_password_restore(
             label,
@@ -1742,15 +1777,13 @@ def _assert_source_checkout_service_env_restore_before_stop(
     )
 
     assert (
-        api_guard_index
-        < api_require_index
-        < api_export_index
-        < api_guard_end_index
+        api_restore_start_index
+        < api_restore_end_index
         < password_restore_start_index
         < password_restore_end_index
         < stop_guard_index
     ), f"{label} must restore service secrets before stopping Core"
-    return api_guard_index, password_restore_end_index
+    return api_restore_start_index, password_restore_end_index
 
 
 def _assert_package_upgrade_restores_service_env(

@@ -231,6 +231,15 @@ block to installs with `awf` on `PATH` and show the no-global
 `start --source-checkout "$PWD"` startup variant so a fresh checkout is selected
 even when persisted source-checkout metadata is stale or absent.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HJjsf`: source-checkout
+upgrade, rollback, and uninstall snippets must not let a root `.env`
+`AWF_API_TOKEN` satisfy the guard without exporting it. When
+`docker/compose/.env` exists, `awf start --source-checkout` reads that compose
+env file and only sees root `.env` values if the shell exports them. The docs
+should restore `AWF_API_TOKEN` from `docker/compose/.env` first, then root
+`.env`, and export whichever persisted value is found before stopping or
+starting Core.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

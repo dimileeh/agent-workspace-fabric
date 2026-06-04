@@ -90,8 +90,16 @@ Core stack still holds them:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv tool install . --force
-if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before upgrading}"
+AWF_PERSISTED_API_TOKEN=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+done
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before upgrading}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
@@ -128,8 +136,16 @@ host ports and blocks while the previous Core stack still holds them:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv sync --extra dev
-if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before upgrading}"
+AWF_PERSISTED_API_TOKEN=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+done
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before upgrading}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
@@ -186,8 +202,16 @@ checkout and refresh persisted source-checkout metadata before starting:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 uv tool install . --force
-if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before rollback}"
+AWF_PERSISTED_API_TOKEN=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+done
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before rollback}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
@@ -218,8 +242,16 @@ For the source checkout with no global install lane, run AWF from the checkout:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 uv sync --extra dev
-if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before rollback}"
+AWF_PERSISTED_API_TOKEN=""
+for env_file in docker/compose/.env .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+done
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before rollback}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
