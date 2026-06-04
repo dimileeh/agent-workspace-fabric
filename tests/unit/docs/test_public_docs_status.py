@@ -424,31 +424,105 @@ def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
     password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
     host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
     database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
-    persist_target = "} > docker/compose/.env"
+    env_tmp = 'awf_env_tmp="$(mktemp)"'
+    preserve_existing_env = "\n".join(
+        (
+            "    sed \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
+            "      docker/compose/.env",
+        )
+    )
+    gnu_only_sed_alternation = (
+        "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
+        "\\|AWF_DATABASE_URL\\)=/d' docker/compose/.env"
+    )
+    persist_target = 'mv "$awf_env_tmp" docker/compose/.env'
+    unsafe_persist_target = "} > docker/compose/.env"
 
     assert "persist" in first_run_section.lower()
     assert api_export in first_run_section
     assert password_export in first_run_section
     assert host_port_export in first_run_section
     assert database_url_export in first_run_section
+    assert env_tmp in first_run_section
     assert api_persist in first_run_section
     assert password_persist in first_run_section
     assert host_port_persist in first_run_section
     assert database_url_persist in first_run_section
+    assert preserve_existing_env in first_run_section
+    assert gnu_only_sed_alternation not in first_run_section
     assert persist_target in first_run_section
+    assert unsafe_persist_target not in first_run_section
     assert f"\n{setup_command}\n" in first_run_section
     assert (
         first_run_section.index(api_export)
         < first_run_section.index(password_export)
         < first_run_section.index(host_port_export)
         < first_run_section.index(database_url_export)
+        < first_run_section.index(env_tmp)
         < first_run_section.index(api_persist)
         < first_run_section.index(password_persist)
         < first_run_section.index(host_port_persist)
         < first_run_section.index(database_url_persist)
+        < first_run_section.index(preserve_existing_env)
         < first_run_section.index(persist_target)
         < first_run_section.index(f"\n{setup_command}\n")
     )
+
+
+@pytest.mark.parametrize(
+    "heading",
+    (
+        "## Lane 2: Source Checkout With Global Tool Install",
+        "## Lane 3: Source Checkout With No Global Install",
+    ),
+)
+def test_quickstart_source_checkout_first_run_strips_exported_awf_compose_env_entries(
+    heading: str,
+    tmp_path: Path,
+) -> None:
+    """Assert Quickstart source lanes preserve non-service Compose env entries."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lane_section = _markdown_section(quickstart_text, heading)
+    first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
+    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", first_run_section, re.MULTILINE)
+    assert len(sed_expressions) == 4
+
+    compose_env = tmp_path / "compose.env"
+    compose_env.write_text(
+        "\n".join(
+            (
+                "export AWF_API_TOKEN=old-token",
+                " export AWF_POSTGRES_PASSWORD=old-password",
+                "\tAWF_POSTGRES_HOST_PORT = 15432",
+                "export AWF_DATABASE_URL = old-url",
+                "AWF_GITHUB_TOKEN=keep",
+                "AWF_API_HOST_PORT=8001",
+                "AWF_HOST_WORK_DIR=/tmp/awf-workspaces",
+                "PROVIDER_TOKEN=keep",
+                "AWF_API_TOKEN_BACKUP=keep",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = ["sed"]
+    for expression in sed_expressions:
+        command.extend(("-e", expression))
+    command.append(str(compose_env))
+
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    assert result.stdout.splitlines() == [
+        "AWF_GITHUB_TOKEN=keep",
+        "AWF_API_HOST_PORT=8001",
+        "AWF_HOST_WORK_DIR=/tmp/awf-workspaces",
+        "PROVIDER_TOKEN=keep",
+        "AWF_API_TOKEN_BACKUP=keep",
+    ]
 
 
 def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:

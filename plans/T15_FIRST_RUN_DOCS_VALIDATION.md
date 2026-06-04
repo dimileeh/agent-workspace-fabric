@@ -1932,6 +1932,48 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HMa3J`:
+
+- `docs/QUICKSTART.md` source-checkout first-run snippets now write
+  `docker/compose/.env` through a temporary file, replacing only
+  `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and
+  `AWF_DATABASE_URL`.
+- Existing unrelated Compose env entries such as `AWF_GITHUB_TOKEN`, custom
+  host ports, host work directories, provider credentials, and backup keys are
+  preserved before `awf setup --source-checkout` / `awf start --source-checkout`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects direct
+  `} > docker/compose/.env` truncation in the Quickstart source-checkout
+  first-run lanes and exercises the documented `sed` expressions against a
+  fixture with exported and whitespace-padded AWF service entries.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_strips_exported_awf_compose_env_entries -q
+```
+
+Red-phase result after tightening the focused regression: failed with four
+expected failures because both Quickstart source-checkout first-run snippets
+still omitted `awf_env_tmp="$(mktemp)"`, used no preservation `sed` block, and
+redirected directly to `docker/compose/.env`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_strips_exported_awf_compose_env_entries -q
+```
+
+Final focused repair result: `4 passed in 0.72s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 passed in 0.77s`; `All checks passed!`;
+`1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

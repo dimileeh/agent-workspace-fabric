@@ -272,6 +272,15 @@ persisting AWF-managed local service values. Replace only
 `AWF_DATABASE_URL`; do not truncate provider tokens, non-default AWF settings,
 or application config before `awf setup` / `awf start`.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HMa3J`: the Quickstart
+source-checkout first-run blocks must also preserve existing
+`docker/compose/.env` entries when persisting AWF-managed local service values.
+Replace only `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`,
+`AWF_POSTGRES_HOST_PORT`, and `AWF_DATABASE_URL`; do not truncate
+`AWF_GITHUB_TOKEN`, custom ports, host work directories, provider credentials,
+or other checkout-specific Compose env before `awf setup --source-checkout` /
+`awf start --source-checkout`.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

@@ -142,7 +142,8 @@ the normal `awf` executable on `PATH`.
 
 Persist the generated local service values into the checkout's Compose env file
 before setup/start so a later upgrade can restore them and host-side database
-checks use the same password.
+checks use the same password. The snippet replaces these AWF-managed keys in
+place and leaves unrelated Compose env entries intact.
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
@@ -153,12 +154,22 @@ export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
 export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
+awf_env_tmp="$(mktemp)"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-} > docker/compose/.env
+  if [ -f docker/compose/.env ]; then
+    sed \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
+      docker/compose/.env
+  fi
+} > "$awf_env_tmp"
+mv "$awf_env_tmp" docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup --source-checkout "$PWD"
@@ -299,7 +310,8 @@ from the checkout.
 
 Persist the generated local service values into the checkout's Compose env file
 before setup/start so a later upgrade can restore them and host-side database
-checks use the same password.
+checks use the same password. The snippet replaces these AWF-managed keys in
+place and leaves unrelated Compose env entries intact.
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
@@ -310,12 +322,22 @@ export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
 export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
+awf_env_tmp="$(mktemp)"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-} > docker/compose/.env
+  if [ -f docker/compose/.env ]; then
+    sed \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
+      docker/compose/.env
+  fi
+} > "$awf_env_tmp"
+mv "$awf_env_tmp" docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
