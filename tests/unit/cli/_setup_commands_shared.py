@@ -131,7 +131,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     monkeypatch.setattr(setup_commands, "_resolve_provider_settings", lambda _environ: None)
     monkeypatch.setattr(setup_commands, "orchestrate_provider_setup", _fake_orchestrate)
     # Default to a hermetic, no-IO readiness environ. The real ``_readiness_environ``
-    # resolves the bootstrap asset root and reads ``docker/compose/.env`` from disk on
+    # resolves the bootstrap asset root and reads root ``.env`` from disk on
     # every harness-based test, even though the stubbed ``run_system_checks`` ignores
     # the kwarg — pointless I/O coupled to bootstrap-asset resolution. The env-merge
     # regression tests re-enable the real resolver explicitly via
@@ -154,7 +154,7 @@ def _make_source_checkout(root: Path) -> Path:
 
 # --- T08: client integration dispatch helpers -----------------------------
 
-_CLIENT_ENV_FILE = "/srv/awf/docker/compose/.env"
+_CLIENT_ENV_FILE = "/srv/awf/.env"
 
 
 @dataclass

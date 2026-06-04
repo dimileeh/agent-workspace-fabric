@@ -45,6 +45,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-timeout>=2.3.0",
     "pytest-mock>=3.14.0",
+    "pytest-split>=0.10.0",
     "pytest-xdist>=3.6.0",
     "testcontainers[postgres]>=4.8.0",
     "hypothesis>=6.112.0",
@@ -77,8 +78,19 @@ exclude = [
 
 [tool.hatch.build.targets.wheel.force-include]
 ".env.example" = "awf/bootstrap_assets/.env.example"
+"compose.yaml" = "awf/bootstrap_assets/compose.yaml"
 "README.md" = "awf/bootstrap_assets/README.md"
 "alembic.ini" = "awf/bootstrap_assets/alembic.ini"
+"apps/console/Dockerfile" = "awf/bootstrap_assets/apps/console/Dockerfile"
+"apps/console/app" = "awf/bootstrap_assets/apps/console/app"
+"apps/console/components" = "awf/bootstrap_assets/apps/console/components"
+"apps/console/lib" = "awf/bootstrap_assets/apps/console/lib"
+"apps/console/next.config.ts" = "awf/bootstrap_assets/apps/console/next.config.ts"
+"apps/console/package-lock.json" = "awf/bootstrap_assets/apps/console/package-lock.json"
+"apps/console/package.json" = "awf/bootstrap_assets/apps/console/package.json"
+"apps/console/postcss.config.mjs" = "awf/bootstrap_assets/apps/console/postcss.config.mjs"
+"apps/console/scripts" = "awf/bootstrap_assets/apps/console/scripts"
+"apps/console/tsconfig.json" = "awf/bootstrap_assets/apps/console/tsconfig.json"
 "docs" = "awf/bootstrap_assets/docs"
 "docker/agent-runtime.Dockerfile" = "awf/bootstrap_assets/docker/agent-runtime.Dockerfile"
 "docker/compose/local-service.yml" = "awf/bootstrap_assets/docker/compose/local-service.yml"
@@ -93,9 +105,20 @@ exclude = [
 [tool.hatch.build.targets.sdist]
 include = [
     "/.env.example",
+    "/compose.yaml",
     "/README.md",
     "/RELEASING.md",
     "/alembic.ini",
+    "/apps/console/Dockerfile",
+    "/apps/console/app",
+    "/apps/console/components",
+    "/apps/console/lib",
+    "/apps/console/next.config.ts",
+    "/apps/console/package-lock.json",
+    "/apps/console/package.json",
+    "/apps/console/postcss.config.mjs",
+    "/apps/console/scripts",
+    "/apps/console/tsconfig.json",
     "/docs",
     "/docker/agent-runtime.Dockerfile",
     "/docker/compose/local-service.yml",
@@ -112,8 +135,20 @@ include = [
 exclude = [
     "**/__pycache__/**",
     "**/*.pyc",
+    "/apps/console/.env.local",
+    "/apps/console/.next",
+    "/apps/console/next-env.d.ts",
+    "/apps/console/node_modules",
+    "/apps/console/playwright-report",
+    "/apps/console/test-results",
+    "/apps/console/tsconfig.tsbuildinfo",
     "/docker/compose/.env",
 ]
+
+[tool.hatch.build.targets.sdist.force-include]
+# Keep this alongside the sdist include entry: hatchling's wheel-from-sdist
+# path can otherwise omit this console source directory from generated wheels.
+"apps/console/lib" = "apps/console/lib"
 
 [tool.ruff]
 line-length = 100

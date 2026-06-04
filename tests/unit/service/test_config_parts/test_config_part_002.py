@@ -170,8 +170,8 @@ def test_provider_environ_loads_default_compose_env_from_asset_root(
     tmp_path: Path,
 ) -> None:
     asset_root = tmp_path / "awf"
-    compose_env = asset_root / "docker" / "compose" / ".env"
-    compose_env.parent.mkdir(parents=True)
+    compose_env = asset_root / ".env"
+    asset_root.mkdir(parents=True)
     compose_env.write_text("AWF_GITHUB_TOKEN=from-asset-root\n", encoding="utf-8")
     monkeypatch.chdir(asset_root)
     monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: asset_root)
@@ -196,7 +196,7 @@ def test_provider_environ_loads_absolute_default_compose_env_from_asset_root(
     compose_file = asset_root / "docker" / "compose" / "local-service.yml"
     compose_file.parent.mkdir(parents=True)
     compose_file.write_text("services: {}\n", encoding="utf-8")
-    compose_env = compose_file.parent / ".env"
+    compose_env = asset_root / ".env"
     compose_env.write_text("AWF_GITHUB_TOKEN=from-asset-root\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: asset_root)
