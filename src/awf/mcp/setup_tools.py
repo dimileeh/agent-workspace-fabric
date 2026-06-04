@@ -346,11 +346,22 @@ async def _start_local_service_result(
             service_environ=inputs.service_env,
         )
     except ServiceBootstrapError as exc:
-        return _first_run_result(safe_result, _start_failure_payload(exc), is_error=True)
+        return _first_run_result(
+            safe_result,
+            _start_failure_payload(exc, env_migration=inputs.env_migration),
+            is_error=True,
+        )
     except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
         return _start_bootstrap_path_error_result(safe_result, exc)
 
-    return _first_run_result(safe_result, _start_success_payload(inputs.settings, result))
+    return _first_run_result(
+        safe_result,
+        _start_success_payload(
+            inputs.settings,
+            result,
+            env_migration=inputs.env_migration,
+        ),
+    )
 
 
 def _resolve_start_bootstrap_inputs_for_mcp(

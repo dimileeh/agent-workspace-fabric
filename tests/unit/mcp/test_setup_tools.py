@@ -204,6 +204,7 @@ async def test_start_local_service_offloads_sync_preparation(
         compose_env_file=tmp_path / ".env",
         asset_root=tmp_path,
         service_env={"AWF_API_HOST_PORT": "8000"},
+        env_migration=None,
     )
 
     def fake_resolve_start_source_checkout(source_checkout: Path | None) -> object:
@@ -261,6 +262,7 @@ async def test_start_local_service_source_checkout_expanduser_failure_uses_guard
         compose_env_file=tmp_path / ".env",
         asset_root=tmp_path,
         service_env={"AWF_API_HOST_PORT": "8000"},
+        env_migration=None,
     )
     source_calls: list[Path | None] = []
 
@@ -885,6 +887,13 @@ async def test_start_local_service_reuses_bootstrap_and_is_idempotent(
     from awf.mcp import setup_tools
 
     verified = object()
+    migration_payload = {
+        "status": "migrated",
+        "canonical_env_file": str(tmp_path / ".env"),
+        "legacy_env_file": str(tmp_path / "docker" / "compose" / ".env"),
+        "imported_keys": ["OPENAI_API_KEY"],
+        "conflict_keys": [],
+    }
     inputs = SimpleNamespace(
         settings=SimpleNamespace(
             api_base_url="http://localhost:8000",
@@ -894,6 +903,7 @@ async def test_start_local_service_reuses_bootstrap_and_is_idempotent(
         compose_env_file=tmp_path / ".env",
         asset_root=tmp_path,
         service_env={"AWF_API_HOST_PORT": "8000"},
+        env_migration=SimpleNamespace(to_dict=lambda: migration_payload),
     )
     calls: list[dict[str, Any]] = []
 
@@ -921,6 +931,8 @@ async def test_start_local_service_reuses_bootstrap_and_is_idempotent(
 
     assert first["status"] == "success"
     assert second["status"] == "success"
+    assert first["details"]["env_migration"] == migration_payload
+    assert second["details"]["env_migration"] == migration_payload
     assert len(calls) == 2
     for call in calls:
         options = call["kwargs"]["options"]
@@ -941,12 +953,20 @@ async def test_start_local_service_reports_structured_failure(
     from awf.mcp import setup_tools
 
     raw_token = "sk-proj-" + "b" * 40
+    migration_payload = {
+        "status": "migrated",
+        "canonical_env_file": str(tmp_path / ".env"),
+        "legacy_env_file": str(tmp_path / "docker" / "compose" / ".env"),
+        "imported_keys": ["GITHUB_TOKEN"],
+        "conflict_keys": [],
+    }
     inputs = SimpleNamespace(
         settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
         compose_file=tmp_path / "compose.yml",
         compose_env_file=None,
         asset_root=None,
         service_env={},
+        env_migration=SimpleNamespace(to_dict=lambda: migration_payload),
     )
 
     async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
@@ -969,6 +989,7 @@ async def test_start_local_service_reports_structured_failure(
     assert payload["status"] == "failed"
     assert payload["reason_code"] == START_HEALTH_TIMEOUT
     assert payload["issues"][0]["details"]["bootstrap"]["reason_code"] == SERVICE_BOOTSTRAP_TIMEOUT
+    assert payload["issues"][0]["details"]["env_migration"] == migration_payload
     assert raw_token not in rendered
     assert REDACTION_MARKER in rendered
 
@@ -987,6 +1008,7 @@ async def test_start_local_service_bootstrap_path_runtime_error_is_first_run_fai
         compose_env_file=None,
         asset_root=None,
         service_env={"AWF_HOST_WORK_DIR": "~nosuchuser/work"},
+        env_migration=None,
     )
 
     async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
@@ -1026,6 +1048,7 @@ async def test_start_local_service_bootstrap_called_process_error_is_structured(
         compose_env_file=None,
         asset_root=None,
         service_env={},
+        env_migration=None,
     )
 
     async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
