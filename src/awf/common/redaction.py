@@ -86,7 +86,11 @@ def redact_secrets_byte_slice(
     if not spans:
         return text_bytes[safe_start:safe_end].decode("utf-8", errors="replace")
 
-    byte_offsets = _utf8_byte_offsets_by_text_index(text)
+    byte_offsets = _utf8_byte_offsets_for_text_indices(
+        text_bytes,
+        len(text),
+        (index for span in spans for index in span),
+    )
     byte_spans = [
         (byte_offsets[span_start], byte_offsets[span_end]) for span_start, span_end in spans
     ]
@@ -161,13 +165,43 @@ def _render_redacted_slice(
     return "".join(pieces)
 
 
-def _utf8_byte_offsets_by_text_index(text: str) -> list[int]:
-    """Map each Python string index to its UTF-8 byte offset."""
-    offsets = [0]
-    cursor = 0
-    for char in text:
-        cursor += len(char.encode("utf-8"))
-        offsets.append(cursor)
+def _utf8_byte_offsets_for_text_indices(
+    text: bytes,
+    text_length: int,
+    indices: Iterable[int],
+) -> dict[int, int]:
+    """Map requested Python string indices to UTF-8 byte offsets."""
+    pending = sorted({index for index in indices if 0 <= index <= text_length})
+    if not pending:  # pragma: no cover - caller passes nonempty redaction spans.
+        return {}
+
+    offsets: dict[int, int] = {}
+    pending_index = 0
+    while pending_index < len(pending) and pending[pending_index] == 0:
+        offsets[0] = 0
+        pending_index += 1
+
+    byte_index = 0
+    text_index = 0
+    target_index = pending[-1]
+    while byte_index < len(text) and text_index < target_index:
+        first_byte = text[byte_index]
+        if first_byte < 0x80:
+            byte_width = 1
+        elif first_byte & 0b1110_0000 == 0b1100_0000:
+            byte_width = 2
+        elif first_byte & 0b1111_0000 == 0b1110_0000:
+            byte_width = 3
+        elif first_byte & 0b1111_1000 == 0b1111_0000:
+            byte_width = 4
+        else:  # pragma: no cover - text comes from Python's UTF-8 encoder.
+            byte_width = 1
+
+        byte_index += byte_width
+        text_index += 1
+        while pending_index < len(pending) and pending[pending_index] == text_index:
+            offsets[pending[pending_index]] = byte_index
+            pending_index += 1
     return offsets
 
 

@@ -152,7 +152,7 @@ def test_redact_secrets_byte_slice_uses_utf8_byte_offsets() -> None:
 def test_redact_secrets_byte_slice_masks_secret_after_multibyte_prefix() -> None:
     """Mask a byte slice overlapping a secret after earlier multi-byte text."""
     secret = "opaque-nonpattern-workspace-secret-value"
-    prefix = "\U0001f525before "
+    prefix = "\u00e9\u0905\U0001f525before "
     text = f"{prefix}AWF_GITHUB_TOKEN={secret} after"
     offset = len(f"{prefix}AWF_GITHUB_TOKEN=opaque-nonpattern-".encode())
     limit = len(b"workspace")
@@ -166,6 +166,23 @@ def test_redact_secrets_byte_slice_masks_secret_after_multibyte_prefix() -> None
 
     assert redacted == REDACTION_MARKER
     assert "workspace" not in redacted
+
+
+@pytest.mark.unit
+def test_redact_secrets_byte_slice_masks_secret_starting_at_byte_zero() -> None:
+    """Mask a byte slice overlapping a secret at the start of the text."""
+    secret = "opaque-nonpattern-workspace-secret-value"
+    text = f"{secret} after"
+
+    redacted = redact_secrets_byte_slice(
+        text,
+        0,
+        len(b"opaque"),
+        extra_secrets=(secret,),
+    )
+
+    assert redacted == REDACTION_MARKER
+    assert "opaque" not in redacted
 
 
 @pytest.mark.unit

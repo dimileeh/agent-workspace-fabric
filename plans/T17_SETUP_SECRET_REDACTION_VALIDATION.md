@@ -409,6 +409,69 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review-Level Comment `issue:4620175517` Log Redaction Performance Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: byte-slice redaction behavior for UTF-8 text and overlapping
+  secret spans remains covered by the focused runtime redaction tests.
+- Complete: `redact_secrets_byte_slice()` no longer builds a full
+  text-index-to-byte-offset list; it maps only requested redaction span
+  endpoints by scanning the encoded UTF-8 bytes.
+- Complete: MCP workspace log reads skip assignment lookback when the current
+  projection already contains an assignment value covering the requested slice.
+- Complete: MCP workspace log reads still use lookback for unknown leading
+  fragments whose assignment prefix may predate the expanded read, and still
+  mask failed lookback fragments.
+- Complete: `_workspace_log_redaction_context_bytes()` no longer has the
+  redundant outer `max()`.
+
+Additional files changed:
+
+- `src/awf/common/redaction.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/runtime/test_log_redaction.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k visible_assignment_context
+# failed: `awf_read_workspace_log` issued a second `read_log()` call even though the expanded projection already contained `SERVICE_TOKEN=` context
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k visible_assignment_context
+# 1 passed, 33 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'visible_assignment_context or pattern_only_secret_assignment or assignment_lookback_failure or preserves_long_benign_token_without_assignment_context'
+# 4 passed, 30 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k redact_secrets_byte_slice
+# 3 passed, 23 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'unknown_leading_log_value_fragment_end or read_workspace_log'
+# 11 passed, 23 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q
+# 26 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 2 source files
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

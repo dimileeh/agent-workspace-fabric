@@ -30,6 +30,7 @@ from awf.api.schemas import (
 )
 from awf.common.config import Settings, get_settings
 from awf.common.redaction import REDACTION_MARKER, redact_secrets_byte_slice
+from awf.common.token_patterns import compile_token_assignment_re
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -108,6 +109,7 @@ _LOG_REDACTION_ASSIGNMENT_LOOKBACK_BYTES = 65_536
 _LOG_REDACTION_VALUE_DELIMITER_BYTES = frozenset(b" \t\r\n\v\f\"'`,;)}]")
 _UTF8_CONTINUATION_BYTE_MASK = 0b1100_0000
 _UTF8_CONTINUATION_BYTE_VALUE = 0b1000_0000
+_LOG_TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
 # sync_release_pr omits base_branch -> target the release branch (main), not the
 # legacy development default, so the release PR is opened development -> main
 # instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
@@ -162,11 +164,10 @@ def _workspace_log_redaction_secrets(
 
 def _workspace_log_redaction_context_bytes(extra_secrets: tuple[str, ...]) -> int:
     """Return surrounding bytes to read before applying slice redaction."""
-    secret_context = max(
+    return max(
         (len(secret.encode("utf-8")) + _LOG_REDACTION_CONTEXT_BYTES for secret in extra_secrets),
         default=_LOG_REDACTION_CONTEXT_BYTES,
     )
-    return max(_LOG_REDACTION_CONTEXT_BYTES, secret_context)
 
 
 def _workspace_log_read_offset(*, requested_offset: int, redaction_context: int) -> int:
@@ -230,6 +231,20 @@ def _workspace_log_slice_starts_in_unknown_leading_fragment(
     return 0 <= start < fragment_end
 
 
+def _workspace_log_assignment_value_covers_byte(text: str, start: int) -> bool:
+    """Return whether visible assignment context already redacts ``start``."""
+    if start < 0:
+        return False
+    for match in _LOG_TOKEN_ASSIGNMENT_RE.finditer(text):
+        if match.start("value") > start:
+            break
+        value_start = len(text[: match.start("value")].encode("utf-8"))
+        value_end = value_start + len(match.group("value").encode("utf-8"))
+        if value_start <= start < value_end:
+            return True
+    return False
+
+
 async def _workspace_log_assignment_lookback_projection(
     service: WorkspaceService,
     workspace_id: str,
@@ -248,6 +263,8 @@ async def _workspace_log_assignment_lookback_projection(
         slice_start,
         result_offset=projection_offset,
     ):
+        return result_text, projection_offset, False
+    if _workspace_log_assignment_value_covers_byte(result_text, slice_start):
         return result_text, projection_offset, False
 
     result_offset = int(result["offset"])

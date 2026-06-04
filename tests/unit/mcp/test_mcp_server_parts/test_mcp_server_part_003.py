@@ -152,6 +152,19 @@ def test_unknown_leading_log_value_fragment_end_counts_utf8_bytes_to_delimiter()
     ) == len("αβ".encode())
 
 
+@pytest.mark.unit
+def test_workspace_log_assignment_value_covers_byte_ignores_out_of_range_context() -> None:
+    """Only visible assignment values covering the requested byte can redact it."""
+    assert not metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        "ordinary SERVICE_TOKEN=value",
+        -1,
+    )
+    assert not metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        "ordinary SERVICE_TOKEN=value",
+        0,
+    )
+
+
 async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     """Unwrap FastMCP's call_tool payload.
 
@@ -1424,6 +1437,82 @@ class TestWorkspaceLogs:
         assert isinstance(chunk, dict)
         assert chunk["offset"] == offset
         assert chunk["next_offset"] == offset + limit_bytes
+        assert chunk["eof"] is False
+        assert chunk["data"] == REDACTION_MARKER
+        assert fragment not in str(chunk["data"])
+
+    @pytest.mark.unit
+    async def test_read_workspace_log_skips_lookback_when_visible_assignment_context_redacts_slice(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Avoid a second log read when the current projection has assignment context."""
+        for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+
+        requested_offset = 10_000
+        fragment = "visible-secret-fragment"
+        requested_limit_bytes = len(fragment.encode())
+        context_bytes = metrics_tools_mod._LOG_REDACTION_CONTEXT_BYTES  # noqa: SLF001
+        first_offset = requested_offset - context_bytes - 1
+        slice_start = requested_offset - first_offset
+        assignment_prefix = b"SERVICE_TOKEN="
+        raw_bytes = (
+            assignment_prefix
+            + (b"x" * (slice_start - len(assignment_prefix)))
+            + fragment.encode()
+            + b" done\n"
+        )
+        first_next_offset = first_offset + len(raw_bytes)
+        calls: list[tuple[int, int]] = []
+
+        service = WorkspaceService(factory)
+
+        async def visible_assignment_read_log(
+            workspace_id: str,
+            stream_id: str,
+            *,
+            offset: int = 0,
+            limit_bytes: int = 65_536,
+            include_bytes: bool = False,
+        ) -> dict[str, object]:
+            """Return a projection whose leading fragment already has assignment context."""
+            assert workspace_id == "ws_visible_assignment"
+            assert stream_id == "setup.stdout"
+            assert include_bytes is True
+            calls.append((offset, limit_bytes))
+            if len(calls) > 1:
+                raise AssertionError("assignment context is already visible")
+            assert offset == first_offset
+            assert limit_bytes == context_bytes + 1 + requested_limit_bytes + context_bytes
+            return {
+                "stream_id": stream_id,
+                "offset": offset,
+                "next_offset": first_next_offset,
+                "eof": False,
+                "text": raw_bytes.decode(),
+                "raw_bytes": raw_bytes,
+            }
+
+        monkeypatch.setattr(service, "read_log", visible_assignment_read_log)
+        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": "ws_visible_assignment",
+                "stream_id": "setup.stdout",
+                "offset": requested_offset,
+                "limit_bytes": requested_limit_bytes,
+            },
+        )
+
+        assert isinstance(chunk, dict)
+        assert calls == [(first_offset, context_bytes + 1 + requested_limit_bytes + context_bytes)]
+        assert chunk["offset"] == requested_offset
+        assert chunk["next_offset"] == requested_offset + requested_limit_bytes
         assert chunk["eof"] is False
         assert chunk["data"] == REDACTION_MARKER
         assert fragment not in str(chunk["data"])

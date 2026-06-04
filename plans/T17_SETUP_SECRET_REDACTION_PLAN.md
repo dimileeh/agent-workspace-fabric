@@ -297,3 +297,58 @@ uv run --python 3.12 --extra dev pytest tests/unit/cli/test_service_cli_parts/te
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
+
+## Review-Level Comment `issue:4620175517` Log Redaction Performance Repair Plan
+
+### Problem Statement And Scope
+
+The review-level comment identifies avoidable work in MCP workspace log
+redaction:
+
+- `redact_secrets_byte_slice()` builds a full text-index to byte-offset list
+  for every secret-bearing byte-slice redaction.
+- assignment lookback can issue a second log read even when the currently read
+  projection already contains assignment context for the requested slice.
+- `_workspace_log_redaction_context_bytes()` wraps an already guarded maximum
+  with a redundant outer `max()`.
+
+This repair is limited to those log-redaction hot paths. It does not change the
+security contract for unknown leading assignment fragments, support bundles,
+doctor output, service logs, or broader MCP behavior.
+
+### Requirements Checklist
+
+- Preserve byte-slice redaction behavior for UTF-8 text and overlapping secret
+  spans.
+- Avoid constructing an O(N) text-index byte-offset list for every
+  secret-bearing byte-slice redaction.
+- Skip assignment lookback when the current projection already contains a
+  token-assignment value span covering the requested slice.
+- Preserve assignment lookback for unknown leading fragments whose assignment
+  prefix may predate the expanded read.
+- Remove the redundant redaction-context `max()` without changing returned
+  context sizes.
+
+### Implementation Steps
+
+1. Add a focused MCP regression showing visible assignment context does not
+   trigger a second `read_log()` lookback.
+2. Replace the full UTF-8 offset table with a targeted byte scanner that maps
+   only redaction span endpoints.
+3. Gate assignment lookback on whether the already-read leading fragment has a
+   visible assignment value covering the caller slice.
+4. Remove the redundant `_workspace_log_redaction_context_bytes()` outer
+   `max()`.
+5. Run focused tests and lint/type checks for the touched files only.
+6. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with requirement
+   status and evidence. Full AWF/GitHub validation remains owned by AWF after
+   agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'visible_assignment_context or pattern_only_secret_assignment or assignment_lookback_failure or preserves_long_benign_token_without_assignment_context'
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k redact_secrets_byte_slice
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
+```
