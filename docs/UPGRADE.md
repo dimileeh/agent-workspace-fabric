@@ -9,7 +9,9 @@ checksums, and distribution artifacts are published and verified.
 
 Package and virtualenv lanes read `.env` from the current directory when it
 exists. If `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` are not already persisted
-there, restore them in the upgrade shell before `awf start`.
+there, restore them in the upgrade shell before `awf start`. Restore the same
+`AWF_API_TOKEN` used by the running local Core; do not generate a replacement
+token during upgrade.
 
 ## uv tool
 
@@ -18,7 +20,8 @@ The `uv tool` lane is release-installed and package-manager mediated:
 ```bash
 uv tool upgrade agent-workspace-fabric
 if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
-  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
+  export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
   export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
@@ -35,7 +38,8 @@ The `pipx` lane is release-installed and package-manager mediated:
 ```bash
 pipx upgrade agent-workspace-fabric
 if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
-  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
+  export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
   export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
@@ -55,7 +59,8 @@ cd /path/to/project-or-env
 . .venv/bin/activate
 pip install --upgrade agent-workspace-fabric
 if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
-  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
+  export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
   export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"

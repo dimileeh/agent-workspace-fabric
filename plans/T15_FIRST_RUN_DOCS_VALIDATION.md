@@ -50,6 +50,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address PR thread `PRRT_kwDOSJAM6s6HFXeN` by stopping local Core
   before source-checkout upgrade snippets refresh persisted `source_checkout`
   metadata with `awf setup --source-checkout "$PWD"`.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HHCBV` by preventing package and
+  virtualenv upgrade snippets from generating a replacement `AWF_API_TOKEN` when
+  `.env` does not already persist the running local Core token.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -742,6 +745,36 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 ```
 
 Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HHCBV`:
+
+- `docs/QUICKSTART.md` now tells package-lane operators to restore the same
+  `AWF_API_TOKEN` used by the running local Core and not generate a replacement
+  token during upgrade.
+- `docs/UPGRADE.md` now applies the same existing-token requirement to the
+  `uv tool`, `pipx`, and virtualenv/pip upgrade snippets.
+- `tests/unit/docs/test_public_docs_status.py` now rejects package upgrade docs
+  that fall back to `openssl rand -hex 32` for `AWF_API_TOKEN` when `.env` does
+  not already persist the token.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword -q
+```
+
+Red-phase result after updating the focused assertion: failed because
+Quickstart Lane 1 did not require the existing `AWF_API_TOKEN`.
+
+Final focused repair result: `2 passed in 0.66s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

@@ -442,7 +442,11 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
         [
             upgrade_line,
             "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then",
-            '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"',
+            (
+                '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running '
+                'local Core or persist it in .env before upgrading}"'
+            ),
+            "  export AWF_API_TOKEN",
             "  # awf_config_file can be configured elsewhere",
             "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
             '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"',
@@ -1213,19 +1217,29 @@ def _assert_package_upgrade_restores_service_env(
 ) -> None:
     """Assert package upgrade snippets restore service environment before restart."""
     api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then"
-    api_export_line = '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    api_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        'or persist it in .env before upgrading}"'
+    )
+    api_export_line = "  export AWF_API_TOKEN"
+    unsafe_api_generation_line = (
+        '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    )
     password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
     password_export_line = '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     start_line = "awf start"
 
     assert upgrade_line in section, f"{label} is missing upgrade command"
     assert api_guard_line in section, f"{label} must prefer persisted AWF_API_TOKEN"
-    assert api_export_line in section, f"{label} must restore AWF_API_TOKEN"
+    assert api_require_line in section, f"{label} must require the existing AWF_API_TOKEN"
+    assert api_export_line in section, f"{label} must export restored AWF_API_TOKEN"
+    assert unsafe_api_generation_line not in section, f"{label} must not regenerate AWF_API_TOKEN"
     assert password_guard_line in section, f"{label} must prefer persisted AWF_POSTGRES_PASSWORD"
     assert password_export_line in section, f"{label} must restore AWF_POSTGRES_PASSWORD"
     assert start_line in section, f"{label} is missing restart command"
 
     api_guard_index = section.index(api_guard_line)
+    api_require_index = section.index(api_require_line)
     api_export_index = section.index(api_export_line)
     api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
     password_guard_index = section.index(password_guard_line)
@@ -1234,6 +1248,7 @@ def _assert_package_upgrade_restores_service_env(
     assert (
         section.index(upgrade_line)
         < api_guard_index
+        < api_require_index
         < api_export_index
         < api_guard_end_index
         < password_guard_index

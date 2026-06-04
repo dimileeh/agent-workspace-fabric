@@ -142,6 +142,12 @@ upgrade env-restore assertion must identify only a shell closing `fi` keyword
 anchored on its own line, and `docs/MCP_SETUP.md` prerequisites must provide a
 clear `awf service status --format pretty` check after each `awf start` example.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HHCBV`: package and
+virtualenv upgrade snippets must not generate a fresh `AWF_API_TOKEN` when the
+current `.env` does not already persist one. Require operators to restore the
+same API token used for the running local Core before restarting, so upgrades do
+not desynchronize CLI/API authentication.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
