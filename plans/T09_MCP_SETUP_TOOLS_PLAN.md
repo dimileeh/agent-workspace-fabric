@@ -82,6 +82,46 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAAxL
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_initialize_project_profile` catches a broad
+preview failure and interpolates `str(exc)` into the MCP error message. That
+can disclose internal paths or state from unexpected exception text before the
+response reaches the normal redaction boundary.
+
+Scope is limited to the onboarding preview failure message returned by the MCP
+setup tool and its focused regression test.
+
+### Requirements Checklist
+
+- Keep known `ValueError` onboarding validation errors unchanged.
+- Keep unexpected onboarding preview failures as structured MCP errors with
+  `PROJECT_INIT_FAILED`.
+- Do not include unexpected exception text in the MCP response message.
+- Preserve useful non-secret context in `detail` for the project path and
+  template.
+- Add a regression proving unexpected preview exception text is not surfaced.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for unexpected onboarding preview
+   failures.
+2. Change the unexpected preview failure message to a generic string that does
+   not interpolate the caught exception.
+3. Run the targeted regression and focused setup-tools test file.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HAAvH
 
 ### Problem Statement And Scope

@@ -53,6 +53,52 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAAxL
+
+### Requirement Status
+
+- Keep known `ValueError` onboarding validation errors unchanged: Complete.
+- Keep unexpected onboarding preview failures as structured MCP errors with
+  `PROJECT_INIT_FAILED`: Complete.
+- Do not include unexpected exception text in the MCP response message:
+  Complete.
+- Preserve useful non-secret context in `detail` for the project path and
+  template: Complete.
+- Add a regression proving unexpected preview exception text is not surfaced:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_preview_failure_does_not_surface_exception_text -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["message"]` included `/srv/awf/internal/config.yml traceback frame`
+  from the raised `RuntimeError`.
+- Regression test after the implementation change: 1 passed.
+- Focused setup-tools test file: 14 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HAAvH
 
 ### Requirement Status

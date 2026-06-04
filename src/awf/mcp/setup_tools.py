@@ -333,11 +333,11 @@ def _initialize_project_profile_result(
         )
     except ValueError as exc:
         return _project_init_path_error(safe_result, str(exc), repository=repository)
-    except Exception as exc:
+    except Exception:
         return _error_result(
             safe_result,
             PROJECT_INIT_FAILED,
-            f"could not build onboarding preview: {exc}",
+            "could not build onboarding preview",
             detail={"project_path": str(repository), "template": template},
         )
 
