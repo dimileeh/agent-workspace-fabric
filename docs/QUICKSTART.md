@@ -80,8 +80,9 @@ pipx upgrade agent-workspace-fabric
 
 Then restart AWF and rerun smoke. If `AWF_API_TOKEN` and
 `AWF_POSTGRES_PASSWORD` are not already persisted in `.env`, restore them in
-this shell before restarting. Restore the same `AWF_API_TOKEN` used by the
-running local Core; do not generate a replacement token during upgrade:
+this shell before restarting. Restore the same `AWF_API_TOKEN` and
+`AWF_POSTGRES_PASSWORD` used by the running local Core; do not generate
+replacement service secrets during upgrade:
 
 ```bash
 if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
@@ -89,7 +90,8 @@ if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
   export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
-  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
+  export AWF_POSTGRES_PASSWORD
 fi
 awf start
 awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty

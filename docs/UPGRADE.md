@@ -10,8 +10,8 @@ checksums, and distribution artifacts are published and verified.
 Package and virtualenv lanes read `.env` from the current directory when it
 exists. If `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` are not already persisted
 there, restore them in the upgrade shell before `awf start`. Restore the same
-`AWF_API_TOKEN` used by the running local Core; do not generate a replacement
-token during upgrade.
+`AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` used by the running local Core; do
+not generate replacement service secrets during upgrade.
 
 Source checkout lanes read `docker/compose/.env` from the checkout, with the
 checkout root `.env` as a read fallback. If neither file contains
@@ -30,7 +30,8 @@ if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
   export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
-  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
+  export AWF_POSTGRES_PASSWORD
 fi
 awf start
 awf service status --format pretty
@@ -48,7 +49,8 @@ if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
   export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
-  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
+  export AWF_POSTGRES_PASSWORD
 fi
 awf start
 awf service status --format pretty
@@ -69,7 +71,8 @@ if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
   export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
-  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
+  export AWF_POSTGRES_PASSWORD
 fi
 awf start
 awf service status --format pretty

@@ -431,6 +431,12 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 
 Result: `All checks passed!`.
 
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
@@ -1066,6 +1072,40 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 ```
 
 Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HIjPO`:
+
+- `docs/UPGRADE.md` now requires the running local Core
+  `AWF_POSTGRES_PASSWORD` for `uv tool`, `pipx`, and virtualenv/pip upgrade
+  snippets when `.env` does not already persist it.
+- `docs/QUICKSTART.md` now applies the same package-lane upgrade guidance, so
+  the canonical lane selector does not keep the old `awf_dev` fallback.
+- `tests/unit/docs/test_public_docs_status.py` now rejects package upgrade docs
+  that default `AWF_POSTGRES_PASSWORD` to `awf_dev` instead of requiring the
+  existing password.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start -q
+```
+
+Red-phase result after tightening the focused assertion: failed because
+Quickstart Lane 1 still defaulted `AWF_POSTGRES_PASSWORD` to `awf_dev`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_matches_restart_command_line -q
+```
+
+Result: `3 passed in 0.67s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

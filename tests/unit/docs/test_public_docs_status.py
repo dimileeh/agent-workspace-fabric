@@ -469,7 +469,11 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
                 "  export AWF_API_TOKEN",
                 "  # awf_config_file can be configured elsewhere",
                 "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
-                '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"',
+                (
+                    '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used '
+                    'for the running local Core or persist it in .env before upgrading}"'
+                ),
+                "  export AWF_POSTGRES_PASSWORD",
                 "  # awf_config_file fallback stays outside persisted .env",
                 "fi",
                 "fi",
@@ -497,7 +501,11 @@ def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
             "  export AWF_API_TOKEN",
             "fi",
             "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then",
-            '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"',
+            (
+                '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used '
+                'for the running local Core or persist it in .env before upgrading}"'
+            ),
+            "  export AWF_POSTGRES_PASSWORD",
             "fi",
             "Before running awf start, inspect the saved environment.",
         ]
@@ -1519,7 +1527,14 @@ def _assert_package_upgrade_restores_service_env(
         '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     )
     password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
-    password_export_line = '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    password_require_line = (
+        '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
+        'the running local Core or persist it in .env before upgrading}"'
+    )
+    password_export_line = "  export AWF_POSTGRES_PASSWORD"
+    unsafe_password_default_line = (
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    )
     start_line = "\nawf start\n"
 
     assert upgrade_line in section, f"{label} is missing upgrade command"
@@ -1528,7 +1543,13 @@ def _assert_package_upgrade_restores_service_env(
     assert api_export_line in section, f"{label} must export restored AWF_API_TOKEN"
     assert unsafe_api_generation_line not in section, f"{label} must not regenerate AWF_API_TOKEN"
     assert password_guard_line in section, f"{label} must prefer persisted AWF_POSTGRES_PASSWORD"
-    assert password_export_line in section, f"{label} must restore AWF_POSTGRES_PASSWORD"
+    assert unsafe_password_default_line not in section, (
+        f"{label} must not default AWF_POSTGRES_PASSWORD"
+    )
+    assert password_require_line in section, (
+        f"{label} must require the existing AWF_POSTGRES_PASSWORD"
+    )
+    assert password_export_line in section, f"{label} must export restored AWF_POSTGRES_PASSWORD"
     assert start_line in section, f"{label} is missing restart command"
 
     api_guard_index = section.index(api_guard_line)
@@ -1536,7 +1557,8 @@ def _assert_package_upgrade_restores_service_env(
     api_export_index = section.index(api_export_line)
     api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
     password_guard_index = section.index(password_guard_line)
-    password_export_index = section.index(password_export_line)
+    password_require_index = section.index(password_require_line)
+    password_export_index = section.index(password_export_line, password_require_index)
     password_guard_end_index = _shell_closing_fi_index(section, password_export_index, label)
     assert (
         section.index(upgrade_line)
@@ -1545,6 +1567,7 @@ def _assert_package_upgrade_restores_service_env(
         < api_export_index
         < api_guard_end_index
         < password_guard_index
+        < password_require_index
         < password_export_index
         < password_guard_end_index
         < section.index(start_line)

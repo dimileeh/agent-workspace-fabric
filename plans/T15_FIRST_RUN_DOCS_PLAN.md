@@ -192,6 +192,13 @@ line instead of prose substrings, and the global source-checkout rollback
 assertion must explicitly prove the documented stop, env-restore, setup, and
 start ordering.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HIjPO`: release-installed
+and virtualenv package upgrade snippets in `docs/QUICKSTART.md` and
+`docs/UPGRADE.md` must require operators to restore the running local Core
+`AWF_POSTGRES_PASSWORD` when `.env` does not already persist it. These snippets
+must not default the password to `awf_dev`, because an existing Postgres volume
+may have been initialized with a non-default password.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
