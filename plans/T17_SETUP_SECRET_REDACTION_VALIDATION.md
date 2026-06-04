@@ -1154,6 +1154,57 @@ uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## CI Repair: MCP Log Test Line-Limit Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: GitHub Actions run `26962953418` was inspected after the existing
+  MCP offset fix. The current `python-full-coverage` job ran tests to
+  completion and failed `test_first_party_code_files_stay_under_line_limit`
+  because `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+  had grown to 2,136 lines.
+- Complete: `TestWorkspaceLogs` was moved whole into
+  `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py` with the
+  same fixture/helper behavior, preserving the workspace-log regression tests
+  without weakening assertions.
+- Complete: The original part 003 file is now 1,034 lines and the new part 005
+  file is 1,137 lines, both below the 1,500-line maintainability limit.
+- Complete: Focused verification passed. Broad AWF/GitHub full coverage was not
+  run locally; AWF owns that gate after agent completion.
+
+Additional files changed:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```text
+GitHub Actions run 26962953418, job python-full-coverage:
+test_first_party_code_files_stay_under_line_limit failed with
+{'tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py': 2136}
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py -q -k line_limit --tb=short -ra
+# 1 passed, 8 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q --tb=short -ra
+# 41 passed
+
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# All checks passed
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

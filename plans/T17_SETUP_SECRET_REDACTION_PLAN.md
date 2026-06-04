@@ -774,3 +774,46 @@ uv run --python 3.12 --extra dev pytest <focused changed tests> -q
 uv run --python 3.12 --extra dev ruff check <touched source/test files>
 uv run --python 3.12 --extra dev mypy <touched source files>
 ```
+
+## CI Repair Plan: MCP Log Test Line Limit
+
+### Problem Statement And Scope
+
+GitHub Actions run `26962953418` completed full pytest execution on the
+current head and failed `test_first_party_code_files_stay_under_line_limit`.
+The oversized file is
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py` at 2,136
+lines, over the 1,500-line first-party guard. The failure is a maintainability
+test failure, not a redaction behavior failure or coverage-percentage miss.
+
+This repair is limited to the owned MCP tests and plan/validation docs. It
+will not weaken the line-limit guard, skip tests, change production behavior,
+or run broad/full coverage locally inside the agent phase.
+
+### Requirements Checklist
+
+- Keep each first-party test file under the 1,500-line maintainability limit.
+- Preserve the MCP workspace-log regression behavior and test names.
+- Keep the split self-contained so pytest can collect the moved tests normally.
+- Record focused verification evidence and leave broad AWF/GitHub full
+  coverage to AWF/GitHub after agent completion.
+
+### Implementation Steps
+
+1. Move the complete `TestWorkspaceLogs` class from
+   `test_mcp_server_part_003.py` into a new MCP server part file with the small
+   fixture/helper header it needs.
+2. Remove imports/helpers from part 003 that are only needed by the moved
+   workspace-log tests.
+3. Run focused collection/pytest and the line-limit guard for the touched test
+   files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py -q -k line_limit
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+```
