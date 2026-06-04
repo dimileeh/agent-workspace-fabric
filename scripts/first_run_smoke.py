@@ -111,6 +111,7 @@ class SmokeResult:
     reason: str = ""
     stdout_tail: str = ""
     stderr_tail: str = ""
+    source_checkout: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -755,7 +756,8 @@ def _source_setup_result(
             stdout_tail=stdout_tail,
             stderr_tail=stderr_tail,
         )
-    selected = _payload_source_checkout_root(payload)
+    source_checkout = _payload_source_checkout(payload)
+    selected = _source_checkout_root(source_checkout)
     if selected != str(checkout.resolve()):
         return SmokeResult(
             lane=lane,
@@ -771,6 +773,7 @@ def _source_setup_result(
         command=command.argv,
         stdout_tail=stdout_tail,
         stderr_tail=stderr_tail,
+        source_checkout=source_checkout,
     )
 
 
@@ -896,7 +899,7 @@ def _payload_reason_codes(payload: object) -> set[str]:
     return codes
 
 
-def _payload_source_checkout_root(payload: object) -> str | None:
+def _payload_source_checkout(payload: object) -> dict[str, object] | None:
     if not isinstance(payload, dict):
         return None
     details = payload.get("details")
@@ -904,6 +907,16 @@ def _payload_source_checkout_root(payload: object) -> str | None:
         return None
     source_checkout = details.get("source_checkout")
     if not isinstance(source_checkout, dict):
+        return None
+    metadata: dict[str, object] = {}
+    for key, value in source_checkout.items():
+        if isinstance(key, str):
+            metadata[key] = value
+    return metadata
+
+
+def _source_checkout_root(source_checkout: Mapping[str, object] | None) -> str | None:
+    if source_checkout is None:
         return None
     root = source_checkout.get("root")
     return root if isinstance(root, str) else None

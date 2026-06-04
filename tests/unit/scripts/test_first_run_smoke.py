@@ -243,6 +243,43 @@ def test_run_command_reports_timeout_as_failed_process(
     assert completed.stderr == "command timed out after 2.5 seconds\npartial stderr"
 
 
+@pytest.mark.unit
+def test_source_setup_result_exposes_full_stdout_source_checkout(tmp_path: Path) -> None:
+    """Setup metadata is parsed from full stdout even when stdout_tail is truncated."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(
+        argv=(
+            "awf",
+            "setup",
+            "--dry-run",
+            "--source-checkout",
+            str(checkout),
+            "--format",
+            "json",
+        ),
+        env={},
+        cwd=tmp_path / "outside",
+    )
+    payload = {
+        "padding": "x" * (smoke._TAIL_CHARS + 100),
+        "details": {"source_checkout": {"root": str(checkout.resolve())}},
+    }
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    result = smoke._source_setup_result(smoke.Lane.SOURCE_UV_RUN, command, completed, checkout)
+
+    assert result.status == "passed"
+    assert result.source_checkout == {"root": str(checkout.resolve())}
+    assert len(result.stdout_tail) == smoke._TAIL_CHARS
+    assert not result.stdout_tail.startswith("{")
+
+
 def _record_run(
     calls: list[smoke.CommandSpec],
     command: smoke.CommandSpec,
