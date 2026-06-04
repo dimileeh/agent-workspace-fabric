@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import IO, Literal, Protocol
 
 import yaml
 
@@ -201,9 +203,55 @@ def _run_subprocess(
 ) -> CompletedProcessLike:
     """Run the logs subprocess, omitting env when no override is needed."""
 
+    if not capture_output:
+        return _run_streaming_subprocess(args, check=check, text=text, env=env)
     if env is None:
         return subprocess.run(args, check=check, capture_output=capture_output, text=text)
     return subprocess.run(args, check=check, capture_output=capture_output, text=text, env=env)
+
+
+def _run_streaming_subprocess(
+    args: list[str],
+    *,
+    check: bool,
+    text: Literal[True],
+    env: Mapping[str, str] | None = None,
+) -> CompletedProcessLike:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=text,
+        env=env,
+    )
+    stdout_thread = _start_redacted_stream_thread(process.stdout, sys.stdout)
+    stderr_thread = _start_redacted_stream_thread(process.stderr, sys.stderr)
+    returncode = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(returncode, args)
+    return subprocess.CompletedProcess(args, returncode, stdout=None, stderr=None)
+
+
+def _start_redacted_stream_thread(
+    source: IO[str] | None,
+    sink: IO[str],
+) -> threading.Thread:
+    thread = threading.Thread(
+        target=_stream_redacted_pipe,
+        args=(source, sink),
+    )
+    thread.start()
+    return thread
+
+
+def _stream_redacted_pipe(source: IO[str] | None, sink: IO[str]) -> None:
+    if source is None:
+        return
+    for line in source:
+        sink.write(redact_secrets(line))
+        sink.flush()
 
 
 def _docker_cli_environ(
@@ -269,6 +317,6 @@ def _failure_detail(*, stdout: str, stderr: str, follow: bool = False) -> str:
     if follow:
         return (
             "docker compose logs --follow exited with a non-zero status; "
-            "docker output was already written directly to the terminal"
+            "docker output was already streamed to the terminal"
         )
     return "docker compose returned a non-zero exit status"

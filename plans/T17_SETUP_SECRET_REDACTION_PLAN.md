@@ -252,3 +252,48 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py src/awf/mcp/metrics_tools.py tests/unit/service/test_support_bundle.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/mcp/metrics_tools.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HBsyZ` Followed Service Logs Repair Plan
+
+### Problem Statement And Scope
+
+The review thread reports that `awf service logs --follow` invokes Docker with
+`capture_output=False`, letting Docker write service logs directly to the
+operator terminal before `run_service_logs()` can redact `stdout`/`stderr`.
+
+This repair is limited to followed local service logs. Non-follow log capture,
+service selection, Docker environment resolution, support bundles, MCP log
+reads, and unrelated CLI behavior are out of scope.
+
+### Requirements Checklist
+
+- Followed service logs must not bypass the shared `redact_secrets()` boundary
+  before they are written to the operator terminal.
+- Followed service logs should preserve streaming behavior for ordinary Docker
+  output.
+- Followed service log interrupt handling remains successful for Ctrl-C return
+  codes and `KeyboardInterrupt`.
+- Non-follow service logs continue to return captured, redacted stdout/stderr.
+
+### Implementation Steps
+
+1. Add/update focused tests showing the default follow runner redacts streamed
+   stdout/stderr and no longer relies on Docker writing directly to the terminal.
+2. Change the default service-log subprocess runner so `capture_output=False`
+   uses piped stdout/stderr, streams redacted lines to the process stdout/stderr,
+   and returns a completed-process-like result without captured output.
+3. Keep `run_service_logs()` interrupt and non-follow behavior intact, adjusting
+   only the follow failure detail wording if needed.
+4. Run focused tests and lint/type checks for the touched files only.
+5. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with evidence. Broad
+   AWF/GitHub validation, full coverage gates, and CI-equivalent suites remain
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'follow or default_subprocess_runner'
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py -q -k service_logs_follow
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```

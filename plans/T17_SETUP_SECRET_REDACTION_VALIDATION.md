@@ -359,6 +359,56 @@ uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review Thread `PRRT_kwDOSJAM6s6HBsyZ` Followed Service Logs Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: followed service logs no longer let the default subprocess runner
+  write raw Docker output directly to the terminal; the streaming path pipes
+  stdout/stderr through `redact_secrets()` before writing.
+- Complete: followed service logs preserve streaming behavior by redacting and
+  flushing output line by line while the process runs.
+- Complete: follow interrupt return codes and `KeyboardInterrupt` behavior
+  remain covered by the focused CLI/service tests.
+- Complete: non-follow captured log behavior remains covered by the existing
+  default runner and captured-output tests.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k default_follow_runner_redacts_streamed_output
+# failed: raw ghp token and plain-file secret ref were captured from the direct subprocess output
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'follow or default_subprocess_runner'
+# 8 passed, 9 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py -q -k service_logs_follow
+# 4 passed, 35 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/cli/test_service_cli_parts/test_service_cli_part_001.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

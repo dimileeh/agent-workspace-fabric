@@ -113,7 +113,7 @@ def test_service_logs_follow_failure_mentions_terminal_output() -> None:
     assert exc_info.value.returncode == 17
     assert exc_info.value.detail == (
         "docker compose logs --follow exited with a non-zero status; "
-        "docker output was already written directly to the terminal"
+        "docker output was already streamed to the terminal"
     )
 
 
@@ -283,6 +283,36 @@ def test_service_logs_default_subprocess_runner_executes_command() -> None:
     assert result.returncode == 0
     assert result.stdout is not None
     assert result.stdout.strip() == "logs-ok"
+
+
+@pytest.mark.unit
+def test_service_logs_default_follow_runner_redacts_streamed_output(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    token = "ghp_serviceLogsSecret123456"
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+    script = (
+        "import sys; "
+        f"print('stdout token={token}'); "
+        f"print('stderr ref={plain_ref}', file=sys.stderr)"
+    )
+
+    result = _run_subprocess(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=False,
+        text=True,
+    )
+
+    captured = capfd.readouterr()
+    rendered = captured.out + captured.err
+    assert result.returncode == 0
+    assert result.stdout is None
+    assert result.stderr is None
+    for raw in (token, plain_ref, "/home/user/.awf/secrets/github.default"):
+        assert raw not in rendered
+    assert "<redacted>" in captured.out
+    assert "<redacted>" in captured.err
 
 
 @pytest.mark.unit

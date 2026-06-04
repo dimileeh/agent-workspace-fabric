@@ -767,7 +767,7 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(args, returncode=0, stdout=None, stderr=None)
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr("awf.service.logs._run_subprocess", _run)
 
     result = _runner.invoke(app, ["service", "logs", "--follow", "--service", "worker"])
 
@@ -786,7 +786,7 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
                 "--follow",
                 "worker",
             ],
-            {"check": False, "capture_output": False, "text": True},
+            {"check": False, "capture_output": False, "text": True, "env": None},
         )
     ]
 
@@ -800,7 +800,7 @@ def test_service_logs_follow_ignores_subprocess_interrupt_exit_codes(
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, returncode=returncode, stdout="", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr("awf.service.logs._run_subprocess", _run)
 
     result = _runner.invoke(app, ["service", "logs", "--follow"])
 
@@ -815,7 +815,7 @@ def test_service_logs_follow_keyboard_interrupt_exits_cleanly(
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr("awf.service.logs._run_subprocess", _run)
 
     result = _runner.invoke(app, ["service", "logs", "--follow"])
 
