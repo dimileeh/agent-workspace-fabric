@@ -97,18 +97,30 @@ For package-manager or virtualenv installs:
 Persist the generated local service values in the current first-run directory's
 `.env` before setup/start so later upgrades can restore the same running Core
 token and password, and so host-side database checks use that same password.
+The snippet replaces these AWF-managed keys in place and leaves unrelated
+`.env` entries intact.
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
 export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
+awf_env_tmp="$(mktemp)"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-} > .env
+  if [ -f .env ]; then
+    sed \
+      -e '/^AWF_API_TOKEN=/d' \
+      -e '/^AWF_POSTGRES_PASSWORD=/d' \
+      -e '/^AWF_POSTGRES_HOST_PORT=/d' \
+      -e '/^AWF_DATABASE_URL=/d' \
+      .env
+  fi
+} > "$awf_env_tmp"
+mv "$awf_env_tmp" .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup

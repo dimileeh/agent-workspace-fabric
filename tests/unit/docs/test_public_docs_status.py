@@ -919,6 +919,22 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
     host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
     database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
+    env_tmp = 'awf_env_tmp="$(mktemp)"'
+    preserve_existing_env = "\n".join(
+        (
+            "    sed \\",
+            "      -e '/^AWF_API_TOKEN=/d' \\",
+            "      -e '/^AWF_POSTGRES_PASSWORD=/d' \\",
+            "      -e '/^AWF_POSTGRES_HOST_PORT=/d' \\",
+            "      -e '/^AWF_DATABASE_URL=/d' \\",
+            "      .env",
+        )
+    )
+    gnu_only_sed_alternation = (
+        "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
+        "\\|AWF_DATABASE_URL\\)=/d' .env"
+    )
+    unsafe_package_persist_target = "} > .env"
 
     assert package_heading in startup_section
     assert source_global_heading in startup_section
@@ -930,7 +946,7 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
                 source_global_heading,
                 maxsplit=1,
             )[0],
-            "} > .env",
+            'mv "$awf_env_tmp" .env',
             "\nawf setup\n",
         ),
         (
@@ -962,6 +978,21 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         assert password_persist in section, f"{label} must persist AWF_POSTGRES_PASSWORD"
         assert host_port_persist in section, f"{label} must persist AWF_POSTGRES_HOST_PORT"
         assert database_url_persist in section, f"{label} must persist AWF_DATABASE_URL"
+        if label == "package-manager or virtualenv installs":
+            assert env_tmp in section, f"{label} must write through a temporary file"
+            assert preserve_existing_env in section, f"{label} must preserve existing .env entries"
+            assert gnu_only_sed_alternation not in section, (
+                f"{label} must not use GNU-only sed alternation"
+            )
+            assert unsafe_package_persist_target not in section, (
+                f"{label} must not truncate existing .env entries"
+            )
+            assert (
+                section.index(database_url_export)
+                < section.index(env_tmp)
+                < section.index(api_persist)
+                < section.index(preserve_existing_env)
+            ), f"{label} must prepare the temp file before preserving .env entries"
         assert persist_target in section, f"{label} must write the expected env file"
         assert (
             section.index(api_export)

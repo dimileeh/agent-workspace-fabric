@@ -1695,6 +1695,50 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HKuFA`:
+
+- `docs/GETTING_STARTED.md` now writes the package-manager / virtualenv
+  first-run `.env` values through a temporary file and replaces only
+  `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and
+  `AWF_DATABASE_URL`.
+- Existing unrelated `.env` entries are copied forward with portable `sed -e`
+  delete expressions before `mv "$awf_env_tmp" .env`, so provider tokens,
+  custom AWF settings, and application config are not truncated.
+- `tests/unit/docs/test_public_docs_status.py` now rejects the unsafe direct
+  `} > .env` target in the Getting Started package/virtualenv block and
+  requires the temp-file preservation path.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade -q
+```
+
+Red-phase result after adding the focused assertion: failed because the
+Getting Started package/virtualenv block did not create `awf_env_tmp` and still
+wrote directly to `.env`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Final focused repair result: `2 passed in 0.76s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
+
+Focused shell repro: executed the Getting Started package/virtualenv temp-file
+persistence block in a temporary directory seeded with `PROVIDER_TOKEN=keep`,
+`AWF_API_TOKEN=old`, and `APP_CONFIG=value`. Result: the repro passed; `.env`
+contained the new AWF service values, no longer contained `AWF_API_TOKEN=old`,
+and retained both non-AWF entries.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

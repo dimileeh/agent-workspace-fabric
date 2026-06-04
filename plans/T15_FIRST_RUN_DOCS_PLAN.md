@@ -371,6 +371,19 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKiIB`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKuFA`: Getting Started's
+package-manager and virtualenv first-run block must preserve existing `.env`
+entries when persisting AWF-managed local service values. Replace only
+`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and
+`AWF_DATABASE_URL`; do not truncate provider tokens, non-default AWF settings,
+or application config before `awf setup` / `awf start`.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKuFA`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
 Focused lint command:
 
 ```bash
