@@ -1,6 +1,6 @@
 # Review 4620252998 Validation
 
-Plan reference: `plans/REVIEW_4620252998_PLAN.md`
+Plan reference: `plans/REVIEW_4620252998_COMPLETED_PR_NOT_MERGED_PLAN.md`
 
 ## Requirement Status
 
@@ -20,8 +20,8 @@ Changed files:
 
 - `src/awf/service/gc.py`
 - `tests/unit/service/test_gc_parts/test_gc_part_001.py`
-- `plans/REVIEW_4620252998_PLAN.md`
-- `plans/REVIEW_4620252998_VALIDATION.md`
+- `plans/REVIEW_4620252998_COMPLETED_PR_NOT_MERGED_PLAN.md`
+- `plans/REVIEW_4620252998_COMPLETED_PR_NOT_MERGED_VALIDATION.md`
 
 Focused checks:
 
