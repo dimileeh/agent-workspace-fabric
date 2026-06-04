@@ -158,6 +158,11 @@ Post-review adjustment for review-level comment `issue:4620140358`:
 each source-checkout metadata refresh command, including the introductory
 refresh example and both source-checkout uninstall sections.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HHpsS`:
+`docs/MCP_SETUP.md` contributor source-checkout prerequisites must pass
+`--source-checkout "$PWD"` to both `awf setup` and `awf start` so a newly cloned
+checkout is selected even when stale source-checkout metadata already exists.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

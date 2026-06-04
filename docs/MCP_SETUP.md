@@ -48,14 +48,16 @@ mkdir -p docker/compose
   printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
 } > docker/compose/.env
-awf setup
-awf start
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
 awf service status --format pretty
 ```
 
 `awf setup` checks the host and selected environment; `awf start` starts local
 Core. Source checkouts use `docker/compose/.env` as the local service
-environment; package installs use `.env` near the working directory instead.
+environment; pass `--source-checkout "$PWD"` from the checkout you just cloned
+so setup/start refresh and use that checkout even if older source-checkout
+metadata exists. Package installs use `.env` near the working directory instead.
 Pass the env file explicitly when configuring MCP; `awf mcp serve --env-file`
 requires the file to exist so the MCP process sees the same database and token
 settings as the local service.

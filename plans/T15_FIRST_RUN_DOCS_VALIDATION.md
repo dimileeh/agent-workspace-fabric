@@ -861,6 +861,47 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HHpsS`:
+
+- `docs/MCP_SETUP.md` now passes `--source-checkout "$PWD"` to both `awf setup`
+  and `awf start` in the contributor source-checkout prerequisite block.
+- The adjacent source-checkout note now explains that the explicit flag pins the
+  checkout just cloned and refreshes stale persisted source-checkout metadata.
+- `tests/unit/docs/test_public_docs_status.py` now rejects MCP prerequisite docs
+  that leave the source-checkout setup/start commands bare.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_mcp_setup_prerequisites_use_runnable_startup_path -q
+```
+
+Red-phase result after updating the focused assertion: failed because
+`docs/MCP_SETUP.md` still had two bare `awf setup` commands and no pinned
+source-checkout setup/start pair.
+
+Final focused repair result: `1 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `47 passed in 1.49s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

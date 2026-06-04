@@ -665,8 +665,26 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         maxsplit=1,
     )[0]
 
-    assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 2
-    assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 2
+    assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 1
+    assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 1
+    assert (
+        len(
+            re.findall(
+                r'(?m)^awf setup --source-checkout "\$PWD"\s*$',
+                prerequisites_section,
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            re.findall(
+                r'(?m)^awf start --source-checkout "\$PWD"\s*$',
+                prerequisites_section,
+            )
+        )
+        == 1
+    )
     assert (
         len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
     )
@@ -676,8 +694,8 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
     )
     assert re.search(
         (
-            r"(?m)^} > docker/compose/\.env\s*\nawf setup\nawf start\n"
-            r"awf service status --format pretty$"
+            r'(?m)^} > docker/compose/\.env\s*\nawf setup --source-checkout "\$PWD"\n'
+            r'awf start --source-checkout "\$PWD"\nawf service status --format pretty$'
         ),
         prerequisites_section,
     )
