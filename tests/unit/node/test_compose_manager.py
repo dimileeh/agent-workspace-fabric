@@ -830,8 +830,7 @@ class TestRender:
             ("ps", "ps", "-aq", "--filter", label_filter),
             ("rm", "rm", "-f", "container-a", "container-b"),
             ("network ls", "network", "ls", "-q", "--filter", label_filter),
-            ("network rm", "network", "rm", "network-a"),
-            ("network rm", "network", "rm", "network-b"),
+            ("network rm", "network", "rm", "network-a", "network-b"),
             ("volume ls", "volume", "ls", "-q", "--filter", label_filter),
             ("volume rm", "volume", "rm", "-f", "volume-a", "volume-b"),
         ]
