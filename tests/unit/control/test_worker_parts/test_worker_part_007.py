@@ -959,6 +959,8 @@ class TestRunOncePart007:
         worker._filter_current_status = _filter_current_requested_status  # type: ignore[method-assign]
         worker._claim_requested_ids = _claim_without_commit  # type: ignore[method-assign]
         worker._maybe_expire_due_secret_leases = _skip_secret_lease_scan  # type: ignore[method-assign]
+        worker._record_heartbeat_safely = _skip_secret_lease_scan  # type: ignore[method-assign]
+        worker._prune_stale_heartbeats_safely = _skip_secret_lease_scan  # type: ignore[method-assign]
         monkeypatch.setattr(AsyncSession, "commit", _fail_commit)
 
         with pytest.raises(InterfaceError, match="connection is closed"):
@@ -1026,6 +1028,8 @@ class TestRunOncePart007:
         worker._list_requested = _list_requested_without_db  # type: ignore[method-assign]
         worker._filter_current_status = _filter_current_requested_status  # type: ignore[method-assign]
         worker._maybe_expire_due_secret_leases = _skip_secret_lease_scan  # type: ignore[method-assign]
+        worker._record_heartbeat_safely = _skip_secret_lease_scan  # type: ignore[method-assign]
+        worker._prune_stale_heartbeats_safely = _skip_secret_lease_scan  # type: ignore[method-assign]
         monkeypatch.setattr(AsyncSession, "commit", _raise_after_ordered_decision_commit)
 
         assert await worker.run_once() == 1
