@@ -221,16 +221,20 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_support_bundle_log_pointers_omit_work_dir_path(tmp_path: Path) -> None:
+    """Keep host work_dir paths out of operator-facing support-bundle pointers."""
     raw_work_dir = "/home/alice/client/.awf/service"
     settings = _settings(tmp_path, work_dir=raw_work_dir)
 
     async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return green service status for log-pointer collection."""
         return _green_status()
 
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a green doctor report for log-pointer collection."""
         return _green_doctor()
 
     async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return a minimal failure summary for log-pointer collection."""
         return _mock_failure_summary()
 
     bundle = asyncio.run(
