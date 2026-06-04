@@ -11,7 +11,7 @@ It validates seven phases in order:
 
 | Phase | Reason codes |
 |---|---|
-| **service_readiness** | `SMOKE_SERVICE_READY` / `SMOKE_SERVICE_UNREACHABLE` |
+| **service_readiness** | `SMOKE_SERVICE_READY` / `SMOKE_SERVICE_UNREACHABLE` / `SMOKE_WORKER_UNAVAILABLE` |
 | **auth_readiness** | `SMOKE_AUTH_READY` / `SMOKE_AUTH_PARTIAL` / `SMOKE_AUTH_UNAVAILABLE` |
 | **profile_preview** | `SMOKE_PROFILE_READY` / `SMOKE_PROFILE_NOT_DETECTED` / `SMOKE_PROFILE_PREVIEW_FAILED` |
 | **validation** | `SMOKE_VALIDATION_READY` / `SMOKE_VALIDATION_MISSING` |
@@ -61,7 +61,17 @@ awf smoke run --project ~/projects/my-app --format pretty
 ## Mocked-local mode
 
 In `--mocked-local` mode, the PR/monitor phase reports `SMOKE_PR_MOCKED_LOCAL`
-instead of failing. Auth and service phases still report their actual status but
-do not block overall success. This makes `awf smoke run` safe to run repeatedly
-without side effects, even without live GitHub credentials or a running service
-stack.
+instead of failing. Auth still reports actual provider readiness without live
+side effects. The service phase remains a hard local Core signal, so API or
+worker-heartbeat failures still fail the smoke run.
+
+It calls token-free `/healthz` for API liveness, then reads token-free
+`/readyz` `checks.worker` for the worker heartbeat. A fresh worker heartbeat
+reports evidence like `worker=ok` and
+`worker_reason=WORKER_HEARTBEAT_FRESH`.
+
+If the API is reachable but no worker has written a heartbeat for the local node,
+or the latest heartbeat is stale, smoke fails the service phase with
+`SMOKE_WORKER_UNAVAILABLE`. The worker sub-reason in evidence distinguishes
+`WORKER_HEARTBEAT_MISSING`, `WORKER_HEARTBEAT_STALE`, and
+`WORKER_HEARTBEAT_UNAVAILABLE`.

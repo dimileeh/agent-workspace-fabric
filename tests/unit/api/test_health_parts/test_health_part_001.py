@@ -16,13 +16,14 @@ import ast
 import asyncio
 import inspect
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -33,7 +34,8 @@ from awf.api.app import configure_database, create_app
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import EgressAuditRepository
+from awf.db.models import WorkerHeartbeat
+from awf.db.repositories import EgressAuditRepository, WorkerHeartbeatRepository
 from awf.db.session import make_session_factory
 from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from tests.unit.helpers import create_workspace
@@ -78,6 +80,32 @@ def _queue_all_ok(runner: FakeCommandRunner) -> None:
     runner.queue_result(stdout="sha256:deadbeef\n")
 
 
+async def _seed_ready_worker_heartbeat(
+    app: Any,
+    *,
+    worker_id: str = "readyz-test-worker",
+    node_id: str = "local",
+    last_heartbeat_at: datetime | None = None,
+    poll_interval_seconds: float = 1.0,
+) -> None:
+    heartbeat_at = last_heartbeat_at or datetime.now(UTC)
+    async with app.state.db_session_factory() as session:
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id=worker_id,
+            node_id=node_id,
+            started_at=heartbeat_at,
+            last_heartbeat_at=heartbeat_at,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        await session.commit()
+
+
+async def _clear_worker_heartbeats(app: Any) -> None:
+    async with app.state.db_session_factory() as session:
+        await session.execute(delete(WorkerHeartbeat))
+        await session.commit()
+
+
 @pytest.fixture
 async def ready_app_and_client(
     engine: AsyncEngine,
@@ -99,6 +127,7 @@ async def ready_app_and_client(
     monkeypatch.setattr(health_route, "get_settings", lambda: test_settings)
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    await _seed_ready_worker_heartbeat(app)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             c.headers["Authorization"] = "Bearer unit-test-api-token"
@@ -253,6 +282,7 @@ async def test_readyz_response_shape_matches_contract(
     checks = body["checks"]
     assert set(checks.keys()) == {
         "db",
+        "worker",
         "docker_cli",
         "docker_daemon",
         "docker_compose",
@@ -270,6 +300,9 @@ async def test_readyz_response_shape_matches_contract(
         elif name == "egress_audit":
             assert check["status"] == "ok"
             assert check["reason"] is not None
+        elif name == "worker":
+            assert check["status"] == "ok"
+            assert check["reason"] == "WORKER_HEARTBEAT_FRESH"
         else:
             assert check["status"] == "ok"
             assert check.get("reason") is None
@@ -287,6 +320,137 @@ async def test_readyz_response_shape_matches_contract(
     assert body["agent_readiness"]["security"]["status"] == "warning"
     assert "DOCKER_HOST_BROAD_CONTROL" in body["agent_readiness"]["security"]["reason_codes"]
     assert body["agent_readiness"]["providers"]["github"]["reason"] == ("GITHUB_TOKEN_ENV_MISSING")
+
+
+@pytest.mark.unit
+async def test_readyz_worker_heartbeat_fresh_returns_worker_ok(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    worker = body["checks"]["worker"]
+    assert worker["ok"] is True
+    assert worker["status"] == "ok"
+    assert worker["reason"] == "WORKER_HEARTBEAT_FRESH"
+
+
+@pytest.mark.unit
+async def test_readyz_worker_heartbeat_missing_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    await _clear_worker_heartbeats(app)
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["status"] == "fail"
+    worker = body["checks"]["worker"]
+    assert worker["ok"] is False
+    assert worker["status"] == "fail"
+    assert worker["reason"] == "WORKER_HEARTBEAT_MISSING"
+
+
+@pytest.mark.unit
+async def test_readyz_worker_stale_heartbeat_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    await _clear_worker_heartbeats(app)
+    await _seed_ready_worker_heartbeat(
+        app,
+        worker_id="stale-worker",
+        last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=60),
+        poll_interval_seconds=1.0,
+    )
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["status"] == "fail"
+    worker = body["checks"]["worker"]
+    assert worker["ok"] is False
+    assert worker["status"] == "fail"
+    assert worker["reason"] == "WORKER_HEARTBEAT_STALE"
+
+
+@pytest.mark.unit
+async def test_worker_heartbeat_check_timeout_uses_unavailable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Session:
+        async def close(self) -> None:
+            return None
+
+    class _SlowWorkerHeartbeatRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def latest_for_node(self, *, node_id: str) -> None:
+            del node_id
+            await asyncio.sleep(1)
+
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(
+        health_route,
+        "WorkerHeartbeatRepository",
+        _SlowWorkerHeartbeatRepository,
+    )
+
+    result = await health_route._check_worker_heartbeat(lambda: _Session(), node_id="local")
+
+    assert result.ok is False
+    assert result.reason == "WORKER_HEARTBEAT_UNAVAILABLE"
+    assert "exceeded" in (result.detail or "")
+
+
+@pytest.mark.unit
+async def test_worker_heartbeat_check_query_failure_is_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Session:
+        async def close(self) -> None:
+            return None
+
+    class _FailingWorkerHeartbeatRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def latest_for_node(self, *, node_id: str) -> None:
+            del node_id
+            raise RuntimeError(
+                "postgresql+asyncpg://awf:secret@db.internal:5432/awf "
+                "Authorization: Bearer ghp_secret123"
+            )
+
+    monkeypatch.setattr(
+        health_route,
+        "WorkerHeartbeatRepository",
+        _FailingWorkerHeartbeatRepository,
+    )
+
+    result = await health_route._check_worker_heartbeat(lambda: _Session(), node_id="local")
+
+    assert result.ok is False
+    assert result.reason == "WORKER_HEARTBEAT_UNAVAILABLE"
+    assert "secret" not in (result.detail or "")
+    assert "ghp_secret123" not in (result.detail or "")
+    assert "postgresql+asyncpg://[redacted]@db.internal:5432/awf" in (result.detail or "")
 
 
 @pytest.mark.unit

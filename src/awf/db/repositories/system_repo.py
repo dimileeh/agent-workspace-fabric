@@ -20,6 +20,7 @@ from awf.db.models import (
     EgressAuditRecord,
     ProviderModelCircuitBreaker,
     QueueDecision,
+    WorkerHeartbeat,
     Workspace,
 )
 from awf.db.repositories.base import (
@@ -108,6 +109,52 @@ class EgressAuditRepository:
         )
         result = await self._session.execute(stmt)
         return {str(row[0]): row[1] for row in result.fetchall()}
+
+
+class WorkerHeartbeatRepository:
+    """CRUD helpers for control-worker heartbeat liveness records."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get(self, *, worker_id: str) -> WorkerHeartbeat | None:
+        stmt = select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id == worker_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def record_heartbeat(
+        self,
+        *,
+        worker_id: str,
+        node_id: str,
+        started_at: datetime,
+        last_heartbeat_at: datetime,
+        poll_interval_seconds: float,
+    ) -> WorkerHeartbeat:
+        heartbeat = await self.get(worker_id=worker_id)
+        if heartbeat is None:
+            heartbeat = WorkerHeartbeat(
+                worker_id=worker_id,
+                node_id=node_id,
+                started_at=started_at,
+                last_heartbeat_at=last_heartbeat_at,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+            self._session.add(heartbeat)
+        else:
+            heartbeat.node_id = node_id
+            heartbeat.last_heartbeat_at = last_heartbeat_at
+            heartbeat.poll_interval_seconds = poll_interval_seconds
+        await self._session.flush()
+        return heartbeat
+
+    async def latest_for_node(self, *, node_id: str) -> WorkerHeartbeat | None:
+        stmt = (
+            select(WorkerHeartbeat)
+            .where(WorkerHeartbeat.node_id == node_id)
+            .order_by(WorkerHeartbeat.last_heartbeat_at.desc(), WorkerHeartbeat.worker_id.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
 
 class ProviderModelCircuitBreakerRepository:

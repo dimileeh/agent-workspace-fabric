@@ -6,9 +6,11 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.db.models import WorkerHeartbeat
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 
@@ -38,6 +40,50 @@ async def test_run_forever_exits_when_stop_requested(
 
     # The task itself must complete within the test's 30s timeout — no hangs.
     await asyncio.gather(worker.run_forever(), _stop_after_tick())
+
+
+@pytest.mark.unit
+async def test_run_once_records_worker_heartbeat(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    provisioner = AsyncMock()
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=provisioner,
+        config=WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_provisions=0,
+            node_id="node-a",
+        ),
+    )
+
+    dispatched = await worker.run_once()
+
+    assert dispatched == 0
+    async with factory() as session:
+        heartbeat = (
+            await session.execute(
+                select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id == worker._worker_id)  # noqa: SLF001
+            )
+        ).scalar_one()
+
+    assert heartbeat.node_id == "node-a"
+    assert heartbeat.poll_interval_seconds == 0.01
+    assert heartbeat.started_at <= heartbeat.last_heartbeat_at
+
+
+@pytest.mark.unit
+async def test_heartbeat_write_failure_does_not_kill_worker() -> None:
+    def _raising_factory() -> AsyncSession:
+        raise RuntimeError("postgresql+asyncpg://awf:secret@db.internal:5432/awf")
+
+    worker = ControlWorker(
+        session_factory=_raising_factory,  # type: ignore[arg-type]
+        provisioner=AsyncMock(),
+        config=WorkerConfig(),
+    )
+
+    await worker._record_heartbeat_safely()  # noqa: SLF001
 
 
 @pytest.mark.unit

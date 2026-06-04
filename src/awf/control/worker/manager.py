@@ -26,8 +26,10 @@ from datetime import (
 )
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import redact_audit_text
 from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
@@ -53,13 +55,17 @@ from awf.control.worker.types import (
     _RequestedCapacityQueueSignature,
 )
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import WorkerHeartbeatRepository, WorkspaceRepository
 from awf.db.resilience import (
     DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
     run_db_operation_with_retry,
 )
 from awf.runtime.inspection import RuntimeInspector
 from awf.service.scheduler import SchedulerOrderCursor
+from awf.service.worker_heartbeat import (
+    WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+    worker_heartbeat_write_interval_seconds,
+)
 
 if TYPE_CHECKING:
     from awf.service.gc_reconcile import OrphanDirReconcileResult
@@ -107,6 +113,7 @@ class ControlWorker(WorkerDelegatesMixin):
             None
         )
         self._requested_capacity_resume_provider_suppression_expires_at: datetime | None = None
+        self._worker_started_at = datetime.now(UTC)
 
     def request_stop(self: Any) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -144,6 +151,8 @@ class ControlWorker(WorkerDelegatesMixin):
         for ``run_forever`` to sleep; non-zero means we may be throughput-bound
         and should immediately loop again.
         """
+        await self._record_heartbeat_safely()
+
         dispatched_ids: set[str] = set()
         execution_dispatched_ids: set[str] = set()
 
@@ -284,20 +293,68 @@ class ControlWorker(WorkerDelegatesMixin):
                     raise exc
 
     async def run_forever(self: Any) -> None:
-        while not self._stopped.is_set():
-            try:
-                dispatched = await self.run_once()
-            except Exception:  # pragma: no cover - defensive: never die silently
-                _log.exception("worker.run_once_failed")
-                dispatched = 0
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name=f"awf-worker-heartbeat-{self._worker_id}",
+        )
+        try:
+            while not self._stopped.is_set():
+                try:
+                    dispatched = await self.run_once()
+                except Exception:  # pragma: no cover - defensive: never die silently
+                    _log.exception("worker.run_once_failed")
+                    dispatched = 0
 
-            if dispatched == 0:
-                # Sleep up to poll_interval, waking early if a stop was requested.
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._stopped.wait(),
-                        timeout=self._config.poll_interval_seconds,
-                    )
+                if dispatched == 0:
+                    # Sleep up to poll_interval, waking early if a stop was requested.
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            self._stopped.wait(),
+                            timeout=self._config.poll_interval_seconds,
+                        )
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+    async def _heartbeat_loop(self: Any) -> None:
+        interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)
+        while not self._stopped.is_set():
+            await self._record_heartbeat_safely()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stopped.wait(), timeout=interval)
+
+    async def _record_heartbeat_safely(self: Any) -> None:
+        try:
+            await self._record_heartbeat()
+        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError) as exc:
+            _log.warning(
+                "worker.heartbeat_write_failed",
+                reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                error_type=type(exc).__name__,
+                error=redact_audit_text(str(exc))[:240],
+            )
+
+    async def _record_heartbeat(self: Any) -> None:
+        async def _operation(session: AsyncSession) -> None:
+            now = datetime.now(UTC)
+            await WorkerHeartbeatRepository(session).record_heartbeat(
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                started_at=self._worker_started_at,
+                last_heartbeat_at=now,
+                poll_interval_seconds=self._config.poll_interval_seconds,
+            )
+
+        await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _log_transient_db_retry(self: Any, exc: BaseException, attempt: int) -> None:
         _log.warning(
