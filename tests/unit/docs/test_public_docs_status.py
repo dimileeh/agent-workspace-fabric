@@ -606,6 +606,25 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     assert "does not delete local AWF service state" in uninstall_text
 
 
+def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
+    """Assert no-global checkout rollback does not require a global awf executable."""
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    no_global_commands = (
+        'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+        'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"',
+        "uv run --python 3.12 --extra dev awf service status --format pretty",
+        (
+            "uv run --python 3.12 --extra dev awf smoke run --project <path> "
+            "--mocked-local --format pretty"
+        ),
+    )
+
+    assert "source checkout with no global install" in rollback_section.lower()
+    for command in no_global_commands:
+        assert command in rollback_section
+
+
 def test_uninstall_no_global_source_checkout_cleanup_uses_uv_run() -> None:
     """Assert no-global checkout cleanup does not require a global awf executable."""
     uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")

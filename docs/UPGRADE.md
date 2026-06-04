@@ -79,9 +79,26 @@ If a local upgrade blocks development:
 
 1. Return to the previous Git revision or reinstall the previous package
    version for your lane.
-2. Run `awf start` from that lane.
-3. Check `awf service status --format pretty`.
-4. Run `awf smoke run --project <path> --mocked-local --format pretty`.
+2. Run the rollback commands that match your lane.
+
+For lanes that put `awf` on `PATH`:
+
+```bash
+awf start
+awf service status --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
+```
+
+For the source checkout with no global install lane, run AWF from the checkout:
+
+```bash
+cd /path/to/aira-agent-workspace-fabric
+uv sync --extra dev
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf service status --format pretty
+uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty
+```
 
 `awf start` is designed to be idempotent for local development. Do not delete
 `.awf` state or Docker volumes unless a specific troubleshooting step requires
