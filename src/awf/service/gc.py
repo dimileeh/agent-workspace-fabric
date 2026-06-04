@@ -8,21 +8,24 @@ log streams.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector
 from awf.service import gc_predicates as _gc_predicates
+from awf.service import gc_results as _gc_results
 from awf.service import gc_worktrees as _gc_worktrees
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
@@ -57,6 +60,8 @@ from awf.service.secret_leases import (
 if TYPE_CHECKING:
     from awf.node.compose_manager import ComposeManager
 
+_log = get_logger(__name__)
+
 WorkspaceGCWorktreeRemoveResult = _gc_worktrees.WorkspaceGCWorktreeRemoveResult
 WorkspaceGCWorktreeRemoveTargetResult = _gc_worktrees.WorkspaceGCWorktreeRemoveTargetResult
 _blocked_worktree_paths_after_remove = _gc_worktrees.blocked_worktree_paths_after_remove
@@ -64,6 +69,15 @@ _default_worktree_remover = _gc_worktrees.default_worktree_remover
 _run_worktree_remove = _gc_worktrees.run_worktree_remove
 _worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
 _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
+
+# Leaf result/data dataclasses live in ``gc_results`` (file-size budget);
+# re-exported so the historical ``awf.service.gc.<name>`` surface is unchanged.
+WorkspaceCleanupExecutionStatus = _gc_results.WorkspaceCleanupExecutionStatus
+WorkspaceCleanupPathStatus = _gc_results.WorkspaceCleanupPathStatus
+WorkspaceGCComposeTeardownResult = _gc_results.WorkspaceGCComposeTeardownResult
+WorkspaceGCDeleteError = _gc_results.WorkspaceGCDeleteError
+WorkspaceGCPathOutcome = _gc_results.WorkspaceGCPathOutcome
+WorkspaceGCPreserved = _gc_results.WorkspaceGCPreserved
 
 # SQL predicate builders live in ``gc_predicates`` (file-size budget); re-aliased
 # under their historical ``_workspace_*`` names for callers/tests.
@@ -97,9 +111,6 @@ CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
 CLEANUP_EXECUTION_PARTIAL = "CLEANUP_EXECUTION_PARTIAL"
 
-WorkspaceCleanupExecutionStatus = Literal["dry_run", "succeeded", "partial"]
-WorkspaceCleanupPathStatus = Literal["planned", "deleted", "already_removed", "skipped", "failed"]
-
 TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
     {
         WorkspaceStatus.completed.value,
@@ -126,76 +137,6 @@ PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
         WorkspaceStatus.destroying.value,
     }
 )
-
-
-@dataclass(frozen=True)
-class WorkspaceGCPreserved:
-    """A workspace considered by policy but intentionally not cleaned."""
-
-    workspace_id: str
-    status: str
-    updated_at: datetime
-    age_hours: int
-    reason_code: str
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "workspace_id": self.workspace_id,
-            "status": self.status,
-            "updated_at": self.updated_at.isoformat(),
-            "age_hours": self.age_hours,
-            "reason_code": self.reason_code,
-        }
-
-
-@dataclass(frozen=True)
-class WorkspaceGCComposeTeardownResult:
-    """Structured outcome for optional compose teardown before filesystem deletion."""
-
-    status: Literal["succeeded", "failed", "skipped"]
-    reason_code: str
-    error: str | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.status in {"succeeded", "skipped"}
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "status": self.status,
-            "reason_code": self.reason_code,
-        }
-        if self.error:
-            payload["error"] = self.error
-        return payload
-
-
-@dataclass(frozen=True)
-class WorkspaceGCPathOutcome:
-    """Structured execution outcome for one pressure-directory target."""
-
-    workspace_id: str
-    kind: str
-    path: Path
-    status: WorkspaceCleanupPathStatus
-    reason_code: str
-    deleted: bool = False
-    error: str | None = None
-    estimated_bytes: int = 0
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "workspace_id": self.workspace_id,
-            "kind": self.kind,
-            "path": str(self.path),
-            "status": self.status,
-            "reason_code": self.reason_code,
-            "deleted": self.deleted,
-            "estimated_bytes": self.estimated_bytes,
-        }
-        if self.error is not None:
-            payload["error"] = self.error
-        return payload
 
 
 @dataclass(frozen=True)
@@ -355,26 +296,6 @@ class WorkspaceGCPlan:
             "total_estimated_bytes": self.total_estimated_bytes,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "preserved": [preserved.to_dict() for preserved in self.preserved],
-        }
-
-
-@dataclass(frozen=True)
-class WorkspaceGCDeleteError:
-    """One deletion failure captured without aborting the rest of the GC run."""
-
-    workspace_id: str
-    kind: str
-    path: Path
-    error: str
-    reason_code: str = PATH_DELETE_FAILED
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "workspace_id": self.workspace_id,
-            "kind": self.kind,
-            "path": str(self.path),
-            "reason_code": self.reason_code,
-            "error": self.error,
         }
 
 
@@ -955,6 +876,39 @@ async def _revoke_gc_secret_leases(
     return summaries
 
 
+def _unmount_candidate_auth_overlay(
+    candidate: WorkspaceGCCandidate,
+    *,
+    work_dir: Path,
+) -> None:
+    """Unmount a GC candidate's Claude auth overlay before its dir is removed.
+
+    Unmount-before-remove: a live overlay mount at ``auth/<id>/claude/merged``
+    makes the subsequent ``rmtree`` of ``auth/<id>`` fail with ``EBUSY`` and
+    strands both the mount and the auth dir. The PR monitor unmounts before its
+    own filesystem GC, but ``POST /v1/service/gc`` funnels through here too, so
+    doing it centrally covers both entrypoints. Best-effort and idempotent: a
+    no-op when nothing is mounted, and a genuine umount failure is logged and
+    swallowed so the per-path delete still records any residual ``EBUSY`` rather
+    than aborting the whole run.
+    """
+
+    from awf.node.auth_mounts import teardown_workspace_auth_overlay
+
+    try:
+        teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=candidate.workspace_id)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.warning(
+            "gc.auth_overlay_unmount_failed",
+            reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
+            workspace_id=candidate.workspace_id,
+            error=repr(exc)[:400],
+            # ``repr(CalledProcessError)`` drops the ``umount(8)`` stderr (e.g.
+            # "target is busy"); forward it so the EBUSY root cause is greppable.
+            stderr=getattr(exc, "stderr", None),
+        )
+
+
 async def _delete_gc_plan_paths(
     plan: WorkspaceGCPlan,
     *,
@@ -999,6 +953,16 @@ async def _delete_gc_plan_paths(
                         )
                     )
                 continue
+        # Unmount the Claude auth overlay only *after* the compose stack is torn
+        # down. While the agent container is up it bind-mounts the overlay
+        # ``merged`` dir, so a pre-teardown umount fails ``EBUSY`` (and is swallowed
+        # by ``_unmount_candidate_auth_overlay``); nothing would retry it before the
+        # auth-dir ``rmtree`` below, stranding the still-mounted overlay. Teardown
+        # stops the container first, so the umount here releases the mount and the
+        # auth dir can be removed. When teardown failed above we ``continue`` without
+        # reaching here — the stack is still up and no paths are deleted, so there is
+        # nothing to strand.
+        await asyncio.to_thread(_unmount_candidate_auth_overlay, candidate, work_dir=plan.work_dir)
         wt_remove = await _run_worktree_remove(candidate, worktree_remover)
         if wt_remove is not None:
             worktree_removes[candidate.workspace_id] = wt_remove
