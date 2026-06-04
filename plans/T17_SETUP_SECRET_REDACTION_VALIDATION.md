@@ -1205,6 +1205,55 @@ uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review Thread `PRRT_kwDOSJAM6s6HIJz7` Exact Secret Ordering Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: full-text `redact_secrets()` now computes exact caller-supplied
+  secret matches on the original input together with regex spans before
+  rendering output.
+- Complete: exact configured secrets that contain URL-credential or
+  authorization-header regex substrings are replaced as whole secrets.
+- Complete: regex-only URL and authorization redaction still preserves useful
+  non-secret context such as `https://<redacted>@host` and
+  `Authorization: Bearer <redacted>`.
+- Complete: existing slice and byte-slice exact-secret regressions still pass.
+
+Additional files changed:
+
+- `src/awf/common/redaction.py`
+- `tests/unit/runtime/test_log_redaction.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k masks_exact_secret_before_pattern_substrings
+# failed: URL host/path and authorization-header suffix remained after regex-first masking
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k exact_secret
+# 3 passed, 25 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q
+# 28 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py tests/unit/runtime/test_log_redaction.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
+# Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

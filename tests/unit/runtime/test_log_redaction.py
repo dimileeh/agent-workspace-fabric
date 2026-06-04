@@ -71,6 +71,27 @@ def test_redact_secrets_catches_truncated_github_tokens(token: str) -> None:
 
 
 @pytest.mark.unit
+def test_redact_secrets_masks_exact_secret_before_pattern_substrings() -> None:
+    """Mask exact secrets as wholes even when they contain regex-redacted parts."""
+    url_secret = "https://svc-user:svc-password@example.test/private/project"
+    header_secret = "Authorization: Bearer exactHeaderToken123456 team=platform"
+    text = f"setup url={url_secret} header={header_secret} done"
+
+    redacted = redact_secrets(text, extra_secrets=(url_secret, header_secret))
+
+    assert redacted == f"setup url={REDACTION_MARKER} header={REDACTION_MARKER} done"
+    for leaked_fragment in (
+        "svc-user",
+        "svc-password",
+        "example.test",
+        "/private/project",
+        "exactHeaderToken123456",
+        "team=platform",
+    ):
+        assert leaked_fragment not in redacted
+
+
+@pytest.mark.unit
 def test_redact_secrets_slice_masks_overlapping_exact_secret() -> None:
     """Mask a requested slice that starts inside an exact configured secret."""
     secret = "opaque-nonpattern-workspace-secret-value"

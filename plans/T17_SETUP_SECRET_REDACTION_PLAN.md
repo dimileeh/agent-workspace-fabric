@@ -817,3 +817,49 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py -q -k line_limit
 uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HIJz7` Exact Secret Ordering Plan
+
+### Problem Statement And Scope
+
+The review thread reports that full-text `redact_secrets()` applies regex
+redaction before exact caller-supplied `extra_secrets` matching. If an exact
+secret contains a substring that regex redaction masks first, such as an HTTPS
+URL with credentials or a full authorization header, the exact secret no longer
+matches and non-regex portions of the configured secret can remain visible.
+
+This repair is limited to shared full-text redaction ordering, a focused runtime
+redaction regression, and validation evidence. Slice and byte-slice redaction
+already compute spans on the original text and should keep their existing
+contracts.
+
+### Requirements Checklist
+
+- Full-text `redact_secrets()` computes exact caller-supplied secret matches on
+  the original input before rendering any regex redaction output.
+- Exact configured secrets that contain URL-credential or authorization regex
+  substrings are replaced as whole secrets.
+- Regex-only redaction still preserves useful context such as
+  `https://<redacted>@host` and `Authorization: Bearer <redacted>`.
+- Slice and byte-slice redaction behavior remains unchanged.
+
+### Implementation Steps
+
+1. Add a focused failing regression with exact `extra_secrets` values that
+   contain URL-credential and authorization-header regex substrings.
+2. Change full-text redaction to compute and merge all redaction spans on the
+   original text, then render the result once.
+3. Preserve the URL `@` separator in regex-only full-text output while still
+   masking the credential body.
+4. Run focused pytest plus narrow lint/type checks for the touched files only.
+5. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k exact_secret
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py tests/unit/runtime/test_log_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
+```

@@ -34,20 +34,13 @@ def redact_secrets(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     if not text:
         return text
 
-    redacted = _URL_CREDENTIAL_RE.sub(r"\1" + REDACTION_MARKER + "@", text)
-    redacted = _AUTHORIZATION_RE.sub(r"\1" + REDACTION_MARKER, redacted)
-    redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, redacted)
-    redacted = _TOKEN_ASSIGNMENT_RE.sub(_redact_assignment, redacted)
-    redacted = _BEARER_RE.sub(r"\1" + REDACTION_MARKER, redacted)
-    redacted = _KNOWN_TOKEN_RE.sub(REDACTION_MARKER, redacted)
-    # Full-text redaction can search exact caller-supplied secrets after regex
-    # masking because already-masked values no longer need original offsets.
-    # Slice helpers compute all spans on the original text so requested offsets
-    # keep projecting to the caller's source window.
-    exact_spans = _merge_redaction_spans(_exact_secret_redaction_spans(redacted, extra_secrets))
-    if not exact_spans:
-        return redacted
-    return _render_redacted_slice(redacted, 0, len(redacted), exact_spans)
+    # Compute exact and regex spans on the original text before rendering so an
+    # exact configured secret containing a token-shaped substring is masked as a
+    # whole instead of being missed after a regex rewrite.
+    spans = _secret_redaction_spans(text, extra_secrets=extra_secrets)
+    if not spans:
+        return text
+    return _render_redacted_slice(text, 0, len(text), spans)
 
 
 def redact_secrets_slice(
@@ -104,11 +97,6 @@ def redact_secrets_byte_slice(
     return _render_redacted_byte_slice(text_bytes, safe_start, safe_end, byte_spans)
 
 
-def _redact_assignment(match: re.Match[str]) -> str:
-    quote = match.group("quote")
-    return f"{match.group('key')}{match.group('separator')}{quote}{REDACTION_MARKER}{quote}"
-
-
 def _secret_redaction_spans(
     text: str,
     *,
@@ -118,7 +106,7 @@ def _secret_redaction_spans(
     spans: list[_RedactionSpan] = []
     spans.extend(_exact_secret_redaction_spans(text, extra_secrets))
 
-    spans.extend((match.start(2), match.end(2)) for match in _URL_CREDENTIAL_RE.finditer(text))
+    spans.extend((match.start(2), match.end(2) - 1) for match in _URL_CREDENTIAL_RE.finditer(text))
     spans.extend((match.start(2), match.end(2)) for match in _AUTHORIZATION_RE.finditer(text))
     spans.extend(match.span() for match in _PROVIDER_REF_RE.finditer(text))
     spans.extend(
