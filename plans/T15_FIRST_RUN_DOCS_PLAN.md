@@ -11,8 +11,12 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`.
 
 ## Requirements Checklist
 
-- Present four first-run lanes: curl installer, `uv tool` / `pipx`, source
-  checkout with global tool install, and source checkout with no global install.
+- Present the currently available public first-run lanes: `uv tool` / `pipx`,
+  source checkout with global tool install, and source checkout with no global
+  install.
+- Omit the hosted curl installer lane from public first-run docs until the
+  installer, manifest, checksums, and distribution artifacts are published and
+  verified.
 - Explain which lanes are release-installed and which lanes are inspectable.
 - For each lane, document setup, start, project init, mocked smoke, upgrade, and
   uninstall.
@@ -27,6 +31,12 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`.
 - Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Implementation Steps
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6G_99y`: until the
+hosted installer, manifest, checksums, and distribution artifacts are published
+and verified, `docs/QUICKSTART.md` must steer evaluators to the `uv tool` /
+`pipx` or source-checkout lanes instead of advertising
+`https://aira.pro/install.sh`.
 
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.

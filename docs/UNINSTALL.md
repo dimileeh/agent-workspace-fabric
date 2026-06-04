@@ -2,22 +2,13 @@
 
 Use the uninstall path that matches the first-run lane you chose. Uninstalling
 the CLI or source checkout does not delete local AWF service state, workspace
-state, Docker volumes, logs, or artifacts.
+state, Docker volumes, logs, or artifacts. The hosted curl installer lane is
+intentionally omitted until its public installer, manifest, checksums, and
+distribution artifacts are published and verified.
 
 For destructive cleanup, use the targeted steps in
 [Troubleshooting](TROUBLESHOOTING.md) only when you intentionally want to remove
 local state.
-
-## Curl Installer
-
-The curl installer lane is release-installed. Remove the installer-managed CLI
-with the same installer:
-
-```bash
-curl -fsSL https://aira.pro/install.sh | sh -s -- --uninstall
-```
-
-The installer refuses to remove an unrelated `awf` executable it did not manage.
 
 ## uv tool
 

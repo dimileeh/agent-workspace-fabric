@@ -1,11 +1,13 @@
 # Quickstart
 
-Pick one lane and follow only that lane. Each lane gets AWF installed, runs the
-host setup check, starts local Core, initializes a project, runs mocked smoke,
-and shows the matching upgrade and uninstall path.
+Pick one lane and follow only that lane. Each available lane gets AWF
+installed, runs the host setup check, starts local Core, initializes a project,
+runs mocked smoke, and shows the matching upgrade and uninstall path.
 
 Use the source checkout lanes when you want to inspect AWF before running it.
-Use a release-installed lane when you want the published package or installer.
+Use the `uv tool` / `pipx` lane when you want the published package. The hosted curl
+installer lane is intentionally omitted until its public installer, manifest,
+checksums, and distribution artifacts are published and verified.
 In source checkout lanes, `awf setup` checks and `awf start` uses
 `docker/compose/.env` for Compose-interpolated local service values.
 
@@ -22,43 +24,7 @@ Local first-run URLs use `127.0.0.1`: API checks use
 `http://127.0.0.1:8000` by default, and the console is
 `http://127.0.0.1:3000` when the console is running.
 
-## Lane 1: Curl Installer
-
-This lane is release-installed and least inspectable before execution because it
-fetches the installer script over HTTPS. Use a source checkout lane if you want
-to inspect the exact code first.
-
-```bash
-curl -fsSL https://aira.pro/install.sh | sh
-
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf setup
-awf start
-
-mkdir -p "$HOME/awf-eval-project"
-awf init "$HOME/awf-eval-project"
-awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
-```
-
-This is the `awf init <path>` step for a checked-out project repository.
-
-Upgrade:
-
-```bash
-curl -fsSL https://aira.pro/install.sh | sh
-awf start
-awf smoke run --mocked-local --format pretty
-```
-
-Uninstall:
-
-```bash
-curl -fsSL https://aira.pro/install.sh | sh -s -- --uninstall
-```
-
-## Lane 2: uv tool or pipx
+## Lane 1: uv tool or pipx
 
 This lane is release-installed and package-manager mediated. `uv tool` and
 `pipx` install the published `agent-workspace-fabric` package into an isolated
@@ -100,7 +66,7 @@ uv tool uninstall agent-workspace-fabric
 pipx uninstall agent-workspace-fabric
 ```
 
-## Lane 3: Source Checkout With Global Tool Install
+## Lane 2: Source Checkout With Global Tool Install
 
 This lane uses inspectable source and then installs `awf` as a global tool from
 that checkout. It is useful when you want to inspect or patch AWF but still want
@@ -141,7 +107,7 @@ uv tool uninstall agent-workspace-fabric
 
 Remove the checkout separately only when you no longer want the source tree.
 
-## Lane 4: Source Checkout With No Global Install
+## Lane 3: Source Checkout With No Global Install
 
 This lane uses inspectable source and no global install. It does not place an
 `awf` executable on the global `PATH`; every AWF command runs through `uv run`

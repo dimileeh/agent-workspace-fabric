@@ -108,7 +108,7 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "docs/QUICKSTART.md" in readme_text
     assert "docs/UPGRADE.md" in readme_text
     assert "docs/UNINSTALL.md" in readme_text
-    assert "curl -fsSL https://aira.pro/install.sh | sh" in readme_text
+    assert "hosted curl installer lane is intentionally omitted" in readme_text
     assert "&#124;" not in readme_text
     assert "docs/START_HERE.md" not in readme_text
     assert "currently a stub" not in quickstart_text.lower()
@@ -119,16 +119,15 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
-def test_quickstart_presents_four_complete_first_run_lanes() -> None:
+def test_quickstart_presents_available_complete_first_run_lanes() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     lanes = {
-        "## Lane 1: Curl Installer": ("release-installed", "least inspectable"),
-        "## Lane 2: uv tool or pipx": ("release-installed", "package-manager"),
-        "## Lane 3: Source Checkout With Global Tool Install": (
+        "## Lane 1: uv tool or pipx": ("release-installed", "package-manager"),
+        "## Lane 2: Source Checkout With Global Tool Install": (
             "inspectable source",
             "global tool",
         ),
-        "## Lane 4: Source Checkout With No Global Install": (
+        "## Lane 3: Source Checkout With No Global Install": (
             "inspectable source",
             "no global install",
         ),
@@ -145,7 +144,9 @@ def test_quickstart_presents_four_complete_first_run_lanes() -> None:
         assert "Upgrade:" in section
         assert "Uninstall:" in section
 
-    assert "curl -fsSL https://aira.pro/install.sh | sh" in quickstart_text
+    assert "## Lane 1: Curl Installer" not in quickstart_text
+    assert "curl -fsSL https://aira.pro/install.sh | sh" not in quickstart_text
+    assert re.search(r"hosted curl\s+installer lane is intentionally omitted", quickstart_text)
     assert "uv tool install agent-workspace-fabric" in quickstart_text
     assert "pipx install agent-workspace-fabric" in quickstart_text
     assert "uv tool install . --force" in quickstart_text
@@ -295,7 +296,6 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
 
     lane_terms = (
-        "curl installer",
         "uv tool",
         "pipx",
         "source checkout with global tool install",
@@ -305,18 +305,36 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
         assert lane_term in upgrade_text.lower()
         assert lane_term in uninstall_text.lower()
 
-    assert "curl -fsSL https://aira.pro/install.sh | sh" in upgrade_text
+    assert "curl -fsSL https://aira.pro/install.sh" not in upgrade_text
     assert "uv tool upgrade agent-workspace-fabric" in upgrade_text
     assert "pipx upgrade agent-workspace-fabric" in upgrade_text
     assert "git pull" in upgrade_text
     assert "awf start" in upgrade_text
     assert "awf smoke run --mocked-local --format pretty" in upgrade_text
 
-    assert "curl -fsSL https://aira.pro/install.sh | sh -s -- --uninstall" in uninstall_text
+    assert "curl -fsSL https://aira.pro/install.sh" not in uninstall_text
     assert "uv tool uninstall agent-workspace-fabric" in uninstall_text
     assert "pipx uninstall agent-workspace-fabric" in uninstall_text
     assert "rm -rf" in uninstall_text
     assert "does not delete local AWF service state" in uninstall_text
+
+
+def test_public_first_run_docs_do_not_advertise_unpublished_curl_installer() -> None:
+    public_first_run_paths = (
+        README_PATH,
+        REPO_ROOT / "docs" / "QUICKSTART.md",
+        REPO_ROOT / "docs" / "GETTING_STARTED.md",
+        REPO_ROOT / "docs" / "UPGRADE.md",
+        REPO_ROOT / "docs" / "UNINSTALL.md",
+    )
+
+    offenders = [
+        str(path.relative_to(REPO_ROOT))
+        for path in public_first_run_paths
+        if "curl -fsSL https://aira.pro/install.sh" in path.read_text(encoding="utf-8")
+    ]
+
+    assert not offenders
 
 
 def test_public_oss_release_metadata_is_consistent() -> None:

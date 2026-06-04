@@ -36,15 +36,11 @@ docker compose version
 
 ### Installation
 
-AWF has four first-run lanes. The [Quickstart](QUICKSTART.md) is the canonical
-lane selector; this guide adds contributor and development detail.
-
-The curl installer is the shortest release-installed lane and the least
-inspectable before execution:
-
-```bash
-curl -fsSL https://aira.pro/install.sh | sh
-```
+AWF currently has three public first-run lanes. The
+[Quickstart](QUICKSTART.md) is the canonical lane selector; this guide adds
+contributor and development detail. The hosted curl installer lane is
+intentionally omitted until its public installer, manifest, checksums, and
+distribution artifacts are published and verified.
 
 The package-manager release-installed lane uses an isolated CLI tool via
 `uv tool`:

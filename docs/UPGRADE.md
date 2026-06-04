@@ -2,27 +2,9 @@
 
 Use the upgrade path that matches the first-run lane you chose. After upgrading,
 run `awf start` and mocked smoke to refresh local Core and prove the operator
-path still works.
-
-## Curl Installer
-
-The curl installer lane is release-installed. Upgrade by rerunning the same
-installer after the release manifest and checksum-backed artifacts are
-published:
-
-```bash
-curl -fsSL https://aira.pro/install.sh | sh
-awf start
-awf service status --format pretty
-awf smoke run --mocked-local --format pretty
-```
-
-Use `--version` only when you intentionally want to pin a specific published
-release:
-
-```bash
-curl -fsSL https://aira.pro/install.sh | sh -s -- --version 0.1.0
-```
+path still works. The hosted curl installer lane is intentionally omitted until
+its public installer, manifest, checksums, and distribution artifacts are
+published and verified.
 
 ## uv tool
 
