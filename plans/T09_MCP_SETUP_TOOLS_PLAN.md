@@ -84,6 +84,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HM47u Bootstrap Preflight Path Expansion
+
+### Problem Statement And Scope
+
+The review reports that `awf_start_local_service` only converts
+`ServiceBootstrapError` from `run_service_bootstrap()`. During the bootstrap
+work-dir mount-propagation preflight, an invalid home-style path such as
+`AWF_HOST_WORK_DIR=~nosuchuser/work` can make `Path.expanduser()` raise
+`RuntimeError` before bootstrap reaches the structured stage-failure path.
+
+Scope is limited to the MCP `awf_start_local_service` boundary around
+`run_service_bootstrap()`. The review explicitly allows normalizing these
+bootstrap-time path errors at this boundary, and the MCP tool must not let raw
+bootstrap-time path errors escape.
+
+### Requirements Checklist
+
+- Preserve normal `ServiceBootstrapError` first-run failure handling.
+- Treat an unexpandable work-dir path raised from `run_service_bootstrap()` as a
+  structured `awf start` first-run failure instead of letting `RuntimeError`
+  escape through FastMCP.
+- Add focused MCP regression coverage for the unexpandable work-dir path case.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression that makes `run_service_bootstrap()`
+   raise the same `RuntimeError` produced by an unexpandable `~user` path.
+2. Add a narrow `run_service_bootstrap()` exception boundary for path-resolution
+   exception types and render them through the existing first-run failure
+   payload path.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_path_runtime_error_is_first_run_failure -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: Setup Tools Test File Line Limit
 
 ### Problem Statement And Scope
