@@ -35,3 +35,14 @@ def test_console_runtime_stage_execs_next_directly_for_signal_handling() -> None
         in dockerfile
     )
     assert 'CMD ["npm", "run", "start"' not in dockerfile
+
+
+@pytest.mark.unit
+def test_console_build_stage_accepts_public_poll_interval_arg() -> None:
+    dockerfile = _console_dockerfile()
+
+    assert "ARG NEXT_PUBLIC_AWF_CONSOLE_POLL_MS=5000" in dockerfile
+    assert "ENV NEXT_PUBLIC_AWF_CONSOLE_POLL_MS=${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS}" in dockerfile
+    assert dockerfile.index("ARG NEXT_PUBLIC_AWF_CONSOLE_POLL_MS=5000") < dockerfile.index(
+        "RUN npm run build"
+    )

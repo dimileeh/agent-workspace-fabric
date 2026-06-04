@@ -217,6 +217,8 @@ services:
     build:
       context: ../..
       dockerfile: apps/console/Dockerfile
+      args:
+        NEXT_PUBLIC_AWF_CONSOLE_POLL_MS: ${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}
     image: awf-console:local
     depends_on:
       api:

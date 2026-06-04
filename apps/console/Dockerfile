@@ -9,6 +9,9 @@ RUN npm ci
 
 FROM deps AS build
 
+ARG NEXT_PUBLIC_AWF_CONSOLE_POLL_MS=5000
+ENV NEXT_PUBLIC_AWF_CONSOLE_POLL_MS=${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS}
+
 COPY apps/console ./
 RUN npm run build
 RUN npm prune --omit=dev

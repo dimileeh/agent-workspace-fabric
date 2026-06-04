@@ -315,8 +315,14 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
 
     console = services["console"]
     assert console["image"] == "awf-console:local"
+    assert console["build"]["args"]["NEXT_PUBLIC_AWF_CONSOLE_POLL_MS"] == (
+        "${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}"
+    )
     assert console["environment"]["AWF_API_BASE_URL"] == "http://api:8000"
     assert console["environment"]["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
+    assert console["environment"]["NEXT_PUBLIC_AWF_CONSOLE_POLL_MS"] == (
+        "${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}"
+    )
     assert console["ports"] == ["127.0.0.1:${AWF_CONSOLE_HOST_PORT:-3000}:3000"]
 
     bridge = services["ollama-bridge"]
