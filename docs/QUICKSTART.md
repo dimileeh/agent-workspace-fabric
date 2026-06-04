@@ -128,8 +128,10 @@ This is the `awf init <path>` step for a checked-out project repository.
 
 Upgrade:
 
+Run this from the existing `aira-agent-workspace-fabric` checkout. If your shell
+is elsewhere, first `cd /path/to/aira-agent-workspace-fabric`.
+
 ```bash
-cd aira-agent-workspace-fabric
 git pull
 uv tool install . --force
 awf setup --source-checkout "$PWD"
