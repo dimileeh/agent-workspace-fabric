@@ -60,6 +60,11 @@ _CLAUDE_BASE_BUILD_LOCK_NAME = ".build.lock"
 _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 _CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED"
 _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
+# Logged when a reused live overlay's real lowerdir could not be recovered, so the
+# host-recomputed base is untrustworthy: the fallback-edit reconcile (#381) and the
+# legacy-copy reap are both deferred to a later provision that can pin the true base,
+# rather than reconciling against a wrong tree (which would mis-copy or drop edits).
+_CLAUDE_AUTH_OVERLAY_RECONCILE_DEFERRED = "CLAUDE_AUTH_OVERLAY_RECONCILE_DEFERRED"
 # Raised by ``teardown_workspace_auth_overlay`` when a process that lacks
 # ``CAP_SYS_ADMIN`` (the CLI / API container) is asked to release a workspace's
 # overlay it cannot see in its own mount namespace and no capable process has
@@ -811,13 +816,30 @@ def _prepare_isolated_claude_auth(
             # writing into a live overlay's upper tree directly is undefined behavior
             # that can leave the edits invisible/stale to the agent reading ``merged``.
             if legacy_claude_copy.exists():
-                _reconcile_fallback_edits_into_upper(
-                    legacy=legacy_claude_copy,
-                    merged=Path(mount.source),
-                    upper=upper,
-                    base=base,
-                )
-                shutil.rmtree(legacy_claude_copy, ignore_errors=True)
+                if base is None:
+                    # ``_prepare_claude_overlay_mount`` reused a live overlay but
+                    # could not recover the base it is actually mounted against, so
+                    # there is no trustworthy tree to reconcile the legacy copy's
+                    # fallback edits against. Reconciling against a host guess could
+                    # copy baseline noise into the live overlay or drop a real edit,
+                    # and reaping the legacy copy afterwards would lose those edits
+                    # for good. Defer both: leave the legacy copy on disk so a later
+                    # provision that recovers/pins the true base can reconcile and
+                    # reap it. Disk leak (~1.7 GB) is the recoverable cost; lost edits
+                    # are not.
+                    _log.info(
+                        "claude_auth_overlay_reconcile_deferred",
+                        reason_code=_CLAUDE_AUTH_OVERLAY_RECONCILE_DEFERRED,
+                        workspace_auth_root=str(target_root),
+                    )
+                else:
+                    _reconcile_fallback_edits_into_upper(
+                        legacy=legacy_claude_copy,
+                        merged=Path(mount.source),
+                        upper=upper,
+                        base=base,
+                    )
+                    shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)
@@ -950,7 +972,7 @@ def _prepare_claude_overlay_mount(
     overlay_mounter: OverlayMounter,
     workspace_owner_uid: int | None,
     workspace_owner_gid: int | None,
-) -> tuple[AuthMount, Path, Path, Path] | None:
+) -> tuple[AuthMount, Path, Path, Path | None] | None:
     """Mount a shared-base + per-workspace overlay at ``<claude_root>/merged``.
 
     Returns ``(merged_mount, upper, work, base)`` on success, or ``None`` to signal
@@ -959,6 +981,14 @@ def _prepare_claude_overlay_mount(
     recovered from a live/raced mount) — the caller needs it to reconcile any
     fallback-era legacy edits into ``upper`` before reaping the legacy copy (#381).
     The shared base is built once per host and reused.
+
+    ``base`` is ``None`` only when a *live overlay was reused* but its real lowerdir
+    could not be recovered from the mount (``_live_overlay_pin_signature`` returned
+    ``None``): the host-recomputed tree we hold is not the one the overlay is
+    actually mounted against, so the caller must **not** reconcile fallback edits
+    against it (a wrong base copies baseline noise into the live overlay or skips a
+    real edit before the legacy copy is reaped). The caller defers both the
+    reconcile and the legacy reap to a later provision that can recover/pin the base.
     """
 
     if not overlay_mounter.supported():
@@ -1054,6 +1084,15 @@ def _prepare_claude_overlay_mount(
                 # edits or copy baseline files into ``upper``. Realign it to the
                 # lowerdir the mount actually uses, just recovered for the pin.
                 base = _shared_claude_base_dir(work_dir, pin_signature)
+            else:
+                # The live mount's real lowerdir could not be recovered, so the
+                # host-recomputed ``base`` is not the tree the overlay actually uses.
+                # Returning it would make the caller reconcile fallback edits against
+                # the wrong base — copying baseline noise into the live overlay or
+                # skipping a real edit before the legacy copy is reaped. Drop ``base``
+                # to ``None`` so the caller defers the reconcile (and the legacy reap)
+                # to a later provision that can recover/pin the true base.
+                base = None
         return (
             AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
             upper,
@@ -1092,6 +1131,13 @@ def _prepare_claude_overlay_mount(
                     # fallback-era legacy edits against the tree the mount truly uses,
                     # not a host guess that would mis-copy or drop edits.
                     base = _shared_claude_base_dir(work_dir, pin_signature)
+                else:
+                    # Mirror the idempotent-retry branch: the racing winner's live
+                    # lowerdir could not be recovered, so the host-recomputed ``base``
+                    # is not the tree the overlay actually uses. Drop it to ``None`` so
+                    # the caller skips the reconcile (and the legacy reap) rather than
+                    # comparing fallback edits against a wrong base.
+                    base = None
             return (
                 AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
                 upper,
