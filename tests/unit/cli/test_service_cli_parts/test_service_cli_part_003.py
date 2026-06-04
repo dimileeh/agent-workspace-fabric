@@ -518,6 +518,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             open_pr_resolver: object,
             config: object,
             orphan_dir_reconciler: object = None,
+            auth_overlay_work_dir: object = None,
         ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
@@ -526,6 +527,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["worker_open_pr_resolver"] = open_pr_resolver
             created["worker_config"] = config
             created["worker_orphan_dir_reconciler"] = orphan_dir_reconciler
+            created["worker_auth_overlay_work_dir"] = auth_overlay_work_dir
 
         async def run_once(self) -> int:
             created["run_once"] = True
@@ -597,6 +599,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["stack_secret_lease_resolver"].host_env is worker_mod.os.environ
     assert created["provisioner_session_factory"] is session_factory
     assert created["worker_session_factory"] is session_factory
+    assert created["worker_auth_overlay_work_dir"] == host_work_dir
     assert created["provisioner_stack_launcher"].__class__ is _ComposeStackLauncher
     assert created["worker_executor"] is not None
     assert created["worker_open_pr_resolver"] is not None
