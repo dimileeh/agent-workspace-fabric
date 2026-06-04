@@ -483,19 +483,24 @@ def ensure_work_dir_mount_propagation(
 def _resolve_bootstrap_host_work_dir(environ: Mapping[str, str]) -> str | None:
     """Return the host work dir to preflight, or ``None`` when unknowable.
 
-    Prefers an explicitly pinned ``AWF_HOST_WORK_DIR`` / ``AWF_WORK_DIR``. When
-    neither is set, falls back to compose's deterministic default
+    Mirrors exactly what compose binds for the worker:
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` (see
+    docker/compose/local-service.yml). Only ``AWF_HOST_WORK_DIR`` pins the host
+    bind; when it is unset, falls back to compose's deterministic default
     ``${HOME}/.awf/service`` so the propagation preflight still runs on the common
     bootstrap path — exactly the Docker Desktop/virtiofs case this change must
     detect, where the compose ``:rshared`` default would otherwise stand and leave
-    the worker provisioning an empty overlay. Returns ``None`` only when ``HOME``
-    is also absent, leaving today's compose defaults untouched.
+    the worker provisioning an empty overlay. ``AWF_WORK_DIR`` is deliberately not
+    consulted: it is the (often relative, default ``.awf``) in-container CLI/API
+    state root, which compose sets *from* the host bind path rather than reads, so
+    preflighting it would inspect the wrong path and leave the actual
+    ``${HOME}/.awf/service`` bind on its default posture. Returns ``None`` only
+    when ``HOME`` is also absent, leaving today's compose defaults untouched.
     """
 
-    for key in ("AWF_HOST_WORK_DIR", "AWF_WORK_DIR"):
-        value = environ.get(key)
-        if value and value.strip():
-            return value.strip()
+    value = environ.get("AWF_HOST_WORK_DIR")
+    if value and value.strip():
+        return value.strip()
     home = environ.get("HOME")
     if home and home.strip():
         return str(Path(home.strip()) / DEFAULT_HOST_WORK_DIR_SUBPATH)

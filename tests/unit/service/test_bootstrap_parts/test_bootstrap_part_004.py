@@ -560,12 +560,23 @@ def test_preflight_make_rshared_with_default_environ(
 
 
 @pytest.mark.unit
-def test_resolve_bootstrap_host_work_dir_prefers_host_then_work_dir() -> None:
+def test_resolve_bootstrap_host_work_dir_mirrors_compose_bind() -> None:
     resolve = bootstrap._resolve_bootstrap_host_work_dir  # noqa: SLF001
+    # Only AWF_HOST_WORK_DIR pins the host bind, matching compose's
+    # ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` expression.
     assert resolve({"AWF_HOST_WORK_DIR": "/a"}) == "/a"
-    assert resolve({"AWF_WORK_DIR": "/b"}) == "/b"
-    # Blank AWF_HOST_WORK_DIR falls through to AWF_WORK_DIR.
-    assert resolve({"AWF_HOST_WORK_DIR": "   ", "AWF_WORK_DIR": "/b"}) == "/b"
+    assert resolve({"AWF_HOST_WORK_DIR": "  /a  "}) == "/a"
+    # AWF_WORK_DIR must NOT be consulted: it is the in-container CLI/API state
+    # root (default ``.awf``), which compose sets from the host bind path rather
+    # than reads. Preflighting it would inspect the wrong path and leave the
+    # actual ${HOME}/.awf/service bind on its default rshared posture (#397
+    # review PRRT_kwDOSJAM6s6HB0Bj). Falls through to the compose default.
+    assert resolve({"AWF_WORK_DIR": "/b", "HOME": "/home/op"}) == "/home/op/.awf/service"
+    assert resolve({"AWF_HOST_WORK_DIR": "   ", "AWF_WORK_DIR": "/b", "HOME": "/home/op"}) == (
+        "/home/op/.awf/service"
+    )
+    # With AWF_WORK_DIR set but no HOME, nothing is knowable.
+    assert resolve({"AWF_WORK_DIR": "/b"}) is None
     # With nothing pinned, fall back to compose's deterministic default so the
     # preflight still runs on the common bootstrap path (#397 review).
     assert resolve({"HOME": "/home/op"}) == "/home/op/.awf/service"
