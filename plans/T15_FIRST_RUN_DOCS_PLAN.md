@@ -403,6 +403,19 @@ Focused lint command:
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_troubleshooting_guide.py tests/unit/cli/test_init_parts/test_init_part_004.py
 ```
 
-Pass criteria: both focused commands pass. Full repository tests, full coverage,
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HK9Wu`: Quickstart
+package-lane `.env` preservation must remove old AWF-managed values written as
+`export KEY=...` or with leading/key-adjacent whitespace before appending the
+remaining `.env`, so the newly printed `AWF_API_TOKEN`,
+`AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and `AWF_DATABASE_URL`
+remain authoritative for later fresh-shell upgrades.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HK9Wu`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_strips_exported_awf_env_entries tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

@@ -1783,6 +1783,42 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HK9Wu`:
+
+- `docs/QUICKSTART.md` now strips old AWF-managed package-lane `.env` entries
+  written as either bare `KEY=...` lines or `export KEY=...` lines, including
+  leading whitespace and whitespace before `=`, before appending preserved
+  unrelated entries after the newly printed service values.
+- `tests/unit/docs/test_public_docs_status.py` now executes the sed expressions
+  parsed from the Quickstart first-run block against exported and
+  whitespace-padded AWF-managed entries, while preserving unrelated keys.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_strips_exported_awf_env_entries tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade -q
+```
+
+Red-phase result after adding the focused regression: failed because the
+Quickstart sed expressions left `export AWF_API_TOKEN=old-token`, exported
+password/database URL entries, and a whitespace-padded host-port entry in the
+preserved output.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_strips_exported_awf_env_entries tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Final focused repair result: `3 passed in 0.79s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
