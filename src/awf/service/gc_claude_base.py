@@ -48,6 +48,11 @@ _log = get_logger(__name__)
 # A superseded base dir was reclaimed (the step's reason code when reaping ran
 # without a permission failure).
 CLAUDE_BASE_SUPERSEDED_REAPED = "CLAUDE_BASE_SUPERSEDED_REAPED"
+# A dry-run pass identified superseded bases but removed nothing from disk. Kept
+# distinct from ``CLAUDE_BASE_SUPERSEDED_REAPED`` so monitoring keyed on a reason
+# code alone can tell an execute that reclaimed disk apart from a plan-only preview
+# without also having to inspect ``execute`` / ``reaped``.
+CLAUDE_BASE_SUPERSEDED_PLANNED = "CLAUDE_BASE_SUPERSEDED_PLANNED"
 # A specific base dir could not be removed because the process lacked permission
 # (e.g. a root-owned base under a uid-1000 caller). Surfaced per-error so the step
 # is a loud ``partial`` rather than reporting success while disk stays leaked.
@@ -380,7 +385,9 @@ def _reap_status(
         return "ok", CLAUDE_BASE_SUPERSEDED_REAPED
     if planned:
         # Dry-run with superseded bases identified: a successful plan, not a no-op.
-        return "ok", CLAUDE_BASE_SUPERSEDED_REAPED
+        # Distinct reason code so a plan-only preview is never mistaken for an
+        # execute that actually reclaimed disk.
+        return "ok", CLAUDE_BASE_SUPERSEDED_PLANNED
     return "skipped", CLAUDE_BASE_GC_NOOP
 
 

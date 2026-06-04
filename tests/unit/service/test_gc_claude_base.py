@@ -24,6 +24,7 @@ from awf.service.gc_claude_base import (
     CLAUDE_BASE_REAP_PARTIAL,
     CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
     CLAUDE_BASE_REAP_PERMISSION_DENIED,
+    CLAUDE_BASE_SUPERSEDED_PLANNED,
     CLAUDE_BASE_SUPERSEDED_REAPED,
     _pinned_base_dirs,
     _reap_one_base,
@@ -220,7 +221,9 @@ def test_dry_run_plans_without_deleting(tmp_path: Path) -> None:
     assert report["planned"] == ["sigsuper0000000"]
     assert report["reaped"] == []
     assert report["status"] == "ok"
-    assert report["reason_code"] == CLAUDE_BASE_SUPERSEDED_REAPED
+    # A plan-only preview reports a dedicated reason code so monitoring can tell it
+    # apart from an execute that actually reclaimed disk.
+    assert report["reason_code"] == CLAUDE_BASE_SUPERSEDED_PLANNED
     # Dry run: the superseded base is still on disk.
     assert base_super.is_dir()
 
