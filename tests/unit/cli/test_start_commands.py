@@ -225,6 +225,8 @@ def test_start_success_json_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert details["providers"]["providers"]["github"] == "ok"
     assert details["health"] == "ok"
     assert payload["next_steps"]
+    # First-run output leads with the provider-free local health proof (T10).
+    assert "awf smoke run --mocked-local" in payload["next_steps"][0]
 
 
 @pytest.mark.unit
@@ -626,6 +628,30 @@ def test_start_success_payload_preserves_remote_console_url() -> None:
 
     assert payload.details["api_url"] == "http://127.0.0.1:8000"
     assert payload.details["console_url"] == "https://console.example.com"
+
+
+@pytest.mark.unit
+def test_start_success_payload_leads_with_provider_free_proof() -> None:
+    """First-run next steps lead with the no-token local health proof (T10).
+
+    A skeptical evaluator must be able to prove local Core health right after
+    ``awf start`` without handing AWF GitHub/PR authority or a provider token, so
+    the leading next step is the provider-free ``awf smoke run --mocked-local``
+    proof and it must not ask for any token or secret.
+    """
+    settings = SimpleNamespace(
+        api_base_url="http://localhost:8000",
+        console_url=None,
+    )
+    payload = start_commands._start_success_payload(settings, _success_result())  # noqa: SLF001
+
+    next_steps = payload.next_steps
+    assert next_steps[0].startswith("Run awf smoke run --mocked-local")
+    assert "token" not in next_steps[0].lower()
+    assert "secret" not in next_steps[0].lower()
+    # The existing onboarding/console guidance is preserved after the proof.
+    joined = "\n".join(next_steps)
+    assert "awf init" in joined
 
 
 @pytest.mark.unit

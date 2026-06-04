@@ -14,7 +14,11 @@ from awf.cli.common import (
     _emit_smoke_pretty,
 )
 
-_DX_HELP = "DX smoke proof: validate local service, profile, and PR path."
+_DX_HELP = (
+    "DX smoke proof: validate local Core health, profile, and PR path. "
+    "Use --mocked-local for a no-token local proof that demonstrates API health "
+    "and worker DB-substrate reachability without a provider token or GitHub access."
+)
 profile_app = typer.Typer(help="Workspace profile inspection.")
 smoke_app = typer.Typer(help=_DX_HELP)
 
@@ -97,7 +101,11 @@ def smoke_run(
     mocked_local: bool = typer.Option(
         False,
         "--mocked-local",
-        help="Run in mocked-local mode without live external services.",
+        help=(
+            "Run the no-token local proof: relax provider/PR requirements while "
+            "keeping local Core (API + worker DB substrate) health a hard signal. "
+            "Needs no provider token or GitHub access."
+        ),
     ),
     demo_path: Path | None = typer.Option(
         None,
