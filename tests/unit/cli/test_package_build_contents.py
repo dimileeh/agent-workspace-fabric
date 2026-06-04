@@ -11,6 +11,7 @@ exercises them fully.
 from __future__ import annotations
 
 import email
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -37,6 +38,27 @@ _BOOTSTRAP_ROOT_MARKERS = (
     "src/awf/__init__.py",
 )
 _WHEEL_ASSET_ROOT = "awf/bootstrap_assets"
+_CONSOLE_BUILD_ASSETS = (
+    "Dockerfile",
+    "package.json",
+    "package-lock.json",
+    "next.config.ts",
+    "postcss.config.mjs",
+    "tsconfig.json",
+    "app",
+    "components",
+    "lib",
+    "scripts",
+)
+_EXCLUDED_CONSOLE_ARTIFACTS = (
+    "apps/console/.env.local",
+    "apps/console/.next",
+    "apps/console/next-env.d.ts",
+    "apps/console/node_modules",
+    "apps/console/playwright-report",
+    "apps/console/test-results",
+    "apps/console/tsconfig.tsbuildinfo",
+)
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +98,25 @@ def _control_plane_copy_sources() -> list[str]:
         # Drop the destination (last token) and any option flags (--from=, --chown=, …).
         sources.extend(t for t in tokens[:-1] if not t.startswith("--"))
     return sources
+
+
+def _tracked_console_sources() -> set[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "apps/console"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return set(result.stdout.splitlines())
+
+
+def test_console_build_asset_sources_are_tracked() -> None:
+    """Console package inputs must survive a clean GitHub Actions checkout."""
+    tracked = _tracked_console_sources()
+    for relative in _CONSOLE_BUILD_ASSETS:
+        source = f"apps/console/{relative}"
+        assert source in tracked or any(name.startswith(f"{source}/") for name in tracked), source
 
 
 # --------------------------------------------------------------------------- #
@@ -118,6 +159,20 @@ def test_wheel_includes_every_control_plane_copy_input(built: BuiltDistributions
     names = _wheel_names(built.wheel)
     for source in _control_plane_copy_sources():
         assert _present(names, f"{_WHEEL_ASSET_ROOT}/{source}"), source
+
+
+@pytest.mark.parametrize("relative", _CONSOLE_BUILD_ASSETS)
+def test_wheel_ships_console_build_asset(built: BuiltDistributions, relative: str) -> None:
+    """The packaged bootstrap root carries the console Docker build context."""
+    names = _wheel_names(built.wheel)
+    assert _present(names, f"{_WHEEL_ASSET_ROOT}/apps/console/{relative}"), relative
+
+
+def test_wheel_excludes_generated_console_artifacts(built: BuiltDistributions) -> None:
+    """The wheel never ships local console build output, installs, or env files."""
+    names = _wheel_names(built.wheel)
+    for relative in _EXCLUDED_CONSOLE_ARTIFACTS:
+        assert not _present(names, f"{_WHEEL_ASSET_ROOT}/{relative}"), relative
 
 
 def test_wheel_excludes_compose_secret_env(built: BuiltDistributions) -> None:
@@ -197,6 +252,22 @@ def test_sdist_ships_installer_metadata(built: BuiltDistributions, relative: str
     """The checked-in installer/release metadata ships in the source distribution."""
     names = _sdist_relative_names(built.sdist)
     assert relative in names, relative
+
+
+@pytest.mark.parametrize("relative", _CONSOLE_BUILD_ASSETS)
+def test_sdist_ships_console_build_asset(built: BuiltDistributions, relative: str) -> None:
+    """The source distribution carries the console Docker build context."""
+    names = _sdist_relative_names(built.sdist)
+    asset = f"apps/console/{relative}"
+    assert asset in names or any(name.startswith(f"{asset}/") for name in names), relative
+
+
+def test_sdist_excludes_generated_console_artifacts(built: BuiltDistributions) -> None:
+    """The sdist never ships local console build output, installs, or env files."""
+    names = _sdist_relative_names(built.sdist)
+    for relative in _EXCLUDED_CONSOLE_ARTIFACTS:
+        assert relative not in names
+        assert not any(name.startswith(f"{relative}/") for name in names), relative
 
 
 def test_sdist_excludes_compose_secret_env(built: BuiltDistributions) -> None:

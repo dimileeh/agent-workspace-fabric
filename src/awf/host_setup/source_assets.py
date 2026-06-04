@@ -33,10 +33,12 @@ SOURCE_CHECKOUT_MARKERS: tuple[SourceCheckoutMarker, ...] = (
     SourceCheckoutMarker(".env.example", "file"),
     SourceCheckoutMarker("openapi.json", "file"),
     SourceCheckoutMarker("src/awf/__init__.py", "file"),
+    SourceCheckoutMarker("compose.yaml", "file"),
     SourceCheckoutMarker("docker/compose/local-service.yml", "file"),
     SourceCheckoutMarker("docker/compose/workspace.base.yml.j2", "file"),
     SourceCheckoutMarker("docker/agent-runtime.Dockerfile", "file"),
     SourceCheckoutMarker("docker/control-plane.Dockerfile", "file"),
+    SourceCheckoutMarker("apps/console/Dockerfile", "file"),
     SourceCheckoutMarker("README.md", "file"),
     SourceCheckoutMarker("docs", "dir"),
     SourceCheckoutMarker("migrations", "dir"),
@@ -52,7 +54,7 @@ class SourceCheckoutAssetPaths(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    compose_file: str = "docker/compose/local-service.yml"
+    compose_file: str = "compose.yaml"
     workspace_base_template: str = "docker/compose/workspace.base.yml.j2"
     agent_runtime_dockerfile: str = "docker/agent-runtime.Dockerfile"
     control_plane_dockerfile: str = "docker/control-plane.Dockerfile"

@@ -20,6 +20,7 @@ from awf.node.auth_mounts import force_copy_isolation_requested
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
     LOCAL_SERVICE_COMPOSE_FILE,
+    LOCAL_SERVICE_INCLUDED_COMPOSE_FILE,
     ServiceSettings,
     local_service_environ,
     resolve_local_service_compose_env_file,
@@ -725,7 +726,7 @@ def _bootstrap_stages(
             ),
             _BootstrapStage(
                 "api_worker",
-                (*compose, "up", "-d", "--build", "api", "worker"),
+                (*compose, "up", "-d", "--build", "--no-deps", "api", "worker"),
             ),
         ]
     )
@@ -860,7 +861,7 @@ def _bootstrap_environment_file(assets: _BootstrapAssets) -> Path:
     if assets.compose_env_file is not None:
         return assets.compose_env_file
     if assets.root is not None and is_packaged_bootstrap_asset_root(assets.root):
-        return Path(".env")
+        return LOCAL_SERVICE_COMPOSE_ENV_FILE
     if assets.root is not None:
         return assets.root / LOCAL_SERVICE_COMPOSE_ENV_FILE
     return LOCAL_SERVICE_COMPOSE_ENV_FILE
@@ -928,6 +929,7 @@ def _is_bootstrap_asset_root(candidate: Path) -> bool:
         candidate.is_dir()
         and (candidate / AGENT_RUNTIME_DOCKERFILE).is_file()
         and (candidate / LOCAL_SERVICE_COMPOSE_FILE).is_file()
+        and (candidate / LOCAL_SERVICE_INCLUDED_COMPOSE_FILE).is_file()
         and (candidate / "docker/control-plane.Dockerfile").is_file()
         and (candidate / "pyproject.toml").is_file()
         and (candidate / "src/awf/__init__.py").is_file()
@@ -944,11 +946,9 @@ def _resolve_user_path(path: Path) -> Path:
 
 
 def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
-    """Return the local service compose env file when it exists."""
+    """Return the canonical local service env file when it exists."""
 
     if asset_root is not None:
-        if is_packaged_bootstrap_asset_root(asset_root):
-            return None
         candidate = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
         return candidate if candidate.exists() else None
 

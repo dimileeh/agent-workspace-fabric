@@ -136,6 +136,7 @@ def test_workspace_create_builds_minimal_development_payload(
         captured.update(kwargs)
         return httpx.Response(202, json={"id": "ws"})
 
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
     monkeypatch.setattr(workspace_commands, "_call", _call)
     monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
 

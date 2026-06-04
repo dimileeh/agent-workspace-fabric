@@ -21,7 +21,7 @@ def mcp_serve(
         "--env-file",
         help=(
             "Optional dotenv file for the AWF local service environment. "
-            "Use docker/compose/.env in source checkouts."
+            "Use the root .env in source checkouts."
         ),
     ),
 ) -> None:

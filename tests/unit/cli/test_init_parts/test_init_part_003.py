@@ -439,7 +439,7 @@ def test_init_without_path_json_normalizes_asset_root_env_write_failure(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
 
     _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
-    _fail_path_write(monkeypatch, failing_path="../docker/compose/.env")
+    _fail_path_write(monkeypatch, failing_path="../.env")
 
     result = invoke_init_service_bootstrap(["--format", "json"])
 
@@ -448,38 +448,9 @@ def test_init_without_path_json_normalizes_asset_root_env_write_failure(
     assert payload["env_action"] == "write_failed"
     assert payload["env_error"] == {
         "operation": "write_env",
-        "path": "../docker/compose/.env",
-        "env_file": "../docker/compose/.env",
+        "path": "../.env",
+        "env_file": "../.env",
         "env_example": "../.env.example",
-        "message": "permission denied",
-    }
-
-
-@pytest.mark.unit
-def test_init_without_path_json_marks_env_overlay_read_failed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Expose overlay read failures without confusing the seed source."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
-    (tmp_path / ".env").write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-    _fail_path_read_bytes(monkeypatch, failing_path=".env")
-
-    result = invoke_init_service_bootstrap(["--format", "json"])
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["env_action"] == "write_failed"
-    assert payload["env_error"] == {
-        "operation": "read_overlay",
-        "path": ".env",
-        "env_file": "docker/compose/.env",
-        "env_example": "docker/compose/.env.example",
         "message": "permission denied",
     }
 
@@ -1141,75 +1112,6 @@ def test_merge_env_seed_keeps_single_comment_before_duplicate_overlay_only_key()
         )
         + "\n"
     )
-
-
-@pytest.mark.unit
-def test_init_without_path_json_marks_multiline_env_overlay_merge_failed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Expose unsupported multi-line overlay merges instead of writing corruption."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
-    (tmp_path / ".env").write_text(
-        'AWF_API_TOKEN="root-token-line-one\nroot-token-line-two"\n',
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap(["--format", "json"])
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["env_action"] == "write_failed"
-    assert payload["env_error"] == {
-        "operation": "merge_overlay",
-        "path": ".env",
-        "env_file": "docker/compose/.env",
-        "env_example": "docker/compose/.env.example",
-        "message": (
-            "unsupported multi-line dotenv values; env seeding merge only supports "
-            "single-line assignments"
-        ),
-    }
-    assert not (compose / ".env").exists()
-    assert "root-token-line-one" not in result.output
-    assert "root-token-line-two" not in result.output
-
-
-@pytest.mark.unit
-def test_init_without_path_json_marks_non_utf8_env_overlay_merge_failed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Expose invalid UTF-8 overlays instead of writing a template-only env file."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
-    (tmp_path / ".env").write_bytes(b"AWF_API_TOKEN=root\nINVALID=\xff\n")
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap(["--format", "json"])
-
-    assert result.exit_code == 1, result.output
-    payload = json.loads(result.output)
-    assert payload["status"] == "failed"
-    assert payload["reason_code"] == "BOOTSTRAP_LOCAL_CHECKS_FAILED"
-    assert payload["env_action"] == "write_failed"
-    assert payload["env_error"] == {
-        "operation": "merge_overlay",
-        "path": ".env",
-        "env_file": "docker/compose/.env",
-        "env_example": "docker/compose/.env.example",
-        "message": "env seeding merge requires UTF-8 dotenv files",
-    }
-    assert not (compose / ".env").exists()
-    assert "AWF_API_TOKEN=root" not in result.output
 
 
 @pytest.mark.unit
