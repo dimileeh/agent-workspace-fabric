@@ -20,6 +20,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    mock_completed_compose_manager,
     pr_payload,
     seed_monitoring_workspace,
 )
@@ -126,7 +127,14 @@ class TestMergeCoordinatorRunner:
             merge_coordinator=coordinator,
         )
 
-        with structlog.testing.capture_logs() as captured:
+        teardown_active: list[bool] = []
+        compose_patch, compose_calls = mock_completed_compose_manager(
+            on_teardown=lambda: teardown_active.append(coordinator.active)
+        )
+        with (
+            structlog.testing.capture_logs() as captured,
+            compose_patch,
+        ):
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",
@@ -141,7 +149,11 @@ class TestMergeCoordinatorRunner:
         ]
         assert graphql_active == [False, True]
         assert [active for args, active in observed if args[:3] == ["gh", "pr", "merge"]] == [True]
-        assert [active for args, active in observed if args[:2] == ["docker", "compose"]] == [False]
+        assert not any(args[:2] == ["docker", "compose"] for args, _active in observed)
+        assert compose_calls == [
+            (f"awf_{ws_id}", Path(f"/tmp/awf/{ws_id}/compose.yml"), ws_id, True)
+        ]
+        assert teardown_active == [False]
 
         waiting = [
             r for r in captured if r.get("event") == "monitor.merge_critical_section_waiting"

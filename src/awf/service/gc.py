@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from pathlib import Path
@@ -22,6 +23,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector
+from awf.service import gc_classify as _gc_classify
 from awf.service import gc_predicates as _gc_predicates
 from awf.service import gc_results as _gc_results
 from awf.service import gc_worktrees as _gc_worktrees
@@ -82,7 +84,9 @@ _run_worktree_remove = _gc_worktrees.run_worktree_remove
 _worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
 _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 
-# Leaf result/data dataclasses live in ``gc_results`` (file-size budget);
+_FAILED_NO_WORK_TERMINAL_STATUSES = _gc_classify.FAILED_NO_WORK_TERMINAL_STATUSES
+
+# Result/data dataclasses live in ``gc_results`` (file-size budget);
 # re-exported so the historical ``awf.service.gc.<name>`` surface is unchanged.
 WorkspaceCleanupExecutionStatus = _gc_results.WorkspaceCleanupExecutionStatus
 WorkspaceCleanupPathStatus = _gc_results.WorkspaceCleanupPathStatus
@@ -102,6 +106,10 @@ _workspace_has_pr_merge_predicate = _gc_predicates.workspace_has_pr_merge_predic
 _workspace_pr_not_merged_predicate = _gc_predicates.workspace_pr_not_merged_predicate
 
 DEFAULT_MIN_AGE_HOURS = 168
+# Bound Docker compose teardown fan-out during service GC batches. The work is
+# slow enough to benefit from limited overlap, but unbounded bursts can saturate
+# small Docker daemons.
+_COMPOSE_TEARDOWN_CONCURRENCY_LIMIT = 4
 # Preserved-failed workspaces (work was kept for triage) are otherwise retained
 # indefinitely. Once they age past this cap their pressure dirs are reclaimed
 # while the durable record (DB row, events, logs) is kept. Far above the 168 h
@@ -118,14 +126,48 @@ PRESERVED_FAILED_AGE_CAP_RECLAIMED = "PRESERVED_FAILED_AGE_CAP_RECLAIMED"
 COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
 COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
+WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
+COMPOSE_TEARDOWN_CALLBACK_RAISED = "COMPOSE_TEARDOWN_CALLBACK_RAISED"
+
+# Extension point: add preserved-workspace reason/status pairs here only when
+# future states should allow compose teardown and the follow-on runtime side
+# effects (secret lease revocation and reservation release) before filesystem
+# retention expires.
+_PRESERVED_COMPOSE_TEARDOWN_FALLBACK_STATES: frozenset[tuple[str, str]] = frozenset(
+    {
+        (WORKSPACE_WITHIN_RETENTION, WorkspaceStatus.completed.value),
+    }
+)
 
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
 CLEANUP_EXECUTION_PARTIAL = "CLEANUP_EXECUTION_PARTIAL"
-
-_FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "superseded"})
+_COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR = "_awf_compose_teardown_result"
 
 _RUNTIME_INSPECTOR = RuntimeInspector()
+
+
+def compose_teardown_result_for_exception(exc: Exception) -> WorkspaceGCComposeTeardownResult:
+    """Return the stable failed compose teardown result for a callback exception.
+
+    Completed-monitor lifecycle tracking may record this before re-raising the
+    exception; GC later catches the same exception and uses the cached result so
+    both logs and the returned GC payload describe the same teardown failure.
+    """
+
+    cached = getattr(exc, _COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR, None)
+    if isinstance(cached, WorkspaceGCComposeTeardownResult):
+        return cached
+    error = str(exc)
+    error_message = f"{type(exc).__name__}: {error}" if error else type(exc).__name__
+    result = WorkspaceGCComposeTeardownResult(
+        status="failed",
+        reason_code=COMPOSE_TEARDOWN_CALLBACK_RAISED,
+        error=error_message[:400],
+    )
+    with suppress(Exception):
+        setattr(exc, _COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR, result)
+    return result
 
 
 async def plan_terminal_workspace_gc(
@@ -360,25 +402,29 @@ async def run_terminal_workspace_gc(
     resolved_worktree_remover = _resolve_worktree_remover(
         worktree_remover, session_factory, work_dir
     )
+    compose_teardowns = await _run_gc_compose_teardowns(plan, compose_teardown)
+    side_effect_workspace_ids = _workspace_ids_after_compose_teardown(
+        plan,
+        compose_teardowns,
+    )
     secret_lease_revocations = await _revoke_gc_secret_leases(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
         now=current_time,
     )
     (
         deleted_paths,
         delete_errors,
         path_outcomes,
-        compose_teardowns,
         worktree_removes,
     ) = await _delete_gc_plan_paths(
         plan,
-        compose_teardown=compose_teardown,
+        compose_teardowns=compose_teardowns,
         worktree_remover=resolved_worktree_remover,
     )
     reservation_releases = await _release_gc_reservations(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
     )
     companion_image_prune_result = (
         await companion_image_prune() if companion_image_prune is not None else None
@@ -635,25 +681,52 @@ async def run_workspace_filesystem_gc(
             reservation_releases={},
         )
 
+    fallback_compose_teardown_candidate: WorkspaceGCCandidate | None = None
+    if not candidates:
+        if workspace is None:
+            fallback_compose_teardown_candidate = _missing_workspace_compose_teardown_candidate(
+                workspace_id=workspace_id,
+                work_dir=normalized_work_dir,
+                now=current_time,
+            )
+        elif preserved and _preserved_workspace_allows_compose_teardown_fallback(preserved[0]):
+            # Extension point for callers that honor retention while still
+            # wanting early runtime teardown. The production post-merge monitor
+            # passes ``ignore_retention=True``, so merged completed workspaces
+            # bypass this preserved branch and are reclaimed as candidates.
+            fallback_compose_teardown_candidate = _candidate_for_workspace(
+                workspace,
+                work_dir=normalized_work_dir,
+                now=current_time,
+                reason_code=preserved[0].reason_code,
+            )
+    compose_teardowns = await _run_gc_compose_teardowns(
+        plan,
+        compose_teardown,
+        fallback_candidate=fallback_compose_teardown_candidate,
+    )
+    side_effect_workspace_ids = _workspace_ids_after_compose_teardown(
+        plan,
+        compose_teardowns,
+    )
     secret_lease_revocations = await _revoke_gc_secret_leases(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
         now=current_time,
     )
     (
         deleted_paths,
         delete_errors,
         path_outcomes,
-        compose_teardowns,
         worktree_removes,
     ) = await _delete_gc_plan_paths(
         plan,
-        compose_teardown=compose_teardown,
+        compose_teardowns=compose_teardowns,
         worktree_remover=resolved_worktree_remover,
     )
     reservation_releases = await _release_gc_reservations(
         session_factory,
-        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        workspace_ids=side_effect_workspace_ids,
     )
     return _gc_result(
         plan=plan,
@@ -700,47 +773,43 @@ async def _revoke_gc_secret_leases(
 async def _delete_gc_plan_paths(
     plan: WorkspaceGCPlan,
     *,
-    compose_teardown: WorkspaceGCComposeTeardown | None,
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult],
     worktree_remover: WorkspaceGCWorktreeRemove | None,
 ) -> tuple[
     list[Path],
     list[WorkspaceGCDeleteError],
     list[WorkspaceGCPathOutcome],
-    dict[str, WorkspaceGCComposeTeardownResult],
     dict[str, WorkspaceGCWorktreeRemoveResult],
 ]:
     deleted_paths: list[Path] = []
     delete_errors: list[WorkspaceGCDeleteError] = []
     path_outcomes: list[WorkspaceGCPathOutcome] = []
-    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
     worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] = {}
     for candidate in plan.candidates:
-        teardown = await _run_compose_teardown(candidate, compose_teardown)
-        if teardown is not None:
-            compose_teardowns[candidate.workspace_id] = teardown
-            if not teardown.ok:
-                delete_errors.append(
-                    WorkspaceGCDeleteError(
+        teardown = compose_teardowns.get(candidate.workspace_id)
+        if teardown is not None and not teardown.ok:
+            delete_errors.append(
+                WorkspaceGCDeleteError(
+                    workspace_id=candidate.workspace_id,
+                    kind="compose_teardown",
+                    path=candidate.compose.path,
+                    error=teardown.error or teardown.reason_code,
+                    reason_code=teardown.reason_code,
+                )
+            )
+            for target in candidate.paths():
+                path_outcomes.append(
+                    WorkspaceGCPathOutcome(
                         workspace_id=candidate.workspace_id,
-                        kind="compose_teardown",
-                        path=candidate.compose.path,
-                        error=teardown.error or teardown.reason_code,
+                        kind=target.kind,
+                        path=target.path,
+                        status="skipped",
                         reason_code=teardown.reason_code,
+                        error=teardown.error,
+                        estimated_bytes=target.estimated_bytes,
                     )
                 )
-                for target in candidate.paths():
-                    path_outcomes.append(
-                        WorkspaceGCPathOutcome(
-                            workspace_id=candidate.workspace_id,
-                            kind=target.kind,
-                            path=target.path,
-                            status="skipped",
-                            reason_code=teardown.reason_code,
-                            error=teardown.error,
-                            estimated_bytes=target.estimated_bytes,
-                        )
-                    )
-                continue
+            continue
         # Unmount the Claude auth overlay only *after* the compose stack is torn
         # down. While the agent container is up it bind-mounts the overlay
         # ``merged`` dir, so a pre-teardown umount fails ``EBUSY`` (and is swallowed
@@ -855,7 +924,93 @@ async def _delete_gc_plan_paths(
                         reason_code=outcome.reason_code,
                     )
                 )
-    return deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes
+    return deleted_paths, delete_errors, path_outcomes, worktree_removes
+
+
+async def _run_gc_compose_teardowns(
+    plan: WorkspaceGCPlan,
+    compose_teardown: WorkspaceGCComposeTeardown | None,
+    *,
+    fallback_candidate: WorkspaceGCCandidate | None = None,
+) -> dict[str, WorkspaceGCComposeTeardownResult]:
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
+    if compose_teardown is None:
+        return compose_teardowns
+    candidates = list(plan.candidates)
+    if not candidates and fallback_candidate is not None:
+        candidates = [fallback_candidate]
+    if not candidates:
+        return compose_teardowns
+
+    semaphore = asyncio.Semaphore(_COMPOSE_TEARDOWN_CONCURRENCY_LIMIT)
+
+    async def _teardown_candidate(
+        candidate: WorkspaceGCCandidate,
+    ) -> tuple[str, WorkspaceGCComposeTeardownResult | None]:
+        async with semaphore:
+            try:
+                teardown = await _run_compose_teardown(candidate, compose_teardown)
+            except Exception as exc:
+                teardown = compose_teardown_result_for_exception(exc)
+        return candidate.workspace_id, teardown
+
+    results = await asyncio.gather(*(_teardown_candidate(candidate) for candidate in candidates))
+    for workspace_id, teardown in results:
+        if teardown is not None:
+            compose_teardowns[workspace_id] = teardown
+    return compose_teardowns
+
+
+def _workspace_ids_after_compose_teardown(
+    plan: WorkspaceGCPlan,
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult],
+) -> list[str]:
+    workspace_ids: list[str] = []
+    candidate_ids: set[str] = set()
+    for candidate in plan.candidates:
+        candidate_ids.add(candidate.workspace_id)
+        teardown = compose_teardowns.get(candidate.workspace_id)
+        # No teardown entry means no compose callback was supplied; preserve the
+        # legacy GC semantics where candidate side effects proceed unconditionally.
+        if teardown is None or teardown.ok:
+            workspace_ids.append(candidate.workspace_id)
+    # Non-candidate compose teardowns come from the single-workspace fallback
+    # path only: missing rows or explicitly allowed preserved terminal-status
+    # workspaces. Runtime side effects are released only after successful
+    # compose teardown; failed teardown keeps leases/reservations in place so
+    # running containers do not lose credentials while the result records the
+    # failed compose outcome for monitoring.
+    for workspace_id, teardown in compose_teardowns.items():
+        if workspace_id not in candidate_ids and teardown.ok:
+            workspace_ids.append(workspace_id)
+    return workspace_ids
+
+
+def _missing_workspace_compose_teardown_candidate(
+    *,
+    workspace_id: str,
+    work_dir: Path,
+    now: datetime,
+) -> WorkspaceGCCandidate:
+    return WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.destroyed.value,
+        updated_at=now,
+        age_hours=0,
+        reason_code=WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN,
+        worktree=_gc_path("worktree", work_dir / "git" / "worktrees" / workspace_id),
+        compose=_gc_path("compose", work_dir / "compose" / workspace_id),
+        auth=_gc_path("auth", work_dir / "auth" / workspace_id),
+    )
+
+
+def _preserved_workspace_allows_compose_teardown_fallback(
+    preserved: WorkspaceGCPreserved,
+) -> bool:
+    return (
+        preserved.reason_code,
+        preserved.status,
+    ) in _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_STATES
 
 
 def _worktree_remove_delete_errors(
@@ -1022,8 +1177,12 @@ def _gc_result(
     claude_base_reap_partial = (
         claude_base_reap is not None and claude_base_reap.get("status") == "partial"
     )
+    # Candidate teardown failures are also reflected in delete_errors by the
+    # path loop, but fallback compose teardowns never enter that loop.
+    compose_teardown_failed = any(not teardown.ok for teardown in compose_teardowns.values())
     has_errors = (
         bool(delete_errors)
+        or compose_teardown_failed
         or any(v.get("error") is not None for v in res_releases.values())
         or companion_prune_failed
         or claude_base_reap_partial
@@ -1118,14 +1277,20 @@ def _classify_workspace_for_gc(
 
     updated_at = _to_utc(workspace.updated_at)
     age_hours = max(0, int((now - updated_at).total_seconds() // 3600))
-    if not cleanup_enabled:
+
+    def _preserved(reason_code: str) -> WorkspaceGCPreserved:
         return WorkspaceGCPreserved(
             workspace_id=workspace.id,
             status=workspace.status,
             updated_at=updated_at,
             age_hours=age_hours,
-            reason_code=WORKSPACE_CLEANUP_DISABLED,
+            reason_code=reason_code,
+            compose_project_name=workspace.compose_project_name,
+            compose_file_path=workspace.compose_file_path,
         )
+
+    if not cleanup_enabled:
+        return _preserved(WORKSPACE_CLEANUP_DISABLED)
 
     def _preserved_failed_or_age_capped() -> WorkspaceGCCandidate | WorkspaceGCPreserved:
         # Work was preserved for triage. Reap pressure dirs once past the cap;
@@ -1137,13 +1302,7 @@ def _classify_workspace_for_gc(
                 now=now,
                 reason_code=PRESERVED_FAILED_AGE_CAP_RECLAIMED,
             )
-        return WorkspaceGCPreserved(
-            workspace_id=workspace.id,
-            status=workspace.status,
-            updated_at=updated_at,
-            age_hours=age_hours,
-            reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
-        )
+        return _preserved(FAILED_WORKSPACE_TRIAGE_PRESERVED)
 
     if default_policy:
         if workspace.status == WorkspaceStatus.failed.value:
@@ -1155,13 +1314,7 @@ def _classify_workspace_for_gc(
                         now=now,
                         reason_code=FAILED_WORKSPACE_NO_WORK,
                     )
-                return WorkspaceGCPreserved(
-                    workspace_id=workspace.id,
-                    status=workspace.status,
-                    updated_at=updated_at,
-                    age_hours=age_hours,
-                    reason_code=WORKSPACE_WITHIN_RETENTION,
-                )
+                return _preserved(WORKSPACE_WITHIN_RETENTION)
             return _preserved_failed_or_age_capped()
         if workspace.status == "superseded":
             if _failed_terminal_workspace_has_no_work(workspace):
@@ -1172,44 +1325,20 @@ def _classify_workspace_for_gc(
                         now=now,
                         reason_code=FAILED_WORKSPACE_NO_WORK,
                     )
-                return WorkspaceGCPreserved(
-                    workspace_id=workspace.id,
-                    status=workspace.status,
-                    updated_at=updated_at,
-                    age_hours=age_hours,
-                    reason_code=WORKSPACE_WITHIN_RETENTION,
-                )
+                return _preserved(WORKSPACE_WITHIN_RETENTION)
             return _preserved_failed_or_age_capped()
         if workspace.status != WorkspaceStatus.completed.value:
             return None
         if not _has_pr_metadata(workspace):
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=COMPLETED_WORKSPACE_WITHOUT_PR,
-            )
+            return _preserved(COMPLETED_WORKSPACE_WITHOUT_PR)
         if not _pr_has_merged(workspace):
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=COMPLETED_PR_NOT_MERGED,
-            )
+            return _preserved(COMPLETED_PR_NOT_MERGED)
         # A merged PR's pressure dirs are disposable the moment it lands. With
         # ``ignore_retention`` the post-merge caller reclaims them immediately
         # instead of waiting out the retention window; the durable record (DB
         # row, events, logs) is preserved either way (GC never deletes it).
         if updated_at > cutoff_at and not ignore_retention:
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=WORKSPACE_WITHIN_RETENTION,
-            )
+            return _preserved(WORKSPACE_WITHIN_RETENTION)
         # Distinguish an immediate post-merge reclaim (``ignore_retention``
         # bypassed the window) from one that naturally aged out, so audit logs
         # and ``WorkspaceEvent`` trails do not mislabel a minutes-old workspace
@@ -1226,25 +1355,13 @@ def _classify_workspace_for_gc(
         )
 
     if updated_at > cutoff_at:
-        return WorkspaceGCPreserved(
-            workspace_id=workspace.id,
-            status=workspace.status,
-            updated_at=updated_at,
-            age_hours=age_hours,
-            reason_code=WORKSPACE_WITHIN_RETENTION,
-        )
+        return _preserved(WORKSPACE_WITHIN_RETENTION)
     if (
         workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES
         and workspace.compose_project_name is not None
         and not _failed_terminal_workspace_has_no_work(workspace)
     ):
-        return WorkspaceGCPreserved(
-            workspace_id=workspace.id,
-            status=workspace.status,
-            updated_at=updated_at,
-            age_hours=age_hours,
-            reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
-        )
+        return _preserved(TERMINAL_WORKSPACE_RETENTION_EXPIRED)
 
     if workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES:
         return _candidate_for_workspace(
