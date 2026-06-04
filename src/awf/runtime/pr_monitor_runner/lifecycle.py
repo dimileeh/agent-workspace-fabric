@@ -691,12 +691,14 @@ def _completed_workspace_teardown_template_sentinel(work_dir: Path) -> Path:
 
 def _compose_file_for_gc_candidate(
     candidate: WorkspaceGCCandidate,
-    fallback_compose_file: Path,
+    fallback_compose_file: Path | None,
 ) -> Path:
     """Prefer persisted compose metadata while keeping monitor-run context as fallback."""
     if candidate.compose_file_path:
         return Path(candidate.compose_file_path).expanduser()
-    return fallback_compose_file
+    if fallback_compose_file is not None:
+        return fallback_compose_file
+    return candidate.compose.path / "compose.yml"
 
 
 def _completed_workspace_compose_teardown(
@@ -706,11 +708,12 @@ def _completed_workspace_compose_teardown(
     compose_file: Path | None,
 ) -> WorkspaceGCComposeTeardown | None:
     """Build a volume-removing compose teardown callback for post-merge GC."""
-    # ``None`` means monitor-side compose context is unavailable. An empty
-    # project string is still accepted so persisted GC candidate metadata can
-    # supply the project name; callers that rely on the fallback pass a real
-    # monitor project.
-    if compose_project is None or compose_file is None:
+    # A missing compose file is still useful context: ``teardown_project`` falls
+    # back to label-scoped cleanup when the path is absent. An empty project
+    # string is still accepted so persisted GC candidate metadata can supply the
+    # project name; callers that rely on the fallback pass a real monitor
+    # project.
+    if compose_project is None:
         return None
     fallback_compose_project = compose_project
 

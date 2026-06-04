@@ -244,6 +244,68 @@ async def test_completed_workspace_compose_teardown_callback_uses_candidate_meta
 
 
 @pytest.mark.unit
+async def test_completed_workspace_compose_teardown_uses_project_when_compose_file_missing(
+    tmp_path: Path,
+) -> None:
+    class _Runner:
+        _work_dir = tmp_path
+
+    compose_patch, compose_calls = mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_PROJECT_LABEL_REMOVED",
+        )
+    )
+
+    with compose_patch:
+        callback = lifecycle._completed_workspace_compose_teardown(
+            _Runner(),
+            compose_project="monitor_project",
+            compose_file=None,
+        )
+        assert callback is not None
+
+        result = await callback(
+            WorkspaceGCCandidate(
+                workspace_id="ws-missing-compose-file",
+                status=WorkspaceStatus.completed.value,
+                updated_at=datetime.now(UTC),
+                age_hours=0,
+                reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+                worktree=WorkspaceGCPath(
+                    kind="worktree",
+                    path=tmp_path / "worktrees" / "ws-missing-compose-file",
+                    exists=True,
+                    estimated_bytes=0,
+                ),
+                compose=WorkspaceGCPath(
+                    kind="compose",
+                    path=tmp_path / "compose" / "ws-missing-compose-file",
+                    exists=True,
+                    estimated_bytes=0,
+                ),
+                auth=WorkspaceGCPath(
+                    kind="auth",
+                    path=tmp_path / "auth" / "ws-missing-compose-file",
+                    exists=True,
+                    estimated_bytes=0,
+                ),
+            )
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "DOCKER_COMPOSE_PROJECT_LABEL_REMOVED"
+    assert compose_calls == [
+        (
+            "monitor_project",
+            tmp_path / "compose" / "ws-missing-compose-file" / "compose.yml",
+            "ws-missing-compose-file",
+            True,
+        )
+    ]
+
+
+@pytest.mark.unit
 async def test_completed_workspace_compose_teardown_accepts_empty_monitor_project_with_candidate_metadata(
     tmp_path: Path,
 ) -> None:

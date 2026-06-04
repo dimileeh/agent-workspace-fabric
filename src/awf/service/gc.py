@@ -844,6 +844,10 @@ async def run_workspace_filesystem_gc(
                 now=current_time,
             )
         elif preserved and _preserved_workspace_allows_compose_teardown_fallback(preserved[0]):
+            # Extension point for callers that honor retention while still
+            # wanting early runtime teardown. The production post-merge monitor
+            # passes ``ignore_retention=True``, so merged completed workspaces
+            # bypass this preserved branch and are reclaimed as candidates.
             fallback_compose_teardown_candidate = _candidate_for_workspace(
                 workspace,
                 work_dir=normalized_work_dir,
