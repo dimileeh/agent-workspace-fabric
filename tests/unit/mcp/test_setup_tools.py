@@ -1426,26 +1426,30 @@ async def test_client_integration_instructions_preserves_explicit_empty_clients(
 ) -> None:
     from awf.mcp import setup_tools
 
-    env_file = tmp_path / ".env"
-    home = tmp_path / "home"
-    home.mkdir()
+    def fail_source_checkout_resolution(_source_checkout: str | None) -> Path | None:
+        pytest.fail("source checkout must not be resolved for explicit empty clients")
 
-    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
-    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
-    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
-    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
-    monkeypatch.setattr(setup_tools, "_client_env", lambda: {})
+    def fail_env_file_resolution(_source_checkout: Path | None, _require_existing: bool) -> Path:
+        pytest.fail("env file must not be resolved for explicit empty clients")
+
+    monkeypatch.setattr(
+        setup_tools,
+        "_resolve_client_source_checkout_path",
+        fail_source_checkout_resolution,
+    )
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fail_env_file_resolution)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
     result = await mcp.call_tool(
         "awf_get_client_integration_instructions",
-        {"clients": []},
+        {"clients": [], "source_checkout": str(tmp_path / "stale-checkout")},
     )
     payload = _payload(result)
 
     assert result.isError is False
     assert payload["status"] == "success"
     assert payload["clients"] == []
+    assert "env_file" not in payload
     assert payload["next_steps"] == ["No client config changes are needed."]
 
 

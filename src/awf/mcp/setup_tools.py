@@ -440,9 +440,23 @@ def _client_integration_instructions_result(
     clients: list[str],
     source_checkout: str | None,
 ) -> CallToolResult:
-    source_path = _resolve_client_source_checkout_path(source_checkout)
     try:
         selected = normalize_clients(clients)
+        if not selected:
+            empty_payload: dict[str, Any] = {
+                "status": "success",
+                "command": "awf setup --client",
+                "summary": _client_instructions_summary([], blocked=False),
+                "clients": [],
+                "next_steps": _client_instruction_next_steps(
+                    [],
+                    blocked=False,
+                    source_checkout=None,
+                ),
+            }
+            return safe_result(empty_payload)
+
+        source_path = _resolve_client_source_checkout_path(source_checkout)
         env_file = _resolve_client_env_file(source_path, False)
         home = _client_home()
         env = _client_env()

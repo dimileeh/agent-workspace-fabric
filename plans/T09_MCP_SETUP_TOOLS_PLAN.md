@@ -84,6 +84,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HHoLm
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` still
+resolves source checkout and MCP env-file state when the caller explicitly
+passes `clients: []`. That can turn a zero-client request into a blocked
+client-config result because of stale persisted source checkout state, an
+invalid explicit `source_checkout`, or compose env-file resolution failure.
+
+Scope is limited to the explicit empty-client request path for client
+integration instructions.
+
+### Requirements Checklist
+
+- Preserve omitted `clients` behavior, which still requests all supported
+  clients.
+- Preserve unknown-client validation for non-empty client lists.
+- For explicit `clients: []`, return a successful empty client instruction
+  payload before resolving source checkout or env-file state.
+- Add a focused regression proving env-file resolution is skipped for explicit
+  empty-client requests.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression where explicit `clients: []` would fail
+   if `_resolve_client_env_file()` runs.
+2. Normalize clients before resolving source checkout/env-file state and return
+   the empty success payload immediately when the normalized selection is empty.
+3. Run the targeted regression and focused checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_preserves_explicit_empty_clients -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HHUuk
 
 ### Problem Statement And Scope
