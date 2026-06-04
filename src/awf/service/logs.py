@@ -412,29 +412,109 @@ def _stream_redacted_pipe(
     if source is None:
         return
     extra_secret_values = tuple(extra_secrets)
+    multiline_secret_values = _multiline_exact_secret_values(extra_secret_values)
+    pending = ""
+
+    def write_redacted_chunk(chunk: str) -> bool:
+        """Write one already-redacted stream chunk, handling downstream closure."""
+        try:
+            on_write_start()
+            try:
+                sink.write(chunk)
+                sink.flush()
+            finally:
+                on_write_end()
+        except (OSError, ValueError):
+            try:
+                source.close()
+            finally:
+                on_broken_pipe()
+            return False
+        return True
+
     try:
         for line in source:
-            # Current token/provider-ref patterns are single-line; multiline
-            # patterns will need carry-over context instead of per-line redaction.
-            redacted_line = redact_secrets(line, extra_secrets=extra_secret_values)
-            try:
-                on_write_start()
-                try:
-                    sink.write(redacted_line)
-                    sink.flush()
-                finally:
-                    on_write_end()
-            except (OSError, ValueError):
-                try:
-                    source.close()
-                finally:
-                    on_broken_pipe()
+            if multiline_secret_values:
+                pending += line
+                flush_length = _stream_redaction_flushable_length(
+                    pending,
+                    multiline_secret_values,
+                )
+                if flush_length <= 0:
+                    continue
+                chunk = pending[:flush_length]
+                pending = pending[flush_length:]
+            else:
+                chunk = line
+            redacted_chunk = redact_secrets(chunk, extra_secrets=extra_secret_values)
+            if not write_redacted_chunk(redacted_chunk):
+                return
+        if pending:
+            redacted_chunk = redact_secrets(pending, extra_secrets=extra_secret_values)
+            if not write_redacted_chunk(redacted_chunk):
                 return
     except BrokenPipeError:
         try:
             source.close()
         finally:
             on_broken_pipe()
+
+
+def _multiline_exact_secret_values(extra_secrets: Iterable[str]) -> tuple[str, ...]:
+    """Return exact secret values that can cross followed stream line boundaries."""
+    return tuple(
+        dict.fromkeys(
+            secret
+            for secret in extra_secrets
+            if len(secret) >= 4 and ("\n" in secret or "\r" in secret)
+        )
+    )
+
+
+def _stream_redaction_flushable_length(text: str, multiline_secrets: Sequence[str]) -> int:
+    """Return the prefix length safe to redact and write from a pending stream."""
+    held_suffix_length = _pending_multiline_secret_prefix_length(text, multiline_secrets)
+    flush_length = len(text) - held_suffix_length
+    spans = _multiline_exact_secret_spans(text, multiline_secrets)
+    while flush_length > 0:
+        next_flush_length = flush_length
+        for start, end in spans:
+            if start < next_flush_length < end:
+                next_flush_length = min(next_flush_length, start)
+        if next_flush_length == flush_length:
+            return flush_length
+        flush_length = next_flush_length
+    return 0
+
+
+def _pending_multiline_secret_prefix_length(text: str, multiline_secrets: Sequence[str]) -> int:
+    """Return the longest text suffix that could become a multiline exact secret."""
+    held_suffix_length = 0
+    for secret in multiline_secrets:
+        max_prefix_length = min(len(text), len(secret) - 1)
+        for prefix_length in range(max_prefix_length, held_suffix_length, -1):
+            if text.endswith(secret[:prefix_length]):
+                held_suffix_length = prefix_length
+                break
+    return held_suffix_length
+
+
+def _multiline_exact_secret_spans(
+    text: str,
+    multiline_secrets: Sequence[str],
+) -> list[tuple[int, int]]:
+    """Find exact multiline secret spans in pending stream text."""
+    spans: list[tuple[int, int]] = []
+    for secret in sorted(multiline_secrets, key=len):
+        cursor = 0
+        while True:
+            start = text.find(secret, cursor)
+            if start == -1:
+                break
+            end = start + len(secret)
+            spans.append((start, end))
+            cursor = start + 1
+    return spans
 
 
 def _service_log_secret_values(

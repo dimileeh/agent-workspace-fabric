@@ -805,6 +805,139 @@ def test_service_logs_follow_redacts_compose_env_provider_secret_from_streamed_o
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_follow_redacts_multiline_compose_env_secret_from_streamed_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Keep multiline exact secrets from leaking across followed log lines."""
+    secret = "line-one-compose-auth-secret\nline-two-compose-auth-secret"
+    visible_value = "visible-stream-project"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        (f'ANTHROPIC_AUTH_TOKEN="{secret}"\nCOMPOSE_PROJECT_NAME={visible_value}\n'),
+        encoding="utf-8",
+    )
+
+    class _FollowProcess:
+        """Follow process double that streams a multiline provider secret."""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Expose streams where no single line contains the full secret."""
+            self.stdout = io.StringIO(f"stdout bare {secret}\nstdout {visible_value}\n")
+            self.stderr = io.StringIO(f"stderr bare {secret}\n")
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Finish immediately after the streaming threads read both pipes."""
+            assert timeout is None
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FollowProcess)
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+        compose_env_file=compose_env_file,
+    )
+
+    captured = capfd.readouterr()
+    rendered = captured.out + captured.err
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    for fragment in secret.splitlines():
+        assert fragment not in rendered
+    assert visible_value in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_follow_redacts_overlapping_multiline_secret_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Do not split an exact secret while holding context for another one."""
+    first_secret = "alpha-compose-secret\nbeta-compose-secret"
+    second_secret = "beta-compose-secret\ngamma-compose-secret"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        (f'ANTHROPIC_AUTH_TOKEN="{first_secret}"\nCUSTOM_CLIENT_SECRET="{second_secret}"\n'),
+        encoding="utf-8",
+    )
+
+    class _FollowProcess:
+        """Follow process double with overlapping multiline secret candidates."""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Expose a stream where the overlap appears at a line boundary."""
+            self.stdout = io.StringIO(
+                "stdout alpha-compose-secret\nbeta-compose-secret\ngamma-compose-secret\n"
+            )
+            self.stderr = io.StringIO("")
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Finish immediately after the streaming threads read both pipes."""
+            assert timeout is None
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FollowProcess)
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+        compose_env_file=compose_env_file,
+    )
+
+    rendered = capfd.readouterr().out
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    for fragment in ("alpha-compose-secret", "beta-compose-secret", "gamma-compose-secret"):
+        assert fragment not in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_follow_flushes_multiline_secret_prefix_at_eof(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Do not drop ordinary output that only looked like a partial secret."""
+    secret = "prefix-compose-secret\nsuffix-compose-secret"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        f'ANTHROPIC_AUTH_TOKEN="{secret}"\n',
+        encoding="utf-8",
+    )
+
+    class _FollowProcess:
+        """Follow process double ending after a possible secret prefix."""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Expose a stream that ends before the configured secret completes."""
+            self.stdout = io.StringIO("stdout prefix-compose-secret\n")
+            self.stderr = io.StringIO("")
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Finish immediately after the streaming threads read both pipes."""
+            assert timeout is None
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FollowProcess)
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+        compose_env_file=compose_env_file,
+    )
+
+    rendered = capfd.readouterr().out
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert rendered == "stdout prefix-compose-secret\n"
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_follow_redacts_inherited_env_secret_from_streamed_output(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],

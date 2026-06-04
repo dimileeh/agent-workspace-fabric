@@ -1746,6 +1746,57 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 # Success: no issues found in 1 source file
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HMbkf` Multiline Follow Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: followed service-log streams now keep pending per-pipe context for
+  exact configured secrets that can span newline boundaries.
+- Complete: partial fragments that could become a multiline exact secret are
+  held until they can be safely redacted or proven ordinary output.
+- Complete: EOF after a partial multiline-secret prefix still flushes ordinary
+  output instead of dropping it.
+- Complete: existing follow redaction behavior remains covered by adjacent
+  focused checks.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k multiline_compose_env_secret --tb=short -ra
+# failed: followed output contained line-one-compose-auth-secret and line-two-compose-auth-secret
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k multiline_compose_env_secret --tb=short -ra
+# 1 passed, 32 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'multiline_compose_env_secret or overlapping_multiline_secret_candidates or flushes_multiline_secret_prefix_at_eof or follow_redacts_compose_env_provider_secret or default_follow_runner' --tb=short -ra
+# 6 passed, 27 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q --tb=short -ra
+# 33 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.

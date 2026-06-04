@@ -1258,6 +1258,56 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HMbkf` Multiline Follow Secret Plan
+
+### Problem Statement And Scope
+
+The review thread reports that `awf service logs --follow` redacts each
+followed stdout/stderr line independently. If the selected Compose env file or
+inherited service environment contains an exact configured secret with a
+newline, no single streamed line contains the full secret value, so the secret
+can be written to the operator terminal in pieces.
+
+This repair is limited to followed service-log streaming exact-secret handling,
+a focused service-log regression, and validation evidence. It does not change
+non-follow captured logs, token pattern definitions, MCP log reads, or broad
+AWF/GitHub validation ownership.
+
+### Requirements Checklist
+
+- Followed service-log streams keep enough per-pipe context to redact exact
+  configured secrets that span newline boundaries.
+- Followed service logs must not write partial fragments of a potential
+  multiline exact secret before the stream proves they are ordinary output.
+- Existing single-line exact-secret, token-pattern, invalid-byte, interrupt,
+  and broken-pipe follow behavior remains unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused failing followed service-log regressions using a quoted
+   multiline Compose env-file provider secret emitted across streamed lines,
+   including overlapping multiline candidates and EOF after a potential prefix.
+2. Buffer only the suffix that could still become a multiline exact secret and
+   redact flushable chunks before writing them to the terminal.
+3. Flush any remaining buffered stream text through the shared redactor at EOF.
+4. Run the targeted regression, adjacent followed service-log checks, and
+   narrow ruff/mypy checks for touched files.
+5. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k multiline_compose_env_secret --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'multiline_compose_env_secret or overlapping_multiline_secret_candidates or flushes_multiline_secret_prefix_at_eof or follow_redacts_compose_env_provider_secret or default_follow_runner' --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```
+
 ## Review-Level Comment `issue:4620175517` MCP Log Startup Secret Cache Plan
 
 ### Problem Statement And Scope
