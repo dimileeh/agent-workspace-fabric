@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -29,7 +30,7 @@ from awf.api.schemas import HttpExceptionErrorResponse
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
-from awf.db.repositories import EgressAuditRepository
+from awf.db.repositories import EgressAuditRepository, WorkerHeartbeatRepository
 from awf.db.resilience import (
     db_connection_failure_reason,
     invalidate_or_rollback_session,
@@ -37,6 +38,7 @@ from awf.db.resilience import (
 )
 from awf.service.config import resolve_service_settings
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
+from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
     ResourceScan,
     WorkspaceIdView,
@@ -52,6 +54,15 @@ from awf.service.provider_readiness import (
     validate_provider_names,
 )
 from awf.service.readiness import collect_core_readiness_report
+from awf.service.worker_heartbeat import (
+    WORKER_HEARTBEAT_FRESH_REASON,
+    WORKER_HEARTBEAT_MISSING_REASON,
+    WORKER_HEARTBEAT_STALE_REASON,
+    WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+    worker_heartbeat_age_seconds,
+    worker_heartbeat_is_fresh,
+    worker_heartbeat_stale_after_seconds,
+)
 
 router = APIRouter(tags=["system"])
 
@@ -258,6 +269,73 @@ async def _check_db(factory: Any) -> CheckResult:
             with contextlib.suppress(Exception):
                 await close()
     return CheckResult(ok=True, status="ok")
+
+
+async def _check_worker_heartbeat(factory: Any, *, node_id: str) -> CheckResult:
+    if factory is None:
+        return CheckResult(
+            ok=False,
+            status="fail",
+            reason=WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+            detail="db_session_factory is not attached to app.state",
+        )
+
+    async def _latest_heartbeat(session: Any) -> Any:
+        return await WorkerHeartbeatRepository(session).latest_for_node(node_id=node_id)
+
+    try:
+        heartbeat = await asyncio.wait_for(
+            run_db_operation_with_retry(factory, _latest_heartbeat),
+            timeout=_CHECK_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        return CheckResult(
+            ok=False,
+            status="fail",
+            reason=WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+            detail=f"Worker heartbeat lookup exceeded {_CHECK_TIMEOUT_SECONDS}s",
+        )
+    except Exception as exc:
+        return CheckResult(
+            ok=False,
+            status="fail",
+            reason=WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+            detail=_redacted_check_detail(exc),
+        )
+
+    if heartbeat is None:
+        return CheckResult(
+            ok=False,
+            status="fail",
+            reason=WORKER_HEARTBEAT_MISSING_REASON,
+            detail=f"No worker heartbeat recorded for node {node_id!r}",
+        )
+
+    now = datetime.now(UTC)
+    if not worker_heartbeat_is_fresh(
+        heartbeat.last_heartbeat_at,
+        now=now,
+        poll_interval_seconds=heartbeat.poll_interval_seconds,
+    ):
+        age_seconds = worker_heartbeat_age_seconds(heartbeat.last_heartbeat_at, now=now)
+        stale_after_seconds = worker_heartbeat_stale_after_seconds(heartbeat.poll_interval_seconds)
+        return CheckResult(
+            ok=False,
+            status="fail",
+            reason=WORKER_HEARTBEAT_STALE_REASON,
+            detail=(
+                f"Latest worker heartbeat is {age_seconds:.1f}s old; "
+                f"stale after {stale_after_seconds:.1f}s"
+            ),
+        )
+
+    return CheckResult(
+        ok=True,
+        status="ok",
+        reason=WORKER_HEARTBEAT_FRESH_REASON,
+        detail=f"Latest worker heartbeat is fresh for node {node_id!r}",
+        resource_count=1,
+    )
 
 
 async def _run_bounded(runner: AsyncCommandRunner, args: list[str]) -> CommandResult | Exception:
@@ -623,6 +701,7 @@ async def readyz(
     service_settings = resolve_service_settings(settings)
     runner = _get_command_runner_for_request(request)
     factory = getattr(request.app.state, "db_session_factory", None)
+    worker_node_id = effective_service_node_id(service_settings)
 
     async def _check_egress_audit() -> CheckResult:
         if factory is None:
@@ -681,6 +760,9 @@ async def readyz(
     # orchestrator). Orphan detection starts its read-only scans in the same
     # wave, then gates classification on DB and daemon readiness results.
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(factory))
+    worker_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_worker_heartbeat(factory, node_id=worker_node_id)
+    )
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
     daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
     workspace_view_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
@@ -724,6 +806,7 @@ async def readyz(
     egress_audit_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_egress_audit())
     await asyncio.gather(
         db_check_task,
+        worker_check_task,
         cli_check_task,
         daemon_check_task,
         compose_check_task,
@@ -733,6 +816,7 @@ async def readyz(
         egress_audit_task,
     )
     db_check = db_check_task.result()
+    worker_check = worker_check_task.result()
     cli_check = cli_check_task.result()
     daemon_check = daemon_check_task.result()
     compose_check = compose_check_task.result()
@@ -742,6 +826,7 @@ async def readyz(
     egress_audit = egress_audit_task.result()
     checks = {
         "db": db_check,
+        "worker": worker_check,
         "docker_cli": cli_check,
         "docker_daemon": daemon_check,
         "docker_compose": compose_check,

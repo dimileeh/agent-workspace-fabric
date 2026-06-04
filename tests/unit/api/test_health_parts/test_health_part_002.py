@@ -97,10 +97,19 @@ async def ready_app_and_client(
     async def _db_ok(_factory: Any) -> health_route.CheckResult:
         return health_route.CheckResult(ok=True, status="ok")
 
+    async def _worker_ok(_factory: Any, *, node_id: str) -> health_route.CheckResult:
+        return health_route.CheckResult(
+            ok=True,
+            status="ok",
+            reason="WORKER_HEARTBEAT_FRESH",
+            detail=f"Latest worker heartbeat is fresh for node {node_id!r}",
+        )
+
     async def _empty_egress_counts(_factory: Any, _state: Any) -> dict[str, int]:
         return {}
 
     monkeypatch.setattr(health_route, "_check_db", _db_ok)
+    monkeypatch.setattr(health_route, "_check_worker_heartbeat", _worker_ok)
     monkeypatch.setattr(
         health_route,
         "_egress_audit_summary_counts_with_timeout",

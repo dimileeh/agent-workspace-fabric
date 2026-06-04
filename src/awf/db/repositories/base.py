@@ -12,6 +12,7 @@ from typing import Any, Final
 
 from sqlalchemy import (
     and_,
+    case,
     func,
     literal,
     or_,
@@ -40,6 +41,7 @@ from awf.db.models import (
     PRFeedbackResolution,
     ProviderModelCircuitBreaker,
     ResourceReservation,
+    WorkerHeartbeat,
     Workspace,
     WorkspaceEvent,
     WorkspaceSecretLease,
@@ -113,6 +115,7 @@ _PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "provider",
     "model",
 )
+_WORKER_HEARTBEAT_CONFLICT_COLUMNS: Final[tuple[str, ...]] = ("worker_id",)
 _PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "scm_provider",
     "repository_key",
@@ -393,6 +396,35 @@ def _provider_model_circuit_breaker_insert_if_absent_stmt(
             .returning(ProviderModelCircuitBreaker.id)
         )
     return None
+
+
+def _worker_heartbeat_upsert_stmt(dialect_name: str | None) -> Any | None:
+    """Build a PostgreSQL upsert statement for worker heartbeat records."""
+    if dialect_name != "postgresql":
+        return None
+    inserted = postgresql_insert(WorkerHeartbeat)
+    excluded_is_newer = inserted.excluded.last_heartbeat_at >= WorkerHeartbeat.last_heartbeat_at
+    return inserted.on_conflict_do_update(
+        index_elements=_WORKER_HEARTBEAT_CONFLICT_COLUMNS,
+        set_={
+            "node_id": case(
+                (excluded_is_newer, inserted.excluded.node_id),
+                else_=WorkerHeartbeat.node_id,
+            ),
+            "last_heartbeat_at": func.greatest(
+                WorkerHeartbeat.last_heartbeat_at,
+                inserted.excluded.last_heartbeat_at,
+            ),
+            "poll_interval_seconds": case(
+                (excluded_is_newer, inserted.excluded.poll_interval_seconds),
+                else_=WorkerHeartbeat.poll_interval_seconds,
+            ),
+            "updated_at": case(
+                (excluded_is_newer, inserted.excluded.updated_at),
+                else_=WorkerHeartbeat.updated_at,
+            ),
+        },
+    ).returning(WorkerHeartbeat)
 
 
 def _pr_feedback_resolution_upsert_stmt(dialect_name: str | None) -> Any | None:

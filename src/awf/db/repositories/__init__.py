@@ -88,6 +88,7 @@ from awf.db.repositories.system_repo import (
     EgressAuditRepository,
     ProviderModelCircuitBreakerRepository,
     QueueDecisionRepository,
+    WorkerHeartbeatRepository,
 )
 from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
@@ -193,6 +194,7 @@ __all__ = [
     "EgressAuditRepository",
     "ProviderModelCircuitBreakerRepository",
     "QueueDecisionRepository",
+    "WorkerHeartbeatRepository",
     "new_workspace_id",
     "AGE_BOOST_MAX",
     "AGE_BOOST_INTERVAL_SECONDS",

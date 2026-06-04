@@ -295,6 +295,13 @@ def _emit_smoke_pretty(payload: dict[str, Any]) -> None:
             typer.echo(f"{header}: {message}" if message else header)
             if reason:
                 typer.echo(f"        reason: {reason}")
+            evidence = _mapping_value(phase.get("evidence"))
+            if name == "service_readiness" and evidence:
+                worker = _text_value(evidence.get("worker"), "")
+                worker_reason = _text_value(evidence.get("worker_reason"), "")
+                if worker or worker_reason:
+                    reason_suffix = f" ({worker_reason})" if worker_reason else ""
+                    typer.echo(f"        worker: {worker or 'unknown'}{reason_suffix}")
             action = _text_value(phase.get("action"), "")
             if action and action not in {"No action required.", "none"}:
                 typer.echo(f"        action: {action}")

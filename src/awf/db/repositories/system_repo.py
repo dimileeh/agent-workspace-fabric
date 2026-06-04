@@ -5,9 +5,10 @@ from __future__ import annotations
 import builtins
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_value
@@ -20,6 +21,7 @@ from awf.db.models import (
     EgressAuditRecord,
     ProviderModelCircuitBreaker,
     QueueDecision,
+    WorkerHeartbeat,
     Workspace,
 )
 from awf.db.repositories.base import (
@@ -27,6 +29,7 @@ from awf.db.repositories.base import (
     QueueDecisionCreate,
     _circuit_breaker_expired,
     _provider_model_circuit_breaker_insert_if_absent_stmt,
+    _worker_heartbeat_upsert_stmt,
     resolve_session_dialect_name,
 )
 
@@ -108,6 +111,141 @@ class EgressAuditRepository:
         )
         result = await self._session.execute(stmt)
         return {str(row[0]): row[1] for row in result.fetchall()}
+
+
+class WorkerHeartbeatRepository:
+    """CRUD helpers for control-worker heartbeat liveness records."""
+
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
+        self._session = session
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
+
+    async def get(self, *, worker_id: str) -> WorkerHeartbeat | None:
+        stmt = select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id == worker_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def record_heartbeat(
+        self,
+        *,
+        worker_id: str,
+        node_id: str,
+        started_at: datetime,
+        last_heartbeat_at: datetime,
+        poll_interval_seconds: float,
+    ) -> WorkerHeartbeat:
+        now = datetime.now(UTC)
+        heartbeat_values: dict[str, Any] = {
+            "worker_id": worker_id,
+            "node_id": node_id,
+            "started_at": started_at,
+            "last_heartbeat_at": last_heartbeat_at,
+            "poll_interval_seconds": poll_interval_seconds,
+        }
+        upsert_stmt = _worker_heartbeat_upsert_stmt(self._dialect_name)
+        if upsert_stmt is not None:
+            result = await self._session.execute(
+                upsert_stmt.values(
+                    **heartbeat_values,
+                    created_at=now,
+                    updated_at=now,
+                ).execution_options(populate_existing=True)
+            )
+            await self._session.flush()
+            return cast(WorkerHeartbeat, result.scalar_one())
+
+        heartbeat = await self._update_existing_heartbeat(
+            worker_id=worker_id,
+            node_id=node_id,
+            last_heartbeat_at=last_heartbeat_at,
+            poll_interval_seconds=poll_interval_seconds,
+            updated_at=now,
+        )
+        if heartbeat is not None:
+            return heartbeat
+
+        inserted_heartbeat = WorkerHeartbeat(
+            **heartbeat_values,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            async with self._session.begin_nested():
+                self._session.add(inserted_heartbeat)
+                await self._session.flush()
+        except IntegrityError as exc:
+            heartbeat = await self._update_existing_heartbeat(
+                worker_id=worker_id,
+                node_id=node_id,
+                last_heartbeat_at=last_heartbeat_at,
+                poll_interval_seconds=poll_interval_seconds,
+                updated_at=now,
+            )
+            if heartbeat is not None:
+                return heartbeat
+            heartbeat = await self.get(worker_id=worker_id)
+            if heartbeat is None:
+                raise RuntimeError("Worker heartbeat fallback did not persist a row.") from exc
+            return heartbeat
+
+        return inserted_heartbeat
+
+    async def _update_existing_heartbeat(
+        self,
+        *,
+        worker_id: str,
+        node_id: str,
+        last_heartbeat_at: datetime,
+        poll_interval_seconds: float,
+        updated_at: datetime,
+    ) -> WorkerHeartbeat | None:
+        stmt = (
+            update(WorkerHeartbeat)
+            .where(
+                WorkerHeartbeat.worker_id == worker_id,
+                WorkerHeartbeat.last_heartbeat_at <= last_heartbeat_at,
+            )
+            .values(
+                node_id=node_id,
+                last_heartbeat_at=last_heartbeat_at,
+                poll_interval_seconds=poll_interval_seconds,
+                updated_at=updated_at,
+            )
+        )
+        result = await self._session.execute(stmt)
+        rowcount = getattr(result, "rowcount", 0)
+        if rowcount is None or rowcount <= 0:
+            return None
+        await self._session.flush()
+        return await self.get(worker_id=worker_id)
+
+    async def latest_for_node(self, *, node_id: str) -> WorkerHeartbeat | None:
+        stmt = (
+            select(WorkerHeartbeat)
+            .where(WorkerHeartbeat.node_id == node_id)
+            .order_by(WorkerHeartbeat.last_heartbeat_at.desc(), WorkerHeartbeat.worker_id.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def prune_stale(self, *, before: datetime, limit: int) -> int:
+        if limit <= 0:
+            return 0
+        stale_worker_ids = (
+            select(WorkerHeartbeat.worker_id)
+            .where(WorkerHeartbeat.last_heartbeat_at < before)
+            .order_by(WorkerHeartbeat.last_heartbeat_at.asc(), WorkerHeartbeat.worker_id.asc())
+            .limit(limit)
+            .subquery()
+        )
+        stmt = delete(WorkerHeartbeat).where(
+            WorkerHeartbeat.worker_id.in_(select(stale_worker_ids.c.worker_id))
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        rowcount = getattr(result, "rowcount", 0)
+        if rowcount is None or rowcount < 0:
+            return 0
+        return int(rowcount)
 
 
 class ProviderModelCircuitBreakerRepository:
