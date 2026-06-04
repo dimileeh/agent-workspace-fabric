@@ -322,9 +322,11 @@ class ControlWorker(WorkerDelegatesMixin):
     async def _heartbeat_loop(self: Any) -> None:
         interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)
         while not self._stopped.is_set():
-            await self._record_heartbeat_safely()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), timeout=interval)
+            if self._stopped.is_set():
+                break
+            await self._record_heartbeat_safely()
 
     async def _record_heartbeat_safely(self: Any) -> None:
         now = monotonic()

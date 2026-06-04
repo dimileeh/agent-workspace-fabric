@@ -74,6 +74,28 @@ async def test_run_once_records_worker_heartbeat(
 
 
 @pytest.mark.unit
+async def test_heartbeat_loop_defers_initial_write_to_run_once(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        config=WorkerConfig(poll_interval_seconds=0.05, max_concurrent_provisions=0),
+    )
+    record_heartbeat = AsyncMock()
+    monkeypatch.setattr(worker, "_record_heartbeat", record_heartbeat)
+
+    heartbeat_task = asyncio.create_task(worker._heartbeat_loop())  # noqa: SLF001
+    try:
+        await asyncio.sleep(0)
+        assert record_heartbeat.await_count == 0
+    finally:
+        worker.request_stop()
+        await asyncio.wait_for(heartbeat_task, timeout=1.0)
+
+
+@pytest.mark.unit
 async def test_heartbeat_write_failure_does_not_kill_worker() -> None:
     def _raising_factory() -> AsyncSession:
         raise RuntimeError("postgresql+asyncpg://awf:secret@db.internal:5432/awf")
