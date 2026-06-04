@@ -978,6 +978,20 @@ def _check_docker_provider(
             if docker_host_signal is not None
             else "DOCKER_REGISTRY_AUTH_PRESENT"
         )
+        # A docker-host signal grants broad daemon control, so it must dominate
+        # the reported posture even when a more isolated registry source is also
+        # present; otherwise the DOCKER_HOST_CONFIGURED reason is under-reported
+        # as read-only host-path access.
+        effective_scope = (
+            "docker_host_control"
+            if docker_host_signal is not None
+            else _primary_credential_scope(credential_sources)
+        )
+        effective_isolation = (
+            "host_daemon"
+            if docker_host_signal is not None
+            else _primary_isolation(credential_sources)
+        )
         return _provider_result(
             ok=True,
             strict=strict,
@@ -986,8 +1000,8 @@ def _check_docker_provider(
             signals=[source["signal"] for source in credential_sources],
             secrets=secrets,
             credential_sources=credential_sources,
-            credential_scope=_primary_credential_scope(credential_sources),
-            isolation=_primary_isolation(credential_sources),
+            credential_scope=effective_scope,
+            isolation=effective_isolation,
             warnings=warnings,
         )
 

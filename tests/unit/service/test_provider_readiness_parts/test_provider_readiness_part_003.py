@@ -233,6 +233,36 @@ def test_provider_readiness_docker_reports_host_daemon_broad_control_warning(
 
 
 @pytest.mark.unit
+def test_provider_readiness_docker_host_signal_preserves_broad_control_scope(
+    tmp_path: Path,
+) -> None:
+    """A docker-host signal must keep host_daemon posture even when a more
+    isolated registry source (``read_only_host_path``) is also present, so the
+    DOCKER_HOST_CONFIGURED reason is not under-reported as read-only access."""
+    home = tmp_path / "home"
+    docker_home = home / ".docker"
+    docker_home.mkdir(parents=True)
+    (docker_home / "config.json").write_text(
+        '{"auths":{"registry.example":{"auth":"docker_combined_secret"}}}'
+    )
+
+    result = provider_readiness_helpers._check_docker_provider(
+        _settings(tmp_path, host_home=str(home)),
+        environ={},
+        host_home=home,
+        strict=False,
+        secrets=frozenset({"docker_combined_secret"}),
+    )
+
+    assert result["reason"] == "DOCKER_HOST_CONFIGURED"
+    assert result["credential_scope"] == "docker_host_control"
+    assert result["isolation"] == "host_daemon"
+    scopes = {source["credential_scope"] for source in result["credential_sources"]}
+    assert {"docker_host_control", "read_only_host_path"} <= scopes
+    assert "docker_combined_secret" not in json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.unit
 def test_provider_readiness_docker_registry_auth_is_observed_not_read(
     tmp_path: Path,
 ) -> None:
