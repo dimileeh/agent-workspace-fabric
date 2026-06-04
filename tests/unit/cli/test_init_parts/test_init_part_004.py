@@ -507,10 +507,18 @@ def test_init_without_path_rejects_include_smoke_request_flag(
 def test_getting_started_recommends_setup_start_then_project_init() -> None:
     """Assert public first-run guidance follows the locked T01 grammar."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
+    first_run = readme.split("### Recommended First-Run Sequence", maxsplit=1)[1].split(
+        "### Configure Environment",
+        maxsplit=1,
+    )[0]
 
-    assert "awf setup" in readme
-    assert "awf start" in readme
-    assert "awf init <path>" in readme
+    assert "awf setup" in first_run
+    assert "awf start" in first_run
+    assert "awf init <path>" in first_run
+    assert "awf smoke run --mocked-local --format pretty" in first_run
+    assert "awf service bootstrap" not in first_run
+    assert "AWF_SETUP_PLACEHOLDER" not in first_run
+    assert "AWF_START_PLACEHOLDER" not in first_run
     assert "awf service status --format pretty" in readme
     assert "docker/compose/.env" in readme
     assert "`awf init`. With no arguments it bootstraps" not in readme
@@ -518,11 +526,11 @@ def test_getting_started_recommends_setup_start_then_project_init() -> None:
 
 
 @pytest.mark.unit
-def test_getting_started_compose_env_snippet_replaces_token_placeholders() -> None:
+def test_getting_started_compose_env_snippet_feeds_setup_and_start() -> None:
     """Regression: avoid duplicate token keys in docker/compose/.env examples."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
     snippet_start = readme.index("env_example=docker/compose/.env.example")
-    snippet_end = readme.index("uv run --python 3.12 --extra dev awf service bootstrap")
+    snippet_end = readme.index("uv run --python 3.12 --extra dev awf setup")
     snippet = readme[snippet_start:snippet_end]
 
     assert "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)='" in readme
@@ -531,6 +539,8 @@ def test_getting_started_compose_env_snippet_replaces_token_placeholders() -> No
     assert 'echo "Missing env template: docker/compose/.env.example or .env.example" >&2' in snippet
     assert "exit 1" in snippet
     assert snippet.index("exit 1") < snippet.index("{")
+    assert "uv run --python 3.12 --extra dev awf setup" in readme
+    assert "uv run --python 3.12 --extra dev awf start" in readme
 
 
 @pytest.mark.unit
@@ -542,6 +552,8 @@ def test_project_onboarding_doc_distinguishes_init_modes() -> None:
     assert "awf init" in doc
     assert "awf init <path>" in doc
     assert "`awf init` (no path)" not in doc
+    assert "AWF_SETUP_PLACEHOLDER" not in doc
+    assert "AWF_START_PLACEHOLDER" not in doc
 
 
 @pytest.mark.unit

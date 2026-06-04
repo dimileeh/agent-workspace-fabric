@@ -11,26 +11,20 @@ Use the current runnable first-run commands in order. Export the required local
 service values before starting Core so Compose can interpolate the API, worker,
 and Postgres service environment:
 
-- `awf service bootstrap` — start local AWF Core with the current service
-  bootstrap path.
-- `awf service status --format pretty` — confirm API, database, Docker, image,
-  disk, provider, and cleanup health.
+- `awf setup` — run host readiness checks without starting Core.
+- `awf start` — start local AWF Core and print local API/console URLs.
 - `awf init <path>` — the project-onboarding pass described on this page. It
   inspects a checked-out repository, runs local readiness checks without
   calling the AWF API, and creates or previews `.awf/workspace.yml`. Interactive
   terminals get a short guided setup when no profile exists; automation can use
   `--write-profile --yes` to write detected defaults.
 
-`awf setup` and `awf start` are reserved future first-run command surfaces.
-Today they exit with `AWF_SETUP_PLACEHOLDER` and `AWF_START_PLACEHOLDER`, so do
-not include them in onboarding copy-paste flows until those slices land.
-
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf service bootstrap
-awf service status --format pretty
+awf setup
+awf start
 awf init .                        # guided project onboarding for ./.
 awf init . --write-profile --yes  # silent profile write with detected defaults
 awf init . --include-smoke-request
@@ -38,7 +32,7 @@ awf init . --include-smoke-request
 
 For persistent values across shells in source checkouts, copy `.env.example` to
 `docker/compose/.env` and set `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and
-`AWF_GITHUB_TOKEN` there before bootstrapping.
+`AWF_GITHUB_TOKEN` there before running `awf setup` and `awf start`.
 
 ## One-message prompt
 

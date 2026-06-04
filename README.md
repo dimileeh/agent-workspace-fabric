@@ -1,6 +1,6 @@
 # Agent Workspace Fabric (AWF)
 
-*New to AWF? See the [Quickstart](docs/QUICKSTART.md) to bootstrap a local evaluation workspace in a few commands.*
+*New to AWF? Pick one first-run lane in the [Quickstart](docs/QUICKSTART.md).*
 
 **AWF is an industrial workspace fabric for AI coding agents.**
 
@@ -129,6 +129,7 @@ See:
 - [CLI Reference](docs/CLI_REFERENCE.md)
 - [DX Smoke Command](docs/SMOKE_COMMAND.md)
 - [Upgrade Guide](docs/UPGRADE.md)
+- [Uninstall Guide](docs/UNINSTALL.md)
 - [REST API Reference](docs/REST_API_REFERENCE.md)
 - [MCP Reference](docs/MCP_REFERENCE.md)
 - [MCP Setup](docs/MCP_SETUP.md)
@@ -145,16 +146,33 @@ See:
 
 ## Installation
 
-For released CLI installs, prefer an isolated tool environment:
+AWF has four first-run lanes. Pick one lane and stay in it through setup,
+start, project init, mocked smoke, upgrade, and uninstall.
+
+| Lane | Use When | Install |
+|---|---|---|
+| Curl installer | You want the shortest release-installed path and accept that it is least inspectable before execution. | `curl -fsSL https://aira.pro/install.sh \| sh` |
+| `uv tool` / `pipx` | You want a release-installed package mediated by an isolated Python tool manager. | `uv tool install agent-workspace-fabric` or `pipx install agent-workspace-fabric` |
+| Source checkout with global tool install | You want inspectable source, then a global `awf` executable installed from that checkout. | `git clone ...` then `uv tool install . --force` |
+| Source checkout with no global install | You want inspectable source and no global `awf` on `PATH`. | `git clone ...` then `uv run --python 3.12 --extra dev awf ...` |
+
+After installing in any lane, the first-run command grammar is:
 
 ```bash
-uv tool install agent-workspace-fabric
-# or
-pipx install agent-workspace-fabric
+awf setup
+awf start
+awf init <path>
+awf smoke run --mocked-local --format pretty
 ```
 
-Virtualenv installs are supported when you want AWF in an active project
-environment:
+For the full lane-specific commands, including source checkout variants, see:
+
+- [Quickstart](docs/QUICKSTART.md)
+- [Upgrade Guide](docs/UPGRADE.md)
+- [Uninstall Guide](docs/UNINSTALL.md)
+
+Virtualenv installs are also supported when you want AWF in an active project
+environment instead of an isolated tool environment:
 
 ```bash
 python -m venv .venv
@@ -162,7 +180,7 @@ python -m venv .venv
 pip install agent-workspace-fabric
 ```
 
-For contributor checkouts:
+For contributor checkouts with a global tool install:
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git

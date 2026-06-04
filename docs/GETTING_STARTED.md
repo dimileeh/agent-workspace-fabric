@@ -36,7 +36,18 @@ docker compose version
 
 ### Installation
 
-The recommended primary path is to install AWF as an isolated CLI tool via `uv tool`:
+AWF has four first-run lanes. The [Quickstart](QUICKSTART.md) is the canonical
+lane selector; this guide adds contributor and development detail.
+
+The curl installer is the shortest release-installed lane and the least
+inspectable before execution:
+
+```bash
+curl -fsSL https://aira.pro/install.sh | sh
+```
+
+The package-manager release-installed lane uses an isolated CLI tool via
+`uv tool`:
 
 ```bash
 uv tool install agent-workspace-fabric
@@ -56,7 +67,7 @@ python -m venv .venv
 pip install agent-workspace-fabric
 ```
 
-For contributors who want to modify AWF itself:
+For contributors who want inspectable source plus a global `awf` executable:
 
 ```bash
 git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
@@ -65,34 +76,42 @@ uv tool install . --force
 uv sync
 ```
 
+For contributors who want inspectable source with no global install:
+
+```bash
+git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
+cd aira-agent-workspace-fabric
+uv sync --extra dev
+uv run --python 3.12 --extra dev awf --help
+```
+
 Homebrew is planned after the Python package has stable tagged artifacts and a
 passing formula audit; it is not a supported install channel yet.
 
 ### Recommended First-Run Sequence
 
-Once AWF is installed, the current runnable first-run sequence is local Core
-startup, health check, then project onboarding. Export the required local
-service values before bootstrapping Core so Compose can interpolate the API,
-worker, and Postgres service environment:
+Once AWF is installed, the runnable first-run sequence is setup, start, project
+onboarding, then mocked smoke. Export the required local service values before
+starting Core so Compose can interpolate the API, worker, and Postgres service
+environment:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf service bootstrap
+awf setup
+awf start
 awf service status --format pretty
+awf init <path> --write-profile --yes
+awf smoke run --mocked-local --format pretty
 ```
 
-`awf service bootstrap` starts the local AWF Core stack, and
-`awf service status --format pretty` confirms API, database, Docker, image,
-disk, provider, and cleanup health.
+`awf setup` runs bounded host readiness checks without starting Core.
+`awf start` starts local AWF Core and reports the local API and console URLs, using
+`127.0.0.1` for host-facing loopback. `awf service status --format pretty`
+confirms API, database, Docker, image, disk, provider, and cleanup health.
 
-`awf setup` and `awf start` are reserved first-run command surfaces. They are
-present in help for the future grammar, but today `awf setup` exits with
-`AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
-`awf service bootstrap` until those setup and start slices land.
-
-If service bootstrap, startup, or first-run health checks fail, use the
+If setup, startup, or first-run health checks fail, use the
 [First run troubleshooting guide](TROUBLESHOOTING.md#first-run-troubleshooting)
 before continuing with provider or workspace-level work.
 
@@ -104,6 +123,8 @@ per-provider copy-paste prompts).
 - `awf init <path>` — run local project onboarding. Interactive terminals get
   a short guided profile setup; automation can use
   `awf init <path> --write-profile --yes` to write detected defaults.
+- `awf smoke run --mocked-local --format pretty` — prove the local operator path
+  without requiring live GitHub or provider credentials.
 
 Subsequent sections describe the contributor/development setup; a fresh
 machine only needs the steps above plus a coding-agent credential.
@@ -115,17 +136,17 @@ monitor policy, idempotency, console inspection, and mocked-local validation.
 
 ### Configure Environment
 
-In source checkouts that include local Compose assets, `awf service bootstrap`
-uses `docker/compose/.env` for Compose-interpolated service values. The
-repo-root `.env` is still useful for Python `awf` commands in package or
+In source checkouts that include local Compose assets, `awf setup` checks and
+`awf start` uses `docker/compose/.env` for Compose-interpolated service values.
+The repo-root `.env` is still useful for Python `awf` commands in package or
 non-source contexts.
 
-Transition note: `awf service status`, `awf service doctor`, and
-`awf service bootstrap` resolve `docker/compose/.env` from verified AWF source
-checkouts with local service Compose assets. In package installs, AWF uses the
-bundled Compose assets and reads `.env` from the working directory; copy any
-existing `docker/compose/.env` values to `.env` or run `awf service bootstrap`
-from the directory where you want local service settings to live.
+Transition note: `awf service status`, `awf service doctor`, and the lower-level
+service bootstrap command still resolve `docker/compose/.env` from verified AWF
+source checkouts with local service Compose assets. In package installs, AWF
+uses the bundled Compose assets and reads `.env` from the working directory;
+copy any existing `docker/compose/.env` values to `.env` or run `awf start` from
+the directory where you want local service settings to live.
 
 Local service development should use Postgres via the Compose stack. The
 service worker needs a GitHub token for PR creation, review-thread inspection,
@@ -153,7 +174,8 @@ fi
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_API_HOST_PORT=%s\n' "$AWF_API_HOST_PORT"
 } > docker/compose/.env
-uv run --python 3.12 --extra dev awf service bootstrap
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 ```
 
 For API-only throwaway development, use the local PostgreSQL control-plane DB:
@@ -193,11 +215,11 @@ AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 ```
 
 If you change `AWF_POSTGRES_HOST_PORT` and set `AWF_DATABASE_URL` to a
-non-default value, update its localhost port to match.
+non-default value, update its loopback port to match.
 
 For host-side `awf` workspace commands and manual HTTP checks, `AWF_BASE_URL`
 is the operator-facing API knob. Usually you do not need to set it: when
-`AWF_API_HOST_PORT` is present, the CLI derives `http://localhost:<port>`
+`AWF_API_HOST_PORT` is present, the CLI derives `http://127.0.0.1:<port>`
 automatically. Set `AWF_BASE_URL` only when running host-side CLI or HTTP checks
 from a different shell that does not carry `AWF_API_HOST_PORT`, or when
 targeting a reverse proxy or other non-derived API root. `AWF_CLI_BASE_URL`
@@ -205,7 +227,7 @@ still works for compatibility, but is deprecated.
 
 ```bash
 export AWF_API_HOST_PORT=9001
-export AWF_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+export AWF_BASE_URL="http://127.0.0.1:${AWF_API_HOST_PORT}"
 awf workspace list --format pretty
 curl "${AWF_BASE_URL}/readyz?provider=github"
 ```
@@ -352,7 +374,7 @@ uv run --python 3.12 --extra dev awf service status --format pretty
 uv run --python 3.12 --extra dev awf service status --provider claude_code --format pretty
 uv run --python 3.12 --extra dev awf service status --provider codex --format pretty
 uv run --python 3.12 --extra dev awf service status --provider cursor --format pretty
-curl 'http://localhost:8000/readyz?provider=opencode'
+curl 'http://127.0.0.1:8000/readyz?provider=opencode'
 ```
 
 Default agent models and effort are centralized in
@@ -384,7 +406,7 @@ uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
 Open API docs:
 
 ```text
-http://localhost:8000/docs
+http://127.0.0.1:8000/docs
 ```
 
 ### Run a Full Local AWF Task

@@ -1,129 +1,196 @@
 # Quickstart
 
-Get a local AWF control plane running and prove the operator path in a few
-commands.
+Pick one lane and follow only that lane. Each lane gets AWF installed, runs the
+host setup check, starts local Core, initializes a project, runs mocked smoke,
+and shows the matching upgrade and uninstall path.
+
+Use the source checkout lanes when you want to inspect AWF before running it.
+Use a release-installed lane when you want the published package or installer.
 
 ## Prerequisites
 
 - Git.
 - Docker Desktop or Docker Engine with the Compose plugin running.
-- `uv`.
+- `uv` for lanes that use `uv`, or `pipx` for the `pipx` lane.
 - GitHub CLI `gh` if you want AWF to create or monitor PRs.
 - At least one coding-agent credential for real workspace execution.
 
-## Install
+The mocked smoke command below does not require live GitHub or provider access.
+Local first-run URLs use `127.0.0.1`: API checks use
+`http://127.0.0.1:8000` by default, and the console is
+`http://127.0.0.1:3000` when the console is running.
 
-For a released install:
+## Lane 1: Curl Installer
+
+This lane is release-installed and least inspectable before execution because it
+fetches the installer script over HTTPS. Use a source checkout lane if you want
+to inspect the exact code first.
+
+```bash
+curl -fsSL https://aira.pro/install.sh | sh
+
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_GITHUB_TOKEN="$(gh auth token)"
+awf setup
+awf start
+
+mkdir -p "$HOME/awf-eval-project"
+awf init "$HOME/awf-eval-project"
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
+```
+
+This is the `awf init <path>` step for a checked-out project repository.
+
+Upgrade:
+
+```bash
+curl -fsSL https://aira.pro/install.sh | sh
+awf start
+awf smoke run --mocked-local --format pretty
+```
+
+Uninstall:
+
+```bash
+curl -fsSL https://aira.pro/install.sh | sh -s -- --uninstall
+```
+
+## Lane 2: uv tool or pipx
+
+This lane is release-installed and package-manager mediated. `uv tool` and
+`pipx` install the published `agent-workspace-fabric` package into an isolated
+tool environment.
 
 ```bash
 uv tool install agent-workspace-fabric
-```
-
-`pipx` is the equivalent isolated install path if you prefer it:
-
-```bash
+# or:
 pipx install agent-workspace-fabric
+
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_GITHUB_TOKEN="$(gh auth token)"
+awf setup
+awf start
+
+mkdir -p "$HOME/awf-eval-project"
+awf init "$HOME/awf-eval-project"
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
-Use plain `pip` only inside an active virtualenv:
+This is the `awf init <path>` step for a checked-out project repository.
+
+Upgrade:
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install agent-workspace-fabric
+uv tool upgrade agent-workspace-fabric
+# or:
+pipx upgrade agent-workspace-fabric
+awf start
+awf smoke run --mocked-local --format pretty
 ```
 
-For contributor or source checkout work:
+Uninstall:
+
+```bash
+uv tool uninstall agent-workspace-fabric
+# or:
+pipx uninstall agent-workspace-fabric
+```
+
+## Lane 3: Source Checkout With Global Tool Install
+
+This lane uses inspectable source and then installs `awf` as a global tool from
+that checkout. It is useful when you want to inspect or patch AWF but still want
+the normal `awf` executable on `PATH`.
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
 uv tool install . --force
-```
 
-Homebrew is planned after AWF has stable tagged Python artifacts and a passing
-formula audit.
-
-## Set Up And Start AWF
-
-The current runnable first-run sequence is local Core startup, health check,
-then project onboarding. Export the required local service values before
-starting Core so Compose can interpolate the API, worker, and Postgres service
-environment:
-
-```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf service bootstrap
-awf service status --format pretty
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
+
+mkdir -p ../awf-eval-project
+awf init ../awf-eval-project
+awf smoke run --project ../awf-eval-project --mocked-local --format pretty
 ```
 
-`awf service bootstrap` starts the local AWF Core stack, and
-`awf service status --format pretty` confirms API, database, Docker, image,
-disk, provider, and cleanup health.
+This is the `awf init <path>` step for a checked-out project repository.
 
-`awf setup` and `awf start` are reserved first-run command surfaces. They are
-present in help for the future grammar, but today `awf setup` exits with
-`AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
-`awf service bootstrap` until those setup and start slices land.
-
-In source checkouts with local Compose assets, `awf service bootstrap` reads
-`docker/compose/.env` when that file already exists. If you prefer persistent
-values across shells, copy `.env.example` to `docker/compose/.env` and set
-`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and `AWF_GITHUB_TOKEN` there before
-bootstrapping.
-
-If you set or refresh the GitHub token after starting Core, rerun the service
-bootstrap so Compose recreates the service containers with the updated
-environment:
+Upgrade:
 
 ```bash
-awf service bootstrap
-```
-
-## Open The Console
-
-The local console runs separately from the service stack:
-
-```bash
-npm --prefix apps/console run dev
-```
-
-Open <http://localhost:3000>. AWF uses `localhost` as the default local console
-host in smoke reports.
-
-## Onboard A Project
-
-From a checked-out project repository:
-
-```bash
-awf init .
-awf profile preview . --format pretty
+git pull
+uv tool install . --force
+awf start --source-checkout "$PWD"
 awf smoke run --mocked-local --format pretty
 ```
 
-If `.awf/workspace.yml` already exists, `awf init .` validates local readiness
-and points you at preview/smoke commands. If no profile exists, interactive
-terminals guide you through a short setup. For automation, write detected
-defaults without prompting:
+Uninstall:
 
 ```bash
-awf init . --write-profile --yes
+uv tool uninstall agent-workspace-fabric
 ```
 
-## When Something Fails
+Remove the checkout separately only when you no longer want the source tree.
 
-- Use `awf service doctor` for local prerequisite failures.
-- Use `awf service status --format pretty` for local API, database, Docker,
-  image, disk, provider, and cleanup health.
-- Use `awf service readiness --format pretty` only as the AWF Core
-  release-readiness gate; it includes historical PRD SLO evidence and may fail
-  even when the local service is healthy.
+## Lane 4: Source Checkout With No Global Install
+
+This lane uses inspectable source and no global install. It does not place an
+`awf` executable on the global `PATH`; every AWF command runs through `uv run`
+from the checkout.
+
+```bash
+git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
+cd aira-agent-workspace-fabric
+uv sync --extra dev
+
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_GITHUB_TOKEN="$(gh auth token)"
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+
+mkdir -p ../awf-eval-project
+uv run --python 3.12 --extra dev awf init ../awf-eval-project
+uv run --python 3.12 --extra dev awf smoke run --project ../awf-eval-project --mocked-local --format pretty
+```
+
+This is the `awf init <path>` step for a checked-out project repository.
+
+Upgrade:
+
+```bash
+git pull
+uv sync --extra dev
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf smoke run --mocked-local --format pretty
+```
+
+Uninstall:
+
+```bash
+cd ..
+rm -rf aira-agent-workspace-fabric
+```
+
+Only delete the AWF checkout if it was created just for evaluation.
+
+## After Start
+
+`awf start` prints the local API and console URLs. Use
+`http://127.0.0.1:3000` for the console when it is running, and
+`http://127.0.0.1:8000/readyz` for a direct local API readiness check.
 
 Next:
 
 - [Project Onboarding](PROJECT_ONBOARDING.md)
-- [PR Monitor Adoption](PR_MONITOR_ADOPTION.md)
+- [Upgrade Guide](UPGRADE.md)
+- [Uninstall Guide](UNINSTALL.md)
 - [DX Smoke Command](SMOKE_COMMAND.md)
 - [Troubleshooting](TROUBLESHOOTING.md)

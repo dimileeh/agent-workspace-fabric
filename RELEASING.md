@@ -12,6 +12,9 @@ Use this checklist before tagging an AWF Core alpha release.
   `uv tool install agent-workspace-fabric`, `pipx install
   agent-workspace-fabric`, virtualenv-scoped `pip install
   agent-workspace-fabric`, and contributor `uv tool install . --force`.
+- Confirm the public curl installer lane is advertised only for releases whose
+  `install.sh`, `awf-install-manifest.json`, and checksum-backed distribution
+  artifacts have been published and verified from GitHub Release URLs.
 - The repository URL still points at
   `https://github.com/dimileeh/aira-agent-workspace-fabric` until the GitHub
   repository is renamed.
@@ -103,9 +106,9 @@ awf service release-readiness --format pretty
 ```
 
 Release readiness uses the lower-level service bootstrap command because it is
-validating local service gates directly. Do not use no-path `awf init` for
-service setup; project onboarding is the separate `awf init <path>` flow after
-the local service is available.
+validating local service gates directly. Do not use `awf init` as service setup;
+project onboarding is the separate `awf init <path>` flow after the local
+service is available.
 
 If `awf service readiness` fails only because historical SLO evidence reflects
 known dogfood failures, document the exception in the release notes and rerun
@@ -116,6 +119,21 @@ awf service readiness --allow-slo-breach --format json
 ```
 
 Do not ignore doctor, provider, Docker, database, or cleanup failures.
+
+## Curl Installer Documentation Gate
+
+The public README and Quickstart may present the curl installer lane only after
+the release has all of the following:
+
+- published `packaging/install.sh` or the approved hosted redirect for it,
+- a published `awf-install-manifest.json`,
+- distribution artifacts attached to the GitHub Release,
+- checksum metadata for those artifacts, and
+- a successful installer smoke proving the manifest-pinned `sha256` is verified
+  before install.
+
+If any of those pieces are missing, release notes must direct users to the
+`uv tool` / `pipx` lane or a source checkout lane instead of curl.
 
 ## PyPI Trusted Publishing
 

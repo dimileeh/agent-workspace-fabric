@@ -106,32 +106,51 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     start_here_text = (REPO_ROOT / "docs" / "START_HERE.md").read_text(encoding="utf-8")
 
     assert "docs/QUICKSTART.md" in readme_text
+    assert "docs/UPGRADE.md" in readme_text
+    assert "docs/UNINSTALL.md" in readme_text
     assert "docs/START_HERE.md" not in readme_text
     assert "currently a stub" not in quickstart_text.lower()
-    assert "awf init" in quickstart_text
+    assert "awf setup" in quickstart_text
+    assert "awf start" in quickstart_text
+    assert "awf init <path>" in quickstart_text
     assert "awf smoke run --mocked-local --format pretty" in quickstart_text
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
-def test_quickstart_uses_runnable_startup_path() -> None:
+def test_quickstart_presents_four_complete_first_run_lanes() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
-    startup_section = quickstart_text.split("## Set Up And Start AWF", maxsplit=1)[1].split(
-        "## Open The Console",
-        maxsplit=1,
-    )[0]
+    lanes = {
+        "## Lane 1: Curl Installer": ("release-installed", "least inspectable"),
+        "## Lane 2: uv tool or pipx": ("release-installed", "package-manager"),
+        "## Lane 3: Source Checkout With Global Tool Install": (
+            "inspectable source",
+            "global tool",
+        ),
+        "## Lane 4: Source Checkout With No Global Install": (
+            "inspectable source",
+            "no global install",
+        ),
+    }
 
-    assert (
-        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
-        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
-        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
-        "awf service bootstrap\n"
-        "awf service status --format pretty"
-    ) in startup_section
-    assert "persists\nCompose-interpolated service values" not in startup_section
-    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
-    assert not re.search(r"(?m)^awf start\s*$", startup_section)
-    assert "AWF_SETUP_PLACEHOLDER" in startup_section
-    assert "AWF_START_PLACEHOLDER" in startup_section
+    for heading, descriptors in lanes.items():
+        section = _markdown_section(quickstart_text, heading)
+        for descriptor in descriptors:
+            assert descriptor in section
+        assert "awf setup" in section
+        assert "awf start" in section
+        assert ("awf init <path>" in section) or re.search(r"(?m)^awf init \.\s*$", section)
+        assert "awf smoke run --mocked-local --format pretty" in section
+        assert "Upgrade:" in section
+        assert "Uninstall:" in section
+
+    assert "curl -fsSL https://aira.pro/install.sh | sh" in quickstart_text
+    assert "uv tool install agent-workspace-fabric" in quickstart_text
+    assert "pipx install agent-workspace-fabric" in quickstart_text
+    assert "uv tool install . --force" in quickstart_text
+    assert "uv run --python 3.12 --extra dev awf setup" in quickstart_text
+    assert "AWF_SETUP_PLACEHOLDER" not in quickstart_text
+    assert "AWF_START_PLACEHOLDER" not in quickstart_text
+    assert not re.search(r"(?m)^awf service bootstrap\s*$", quickstart_text)
 
 
 def test_getting_started_uses_runnable_startup_path() -> None:
@@ -145,20 +164,16 @@ def test_getting_started_uses_runnable_startup_path() -> None:
         maxsplit=1,
     )[1].split("### Run Locally", maxsplit=1)[0]
 
-    assert (
-        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
-        "awf service bootstrap\n"
-        "awf service status --format pretty"
-    ) in startup_section
-    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
-    assert not re.search(r"(?m)^awf start\s*$", startup_section)
-    assert "AWF_SETUP_PLACEHOLDER" in startup_section
-    assert "AWF_START_PLACEHOLDER" in startup_section
+    assert "awf setup" in startup_section
+    assert "awf start" in startup_section
     assert "awf init <path> --write-profile --yes" in startup_section
-    assert re.search(r"`awf service bootstrap`\s+uses", configure_section)
-    assert "`awf start` uses" not in configure_section
-    assert "run `awf service bootstrap`" in configure_section
-    assert "run `awf start`" not in configure_section
+    assert "awf smoke run --mocked-local --format pretty" in startup_section
+    assert "AWF_SETUP_PLACEHOLDER" not in startup_section
+    assert "AWF_START_PLACEHOLDER" not in startup_section
+    assert not re.search(r"(?m)^awf service bootstrap\s*$", startup_section)
+    assert re.search(r"`awf start`\s+uses", configure_section)
+    assert "`awf service bootstrap` uses" not in configure_section
+    assert "run `awf start`" in configure_section
 
 
 def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
@@ -168,21 +183,18 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         maxsplit=1,
     )[0]
 
-    assert len(re.findall(r"(?m)^awf service bootstrap\s*$", prerequisites_section)) == 2
-    assert (
-        len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
-    )
-    assert re.search(r"(?m)^} > \.env\s*\nawf service bootstrap$", prerequisites_section)
+    assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 2
+    assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 2
+    assert re.search(r"(?m)^} > \.env\s*\nawf setup\nawf start$", prerequisites_section)
     assert re.search(
-        r"(?m)^} > docker/compose/\.env\s*\nawf service bootstrap$",
+        r"(?m)^} > docker/compose/\.env\s*\nawf setup\nawf start$",
         prerequisites_section,
     )
     assert (
         'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
-        '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+        '${AWF_POSTGRES_PASSWORD}@127.0.0.1:${AWF_POSTGRES_HOST_PORT}/awf"'
     ) in prerequisites_section
-    assert not re.search(r"(?m)^awf setup\s*$", prerequisites_section)
-    assert not re.search(r"(?m)^awf start\s*$", prerequisites_section)
+    assert not re.search(r"(?m)^awf service bootstrap\s*$", prerequisites_section)
 
 
 def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
@@ -196,14 +208,13 @@ def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
         'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
         'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
         'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
-        "awf service bootstrap\n"
-        "awf service status --format pretty\n"
+        "awf setup\n"
+        "awf start\n"
         "awf init ."
     ) in first_run_section
-    assert not re.search(r"(?m)^awf setup\s*$", first_run_section)
-    assert not re.search(r"(?m)^awf start\s*$", first_run_section)
-    assert "AWF_SETUP_PLACEHOLDER" in first_run_section
-    assert "AWF_START_PLACEHOLDER" in first_run_section
+    assert not re.search(r"(?m)^awf service bootstrap\s*$", first_run_section)
+    assert "AWF_SETUP_PLACEHOLDER" not in first_run_section
+    assert "AWF_START_PLACEHOLDER" not in first_run_section
 
 
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
@@ -213,7 +224,7 @@ def test_project_onboarding_docs_make_awf_init_primary() -> None:
 
     assert "awf setup" in quickstart_text
     assert "awf start" in quickstart_text
-    assert "awf init . --write-profile --yes" in quickstart_text
+    assert "awf init <path>" in quickstart_text
     assert "awf setup" in getting_started_text
     assert "awf start" in getting_started_text
     assert "awf init <path> --write-profile --yes" in getting_started_text
@@ -226,7 +237,10 @@ def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None
     public_paths = [Path("README.md"), *map(Path, sorted(_public_docs()))]
     forbidden_patterns = [
         r"`awf init`\s+without a path",
+        r"without a path,?\s+`awf init`",
         r"`awf init`\s+\(no path\)",
+        r"no-path\s+`awf init`",
+        r"bare\s+`awf init`",
         r"(?m)^\s*awf init\s*(?:#\s*.*bootstrap.*)?$",
         r"`awf init`\s+or\s+`awf service bootstrap`",
         r"after `awf init` or `awf service bootstrap`",
@@ -250,15 +264,46 @@ def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None
     assert "awf start" in public_text
 
 
-def test_changelog_and_upgrade_guide_are_discoverable() -> None:
+def test_changelog_upgrade_and_uninstall_guides_are_discoverable() -> None:
     readme_text = README_PATH.read_text(encoding="utf-8")
 
     assert (REPO_ROOT / "CHANGELOG.md").exists()
     assert (REPO_ROOT / "docs" / "UPGRADE.md").exists()
+    assert (REPO_ROOT / "docs" / "UNINSTALL.md").exists()
     assert (REPO_ROOT / "RELEASING.md").exists()
     assert "[Changelog](CHANGELOG.md)" in readme_text
     assert "[Upgrade Guide](docs/UPGRADE.md)" in readme_text
+    assert "[Uninstall Guide](docs/UNINSTALL.md)" in readme_text
     assert "[Release Checklist](RELEASING.md)" in readme_text
+
+
+def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+
+    lane_terms = (
+        "curl installer",
+        "uv tool",
+        "pipx",
+        "source checkout with global tool install",
+        "source checkout with no global install",
+    )
+    for lane_term in lane_terms:
+        assert lane_term in upgrade_text.lower()
+        assert lane_term in uninstall_text.lower()
+
+    assert "curl -fsSL https://aira.pro/install.sh | sh" in upgrade_text
+    assert "uv tool upgrade agent-workspace-fabric" in upgrade_text
+    assert "pipx upgrade agent-workspace-fabric" in upgrade_text
+    assert "git pull" in upgrade_text
+    assert "awf start" in upgrade_text
+    assert "awf smoke run --mocked-local --format pretty" in upgrade_text
+
+    assert "curl -fsSL https://aira.pro/install.sh | sh -s -- --uninstall" in uninstall_text
+    assert "uv tool uninstall agent-workspace-fabric" in uninstall_text
+    assert "pipx uninstall agent-workspace-fabric" in uninstall_text
+    assert "rm -rf" in uninstall_text
+    assert "does not delete local AWF service state" in uninstall_text
 
 
 def test_public_oss_release_metadata_is_consistent() -> None:
@@ -463,6 +508,14 @@ def test_awf_command_mentions_ignore_missing_readme_linked_docs(
 
     assert _public_docs() == {"docs/MISSING.md"}
     assert _awf_command_mentions(paths) == []
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    start = text.index(f"{heading}\n") + len(heading) + 1
+    next_heading = re.search(r"(?m)^## ", text[start:])
+    if next_heading is None:
+        return text[start:]
+    return text[start : start + next_heading.start()]
 
 
 def _public_docs() -> set[str]:
