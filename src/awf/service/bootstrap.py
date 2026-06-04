@@ -401,7 +401,10 @@ def ensure_work_dir_mount_propagation(
     to be a shared mount. This preflight:
 
     - Reads ``/proc/self/mountinfo`` to find the mount backing ``host_work_dir``.
-      Shared → ``rshared`` (no copy fallback).
+      Shared on a propagating fs → ``rshared`` (no copy fallback). A
+      non-propagating fs (Docker Desktop / virtiofs / grpcfuse / Plan 9) forces
+      the copy fallback even when flagged shared, since the overlay never reaches
+      the sibling regardless of propagation mode.
     - Private but Linux with ``mount(8)`` available → attempt
       ``mount --bind`` + ``mount --make-rshared`` (idempotent), then report
       ``rshared`` on success.
@@ -425,6 +428,22 @@ def ensure_work_dir_mount_propagation(
                 "forcing the per-workspace copy fallback"
             ),
         )
+    if entry.fs_type in _NON_PROPAGATING_FS_TYPES:
+        # Checked before ``entry.shared``: on these filesystems an overlay never
+        # reaches the sibling agent even when the mount is flagged shared/rshared
+        # (Docker Desktop marks its virtiofs/grpcfuse mounts ``shared:N``), so a
+        # shared flag here is a false reassurance. Force the copy fallback rather
+        # than provisioning an empty overlay.
+        return WorkDirPropagationResult(
+            propagation="rprivate",
+            force_copy=True,
+            reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE,
+            detail=(
+                f"{target} is on a non-propagating mount "
+                f"(fs={entry.fs_type}, mount={entry.mount_point}); forcing the "
+                "per-workspace copy fallback"
+            ),
+        )
     if entry.shared:
         return WorkDirPropagationResult(
             propagation="rshared",
@@ -432,11 +451,7 @@ def ensure_work_dir_mount_propagation(
             reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED,
             detail=f"{target} is backed by a shared mount at {entry.mount_point}",
         )
-    if (
-        entry.fs_type in _NON_PROPAGATING_FS_TYPES
-        or not _host_is_linux()
-        or not _mount_binary_available()
-    ):
+    if not _host_is_linux() or not _mount_binary_available():
         return WorkDirPropagationResult(
             propagation="rprivate",
             force_copy=True,

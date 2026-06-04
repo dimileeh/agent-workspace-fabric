@@ -189,6 +189,30 @@ def test_preflight_non_propagating_fs_forces_copy_fallback(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_preflight_shared_non_propagating_fs_forces_copy_fallback(tmp_path: Path) -> None:
+    # Docker Desktop marks its virtiofs mounts ``shared:N`` in mountinfo, but an
+    # overlay still never propagates into the sibling agent. The non-propagating
+    # fs check must win over the shared flag, otherwise the worker provisions an
+    # empty ``~/.claude`` on rshared instead of using the copy fallback.
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "23 28 0:21 / /host/work rw,relatime shared:1 - virtiofs virtiofs rw\n",
+        encoding="utf-8",
+    )
+
+    result = ensure_work_dir_mount_propagation(
+        "/host/work",
+        run_subprocess=_unexpected_runner,  # fs check precedes any mount attempt
+        environ={},
+        mountinfo_path=mountinfo,
+    )
+
+    assert result.propagation == "rprivate"
+    assert result.force_copy is True
+    assert result.reason_code == "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE"
+
+
+@pytest.mark.unit
 def test_preflight_make_rshared_failure_forces_copy_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
