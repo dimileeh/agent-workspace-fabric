@@ -168,6 +168,40 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 
 Result: `All checks passed!`.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HBU4r`:
+
+- `docs/QUICKSTART.md` now leaves the `AWF_GITHUB_TOKEN` export commented and
+  explicitly optional in all three mocked first-run lane command blocks.
+- `tests/unit/docs/test_public_docs_status.py` now rejects active Quickstart
+  `gh auth token` exports while requiring the optional commented guidance in
+  each lane.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional -q
+```
+
+Red-phase result after updating the focused assertion: failed because
+`docs/QUICKSTART.md` still hard-required
+`export AWF_GITHUB_TOKEN="$(gh auth token)"`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_quickstart_presents_available_complete_first_run_lanes tests/unit/docs/test_public_docs_status.py::test_quickstart_is_canonical_and_not_a_stub -q
+```
+
+Final repair result: `3 passed in 0.55s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.

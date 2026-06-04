@@ -55,6 +55,11 @@ commands in `docs/QUICKSTART.md` must pass the same project paths initialized in
 their lanes because `awf smoke run` defaults `--project` to the current working
 directory.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HBU4r`: mocked first-run
+command blocks in `docs/QUICKSTART.md` must not hard-require `gh auth token`;
+leave `AWF_GITHUB_TOKEN` explicit but commented as optional for PR creation and
+monitoring features.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

@@ -182,6 +182,21 @@ def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
     assert all("--project " in line for line in smoke_lines)
 
 
+def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
+    """Assert mocked first-run commands do not require GitHub CLI auth."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+
+    assert "does not require live GitHub or provider access" in quickstart_text
+    assert not re.search(
+        r'(?m)^export AWF_GITHUB_TOKEN="\$\(gh auth token\)"$',
+        quickstart_text,
+    )
+    assert (
+        quickstart_text.count("# Optional: only needed for PR creation/monitoring features.") == 3
+    )
+    assert quickstart_text.count('# export AWF_GITHUB_TOKEN="$(gh auth token)"') == 3
+
+
 def test_markdown_section_accepts_trailing_heading_whitespace() -> None:
     """Assert section extraction tolerates harmless heading whitespace."""
     text = "Intro\n## Target \t\nbody\n## Next\nother\n"
