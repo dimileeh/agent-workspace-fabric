@@ -1760,8 +1760,8 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 The inline review reports that the shared token-assignment regex recognizes
 `PRIVATE_KEY` keys but still captures only the first whitespace-delimited token
 as the value. PEM-style assignments such as
-`SSH_PRIVATE_KEY=-----BEGIN OPENSSH PRIVATE KEY-----\n...` therefore redact
-only `-----BEGIN` and can leak the remaining key header/body through runtime
+`SSH_PRIVATE_KEY=<PEM private-key header>\n...` therefore redact only the first
+header token and can leak the remaining key header/body through runtime
 logs, audit text, and MCP log-slice assignment context.
 
 This repair is limited to shared assignment-style redaction for PEM private-key
@@ -1772,7 +1772,7 @@ or broad validation ownership.
 ### Requirements Checklist
 
 - Shared token-assignment matching treats PEM private-key assignment values as
-  multiline values through the matching `-----END ... PRIVATE KEY-----` marker.
+  multiline values through the matching PEM private-key end marker.
 - Runtime and audit text redaction mask the full PEM private-key assignment
   value while preserving the assignment key, separator, optional quotes, and
   surrounding non-secret text.
@@ -1798,4 +1798,47 @@ or broad validation ownership.
 uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key -q --tb=short -ra
 uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key -q --tb=short -ra
 uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py tests/unit/common/test_token_patterns.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+```
+
+## Review-Level Comment `issue:4620175517` MCP Byte-Window Integration Coverage Plan
+
+### Problem Statement And Scope
+
+The review-level comment found no remaining MCP byte-window defect but noted
+that the dense projection/lookback logic would benefit from targeted integration
+coverage against truncated and multibyte log files. Helper-level UTF-8 and
+projection tests already exist, but the MCP tool integration surface should
+also prove these edge cases through `awf_read_workspace_log`.
+
+This repair is limited to focused MCP workspace-log tests and plan/validation
+evidence. It does not change production redaction logic, service-log streaming,
+support bundles, branch management, pushing, or broad validation ownership.
+
+### Requirements Checklist
+
+- `awf_read_workspace_log` clamps a requested byte window that extends past EOF
+  in a multibyte log file and reports the correct `next_offset`, `eof`, and
+  decoded data.
+- `awf_read_workspace_log` preserves byte offsets when the requested caller
+  window itself starts inside a multibyte UTF-8 character, returning replacement
+  decoding for the truncated character byte without shifting later bytes.
+- Existing MCP workspace-log redaction and assignment-lookback behavior remains
+  unchanged.
+- Run only focused tests and narrow lint checks for touched files; leave broad
+  AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused MCP workspace-log tests in the existing `TestWorkspaceLogs`
+   coverage file for a multibyte EOF-truncated window and a caller window that
+   starts inside a multibyte UTF-8 character.
+2. Run the new focused tests and narrow ruff check for the touched test file.
+3. Update validation evidence with the focused checks and the no-production-code
+   scope decision.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k 'truncated_multibyte_eof_window or requested_window_starts_inside_multibyte_character' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 ```

@@ -110,6 +110,112 @@ class TestWorkspaceLogs:
         }
 
     @pytest.mark.unit
+    async def test_read_workspace_log_clamps_truncated_multibyte_eof_window(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Clamp an EOF-truncated caller window over a multibyte log file."""
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe truncated logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        prefix = "alpha "
+        raw_text = f"{prefix}café"
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+            source="agent",
+            name="Agent stdout",
+            kind="stdout",
+        )
+        await sink.write(raw_text)
+        await sink.close()
+
+        offset = len(prefix.encode())
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": offset,
+                "limit_bytes": 64,
+            },
+        )
+
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": offset,
+            "next_offset": len(raw_text.encode()),
+            "eof": True,
+            "data": "café",
+        }
+
+    @pytest.mark.unit
+    async def test_read_workspace_log_requested_window_starts_inside_multibyte_character(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Preserve byte cursors when a caller window starts inside UTF-8."""
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe partial UTF-8 logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        raw_text = "prefix étarget\n"
+        raw_bytes = raw_text.encode()
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+            source="agent",
+            name="Agent stdout",
+            kind="stdout",
+        )
+        await sink.write(raw_text)
+        await sink.close()
+
+        offset = raw_bytes.index("é".encode()) + 1
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": offset,
+                "limit_bytes": 1,
+            },
+        )
+
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": offset,
+            "next_offset": offset + 1,
+            "eof": False,
+            "data": "\ufffd",
+        }
+
+    @pytest.mark.unit
     async def test_read_workspace_log_preserves_offsets_when_expanded_context_starts_inside_multibyte_character(
         self,
         factory: async_sessionmaker[AsyncSession],

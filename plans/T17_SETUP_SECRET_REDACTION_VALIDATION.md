@@ -1960,8 +1960,7 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 Requirement status:
 
 - Complete: shared token-assignment matching treats PEM private-key assignment
-  values as multiline values through the matching `-----END ... PRIVATE KEY-----`
-  marker.
+  values as multiline values through the matching PEM private-key end marker.
 - Complete: runtime and audit text redaction mask the full PEM private-key
   assignment value while preserving the assignment key, separator, optional
   quotes, and surrounding non-secret text.
@@ -2210,3 +2209,43 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ## Gaps
 
 None found.
+
+## Review-Level Comment `issue:4620175517` MCP Byte-Window Integration Coverage Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `awf_read_workspace_log` now has tool-level coverage for a
+  requested byte window that extends past EOF in a multibyte log file, including
+  `next_offset`, `eof`, and decoded data assertions.
+- Complete: `awf_read_workspace_log` now has tool-level coverage for a caller
+  byte window that starts inside a multibyte UTF-8 character and returns
+  replacement decoding without shifting the byte cursor.
+- Complete: no production redaction logic was changed; existing MCP
+  workspace-log behavior remains covered by the adjacent focused file sweep.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k 'truncated_multibyte_eof_window or requested_window_starts_inside_multibyte_character' --tb=short -ra
+# 2 passed, 19 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q --tb=short -ra
+# 21 passed
+
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# All checks passed!
+
+wc -l tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# 1425 tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+```
