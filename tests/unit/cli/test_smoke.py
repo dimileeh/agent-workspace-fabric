@@ -89,8 +89,11 @@ class TestSmokeRunCommand:
                     "name": "service_readiness",
                     "status": "ok",
                     "reason_code": "SMOKE_SERVICE_READY",
-                    "message": "ready",
-                    "evidence": {},
+                    "message": "ready: worker heartbeat fresh",
+                    "evidence": {
+                        "worker": "ok",
+                        "worker_reason": "WORKER_HEARTBEAT_FRESH",
+                    },
                     "action": "none",
                 },
                 {
@@ -108,8 +111,42 @@ class TestSmokeRunCommand:
         assert "AWF smoke: ok" in result.stdout
         assert "[ok] service_readiness" in result.stdout
         assert "SMOKE_SERVICE_READY" in result.stdout
+        assert "worker heartbeat fresh" in result.stdout
+        assert "worker: ok (WORKER_HEARTBEAT_FRESH)" in result.stdout
+        assert "worker_db_substrate" not in result.stdout
         assert "SMOKE_AUTH_READY" in result.stdout
         assert "phases[0]." not in result.stdout
+
+    def test_json_output_carries_worker_heartbeat_evidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_smoke_collector(
+            monkeypatch,
+            phases=[
+                {
+                    "name": "service_readiness",
+                    "status": "ok",
+                    "reason_code": "SMOKE_SERVICE_READY",
+                    "message": "ready",
+                    "evidence": {
+                        "api": "ok",
+                        "worker": "ok",
+                        "worker_reason": "WORKER_HEARTBEAT_FRESH",
+                    },
+                    "action": "none",
+                },
+            ],
+        )
+
+        result = _runner.invoke(app, ["smoke", "run"])
+
+        assert result.exit_code == 0
+        output = json.loads(result.stdout)
+        service_phase = output["phases"][0]
+        assert service_phase["reason_code"] == "SMOKE_SERVICE_READY"
+        assert service_phase["evidence"]["worker"] == "ok"
+        assert service_phase["evidence"]["worker_reason"] == "WORKER_HEARTBEAT_FRESH"
+        assert "worker_db_substrate" not in json.dumps(output)
 
     def test_pretty_format_does_not_duplicate_reason_when_message_missing(
         self, monkeypatch: pytest.MonkeyPatch

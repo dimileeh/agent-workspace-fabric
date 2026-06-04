@@ -8,6 +8,10 @@ from typing import Any
 
 from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.service.config import ServiceSettings
+from awf.service.worker_heartbeat import (
+    WORKER_HEARTBEAT_FRESH_REASON,
+    WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+)
 
 ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
 AuthCollector = Callable[..., dict[str, Any]]
@@ -160,20 +164,14 @@ async def _phase_service_readiness(
     Local Core health is a *hard* signal even in ``mocked_local`` mode: the
     no-token proof only relaxes the provider/PR (token + GitHub) requirements, so
     an unreachable or unhealthy Core always fails. A richer collector may report
-    ``api`` and ``worker_db_substrate`` sub-signals; ``status == "ok"`` means
-    API-up, and a ``worker_db_substrate`` value that is not healthy fails with a
-    substrate-specific reason so the report proves Core health rather than merely
-    echoing a URL.
+    ``api`` and ``worker`` sub-signals; ``status == "ok"`` means API-up, and a
+    ``worker`` value that is not healthy fails with a worker-specific reason so
+    the report proves Core health rather than merely echoing a URL.
 
-    ``worker_db_substrate`` is the worker's *required dependency* (the
-    control-plane DB the poll/claim loop reads), **not** worker-process liveness:
-    a token-free HTTP probe cannot observe the worker container directly, and a
-    real worker-container health signal (``awf service doctor``'s
-    ``docker compose ps worker``) is Docker-dependent and outside this provider-
-    free proof. So this phase proves the worker's substrate is reachable, not that
-    a worker is currently polling. A plain ``{"status": "ok"}`` (no
-    ``worker_db_substrate`` key) stays ``ok`` for backward compatibility with
-    injected collectors.
+    ``worker`` comes from the token-free ``/readyz`` worker heartbeat sub-check.
+    A plain ``{"status": "ok"}`` (no ``worker`` key) stays ``ok`` for backward
+    compatibility with injected collectors, but the worker evidence remains
+    ``unknown`` instead of claiming liveness.
     """
     try:
         collector = service_collector or _default_service_collector
@@ -190,7 +188,9 @@ async def _phase_service_readiness(
 
     svc_status = result.get("status", "unreachable")
     api_status = result.get("api", svc_status)
-    worker_db_substrate = result.get("worker_db_substrate")
+    worker_status = result.get("worker")
+    worker_reason = result.get("worker_reason")
+    worker_detail = result.get("worker_detail")
     api_up = svc_status == "ok" or api_status == "ok"
     if not api_up:
         return {
@@ -202,58 +202,55 @@ async def _phase_service_readiness(
                 "api_url": settings.api_base_url,
                 "status": svc_status,
                 "api": api_status,
-                "worker_db_substrate": (
-                    worker_db_substrate if worker_db_substrate is not None else "unknown"
-                ),
+                "worker": worker_status if worker_status is not None else "unknown",
+                "worker_reason": worker_reason if worker_reason is not None else "unknown",
             },
             "action": "Run `awf service bootstrap` or inspect service logs.",
         }
 
-    # API is up. If the collector also reports a worker-substrate signal, it must
-    # be healthy — a reachable API with an unreachable worker DB substrate is not a
-    # healthy Core, even in mocked-local mode (the no-token proof keeps Core health
-    # hard). This proves the worker's DB *dependency*, not worker-process liveness.
-    if worker_db_substrate is not None and worker_db_substrate != "ok":
+    # API is up. If the collector also reports a worker heartbeat signal, it must
+    # be healthy - a reachable API with a stale/missing worker heartbeat is not a
+    # healthy Core, even in mocked-local mode.
+    if worker_status is not None and worker_status != "ok":
+        evidence = {
+            "api_url": settings.api_base_url,
+            "status": svc_status,
+            "api": api_status,
+            "worker": worker_status,
+            "worker_reason": worker_reason if worker_reason is not None else "unknown",
+        }
+        if worker_detail is not None:
+            evidence["worker_detail"] = worker_detail
         return {
             "name": "service_readiness",
             "status": "fail",
             "reason_code": "SMOKE_WORKER_UNAVAILABLE",
-            "message": "AWF API is reachable but the worker DB substrate is not healthy.",
-            "evidence": {
-                "api_url": settings.api_base_url,
-                "status": svc_status,
-                "api": api_status,
-                "worker_db_substrate": worker_db_substrate,
-            },
+            "message": "AWF API is reachable but the worker heartbeat is not healthy.",
+            "evidence": evidence,
             "action": (
-                "Run `awf service bootstrap` or inspect worker/DB logs; the worker "
-                "poll/claim loop needs a reachable control-plane database."
+                "Run `awf service bootstrap` or inspect worker logs; the worker "
+                "poll/claim loop must write a fresh heartbeat."
             ),
         }
-    # Only claim the worker DB substrate is reachable when the collector actually
-    # probed it. An injected collector that returns a plain ``{"status": "ok"}``
-    # (no ``worker_db_substrate`` key) never checked the substrate, so reporting it
-    # as "ok" would be a false claim — surface "unknown" / "not probed" instead.
-    substrate_clause = (
-        "worker DB substrate reachable"
-        if worker_db_substrate is not None
-        else "worker DB substrate not probed by this collector"
+    # Only claim the worker heartbeat is fresh when the collector actually probed
+    # it. An injected collector that returns a plain ``{"status": "ok"}`` never
+    # checked worker liveness, so report "unknown" instead.
+    worker_clause = (
+        f"worker heartbeat fresh ({worker_reason or WORKER_HEARTBEAT_FRESH_REASON})"
+        if worker_status is not None
+        else "worker heartbeat not probed by this collector"
     )
     return {
         "name": "service_readiness",
         "status": "ok",
         "reason_code": "SMOKE_SERVICE_READY",
-        "message": (
-            f"AWF local Core health check passed (API up; {substrate_clause}). "
-            "Worker-process liveness is not probed by this provider-free check."
-        ),
+        "message": (f"AWF local Core health check passed (API up; {worker_clause})."),
         "evidence": {
             "api_url": settings.api_base_url,
             "status": "ok",
             "api": api_status,
-            "worker_db_substrate": (
-                worker_db_substrate if worker_db_substrate is not None else "unknown"
-            ),
+            "worker": worker_status if worker_status is not None else "unknown",
+            "worker_reason": worker_reason if worker_reason is not None else "unknown",
         },
         "action": "No action required.",
     }
@@ -619,24 +616,15 @@ def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
 
 
 async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any]:
-    """Probe AWF local Core health and return an api/worker-substrate status map.
+    """Probe AWF local Core health and return an api/worker status map.
 
     ``/healthz`` is dependency-free liveness ("the API process answered"). To
     prove Core health rather than mere liveness, also consult ``/readyz`` and read
-    its ``checks.db.ok`` sub-check — the worker is a DB poll/claim loop, so DB
-    reachability is the token-free signal that the worker's *substrate dependency*
-    is up. ``/readyz`` returns its JSON body even on 503 (its *overall* status is
-    503 whenever a provider token is unconfigured), so the DB sub-check is readable
-    without provider tokens; the provider/``agent_readiness`` parts are
-    intentionally ignored to keep the probe provider-free. Docker-dependent
-    ``/readyz`` checks are *not* required for the no-token proof — the substrate
-    proven here is the DB; the live smoke path covers docker/provisioning.
-    ``/readyz`` failures degrade the signal to ``fail`` rather than crashing.
-
-    The returned ``worker_db_substrate`` value is deliberately *not* worker-process
-    liveness: a provider-free HTTP probe cannot observe the worker container. A
-    real worker-container health signal exists in ``awf service doctor``
-    (``docker compose ps worker``) but is Docker-dependent and outside this proof.
+    its ``checks.worker`` heartbeat sub-check. ``/readyz`` returns its JSON body
+    even on 503, so the worker heartbeat is readable without provider tokens; the
+    provider/``agent_readiness`` parts are intentionally ignored to keep the probe
+    provider-free. ``/readyz`` transport or schema failures degrade the signal to
+    ``fail`` rather than crashing.
     """
     import httpx
 
@@ -644,32 +632,49 @@ async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any
     async with httpx.AsyncClient(timeout=5.0) as client:
         health = await client.get(f"{base}/healthz")
         if health.status_code != 200:
-            return {"status": "unreachable", "api": "fail", "worker_db_substrate": "unknown"}
-        substrate_status = await _probe_worker_db_substrate(client, base)
+            return {
+                "status": "unreachable",
+                "api": "fail",
+                "worker": "unknown",
+                "worker_reason": "unknown",
+            }
+        worker_signal = await _probe_worker_heartbeat(client, base)
 
-    if substrate_status == "ok":
-        return {"status": "ok", "api": "ok", "worker_db_substrate": "ok"}
-    return {"status": "degraded", "api": "ok", "worker_db_substrate": substrate_status}
+    if worker_signal["worker"] == "ok":
+        return {"status": "ok", "api": "ok", **worker_signal}
+    return {"status": "degraded", "api": "ok", **worker_signal}
 
 
-async def _probe_worker_db_substrate(client: Any, base: str) -> str:
-    """Return the worker-DB-substrate signal from ``/readyz`` ``checks.db.ok``.
+async def _probe_worker_heartbeat(client: Any, base: str) -> dict[str, str]:
+    """Return the worker heartbeat signal from ``/readyz`` ``checks.worker``.
 
-    Reads the DB sub-check regardless of the ``/readyz`` HTTP status (the body is
-    returned on 503 too). Any failure to reach or parse ``/readyz`` degrades the
-    signal to ``fail`` so the proof never reports a false-green. This proves the
-    worker's DB dependency is reachable, not that a worker process is polling.
+    Reads the worker sub-check regardless of the ``/readyz`` HTTP status. Any
+    failure to reach or parse ``/readyz`` degrades the signal to ``fail`` so the
+    proof never reports a false-green.
     """
     import httpx
 
     try:
         ready = await client.get(f"{base}/readyz")
-        db_ok = bool(ready.json()["checks"]["db"]["ok"])
-    except (httpx.HTTPError, ValueError, KeyError, TypeError):
-        # Transport failure, non-JSON body, or a malformed/missing db sub-check:
-        # treat the worker substrate as unproven (fail), never a crash.
-        return "fail"
-    return "ok" if db_ok else "fail"
+        worker_check = ready.json()["checks"]["worker"]
+        worker_ok = bool(worker_check["ok"])
+        worker_reason = str(
+            worker_check.get("reason")
+            or (WORKER_HEARTBEAT_FRESH_REASON if worker_ok else WORKER_HEARTBEAT_UNAVAILABLE_REASON)
+        )
+        result = {
+            "worker": "ok" if worker_ok else "fail",
+            "worker_reason": worker_reason,
+        }
+        worker_detail = worker_check.get("detail")
+        if worker_detail:
+            result["worker_detail"] = str(worker_detail)
+        return result
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+        return {
+            "worker": "fail",
+            "worker_reason": WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+        }
 
 
 async def _default_console_checker(url: str) -> bool:

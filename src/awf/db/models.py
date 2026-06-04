@@ -1226,6 +1226,29 @@ class EgressAuditRecord(Base):
     workspace: Mapped[Workspace] = relationship(back_populates="egress_audit_records")
 
 
+class WorkerHeartbeat(Base):
+    """Latest liveness heartbeat written by one control-worker process."""
+
+    __tablename__ = "worker_heartbeats"
+    __table_args__ = (
+        Index("ix_worker_heartbeats_node_id", "node_id"),
+        Index("ix_worker_heartbeats_last_heartbeat_at", "last_heartbeat_at"),
+        Index("ix_worker_heartbeats_node_last_heartbeat", "node_id", "last_heartbeat_at"),
+    )
+
+    worker_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    poll_interval_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
 def _queue_decision_summary(decision: QueueDecision) -> dict[str, Any]:
     return {
         "id": decision.id,
