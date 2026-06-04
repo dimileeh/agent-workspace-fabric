@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import signal
 import subprocess
@@ -148,6 +149,68 @@ def test_service_logs_follow_keyboard_interrupt_returns_empty_result() -> None:
 
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("timeout_on_terminate", "expected_wait_timeouts", "expected_killed"),
+    [
+        (False, [None, 5.0], False),
+        (True, [None, 5.0, None], True),
+    ],
+)
+def test_service_logs_follow_keyboard_interrupt_reaps_default_process(
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_on_terminate: bool,
+    expected_wait_timeouts: list[float | None],
+    expected_killed: bool,
+) -> None:
+    class _InterruptingFollowProcess:
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+            self.wait_timeouts: list[float | None] = []
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_timeouts.append(timeout)
+            if len(self.wait_timeouts) == 1:
+                raise KeyboardInterrupt
+            if timeout_on_terminate and len(self.wait_timeouts) == 2:
+                raise subprocess.TimeoutExpired(cmd=["docker"], timeout=timeout)
+            return -signal.SIGKILL if self.killed else -signal.SIGTERM
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    processes: list[_InterruptingFollowProcess] = []
+
+    def _popen(_args: list[str], **kwargs: object) -> _InterruptingFollowProcess:
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        process = _InterruptingFollowProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+    )
+
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert processes[0].killed is expected_killed
+    assert processes[0].wait_timeouts == expected_wait_timeouts
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

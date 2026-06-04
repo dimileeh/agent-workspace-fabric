@@ -29,6 +29,7 @@ from awf.service.environment import (
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
+_STREAMING_INTERRUPT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
 
 
@@ -227,12 +228,27 @@ def _run_streaming_subprocess(
     )
     stdout_thread = _start_redacted_stream_thread(process.stdout, sys.stdout)
     stderr_thread = _start_redacted_stream_thread(process.stderr, sys.stderr)
-    returncode = process.wait()
-    stdout_thread.join()
-    stderr_thread.join()
+    try:
+        returncode = process.wait()
+    except KeyboardInterrupt:
+        _terminate_streaming_subprocess(process)
+        raise
+    finally:
+        stdout_thread.join()
+        stderr_thread.join()
     if check and returncode != 0:
         raise subprocess.CalledProcessError(returncode, args)
     return subprocess.CompletedProcess(args, returncode, stdout=None, stderr=None)
+
+
+def _terminate_streaming_subprocess(process: subprocess.Popen[str]) -> None:
+    """Terminate and reap a streaming child after an operator interrupt."""
+    process.terminate()
+    try:
+        process.wait(timeout=_STREAMING_INTERRUPT_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def _start_redacted_stream_thread(

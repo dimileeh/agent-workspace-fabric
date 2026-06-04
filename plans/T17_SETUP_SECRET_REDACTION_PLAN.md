@@ -298,6 +298,53 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/s
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HCaLj` Followed Service Logs Interrupt Cleanup Plan
+
+### Problem Statement And Scope
+
+The review thread reports that the custom followed service-log `Popen` path can
+receive `KeyboardInterrupt` while waiting for `docker compose logs --follow`,
+then return through `run_service_logs()` without terminating or reaping the
+Docker child process.
+
+This repair is limited to interrupt cleanup in the default streaming
+service-log subprocess runner. Service selection, Docker environment
+resolution, redaction behavior, non-follow log capture, and unrelated CLI
+behavior are out of scope.
+
+### Requirements Checklist
+
+- A followed service-log interrupt terminates the Docker child before returning
+  control to `run_service_logs()`.
+- If graceful termination does not finish promptly, the child is killed and
+  reaped.
+- Reader threads for the child's stdout/stderr are joined during interrupt
+  cleanup.
+- Existing `run_service_logs(follow=True)` interrupt semantics remain intact:
+  the caller receives an empty successful result.
+
+### Implementation Steps
+
+1. Add a focused regression that simulates `KeyboardInterrupt` at
+   `process.wait()` and asserts the child is terminated, killed on timeout, and
+   reaped before `run_service_logs()` returns.
+2. Update the default streaming subprocess runner to handle
+   `KeyboardInterrupt` by terminating, escalating to kill after a short timeout,
+   waiting for the child, joining reader threads, and re-raising.
+3. Run focused service-log tests and lint/type checks for the touched files
+   only.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with evidence. Broad
+   AWF/GitHub validation, full coverage gates, and CI-equivalent suites remain
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'follow or default_subprocess_runner'
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```
+
 ## Review-Level Comment `issue:4620175517` Log Redaction Performance Repair Plan
 
 ### Problem Statement And Scope
