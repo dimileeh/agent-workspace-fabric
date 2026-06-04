@@ -177,6 +177,38 @@ def test_quickstart_presents_available_complete_first_run_lanes() -> None:
     assert not re.search(r"(?m)^awf service bootstrap\s*$", quickstart_text)
 
 
+def test_quickstart_keeps_package_manager_alternatives_in_separate_blocks() -> None:
+    """Assert copying one Lane 1 bash block cannot execute both install managers."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lane_section = _markdown_section(quickstart_text, "## Lane 1: uv tool or pipx")
+    alternative_pairs = (
+        ("uv tool install agent-workspace-fabric", "pipx install agent-workspace-fabric"),
+        ("uv tool upgrade agent-workspace-fabric", "pipx upgrade agent-workspace-fabric"),
+        (
+            "uv tool uninstall agent-workspace-fabric",
+            "pipx uninstall agent-workspace-fabric",
+        ),
+    )
+    mixed_blocks: list[str] = []
+
+    for fence in _markdown_fences("docs/QUICKSTART.md", lane_section):
+        if fence.language != "bash":
+            continue
+
+        executable_lines = {
+            line.strip()
+            for line in fence.body.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        for uv_command, pipx_command in alternative_pairs:
+            if uv_command in executable_lines and pipx_command in executable_lines:
+                mixed_blocks.append(
+                    f"{fence.path}:{fence.line} mixes `{uv_command}` and `{pipx_command}`"
+                )
+
+    assert not mixed_blocks, "; ".join(mixed_blocks)
+
+
 def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
     """Assert Quickstart smoke commands validate the lane's initialized project."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")

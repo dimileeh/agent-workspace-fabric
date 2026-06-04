@@ -30,11 +30,23 @@ This lane is release-installed and package-manager mediated. `uv tool` and
 `pipx` install the published `agent-workspace-fabric` package into an isolated
 tool environment.
 
+Install AWF with one package manager.
+
+`uv tool`:
+
 ```bash
 uv tool install agent-workspace-fabric
-# or:
-pipx install agent-workspace-fabric
+```
 
+`pipx`:
+
+```bash
+pipx install agent-workspace-fabric
+```
+
+Then run the shared first-run commands:
+
+```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
@@ -52,19 +64,40 @@ directory or a checked-out project.
 
 Upgrade:
 
+Run the upgrade command for the package manager you used to install AWF.
+
+`uv tool`:
+
 ```bash
 uv tool upgrade agent-workspace-fabric
-# or:
+```
+
+`pipx`:
+
+```bash
 pipx upgrade agent-workspace-fabric
+```
+
+Then restart AWF and rerun smoke:
+
+```bash
 awf start
 awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
 Uninstall:
 
+Run the uninstall command for the package manager you used to install AWF.
+
+`uv tool`:
+
 ```bash
 uv tool uninstall agent-workspace-fabric
-# or:
+```
+
+`pipx`:
+
+```bash
 pipx uninstall agent-workspace-fabric
 ```
 

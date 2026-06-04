@@ -98,6 +98,11 @@ persisted source-checkout metadata with `awf setup --source-checkout "$PWD"`
 after the pull/install or sync step and before the matching
 `awf start --source-checkout "$PWD"` command.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HDHwd`: the `uv tool` and
+`pipx` alternatives in `docs/QUICKSTART.md` Lane 1 must not be executable in the
+same copy-paste bash block; split install, upgrade, and uninstall alternatives
+so copying one block cannot run both package managers.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

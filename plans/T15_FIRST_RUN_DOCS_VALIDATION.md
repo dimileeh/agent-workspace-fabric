@@ -441,6 +441,40 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HDHwd`:
+
+- `docs/QUICKSTART.md` Lane 1 now separates `uv tool` and `pipx` install,
+  upgrade, and uninstall alternatives into distinct bash blocks, with shared
+  setup/start/smoke commands in their own blocks.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Lane 1 bash blocks
+  that would execute both package-manager alternatives from one copied block.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_keeps_package_manager_alternatives_in_separate_blocks -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/QUICKSTART.md` Lane 1 had executable `uv tool` and `pipx` install,
+upgrade, and uninstall alternatives in the same bash blocks.
+
+Final repair result: `1 passed in 0.58s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_presents_available_complete_first_run_lanes tests/unit/docs/test_public_docs_status.py::test_quickstart_keeps_package_manager_alternatives_in_separate_blocks tests/unit/docs/test_public_docs_status.py::test_quickstart_smoke_commands_reuse_initialized_project_paths tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional -q
+```
+
+Result: `4 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
