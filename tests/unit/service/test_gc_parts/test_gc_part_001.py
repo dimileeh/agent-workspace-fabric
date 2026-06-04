@@ -14,8 +14,11 @@ import awf.service.gc as gc
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    ResourceReservationRepository,
     SecretLeaseIssue,
     SecretLeaseRepository,
+    TaskAttemptRepository,
+    TaskRepository,
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
@@ -88,6 +91,29 @@ async def _workspace(
             workspace.pr_merge_sha = pr_merge_sha
         await session.commit()
         return workspace.id
+
+
+async def _task_attempt_for_workspace(
+    session: AsyncSession,
+    workspace_id: str,
+) -> str:
+    workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    task = await TaskRepository(session).create_or_get(
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        title=workspace.task_title,
+        prompt=workspace.task_prompt,
+        external_id=f"gc-{workspace_id}",
+        idempotency_key=None,
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=workspace,
+    )
+    return attempt.id
 
 
 async def _set_workspace_gc_state(
@@ -1297,6 +1323,76 @@ async def test_single_workspace_gc_tears_down_compose_for_preserved_workspace(
     ]
     assert worktree.exists()
     assert compose_file.exists()
+
+
+@pytest.mark.unit
+async def test_single_workspace_fallback_compose_teardown_releases_runtime_side_effects(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha=None,
+    )
+    await _issue_gc_secret_lease(session_factory, workspace_id, now=now)
+    async with session_factory() as session:
+        repo = ResourceReservationRepository(session)
+        attempt_id = await _task_attempt_for_workspace(session, workspace_id)
+        await repo.create(
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            node_id="node_1",
+            steady_cpu=1.0,
+            steady_memory_gb=2.0,
+            peak_cpu=2.0,
+            peak_memory_gb=4.0,
+            disk_mb=1024,
+            phase="steady",
+            reserved_at=now - timedelta(hours=1),
+        )
+        await session.commit()
+
+    async def _compose_teardown(
+        _candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        ignore_retention=True,
+        compose_teardown=_compose_teardown,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        COMPLETED_PR_NOT_MERGED,
+    ]
+    assert result.to_dict()["secret_leases"] == {
+        workspace_id: {"revoked_count": 1, "reason_code": "TERMINAL_GC"}
+    }
+    assert result.reservation_releases[workspace_id]["released_count"] == 1
+    async with session_factory() as session:
+        leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
+        reservation = await ResourceReservationRepository(session).active_for_workspace(
+            workspace_id
+        )
+
+    assert leases[0].status == "revoked"
+    assert leases[0].revoke_reason_code == "TERMINAL_GC"
+    assert reservation is None
 
 
 @pytest.mark.unit

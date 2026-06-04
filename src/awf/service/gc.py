@@ -1093,10 +1093,15 @@ def _workspace_ids_after_compose_teardown(
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult],
 ) -> list[str]:
     workspace_ids: list[str] = []
+    candidate_ids: set[str] = set()
     for candidate in plan.candidates:
+        candidate_ids.add(candidate.workspace_id)
         teardown = compose_teardowns.get(candidate.workspace_id)
         if teardown is None or teardown.ok:
             workspace_ids.append(candidate.workspace_id)
+    for workspace_id, teardown in compose_teardowns.items():
+        if workspace_id not in candidate_ids and teardown.ok:
+            workspace_ids.append(workspace_id)
     return workspace_ids
 
 
