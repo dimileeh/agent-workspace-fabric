@@ -8,6 +8,7 @@ import httpx
 import pytest
 import typer
 
+from awf.cli import common as cli_common
 from awf.cli import workspace_commands
 from awf.cli.common import OutputFormat
 from awf.db.enums import TaskClass, TaskKind
@@ -136,6 +137,12 @@ def test_workspace_create_builds_minimal_development_payload(
         captured.update(kwargs)
         return httpx.Response(202, json={"id": "ws"})
 
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.setattr(
+        cli_common,
+        "local_service_environ",
+        lambda _environ: {"AWF_API_TOKEN": "local-dev-token"},
+    )
     monkeypatch.setattr(workspace_commands, "_call", _call)
     monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
 
@@ -181,7 +188,7 @@ def test_workspace_create_builds_minimal_development_payload(
 
     assert captured["method"] == "POST"
     assert captured["path"] == "/v1/workspaces"
-    assert captured["headers"] == {}
+    assert captured["headers"] == {"Authorization": "Bearer local-dev-token"}
     assert captured["json"] == {
         "repo": {
             "url": "git@example.com:repo/app.git",
