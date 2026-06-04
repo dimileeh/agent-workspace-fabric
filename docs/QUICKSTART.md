@@ -78,9 +78,17 @@ uv tool upgrade agent-workspace-fabric
 pipx upgrade agent-workspace-fabric
 ```
 
-Then restart AWF and rerun smoke:
+Then restart AWF and rerun smoke. If `AWF_API_TOKEN` and
+`AWF_POSTGRES_PASSWORD` are not already persisted in `.env`, restore them in
+this shell before restarting:
 
 ```bash
+if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+fi
+if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+fi
 awf start
 awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```

@@ -131,6 +131,12 @@ source lane must stop local Core, refresh persisted source-checkout metadata wit
 `awf setup --source-checkout "$PWD"`, then start with
 `awf start --source-checkout "$PWD"` from the restored checkout.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HGN4c`: package and
+virtualenv upgrade snippets must restore the mandatory local service values
+before `awf start` when no `.env` already persists them. Preserve an existing
+`.env` as the preferred read source so upgrade snippets do not accidentally
+override persisted service secrets.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

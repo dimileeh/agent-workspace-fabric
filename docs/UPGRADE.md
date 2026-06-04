@@ -7,12 +7,22 @@ still works. Replace `<path>` below with that project path. The hosted curl
 installer lane is intentionally omitted until its public installer, manifest,
 checksums, and distribution artifacts are published and verified.
 
+Package and virtualenv lanes read `.env` from the current directory when it
+exists. If `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` are not already persisted
+there, restore them in the upgrade shell before `awf start`.
+
 ## uv tool
 
 The `uv tool` lane is release-installed and package-manager mediated:
 
 ```bash
 uv tool upgrade agent-workspace-fabric
+if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+fi
+if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+fi
 awf start
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty
@@ -24,6 +34,12 @@ The `pipx` lane is release-installed and package-manager mediated:
 
 ```bash
 pipx upgrade agent-workspace-fabric
+if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+fi
+if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+fi
 awf start
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty
@@ -38,6 +54,12 @@ Use this path only when you installed AWF into an active virtualenv with
 cd /path/to/project-or-env
 . .venv/bin/activate
 pip install --upgrade agent-workspace-fabric
+if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+fi
+if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
+  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+fi
 awf start
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty

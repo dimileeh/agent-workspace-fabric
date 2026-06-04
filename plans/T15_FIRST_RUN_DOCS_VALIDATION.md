@@ -669,6 +669,42 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HGN4c`:
+
+- `docs/QUICKSTART.md` now restores package-lane service env before the upgrade
+  restart when `AWF_API_TOKEN` or `AWF_POSTGRES_PASSWORD` is not already
+  persisted in `.env`.
+- `docs/UPGRADE.md` now applies the same guarded env restoration to the `uv
+  tool`, `pipx`, and virtualenv/pip upgrade snippets before `awf start`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects package upgrade docs
+  that restart AWF without first preserving existing `.env` values and exporting
+  missing mandatory service variables.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start -q
+```
+
+Red-phase result after adding the focused assertion: failed because Quickstart
+Lane 1 restarted AWF without checking `.env` or exporting `AWF_API_TOKEN`.
+
+Final focused repair result: `1 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `44 passed in 1.28s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

@@ -374,6 +374,37 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         ), f"{label} must guard env-file stop, refresh metadata, then start"
 
 
+def test_package_upgrade_docs_restore_service_env_before_start() -> None:
+    """Assert package upgrades keep mandatory local service env available."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    cases = (
+        (
+            "Quickstart Lane 1",
+            _quickstart_upgrade_section(quickstart_text, "## Lane 1: uv tool or pipx"),
+            "pipx upgrade agent-workspace-fabric",
+        ),
+        (
+            "Upgrade uv tool",
+            _markdown_section(upgrade_text, "## uv tool"),
+            "uv tool upgrade agent-workspace-fabric",
+        ),
+        (
+            "Upgrade pipx",
+            _markdown_section(upgrade_text, "## pipx"),
+            "pipx upgrade agent-workspace-fabric",
+        ),
+        (
+            "Upgrade virtualenv / pip",
+            _markdown_section(upgrade_text, "## Virtualenv / pip"),
+            "pip install --upgrade agent-workspace-fabric",
+        ),
+    )
+
+    for label, section, upgrade_line in cases:
+        _assert_package_upgrade_restores_service_env(label, section, upgrade_line)
+
+
 def test_quickstart_source_checkout_upgrades_reuse_existing_checkout() -> None:
     """Assert source-checkout upgrade commands reuse the checkout created earlier."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
@@ -1044,6 +1075,42 @@ def _quickstart_upgrade_section(text: str, heading: str) -> str:
     assert "Upgrade:" in section, f"{heading} is missing Upgrade block"
     assert "Uninstall:" in section, f"{heading} is missing Uninstall block"
     return section.split("Upgrade:", maxsplit=1)[1].split("Uninstall:", maxsplit=1)[0]
+
+
+def _assert_package_upgrade_restores_service_env(
+    label: str,
+    section: str,
+    upgrade_line: str,
+) -> None:
+    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then"
+    api_export_line = '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
+    password_export_line = '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    start_line = "awf start"
+
+    assert upgrade_line in section, f"{label} is missing upgrade command"
+    assert api_guard_line in section, f"{label} must prefer persisted AWF_API_TOKEN"
+    assert api_export_line in section, f"{label} must restore AWF_API_TOKEN"
+    assert password_guard_line in section, f"{label} must prefer persisted AWF_POSTGRES_PASSWORD"
+    assert password_export_line in section, f"{label} must restore AWF_POSTGRES_PASSWORD"
+    assert start_line in section, f"{label} is missing restart command"
+
+    api_guard_index = section.index(api_guard_line)
+    api_export_index = section.index(api_export_line)
+    api_guard_end_index = section.index("fi", api_export_index)
+    password_guard_index = section.index(password_guard_line)
+    password_export_index = section.index(password_export_line)
+    password_guard_end_index = section.index("fi", password_export_index)
+    assert (
+        section.index(upgrade_line)
+        < api_guard_index
+        < api_export_index
+        < api_guard_end_index
+        < password_guard_index
+        < password_export_index
+        < password_guard_end_index
+        < section.index(start_line)
+    ), f"{label} must restore missing service env before restart"
 
 
 def _public_docs() -> set[str]:
