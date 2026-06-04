@@ -190,6 +190,13 @@ def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
 def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
     """Assert mocked first-run commands do not require GitHub CLI auth."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lane_headings = re.findall(r"(?m)^## Lane [^\n]+", quickstart_text)
+    optional_token_comment = (
+        "# [optional] Only needed for PR creation/monitoring; skip for mocked smoke."
+    )
+    manual_token_comment = (
+        "# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed."
+    )
 
     assert "does not require live GitHub or provider access" in quickstart_text
     assert "gh auth token" not in quickstart_text
@@ -197,18 +204,24 @@ def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
         r'(?m)^export AWF_GITHUB_TOKEN="\$\(gh auth token\)"$',
         quickstart_text,
     )
-    assert (
-        quickstart_text.count(
-            "# [optional] Only needed for PR creation/monitoring; skip for mocked smoke."
-        )
-        == 3
+    optional_token_comment_count = quickstart_text.count(optional_token_comment)
+    manual_token_comment_count = quickstart_text.count(manual_token_comment)
+
+    assert len(lane_headings) >= 3
+    assert optional_token_comment_count == len(lane_headings), (
+        "Expected one optional GitHub token scope comment per Quickstart lane; "
+        f"found {optional_token_comment_count} comments for {len(lane_headings)} lanes: "
+        f"{lane_headings}"
     )
-    assert (
-        quickstart_text.count(
-            "# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed."
-        )
-        == 3
+    assert manual_token_comment_count == len(lane_headings), (
+        "Expected one manual GitHub token guidance comment per Quickstart lane; "
+        f"found {manual_token_comment_count} comments for {len(lane_headings)} lanes: "
+        f"{lane_headings}"
     )
+    for heading in lane_headings:
+        section = _markdown_section(quickstart_text, heading)
+        assert optional_token_comment in section, f"{heading} is missing optional token scope"
+        assert manual_token_comment in section, f"{heading} is missing manual token guidance"
 
 
 def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -> None:
@@ -233,6 +246,17 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
     """Assert Quickstart local URLs match the default smoke probe targets."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
+        encoding="utf-8",
+    )
+    startup_heading = "### Recommended First-Run Sequence"
+    configure_heading = "### Configure Environment"
+    assert startup_heading in getting_started_text
+    assert configure_heading in getting_started_text
+    startup_section = getting_started_text.split(startup_heading, maxsplit=1)[1].split(
+        configure_heading,
+        maxsplit=1,
+    )[0]
     api_url = DEFAULT_LOCAL_SERVICE_API_BASE_URL
     readyz_url = f"{api_url.rstrip('/')}/readyz"
     console_url = DEFAULT_LOCAL_CONSOLE_URL
@@ -243,6 +267,11 @@ def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
     assert f"`{readyz_url}`" in quickstart_text
     assert "http://127.0.0.1:8000" not in quickstart_text
     assert "http://127.0.0.1:3000" not in quickstart_text
+    assert not re.search(
+        r"using\s+`127\.0\.0\.1`\s+for host-facing loopback",
+        startup_section,
+    )
+    assert re.search(r"current smoke\s+defaults", startup_section)
 
 
 def test_markdown_section_accepts_trailing_heading_whitespace() -> None:

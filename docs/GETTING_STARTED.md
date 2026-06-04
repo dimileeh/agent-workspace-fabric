@@ -103,8 +103,9 @@ awf smoke run --project <path> --mocked-local --format pretty
 ```
 
 `awf setup` runs bounded host readiness checks without starting Core.
-`awf start` starts local AWF Core and reports the local API and console URLs, using
-`127.0.0.1` for host-facing loopback. `awf service status --format pretty`
+`awf start` starts local AWF Core and reports the local API and console URLs.
+For first-run probes, Quickstart keeps those URLs aligned with the current smoke
+defaults. `awf service status --format pretty`
 confirms API, database, Docker, image, disk, provider, and cleanup health.
 
 If setup, startup, or first-run health checks fail, use the

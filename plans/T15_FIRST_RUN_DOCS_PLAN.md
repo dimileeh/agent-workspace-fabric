@@ -81,6 +81,12 @@ Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HCN6b`: the self-contained
 Quickstart source-checkout/no-global-install uninstall lane must clear or refresh
 persisted `source_checkout` metadata before deleting the recorded checkout.
 
+Post-review adjustment for review-level comment `issue:4620140358`: Getting
+Started must not contradict the Quickstart smoke-default `localhost` URLs with a
+blanket `127.0.0.1` first-run statement, and the Quickstart optional GitHub
+token assertion must calibrate itself from the advertised lane headings instead
+of hard-coding the current lane count.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

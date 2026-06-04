@@ -37,6 +37,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   self-contained Quickstart source-checkout/no-global-install uninstall lane
   clear or refresh persisted `source_checkout` metadata before deleting the
   recorded checkout.
+- Complete: Address review-level comment `issue:4620140358` by removing the
+  Getting Started `127.0.0.1` first-run URL contradiction and making the
+  Quickstart optional GitHub token assertion self-calibrate from lane headings.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -327,6 +330,40 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `34 passed in 1.00s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `docs/GETTING_STARTED.md` no longer states that first-run local API and
+  console URLs use `127.0.0.1`; it now defers first-run probe URL defaults to
+  Quickstart's smoke-default wording.
+- `tests/unit/docs/test_public_docs_status.py` now rejects the old
+  `127.0.0.1` host-facing loopback sentence in the Getting Started first-run
+  section while keeping Quickstart tied to the smoke defaults.
+- `test_quickstart_mocked_smoke_keeps_github_auth_optional` now derives its
+  expected optional-token comment count from `## Lane ...` headings and reports
+  the lane heading when a lane is missing the comments.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional -q
+```
+
+Red-phase result after adding the focused assertions: failed because
+`docs/GETTING_STARTED.md` still said `awf start` reported URLs using
+`127.0.0.1` for host-facing loopback.
+
+Final repair result: `2 passed in 0.57s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `34 passed in 0.98s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
