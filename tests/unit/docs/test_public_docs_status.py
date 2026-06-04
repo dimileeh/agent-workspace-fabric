@@ -629,24 +629,22 @@ def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
         r'(?m)^export AWF_GITHUB_TOKEN="\$\(gh auth token\)"$',
         quickstart_text,
     )
-    optional_token_comment_count = quickstart_text.count(optional_token_comment)
-    manual_token_comment_count = quickstart_text.count(manual_token_comment)
-
     assert len(lane_headings) >= 3
-    assert optional_token_comment_count == len(lane_headings), (
-        "Expected one optional GitHub token scope comment per Quickstart lane; "
-        f"found {optional_token_comment_count} comments for {len(lane_headings)} lanes: "
-        f"{lane_headings}"
-    )
-    assert manual_token_comment_count == len(lane_headings), (
-        "Expected one manual GitHub token guidance comment per Quickstart lane; "
-        f"found {manual_token_comment_count} comments for {len(lane_headings)} lanes: "
-        f"{lane_headings}"
-    )
     for heading in lane_headings:
         section = _markdown_section(quickstart_text, heading)
-        assert optional_token_comment in section, f"{heading} is missing optional token scope"
-        assert manual_token_comment in section, f"{heading} is missing manual token guidance"
+        first_run_section = section.split("\nUpgrade:\n", maxsplit=1)[0]
+        optional_token_comment_count = first_run_section.count(optional_token_comment)
+        manual_token_comment_count = first_run_section.count(manual_token_comment)
+        assert optional_token_comment_count == 1, (
+            f"{heading} must include exactly one optional GitHub token scope comment "
+            "before Upgrade; "
+            f"found {optional_token_comment_count}"
+        )
+        assert manual_token_comment_count == 1, (
+            f"{heading} must include exactly one manual GitHub token guidance comment "
+            "before Upgrade; "
+            f"found {manual_token_comment_count}"
+        )
 
 
 def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -> None:
@@ -2400,7 +2398,9 @@ def _required_index(text: str, needle: str, label: str, start: int = 0) -> int:
 
 
 def _shell_closing_fi_index(section: str, start: int, label: str) -> int:
-    """Return the closing fi index after a shell guard line."""
+    """Return the closing fi index after a flat shell guard line."""
+    # The docs snippets validated here intentionally use flat if/fi guards. Use
+    # a depth-aware parser before reusing this helper for nested shell guards.
     closing_match = re.search(r"(?m)^fi$", section[start:])
     assert closing_match is not None, f"{label} is missing closing shell fi"
     return start + closing_match.start()

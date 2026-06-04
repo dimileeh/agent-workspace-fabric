@@ -485,6 +485,18 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HLiZ5`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_accepts_export_prefixed_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
 ```
 
+Post-review adjustment for review-level comment `issue:4620140358`: Quickstart
+optional GitHub token assertions must count the required comments inside each
+advertised lane's first-run section instead of across all of
+`docs/QUICKSTART.md`, and `_shell_closing_fi_index` must document that it only
+supports the flat shell guards used by these docs snippets.
+
+Focused repair command for review-level comment `issue:4620140358`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword -q
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

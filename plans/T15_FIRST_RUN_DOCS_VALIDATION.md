@@ -98,6 +98,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address PR thread `PRRT_kwDOSJAM6s6HKuFE` by splitting the README
   first-run global-source lane away from release-installed PATH commands and
   passing `--source-checkout "$PWD"` to global-source setup/start.
+- Complete: Address review-level comment `issue:4620140358` by checking
+  Quickstart optional GitHub token guidance per advertised lane first-run
+  section and documenting the flat shell guard assumption in
+  `_shell_closing_fi_index`.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -2085,6 +2089,28 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 
 Final focused repair result: `1 passed in 0.67s`; `3 passed in 0.73s`;
 `1 passed in 0.75s`; `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `tests/unit/docs/test_public_docs_status.py` now counts the optional and
+  manual GitHub token comments inside each advertised Quickstart lane's
+  first-run section instead of across the entire document.
+- `_shell_closing_fi_index` now documents that it supports the flat `if`/`fi`
+  guards used by the docs snippets and should not be reused for nested guards
+  without a depth-aware parser.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `2 passed in 0.68s`; `All checks passed!`;
+`1 file already formatted`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
