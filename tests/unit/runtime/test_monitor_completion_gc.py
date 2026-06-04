@@ -353,6 +353,10 @@ async def test_completed_monitor_reclaims_recent_workspace_pressure_dirs_immedia
     assert not auth.exists()
     # The durable record is kept.
     assert log_file.exists()
+    assert any(
+        record.get("event") == "monitor.compose_teardown_ok" and record.get("workspace_id") == ws_id
+        for record in captured
+    )
     assert any(record.get("event") == "monitor.filesystem_gc_ok" for record in captured)
     assert not any(record.get("event") == "monitor.filesystem_gc_deferred" for record in captured)
     async with factory() as session:
@@ -806,7 +810,7 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
             error="docker unavailable",
         )
     )
-    with compose_patch:
+    with compose_patch, structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
@@ -817,6 +821,12 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
     assert auth.exists()
     assert compose_calls == [(f"awf_{ws_id}", Path(f"/tmp/awf/{ws_id}/compose.yml"), ws_id, True)]
     assert not any(call.args[:2] == ["docker", "compose"] for call in cmd.calls)
+    assert any(
+        record.get("event") == "monitor.compose_teardown_failed"
+        and record.get("workspace_id") == ws_id
+        and record.get("reason_code") == "DOCKER_UNAVAILABLE"
+        for record in captured
+    )
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None

@@ -67,6 +67,7 @@ from awf.service.gc import (
     WorkspaceGCCandidate,
     WorkspaceGCComposeTeardown,
     WorkspaceGCComposeTeardownResult,
+    WorkspaceGCResult,
     run_workspace_filesystem_gc,
 )
 
@@ -559,7 +560,13 @@ async def _teardown_compose_stack(
     compose_project: str,
     compose_file: Path,
 ) -> bool:
-    """Run ``docker compose down --remove-orphans --volumes`` for a
+    """Legacy compatibility helper for direct compose teardown calls.
+
+    Completed-workspace monitor cleanup now routes compose teardown through
+    ``_gc_completed_workspace_filesystem`` so compose, auth-overlay unmount, and
+    path deletion share the filesystem GC failure gate.
+
+    Run ``docker compose down --remove-orphans --volumes`` for a
     terminated workspace. Never raises a regular ``Exception``.
 
     The call is wrapped in ``except Exception`` so the failure modes
@@ -699,6 +706,48 @@ def _completed_workspace_compose_teardown(
     return _teardown
 
 
+def _compose_project_for_gc_log(
+    result: WorkspaceGCResult,
+    *,
+    workspace_id: str,
+    fallback_compose_project: str | None,
+) -> str | None:
+    for candidate in result.plan.candidates:
+        if candidate.workspace_id == workspace_id:
+            return candidate.compose_project_name or fallback_compose_project
+    return fallback_compose_project
+
+
+def _log_completed_workspace_compose_teardown_result(
+    result: WorkspaceGCResult,
+    *,
+    workspace_id: str,
+    compose_project: str | None,
+) -> None:
+    teardown = result.compose_teardowns.get(workspace_id)
+    if teardown is None:
+        return
+
+    log_fields: dict[str, object] = {
+        "workspace_id": workspace_id,
+        "status": teardown.status,
+        "reason_code": teardown.reason_code,
+    }
+    resolved_compose_project = _compose_project_for_gc_log(
+        result,
+        workspace_id=workspace_id,
+        fallback_compose_project=compose_project,
+    )
+    if resolved_compose_project is not None:
+        log_fields["compose_project"] = resolved_compose_project
+    if teardown.ok:
+        _log.info("monitor.compose_teardown_ok", **log_fields)
+        return
+    if teardown.error:
+        log_fields["error"] = teardown.error[:400]
+    _log.warning("monitor.compose_teardown_failed", **log_fields)
+
+
 async def _gc_completed_workspace_filesystem(
     self: Any,
     workspace_id: str,
@@ -743,6 +792,11 @@ async def _gc_completed_workspace_filesystem(
             error=repr(exc)[:400],
         )
         return
+    _log_completed_workspace_compose_teardown_result(
+        result,
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+    )
     if not result.plan.candidates and result.plan.preserved:
         preserved = result.plan.preserved[0]
         _log.info(
