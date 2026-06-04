@@ -182,7 +182,10 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
     assert (
         len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
     )
-    assert len(re.findall(r"(?m)^cp \.env\.example \.env$", prerequisites_section)) == 2
+    assert len(re.findall(r"(?m)^cp \.env\.example \.env$", prerequisites_section)) == 1
+    assert "cat > .env <<'EOF'" in prerequisites_section
+    assert "AWF_API_TOKEN=local-dev-token" in prerequisites_section
+    assert "AWF_POSTGRES_PASSWORD=awf_dev" in prerequisites_section
     assert "docker/compose/.env" not in prerequisites_section
 
 

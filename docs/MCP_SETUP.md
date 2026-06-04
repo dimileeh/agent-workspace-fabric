@@ -8,11 +8,20 @@ shelling out to `awf` or `curl`.
 
 Install AWF and start the local Core service first. Persist the required local
 service values in root `.env` so Compose and the MCP server read the same API,
-worker, and Postgres service environment:
+worker, and Postgres service environment.
+
+For package installs, create that file explicitly because `.env.example` stays
+inside the installed AWF package assets:
 
 ```bash
 uv tool install agent-workspace-fabric
-cp .env.example .env
+cat > .env <<'EOF'
+AWF_API_TOKEN=local-dev-token
+AWF_POSTGRES_PASSWORD=awf_dev
+AWF_API_HOST_PORT=8000
+AWF_POSTGRES_HOST_PORT=5433
+AWF_CONSOLE_HOST_PORT=3000
+EOF
 awf setup
 awf start
 awf service status --format pretty
