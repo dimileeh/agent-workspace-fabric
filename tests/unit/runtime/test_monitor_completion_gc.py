@@ -279,6 +279,42 @@ async def test_completed_workspace_gc_tears_down_compose_when_plan_is_empty(
 
 
 @pytest.mark.unit
+async def test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-empty-plan-ok-log"
+    compose_file = work_dir / "compose" / ws_id / "compose.yml"
+    runner = SimpleNamespace(
+        _work_dir=work_dir,
+        _deps=SimpleNamespace(session_factory=factory),
+    )
+    compose_patch, _compose_calls = mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+
+    with compose_patch, structlog.testing.capture_logs() as captured:
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="proj_from_monitor",
+            compose_file=compose_file,
+        )
+
+    ok_records = [
+        record for record in captured if record.get("event") == "monitor.filesystem_gc_ok"
+    ]
+    assert ok_records
+    assert ok_records[0].get("deleted_path_count") == 0
+    assert ok_records[0].get("compose_teardown_status") == "succeeded"
+    assert ok_records[0].get("compose_teardown_only") is True
+
+
+@pytest.mark.unit
 async def test_completed_workspace_gc_unmounts_auth_overlay_when_plan_is_empty(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

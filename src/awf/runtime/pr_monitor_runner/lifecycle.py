@@ -846,12 +846,17 @@ async def _gc_completed_workspace_filesystem(
             deferred_log_fields["compose_teardown_status"] = teardown.status
         _log.info("monitor.filesystem_gc_deferred", **deferred_log_fields)
         return
-    _log.info(
-        "monitor.filesystem_gc_ok",
-        workspace_id=workspace_id,
-        deleted_path_count=len(result.deleted_paths),
-        reclaimed_bytes=result.plan.total_estimated_bytes,
-    )
+    ok_log_fields: dict[str, object] = {
+        "workspace_id": workspace_id,
+        "deleted_path_count": len(result.deleted_paths),
+        "reclaimed_bytes": result.plan.total_estimated_bytes,
+    }
+    teardown = result.compose_teardowns.get(workspace_id)
+    if teardown is not None:
+        ok_log_fields["compose_teardown_status"] = teardown.status
+        if not result.plan.candidates and not result.deleted_paths:
+            ok_log_fields["compose_teardown_only"] = True
+    _log.info("monitor.filesystem_gc_ok", **ok_log_fields)
 
 
 async def _terminate_failed(

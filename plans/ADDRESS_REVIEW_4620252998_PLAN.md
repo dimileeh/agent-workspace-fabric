@@ -53,3 +53,59 @@ Existing earlier fixes for partial failure logging are preserved.
 - Optional targeted lint:
   `uv run --python 3.12 --extra dev ruff check src/awf/service/gc.py src/awf/runtime/pr_monitor_runner/lifecycle.py tests/unit/service/test_gc_parts/test_gc_part_002.py tests/unit/runtime/test_monitor_completion_gc.py`
   should pass.
+
+## Iteration 2: Compose-Only Success Observability
+
+### Problem Statement And Scope
+
+Follow-up review on the same PR comment identified two remaining issues:
+
+- `_gc_result` has a `compose_teardown_failed` flag that appears redundant for
+  normal candidates but is required for fallback compose teardown candidates,
+  where the path deletion loop never records a delete error.
+- A missing-workspace fallback compose teardown can succeed and emit
+  `monitor.filesystem_gc_ok` with `deleted_path_count=0`, making the event look
+  like a clean no-op unless the operator correlates it with the separate
+  `monitor.compose_teardown_ok` event.
+
+Scope is limited to one explanatory comment in service GC, one success-log
+payload change in the completed monitor filesystem GC path, and focused runtime
+coverage for the compose-only success log.
+
+### Requirements Checklist
+
+- Verify the follow-up reviewer claims against the current service GC and
+  lifecycle code.
+- Add a focused lifecycle regression proving a missing-workspace fallback
+  compose teardown success marks `monitor.filesystem_gc_ok` as compose-only.
+- Add a short code comment explaining why `compose_teardown_failed` remains
+  load-bearing for fallback candidates.
+- Implement the smallest log payload change needed to make compose-only success
+  distinguishable from a zero-delete no-op.
+- Run only focused tests and targeted lint for touched files; broad AWF/GitHub
+  validation remains managed after agent completion.
+
+### Implementation Steps
+
+1. Add the focused runtime regression to
+   `tests/unit/runtime/test_monitor_completion_gc.py`.
+2. Confirm the new assertion fails against the current implementation when
+   practical.
+3. Update `_gc_completed_workspace_filesystem` to add compose teardown status
+   and a compose-only marker to successful filesystem GC logs when the result is
+   the missing-workspace fallback shape.
+4. Add the explanatory comment near `_gc_result` error-status derivation.
+5. Re-run the focused regression and targeted lint, then update validation
+   evidence.
+
+### Verification Commands And Pass Criteria
+
+- Initial/final focused regression command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success -q`
+  should fail before implementation and pass after implementation.
+- Optional focused related slice:
+  `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_tears_down_compose_when_plan_is_empty tests/unit/runtime/test_monitor_completion_gc.py::test_completed_monitor_filesystem_gc_logs_success_for_retained_old_workspace -q`
+  should pass.
+- Targeted lint:
+  `uv run --python 3.12 --extra dev ruff check src/awf/service/gc.py src/awf/runtime/pr_monitor_runner/lifecycle.py tests/unit/runtime/test_monitor_completion_gc.py`
+  should pass.

@@ -39,3 +39,45 @@ Plan reference: `plans/ADDRESS_REVIEW_4620252998_PLAN.md`
 
 None for this review-level comment. Broad validation and merge gating remain
 owned by AWF/GitHub after agent completion.
+
+## Iteration 2: Compose-Only Success Observability
+
+### Requirement Status
+
+- Verify the follow-up reviewer claims against current code: Complete. The
+  `compose_teardown_failed` flag is required for fallback teardown failures
+  because fallback candidates are not passed through `_delete_gc_plan_paths`;
+  the completed-monitor ok log also lacked compose teardown fields for the
+  missing-workspace fallback success case.
+- Add a focused lifecycle regression for compose-only success logs: Complete.
+  Added
+  `test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success`.
+- Add an explanatory comment for `compose_teardown_failed`: Complete. The
+  comment documents why fallback compose teardowns still need the explicit
+  failure flag.
+- Make compose-only success distinguishable from a zero-delete no-op: Complete.
+  `monitor.filesystem_gc_ok` now includes `compose_teardown_status` when the
+  result carries a teardown for the workspace, plus `compose_teardown_only=True`
+  for the empty-plan fallback success shape.
+- Run only focused local checks: Complete. Full AWF/GitHub validation remains
+  managed after agent completion.
+
+### Evidence
+
+- Initial focused regression check before implementation:
+  `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success -q`
+  failed because `monitor.filesystem_gc_ok` had no `compose_teardown_status`.
+- Focused regression check after implementation:
+  `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success -q`
+  passed with 1 test.
+- Focused related slice:
+  `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success tests/unit/runtime/test_monitor_completion_gc.py::test_completed_workspace_gc_tears_down_compose_when_plan_is_empty tests/unit/runtime/test_monitor_completion_gc.py::test_completed_monitor_filesystem_gc_logs_success_for_retained_old_workspace -q`
+  passed with 3 tests.
+- Targeted lint:
+  `uv run --python 3.12 --extra dev ruff check src/awf/service/gc.py src/awf/runtime/pr_monitor_runner/lifecycle.py tests/unit/runtime/test_monitor_completion_gc.py`
+  passed.
+
+### Remaining Gaps
+
+None for the follow-up review points. Broad validation and merge gating remain
+owned by AWF/GitHub after agent completion.

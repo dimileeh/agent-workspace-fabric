@@ -1306,6 +1306,8 @@ def _gc_result(
     companion_prune_failed = (
         companion_image_prune is not None and companion_image_prune.get("status") == "failed"
     )
+    # Candidate teardown failures are also reflected in delete_errors by the
+    # path loop, but fallback compose teardowns never enter that loop.
     compose_teardown_failed = any(not teardown.ok for teardown in compose_teardowns.values())
     has_errors = (
         bool(delete_errors)
