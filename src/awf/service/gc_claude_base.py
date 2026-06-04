@@ -272,7 +272,9 @@ def reap_superseded_claude_bases(
     could be invisible *and* unpinned — so every candidate is conservatively
     protected (listed under ``unverifiable``) and ``reason_code`` becomes
     ``CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE`` rather than reaping a base that may
-    still back a running agent (PRRT_kwDOSJAM6s6HI1tS).
+    still back a running agent (PRRT_kwDOSJAM6s6HI1tS). On ``execute`` that case also
+    sets ``status`` to ``partial`` so the top-level GC does not report a clean success
+    while the unreaped bases stay leaked (PRRT_kwDOSJAM6s6HLNDz).
     """
 
     work_dir = Path(work_dir).expanduser()
@@ -371,6 +373,13 @@ def reap_superseded_claude_bases(
         # live-mount view is untrustworthy and the overlay is unpinned. Surface it
         # loudly with a dedicated reason code so this is never a silent no-op.
         report["reason_code"] = CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+        if execute:
+            # On execute the superseded bases were left on disk, so this pass
+            # reclaimed nothing it set out to. Mark the sub-step ``partial`` (not
+            # the ``skipped`` ``_reap_status`` returns for an empty reap) so
+            # ``_gc_result`` drives the whole run partial and the CLI does not exit
+            # 0 while the targeted multi-GB bases stay leaked (PRRT_kwDOSJAM6s6HLNDz).
+            report["status"] = "partial"
         _log.warning(
             "gc.claude_base_reap_live_mount_unverifiable",
             reason_code=CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE,

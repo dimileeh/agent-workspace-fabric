@@ -526,10 +526,38 @@ def test_declines_to_reap_when_live_mount_unverifiable(tmp_path: Path) -> None:
     assert report["unverifiable"] == ["sigsuper0000000"]
     assert "sigsuper0000000" in report["protected"]
     assert report["reason_code"] == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+    # On execute the superseded base was left on disk, so the sub-step is ``partial``
+    # (not ``skipped``) — otherwise ``_gc_result`` would report a clean success and the
+    # CLI would exit 0 while the multi-GB base stays leaked.
+    assert report["status"] == "partial"
     assert any(
         entry.get("reason_code") == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE for entry in logs
     )
     # The possibly-live base was not reclaimed.
+    assert base_super.is_dir()
+
+
+@pytest.mark.unit
+def test_dry_run_unverifiable_guard_is_not_partial(tmp_path: Path) -> None:
+    # A dry run reaps nothing regardless, so an unverifiable live-mount preview is an
+    # honest plan, not a failed reclaim — its sub-step status stays ``skipped`` and only
+    # the execute path escalates to ``partial``.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    _make_overlay_scratch(work_dir, "ws_live")
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=False,
+        capability_probe=lambda: False,
+    )
+
+    assert report["unverifiable"] == ["sigsuper0000000"]
+    assert report["reason_code"] == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+    assert report["status"] == "skipped"
     assert base_super.is_dir()
 
 
