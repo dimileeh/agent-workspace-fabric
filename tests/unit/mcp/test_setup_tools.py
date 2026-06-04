@@ -500,6 +500,35 @@ async def test_get_setup_status_host_config_error_without_source_checkout_is_str
 
 
 @pytest.mark.unit
+async def test_get_setup_status_run_setup_oserror_is_structured_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "f" * 40
+    leaked_detail = f"{tmp_path}/docker.sock contains {raw_token}"
+
+    def fail_run_setup(**_kwargs: Any) -> Any:
+        raise OSError(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "_run_setup", fail_run_setup)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_get_setup_status", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["summary"] == "could not inspect local setup readiness"
+    assert payload["issues"][0]["details"] == {"error_type": "OSError"}
+    assert leaked_detail not in rendered
+    assert raw_token not in rendered
+
+
+@pytest.mark.unit
 async def test_get_setup_status_source_checkout_reads_host_config_status(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

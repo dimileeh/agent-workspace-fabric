@@ -6,6 +6,7 @@ import asyncio
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
+from subprocess import CalledProcessError
 from typing import Annotated, Any, Protocol, cast
 
 from mcp.server.fastmcp import FastMCP
@@ -54,6 +55,7 @@ from awf.host_setup.config import (
 )
 from awf.host_setup.rendering import (
     CLIENT_CONFIG_CONFLICT,
+    SETUP_READINESS_FAILED,
     FirstRunPayload,
     render_first_run_json,
 )
@@ -237,6 +239,16 @@ def _get_setup_status_result(
         return _first_run_result(
             safe_result,
             _reason_coded_payload(exc.reason_code, exc.message, _config_error_details(exc)),
+            is_error=True,
+        )
+    except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
+        return _first_run_result(
+            safe_result,
+            _reason_coded_payload(
+                SETUP_READINESS_FAILED,
+                "could not inspect local setup readiness",
+                {"error_type": type(exc).__name__},
+            ),
             is_error=True,
         )
 

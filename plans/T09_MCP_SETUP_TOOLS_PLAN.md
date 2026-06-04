@@ -84,6 +84,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue_4620143523
+
+### Problem Statement And Scope
+
+The PR review reports that unguarded non-domain exceptions from `_run_setup`
+inside `awf_get_setup_status` can propagate through FastMCP without first
+passing through the shared safe-result redaction path. Plausible first-run
+failures include filesystem, subprocess, or runtime errors that may contain
+local paths or token-like details in their exception strings.
+
+Scope is limited to the setup-status `_run_setup` exception boundary and a
+focused regression proving the MCP result stays structured and redacted.
+
+### Requirements Checklist
+
+- Preserve the explicit `SetupCheckError` and `HostSetupConfigError` structured
+  reason-code payloads.
+- Convert generic setup-status probe failures into a redacted first-run blocked
+  result instead of allowing the raw exception to escape.
+- Expose only the exception type for generic probe failures; do not echo the
+  exception message or local path details.
+- Add a focused regression for an `_run_setup` `OSError` containing a
+  token-like value and path.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for a generic `_run_setup` failure.
+2. Add a fallback exception handler in `_get_setup_status_result` that returns a
+   `SETUP_READINESS_FAILED` first-run payload with only `error_type` details.
+3. Run the targeted regression and focused setup-tools checks for the touched
+   behavior.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_run_setup_oserror_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_marks_blocked_and_failed_readiness_as_mcp_error tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured tests/unit/mcp/test_setup_tools.py::test_get_setup_status_run_setup_oserror_is_structured_and_redacted -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HDuez
 
 ### Problem Statement And Scope
