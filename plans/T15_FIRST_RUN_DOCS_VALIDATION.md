@@ -63,6 +63,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   source-checkout upgrade and rollback snippets from generating a replacement
   `AWF_API_TOKEN` when `docker/compose/.env` or `.env` already carries the
   running local Core token.
+- Complete: Address review-level comment `issue:4620140358` by guarding the
+  reviewer-cited docs ordering assertions with explicit presence checks, while
+  leaving the already-correct source-checkout token restoration docs unchanged.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -944,6 +947,33 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 ```
 
 Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `tests/unit/docs/test_public_docs_status.py` now asserts the reviewer-cited
+  uninstall ordering anchors are present before calling `str.index`, so missing
+  anchors fail as clear pytest `AssertionError` output instead of bare
+  `ValueError: substring not found`.
+- `docs/UPGRADE.md` already requires restoring the running Core
+  `AWF_API_TOKEN` for source-checkout upgrade and rollback lanes and the
+  focused regression rejects `openssl rand -hex 32` token fallback there, so no
+  upgrade-doc rewrite was needed for that part of the comment.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion tests/unit/docs/test_public_docs_status.py::test_uninstall_no_global_source_checkout_cleanup_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_uninstall_global_source_checkout_refreshes_before_tool_uninstall tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+```
+
+Result: `4 passed in 0.73s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

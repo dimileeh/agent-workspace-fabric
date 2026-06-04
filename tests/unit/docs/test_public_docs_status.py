@@ -303,6 +303,7 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
         assert stop_env_file_line in uninstall_section
         assert stop_fallback_line in uninstall_section
         assert stop_guard_end_line in uninstall_section
+        assert "rm -rf aira-agent-workspace-fabric" in uninstall_section
         stop_fallback_index = uninstall_section.index(stop_fallback_line)
         assert section_words.index(core_stop_guidance) < section_words.index(port_block_guidance)
         assert (
@@ -316,6 +317,7 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
             "rm -rf aira-agent-workspace-fabric"
         )
         if heading == "## Lane 2: Source Checkout With Global Tool Install":
+            assert "uv tool uninstall agent-workspace-fabric" in uninstall_section
             assert uninstall_section.index(replacement_setup) < uninstall_section.index(
                 "uv tool uninstall agent-workspace-fabric"
             )
@@ -1080,6 +1082,7 @@ def test_uninstall_no_global_source_checkout_cleanup_uses_uv_run() -> None:
     )
 
     assert replacement_setup in source_section
+    assert "rm -rf" in source_section
     assert source_section.index(replacement_setup) < source_section.index("rm -rf")
 
 
@@ -1095,6 +1098,8 @@ def test_uninstall_global_source_checkout_refreshes_before_tool_uninstall() -> N
     )
 
     assert replacement_setup in source_section
+    assert "uv tool uninstall agent-workspace-fabric" in source_section
+    assert "rm -rf" in source_section
     assert source_section.index(replacement_setup) < source_section.index(
         "uv tool uninstall agent-workspace-fabric"
     )

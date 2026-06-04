@@ -170,6 +170,14 @@ unset. Reuse a token already persisted in `docker/compose/.env` or `.env`; only
 require operators to export the running local Core token when neither file
 contains it.
 
+Post-review adjustment for review-level comment `issue:4620140358`: docs
+ordering assertions cited by the reviewer must assert each ordering anchor is
+present before calling `str.index`, so future documentation regressions fail
+with clear `AssertionError` messages instead of opaque `ValueError` exceptions.
+The same comment's source-checkout token-regeneration concern is already
+addressed by the current `docs/UPGRADE.md` `AWF_API_TOKEN` guards and
+regression assertions, so avoid unrelated docs churn there.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
