@@ -23,6 +23,7 @@ from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
     TERMINAL_WORKSPACE_RETENTION_EXPIRED,
     WorkspaceGCCandidate,
+    WorkspaceGCComposeTeardownResult,
     WorkspaceGCPath,
     WorkspaceGCPreserved,
     WorkspaceGCWorktreeRemoveResult,
@@ -289,6 +290,74 @@ async def test_gc_execute_releases_resource_reservations(
         stmt = select(ResourceReservation).where(ResourceReservation.workspace_id == workspace_id)
         rows = list((await session.execute(stmt)).scalars())
         assert all(r.released_at is not None for r in rows)
+
+
+async def test_gc_compose_teardown_failure_preserves_resource_reservations(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="r" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(compose / "compose.yml", "compose")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    async with session_factory() as session:
+        repo = ResourceReservationRepository(session)
+        attempt_id = await _task_attempt_for_workspace(session, workspace_id)
+        await repo.create(
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            node_id="node_1",
+            steady_cpu=1.0,
+            steady_memory_gb=2.0,
+            peak_cpu=2.0,
+            peak_memory_gb=4.0,
+            disk_mb=1024,
+            phase="steady",
+            reserved_at=now - timedelta(hours=300),
+        )
+        await session.commit()
+
+    async def _failed_compose_teardown(
+        _candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_UNAVAILABLE",
+            error="docker unavailable",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+        compose_teardown=_failed_compose_teardown,
+    )
+
+    assert result.status == "partial"
+    assert result.reservation_releases == {}
+    assert worktree.exists()
+    assert compose.exists()
+    assert auth.exists()
+    async with session_factory() as session:
+        reservation = await ResourceReservationRepository(session).active_for_workspace(
+            workspace_id
+        )
+        assert reservation is not None
 
 
 async def test_gc_dry_run_does_not_remove_worktree_or_release_reservations(

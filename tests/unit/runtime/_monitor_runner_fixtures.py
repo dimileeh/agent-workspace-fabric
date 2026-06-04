@@ -36,7 +36,15 @@ from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import (
+    DefaultMergeMethodGitHubClient,
+)
+from tests.shared.monitor_runner import (
+    mock_completed_compose_manager as _mock_completed_compose_manager,
+)
+
+# Preserve the existing fixture-module import path for older runtime tests.
+mock_completed_compose_manager = _mock_completed_compose_manager
 
 
 @dataclass

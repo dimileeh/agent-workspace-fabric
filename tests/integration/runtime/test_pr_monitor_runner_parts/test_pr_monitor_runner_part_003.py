@@ -27,6 +27,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor import (
     MonitorConfig,
 )
@@ -36,7 +37,10 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner.helpers import _parse_verdict
 from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import (
+    DefaultMergeMethodGitHubClient,
+    mock_completed_compose_manager,
+)
 
 
 @dataclass
@@ -287,9 +291,9 @@ def _make_runner(
 class TestCompleteWorkspaceTearsDownComposeStack:
     """2026-04-24 incident: Docker ran out of network subnets because
     every AWF workspace's compose stack survived its workspace's
-    termination. ``_terminate_completed`` now runs
-    ``docker compose down`` as a best-effort cleanup. Failed
-    workspaces are preserved for operator inspection."""
+    termination. ``_terminate_completed`` now requests a best-effort
+    volume-removing compose teardown through completion GC. Failed workspaces
+    are preserved for operator inspection."""
 
     @pytest.mark.unit
     async def test_happy_merge_tears_down_compose(
@@ -306,7 +310,6 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")  # gh pr view (sha)
-        cmd.queue_result(returncode=0)  # docker compose down
 
         runner = _make_runner(
             factory=factory,
@@ -315,19 +318,15 @@ class TestCompleteWorkspaceTearsDownComposeStack:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="awf_ws_test",
-            compose_file=tmp_path / "compose.yml",
-        )
-        teardown_calls = [
-            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
-        ]
-        assert len(teardown_calls) == 1
-        args = teardown_calls[0].args
-        assert "-p" in args and "awf_ws_test" in args
-        assert "--remove-orphans" in args
-        assert "--volumes" in args
+        compose_patch, compose_calls = mock_completed_compose_manager()
+        with compose_patch:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="awf_ws_test",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        assert compose_calls == [(f"awf_{ws_id}", tmp_path / "compose.yml", ws_id, True)]
 
     @pytest.mark.unit
     async def test_failed_abort_does_not_tear_down_compose(
@@ -381,7 +380,6 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         cmd.queue_result(returncode=0)  # fetch base
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
-        cmd.queue_result(returncode=0)  # docker compose down
 
         runner = _make_runner(
             factory=factory,
@@ -390,16 +388,15 @@ class TestCompleteWorkspaceTearsDownComposeStack:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="awf_ws_short",
-            compose_file=tmp_path / "compose.yml",
-        )
-        teardown_calls = [
-            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
-        ]
-        assert len(teardown_calls) == 1
-        assert "awf_ws_short" in teardown_calls[0].args
+        compose_patch, compose_calls = mock_completed_compose_manager()
+        with compose_patch:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="awf_ws_short",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        assert compose_calls == [(f"awf_{ws_id}", tmp_path / "compose.yml", ws_id, True)]
 
     @pytest.mark.unit
     async def test_merge_blocked_notify_human_tears_down_after_external_merge(
@@ -423,7 +420,6 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
-        cmd.queue_result(returncode=0)  # docker compose down
 
         runner = _make_runner(
             factory=factory,
@@ -432,16 +428,15 @@ class TestCompleteWorkspaceTearsDownComposeStack:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="awf_ws_blocked",
-            compose_file=tmp_path / "compose.yml",
-        )
-        teardown_calls = [
-            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
-        ]
-        assert len(teardown_calls) == 1
-        assert "awf_ws_blocked" in teardown_calls[0].args
+        compose_patch, compose_calls = mock_completed_compose_manager()
+        with compose_patch:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="awf_ws_blocked",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        assert compose_calls == [(f"awf_{ws_id}", tmp_path / "compose.yml", ws_id, True)]
 
     @pytest.mark.unit
     async def test_plain_notify_human_tears_down_after_external_merge(
@@ -463,7 +458,6 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
-        cmd.queue_result(returncode=0)  # docker compose down
 
         runner = _make_runner(
             factory=factory,
@@ -473,16 +467,15 @@ class TestCompleteWorkspaceTearsDownComposeStack:
             worktrees_root=tmp_path / "worktrees",
             auto_merge=False,
         )
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="awf_ws_notify",
-            compose_file=tmp_path / "compose.yml",
-        )
-        teardown_calls = [
-            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
-        ]
-        assert len(teardown_calls) == 1
-        assert "awf_ws_notify" in teardown_calls[0].args
+        compose_patch, compose_calls = mock_completed_compose_manager()
+        with compose_patch:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="awf_ws_notify",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        assert compose_calls == [(f"awf_{ws_id}", tmp_path / "compose.yml", ws_id, True)]
 
     @pytest.mark.unit
     async def test_teardown_raised_exception_swallowed(
@@ -492,22 +485,12 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """``docker compose down`` subprocess RAISING (not exiting
-        non-zero — raising) must not kill the monitor. Simulates
-        FileNotFoundError when docker isn't on PATH."""
+        """Compose teardown RAISING must not kill a completed monitor.
 
-        class _RaisingRunner(FakeCommandRunner):
-            def __init__(self) -> None:
-                super().__init__()
-                self.teardown_seen = False
+        Simulates FileNotFoundError from the completed-workspace compose
+        teardown path when docker isn't on PATH."""
 
-            async def run(self, args, *, input_bytes=None, cwd=None):  # type: ignore[override]
-                if args[:2] == ["docker", "compose"] and "down" in args:
-                    self.teardown_seen = True
-                    raise FileNotFoundError("docker: command not found")
-                return await super().run(args, input_bytes=input_bytes, cwd=cwd)
-
-        cmd_raising = _RaisingRunner()
+        cmd_raising = FakeCommandRunner()
         ws_id = await _seed_monitoring_workspace(factory)
         cmd_raising.queue_result(returncode=0)
         cmd_raising.queue_result(returncode=0, stdout="0\n")
@@ -522,13 +505,17 @@ class TestCompleteWorkspaceTearsDownComposeStack:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
-        # Must NOT raise despite the teardown raising internally.
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="awf_ws_missing_docker",
-            compose_file=tmp_path / "compose.yml",
+        compose_patch, compose_calls = mock_completed_compose_manager(
+            exc=FileNotFoundError("docker: command not found")
         )
-        assert cmd_raising.teardown_seen
+        # Must NOT raise despite the teardown raising internally.
+        with compose_patch:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="awf_ws_missing_docker",
+                compose_file=tmp_path / "compose.yml",
+            )
+        assert compose_calls == [(f"awf_{ws_id}", tmp_path / "compose.yml", ws_id, True)]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
@@ -543,8 +530,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """``docker compose down`` exiting non-zero (stack already
-        gone, permission issue) must NOT mask completion — the DB
+        """Compose teardown failure must NOT mask completion — the DB
         transition already landed before the teardown call."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # fetch base
@@ -552,7 +538,6 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")  # gh pr view (sha)
-        cmd.queue_result(returncode=1, stderr="no such compose project")  # teardown fails
 
         runner = _make_runner(
             factory=factory,
@@ -561,11 +546,21 @@ class TestCompleteWorkspaceTearsDownComposeStack:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="awf_ws_test",
-            compose_file=tmp_path / "compose.yml",
+        compose_patch, compose_calls = mock_completed_compose_manager(
+            ComposeTeardownResult(
+                status="failed",
+                reason_code="COMPOSE_COMMAND_FAILED",
+                error="no such compose project",
+            )
         )
+        with compose_patch:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="awf_ws_test",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        assert compose_calls == [(f"awf_{ws_id}", tmp_path / "compose.yml", ws_id, True)]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
