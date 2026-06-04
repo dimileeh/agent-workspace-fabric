@@ -970,6 +970,13 @@ async def sweep_classified_orphans(
     classification, while ``min_age_hours`` only guards row-less missing
     resources during reaping.
     """
+    if not enabled:
+        return OrphanReapResult(
+            enabled=False,
+            status="disabled",
+            reason_code=ORPHAN_REAP_DISABLED,
+        )
+
     resolved_run_subprocess = subprocess.run if run_subprocess is None else run_subprocess
     docker_scan, worktree_scan = await asyncio.gather(
         asyncio.to_thread(

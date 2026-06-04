@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.service.orphan_resources import (
+    ORPHAN_REAP_DISABLED,
     ORPHAN_REAP_OK,
     ORPHAN_REAP_SKIPPED_UNKNOWN,
     WorkspaceIdView,
@@ -669,6 +670,48 @@ def test_sweep_classified_orphans_scans_classifies_and_reaps(
     ]
     assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
     assert set(docker_hosts) == {"unix:///test-docker.sock"}
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_disabled_skips_scans_and_workspace_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import awf.service.orphan_resources as orphan_resources
+
+    calls: list[str] = []
+
+    def _unexpected_docker_scan(**_kwargs: object) -> Any:
+        calls.append("docker")
+        raise AssertionError("disabled sweep should not scan Docker resources")
+
+    def _unexpected_worktree_scan(_work_dir: Path | str) -> Any:
+        calls.append("worktree")
+        raise AssertionError("disabled sweep should not scan managed worktrees")
+
+    def _unexpected_session_scope(_factory: object) -> Any:
+        calls.append("workspace_view")
+        raise AssertionError("disabled sweep should not load workspace view")
+
+    monkeypatch.setattr(orphan_resources, "scan_docker_resources", _unexpected_docker_scan)
+    monkeypatch.setattr(orphan_resources, "scan_managed_worktrees", _unexpected_worktree_scan)
+    monkeypatch.setattr(orphan_resources, "session_scope", _unexpected_session_scope)
+
+    result = asyncio.run(
+        orphan_resources.sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=False,
+        )
+    )
+
+    assert result.enabled is False
+    assert result.status == "disabled"
+    assert result.reason_code == ORPHAN_REAP_DISABLED
+    assert result.reaped == ()
+    assert result.errors == ()
+    assert calls == []
 
 
 @pytest.mark.unit
