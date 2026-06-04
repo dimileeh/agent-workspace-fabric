@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from awf.db.enums import WorkspaceStatus
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 
 if TYPE_CHECKING:
@@ -30,6 +31,31 @@ PATH_DELETE_PERMISSION_DENIED = "PATH_DELETE_PERMISSION_DENIED"
 _PERMISSION_DENIED_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
 
 _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
+
+TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
+    {
+        WorkspaceStatus.completed.value,
+        WorkspaceStatus.failed.value,
+        "superseded",
+        WorkspaceStatus.cancelled.value,
+        WorkspaceStatus.destroyed.value,
+    }
+)
+
+FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "superseded"})
+
+PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
+    {
+        WorkspaceStatus.requested.value,
+        WorkspaceStatus.provisioning.value,
+        WorkspaceStatus.ready.value,
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+        WorkspaceStatus.destroying.value,
+    }
+)
 
 
 @dataclass(frozen=True)

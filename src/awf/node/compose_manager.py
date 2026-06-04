@@ -498,8 +498,8 @@ class ComposeManager:
             ["network", "ls", "-q", "--filter", label_filter],
             operation="network ls",
         )
-        for network_id in network_ids:
-            await self._docker(["network", "rm", network_id], operation="network rm")
+        if network_ids:
+            await self._docker(["network", "rm", *network_ids], operation="network rm")
 
         volume_names: list[str] = []
         if remove_volumes:
