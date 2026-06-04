@@ -612,6 +612,24 @@ def test_uninstall_no_global_source_checkout_cleanup_uses_uv_run() -> None:
     assert source_section.index(replacement_setup) < source_section.index("rm -rf")
 
 
+def test_uninstall_global_source_checkout_refreshes_before_tool_uninstall() -> None:
+    """Assert global-tool checkout cleanup refreshes metadata before removing awf."""
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+    source_section = _markdown_section(
+        uninstall_text,
+        "## Source Checkout With Global Tool Install",
+    )
+    replacement_setup = (
+        "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+    )
+
+    assert replacement_setup in source_section
+    assert source_section.index(replacement_setup) < source_section.index(
+        "uv tool uninstall agent-workspace-fabric"
+    )
+    assert source_section.index(replacement_setup) < source_section.index("rm -rf")
+
+
 def test_virtualenv_lifecycle_docs_cover_readme_install_path() -> None:
     """Assert README-supported virtualenv installs have upgrade/uninstall guidance."""
     readme_text = README_PATH.read_text(encoding="utf-8")

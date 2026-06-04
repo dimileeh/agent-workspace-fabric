@@ -61,16 +61,22 @@ longer need it.
 ## Source Checkout With Global Tool Install
 
 This lane uses inspectable source plus a global tool installed from that source
-checkout. Remove the global tool when you no longer need a global `awf`
-executable:
+checkout. If `~/.awf/config.yml` still points at this checkout, refresh the
+persisted path while the global `awf` executable is still available:
+
+```bash
+awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
+```
+
+If there is no replacement checkout, edit `~/.awf/config.yml` and remove only
+the top-level `source_checkout:` block. After the persisted metadata no longer
+points at this checkout, remove the global tool:
 
 ```bash
 uv tool uninstall agent-workspace-fabric
 ```
 
-After the persisted `source_checkout` metadata no longer points at this
-checkout, remove the checkout only if you no longer need the inspected source
-tree:
+Then remove the checkout only if you no longer need the inspected source tree:
 
 ```bash
 rm -rf /path/to/aira-agent-workspace-fabric
