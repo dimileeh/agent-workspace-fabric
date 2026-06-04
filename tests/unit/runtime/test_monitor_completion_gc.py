@@ -243,6 +243,64 @@ async def test_completed_workspace_compose_teardown_callback_uses_candidate_meta
 
 
 @pytest.mark.unit
+async def test_completed_workspace_compose_teardown_accepts_empty_monitor_project_with_candidate_metadata(
+    tmp_path: Path,
+) -> None:
+    class _Runner:
+        _work_dir = tmp_path
+
+    monitor_compose_file = tmp_path / "monitor" / "compose.yml"
+    compose_patch, compose_calls = mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+
+    with compose_patch:
+        callback = lifecycle._completed_workspace_compose_teardown(
+            _Runner(),
+            compose_project="",
+            compose_file=monitor_compose_file,
+        )
+        assert callback is not None
+
+        result = await callback(
+            WorkspaceGCCandidate(
+                workspace_id="ws-empty-monitor-project",
+                status=WorkspaceStatus.completed.value,
+                updated_at=datetime.now(UTC),
+                age_hours=0,
+                reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+                worktree=WorkspaceGCPath(
+                    kind="worktree",
+                    path=tmp_path / "worktrees" / "ws-empty-monitor-project",
+                    exists=True,
+                    estimated_bytes=0,
+                ),
+                compose=WorkspaceGCPath(
+                    kind="compose",
+                    path=tmp_path / "compose" / "ws-empty-monitor-project",
+                    exists=True,
+                    estimated_bytes=0,
+                ),
+                auth=WorkspaceGCPath(
+                    kind="auth",
+                    path=tmp_path / "auth" / "ws-empty-monitor-project",
+                    exists=True,
+                    estimated_bytes=0,
+                ),
+                compose_project_name="candidate_project",
+            )
+        )
+
+    assert result.status == "succeeded"
+    assert compose_calls == [
+        ("candidate_project", monitor_compose_file, "ws-empty-monitor-project", True)
+    ]
+
+
+@pytest.mark.unit
 async def test_completed_workspace_gc_tears_down_compose_when_plan_is_empty(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -312,6 +370,99 @@ async def test_completed_workspace_gc_ok_marks_empty_plan_compose_only_success(
     assert ok_records[0].get("deleted_path_count") == 0
     assert ok_records[0].get("compose_teardown_status") == "succeeded"
     assert ok_records[0].get("compose_teardown_only") is True
+
+
+@pytest.mark.unit
+async def test_completed_workspace_gc_logs_compose_teardown_when_gc_raises_after_teardown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-gc-raises-after-compose"
+    compose_file = work_dir / "compose" / ws_id / "compose.yml"
+    runner = SimpleNamespace(
+        _work_dir=work_dir,
+        _deps=SimpleNamespace(session_factory=factory),
+    )
+    compose_patch, compose_calls = mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+    auth_teardowns: list[tuple[Path, str]] = []
+
+    async def _raise_after_compose_teardown(
+        _session_factory: async_sessionmaker[AsyncSession],
+        *,
+        compose_teardown: object,
+        **_kwargs: object,
+    ) -> WorkspaceGCResult:
+        assert callable(compose_teardown)
+        candidate = WorkspaceGCCandidate(
+            workspace_id=ws_id,
+            status=WorkspaceStatus.completed.value,
+            updated_at=datetime.now(UTC),
+            age_hours=0,
+            reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+            worktree=WorkspaceGCPath(
+                kind="worktree",
+                path=work_dir / "git" / "worktrees" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose=WorkspaceGCPath(
+                kind="compose",
+                path=work_dir / "compose" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            auth=WorkspaceGCPath(
+                kind="auth",
+                path=work_dir / "auth" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose_project_name="candidate_project",
+        )
+        await compose_teardown(candidate)
+        raise RuntimeError("database unavailable after compose teardown")
+
+    def _record_auth_teardown(work_dir: Path, workspace_id: str) -> None:
+        auth_teardowns.append((work_dir, workspace_id))
+
+    with (
+        compose_patch,
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=_raise_after_compose_teardown,
+        ),
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle._teardown_completed_workspace_auth_overlay",
+            new=_record_auth_teardown,
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="monitor_project",
+            compose_file=compose_file,
+        )
+
+    assert compose_calls == [("candidate_project", compose_file, ws_id, True)]
+    assert auth_teardowns == [(work_dir, ws_id)]
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_raised"
+        and record.get("workspace_id") == ws_id
+        for record in captured
+    )
+    assert any(
+        record.get("event") == "monitor.compose_teardown_ok"
+        and record.get("workspace_id") == ws_id
+        and record.get("compose_project") == "candidate_project"
+        for record in captured
+    )
 
 
 @pytest.mark.unit

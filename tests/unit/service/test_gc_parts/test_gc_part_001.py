@@ -1328,6 +1328,76 @@ async def test_single_workspace_gc_tears_down_compose_for_preserved_workspace(
 
 
 @pytest.mark.unit
+async def test_single_workspace_gc_tears_down_compose_for_retained_merged_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    compose_file = work_dir / "compose" / "stored-retained-merged" / "compose.yml"
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        compose_file_path=str(compose_file),
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        compose_project_name="awf_retained_merged_compose",
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(compose_file, "compose")
+    calls: list[tuple[str, str, str | None, str | None]] = []
+
+    async def _compose_teardown(
+        candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(
+            (
+                candidate.workspace_id,
+                candidate.reason_code,
+                candidate.compose_project_name,
+                candidate.compose_file_path,
+            )
+        )
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        compose_teardown=_compose_teardown,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        WORKSPACE_WITHIN_RETENTION,
+    ]
+    assert result.compose_teardowns[workspace_id].reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert calls == [
+        (
+            workspace_id,
+            WORKSPACE_WITHIN_RETENTION,
+            "awf_retained_merged_compose",
+            str(compose_file),
+        )
+    ]
+    assert worktree.exists()
+    assert compose_file.exists()
+
+
+@pytest.mark.unit
 async def test_single_workspace_gc_cleanup_disabled_skips_fallback_compose_teardown(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1374,6 +1444,48 @@ async def test_single_workspace_gc_cleanup_disabled_skips_fallback_compose_teard
     async with session_factory() as session:
         leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
     assert leases[0].status == "issued"
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_failed_within_retention_skips_fallback_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+    )
+    calls: list[str] = []
+
+    async def _compose_teardown(
+        candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(candidate.reason_code)
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=True):
+        result = await run_workspace_filesystem_gc(
+            session_factory,
+            work_dir=work_dir,
+            workspace_id=workspace_id,
+            execute=True,
+            compose_teardown=_compose_teardown,
+            now=now,
+        )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        WORKSPACE_WITHIN_RETENTION,
+    ]
+    assert calls == []
+    assert result.compose_teardowns == {}
 
 
 @pytest.mark.unit

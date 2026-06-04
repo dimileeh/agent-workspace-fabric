@@ -13,6 +13,7 @@ from datetime import (
     datetime,
     timedelta,
 )
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -703,8 +704,9 @@ def _completed_workspace_compose_teardown(
     compose_file: Path | None,
 ) -> WorkspaceGCComposeTeardown | None:
     """Build a volume-removing compose teardown callback for post-merge GC."""
-    if not compose_project or compose_file is None:
+    if compose_project is None or compose_file is None:
         return None
+    fallback_compose_project = compose_project
 
     manager = ComposeManager(
         work_dir=self._work_dir,
@@ -713,7 +715,7 @@ def _completed_workspace_compose_teardown(
 
     async def _teardown(candidate: WorkspaceGCCandidate) -> WorkspaceGCComposeTeardownResult:
         result = await manager.teardown_project(
-            project_name=candidate.compose_project_name or compose_project,
+            project_name=candidate.compose_project_name or fallback_compose_project,
             compose_file=_compose_file_for_gc_candidate(candidate, compose_file),
             workspace_id=candidate.workspace_id,
             remove_volumes=True,
@@ -752,18 +754,31 @@ def _log_completed_workspace_compose_teardown_result(
     if teardown is None:
         return
 
-    log_fields: dict[str, object] = {
-        "workspace_id": workspace_id,
-        "status": teardown.status,
-        "reason_code": teardown.reason_code,
-    }
     resolved_compose_project = _compose_project_for_gc_log(
         result,
         workspace_id=workspace_id,
         fallback_compose_project=compose_project,
     )
-    if resolved_compose_project is not None:
-        log_fields["compose_project"] = resolved_compose_project
+    _log_completed_workspace_compose_teardown_outcome(
+        teardown,
+        workspace_id=workspace_id,
+        compose_project=resolved_compose_project,
+    )
+
+
+def _log_completed_workspace_compose_teardown_outcome(
+    teardown: WorkspaceGCComposeTeardownResult,
+    *,
+    workspace_id: str,
+    compose_project: str | None,
+) -> None:
+    log_fields: dict[str, object] = {
+        "workspace_id": workspace_id,
+        "status": teardown.status,
+        "reason_code": teardown.reason_code,
+    }
+    if compose_project is not None:
+        log_fields["compose_project"] = compose_project
     if teardown.ok:
         _log.info("monitor.compose_teardown_ok", **log_fields)
         return
@@ -778,6 +793,27 @@ def _failed_compose_teardowns_for_gc_log(result: WorkspaceGCResult) -> dict[str,
         for workspace_id, teardown in result.compose_teardowns.items()
         if not teardown.ok
     }
+
+
+def _track_completed_workspace_compose_teardown(
+    compose_teardown: WorkspaceGCComposeTeardown | None,
+    *,
+    compose_project: str | None,
+    tracked_results: dict[str, WorkspaceGCComposeTeardownResult],
+    tracked_projects: dict[str, str | None],
+) -> WorkspaceGCComposeTeardown | None:
+    if compose_teardown is None:
+        return None
+
+    async def _tracked(candidate: WorkspaceGCCandidate) -> WorkspaceGCComposeTeardownResult:
+        result = compose_teardown(candidate)
+        if isawaitable(result):
+            result = await result
+        tracked_results[candidate.workspace_id] = result
+        tracked_projects[candidate.workspace_id] = candidate.compose_project_name or compose_project
+        return result
+
+    return _tracked
 
 
 async def _gc_completed_workspace_filesystem(
@@ -797,6 +833,14 @@ async def _gc_completed_workspace_filesystem(
         compose_project=compose_project,
         compose_file=compose_file,
     )
+    tracked_compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
+    tracked_compose_projects: dict[str, str | None] = {}
+    gc_compose_teardown = _track_completed_workspace_compose_teardown(
+        compose_teardown,
+        compose_project=compose_project,
+        tracked_results=tracked_compose_teardowns,
+        tracked_projects=tracked_compose_projects,
+    )
     if compose_teardown is None:
         # Legacy/direct callers may invoke this method without compose context.
         # In that case, preserve the old best-effort pre-GC unmount path. When a
@@ -815,7 +859,7 @@ async def _gc_completed_workspace_filesystem(
             # retention window so disk is returned on merge rather than a week
             # later. The durable DB row, events, and logs are always kept.
             ignore_retention=True,
-            compose_teardown=compose_teardown,
+            compose_teardown=gc_compose_teardown,
         )
     except Exception as exc:
         _log.warning(
@@ -823,6 +867,17 @@ async def _gc_completed_workspace_filesystem(
             workspace_id=workspace_id,
             error=repr(exc)[:400],
         )
+        for tracked_workspace_id, tracked_teardown in tracked_compose_teardowns.items():
+            _log_completed_workspace_compose_teardown_outcome(
+                tracked_teardown,
+                workspace_id=tracked_workspace_id,
+                compose_project=tracked_compose_projects.get(tracked_workspace_id),
+            )
+        raised_teardown = tracked_compose_teardowns.get(workspace_id)
+        if compose_teardown is not None and raised_teardown is not None and raised_teardown.ok:
+            await asyncio.to_thread(
+                _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
+            )
         return
     _log_completed_workspace_compose_teardown_result(
         result,
@@ -834,11 +889,11 @@ async def _gc_completed_workspace_filesystem(
     if compose_teardown is not None and not any(
         candidate.workspace_id == workspace_id for candidate in result.plan.candidates
     ):
-        teardown = result.compose_teardowns.get(workspace_id)
+        empty_plan_teardown = result.compose_teardowns.get(workspace_id)
         # A failed fallback teardown may leave agent containers alive. Keep the
         # overlay mounted in that case so runtime side effects stay preserved
         # together with the failed compose teardown evidence.
-        if teardown is not None and teardown.ok:
+        if empty_plan_teardown is not None and empty_plan_teardown.ok:
             await asyncio.to_thread(
                 _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
             )
@@ -862,9 +917,9 @@ async def _gc_completed_workspace_filesystem(
             "age_hours": preserved.age_hours,
             "retention_hours": result.plan.min_age_hours,
         }
-        teardown = result.compose_teardowns.get(workspace_id)
-        if teardown is not None:
-            deferred_log_fields["compose_teardown_status"] = teardown.status
+        deferred_teardown = result.compose_teardowns.get(workspace_id)
+        if deferred_teardown is not None:
+            deferred_log_fields["compose_teardown_status"] = deferred_teardown.status
         _log.info("monitor.filesystem_gc_deferred", **deferred_log_fields)
         return
     ok_log_fields: dict[str, object] = {
@@ -872,9 +927,9 @@ async def _gc_completed_workspace_filesystem(
         "deleted_path_count": len(result.deleted_paths),
         "reclaimed_bytes": result.plan.total_estimated_bytes,
     }
-    teardown = result.compose_teardowns.get(workspace_id)
-    if teardown is not None:
-        ok_log_fields["compose_teardown_status"] = teardown.status
+    ok_teardown = result.compose_teardowns.get(workspace_id)
+    if ok_teardown is not None:
+        ok_log_fields["compose_teardown_status"] = ok_teardown.status
         if not result.plan.candidates and not result.deleted_paths:
             ok_log_fields["compose_teardown_only"] = True
     _log.info("monitor.filesystem_gc_ok", **ok_log_fields)

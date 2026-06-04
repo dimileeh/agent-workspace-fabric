@@ -1146,6 +1146,11 @@ def _missing_workspace_compose_teardown_candidate(
 def _preserved_workspace_allows_compose_teardown_fallback(
     preserved: WorkspaceGCPreserved,
 ) -> bool:
+    if (
+        preserved.reason_code == WORKSPACE_WITHIN_RETENTION
+        and preserved.status == WorkspaceStatus.completed.value
+    ):
+        return True
     return preserved.reason_code in _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES
 
 
