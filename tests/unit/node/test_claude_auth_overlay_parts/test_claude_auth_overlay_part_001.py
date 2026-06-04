@@ -9,6 +9,7 @@ routing, fallback, and unmount-before-remove.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -276,6 +277,36 @@ def test_signature_terminates_on_circular_symlink(tmp_path: Path) -> None:
     (loop_dir / "cycle").symlink_to(claude / "skills", target_is_directory=True)
 
     # Terminates (no hang) and returns a stable 16-char digest.
+    signature = _host_claude_signature(host_home)
+    assert len(signature) == 16
+    assert signature == _host_claude_signature(host_home)
+
+
+@pytest.mark.unit
+def test_signature_keeps_dir_whose_stat_races_to_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``os.walk(followlinks=True)`` classifies a directory from ``scandir`` (no stat
+    # call on a populated ``d_type``), but the per-child ``child.stat()`` in the dirs
+    # loop can still raise — a directory deleted/permission-flipped in the window
+    # (a TOCTOU), or an ``EACCES`` race. That ``except`` must keep the entry so the
+    # files loop signs it as ``missing`` and record an ``ancestors_by_path`` entry so
+    # the "every walked path has an entry" invariant holds for any descendant that
+    # resolves before the walk descends. Signing must terminate and stay stable.
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    (host_home / ".claude" / "racingdir").mkdir()
+
+    base_path_cls = type(Path())
+
+    class _StatRacingPath(base_path_cls):  # type: ignore[valid-type, misc]
+        def stat(self, *args: object, **kwargs: object) -> os.stat_result:
+            if self.name == "racingdir":
+                raise PermissionError("simulated stat race")
+            return super().stat(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(auth_mounts_mod, "Path", _StatRacingPath)
+
     signature = _host_claude_signature(host_home)
     assert len(signature) == 16
     assert signature == _host_claude_signature(host_home)

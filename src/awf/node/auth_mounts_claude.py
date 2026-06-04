@@ -471,6 +471,12 @@ def _host_claude_signature(host_home: Path) -> str:
             except OSError:
                 # A dangling/broken dir link: keep it so the entry loop below
                 # records the ``missing`` marker, matching the prior behaviour.
+                # Record an ancestors entry too, so the invariant "every walked
+                # path has an entry" holds: if the link target is created in the
+                # window before ``os.walk`` descends, the descendant branch still
+                # inherits this root's ancestor set instead of an empty one,
+                # keeping cycle detection sound.
+                ancestors_by_path[os.fspath(child)] = root_ancestors
                 kept.append(name)
                 continue
             identity = (dir_stat.st_dev, dir_stat.st_ino)
@@ -646,7 +652,11 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
         return
     finally:
         for fd in fds:
-            os.close(fd)
+            # Best-effort cleanup: a failing ``os.close`` (e.g. ``EBADF``) must not
+            # abort the loop and leak the remaining descended fds. Matches the
+            # "never blocks provisioning" contract above.
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def _reconcile_fallback_edits_into_upper(
