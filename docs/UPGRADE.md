@@ -172,7 +172,8 @@ if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then
   export AWF_API_TOKEN
 fi
 if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then
-  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before rollback}"
+  export AWF_POSTGRES_PASSWORD
 fi
 awf start
 awf service status --format pretty

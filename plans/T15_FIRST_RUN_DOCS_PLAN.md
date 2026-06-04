@@ -217,6 +217,12 @@ source-checkout setup/start commands must pass `--source-checkout "$PWD"` so a
 fresh checkout is selected even when stale persisted `source_checkout` metadata
 exists.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HJDHP`: the
+release-installed and virtualenv rollback snippet in `docs/UPGRADE.md` must
+require operators to restore the running local Core `AWF_POSTGRES_PASSWORD`
+when `.env` does not already persist it. It must not fall back to `awf_dev`,
+because the existing Postgres volume may require a non-default password.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -263,6 +269,12 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HJDHL`:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
+```
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HJDHP`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start -q
 ```
 
 Focused lint command:

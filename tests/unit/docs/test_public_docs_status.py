@@ -584,7 +584,14 @@ def test_upgrade_release_installed_rollback_restores_service_env_before_start() 
         '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     )
     password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
-    password_export_line = '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    password_require_line = (
+        '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
+        'the running local Core or persist it in .env before rollback}"'
+    )
+    password_export_line = "  export AWF_POSTGRES_PASSWORD"
+    unsafe_password_default_line = (
+        '  export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    )
     start_line = "\nawf start\n"
 
     assert release_heading in rollback_section
@@ -598,7 +605,9 @@ def test_upgrade_release_installed_rollback_restores_service_env_before_start() 
     assert api_export_line in release_section
     assert unsafe_api_generation_line not in release_section
     assert password_guard_line in release_section
+    assert password_require_line in release_section
     assert password_export_line in release_section
+    assert unsafe_password_default_line not in release_section
     assert start_line in release_section
 
     api_guard_index = release_section.index(api_guard_line)
@@ -610,6 +619,7 @@ def test_upgrade_release_installed_rollback_restores_service_env_before_start() 
         "release-installed rollback",
     )
     password_guard_index = release_section.index(password_guard_line)
+    password_require_index = release_section.index(password_require_line)
     password_export_index = release_section.index(password_export_line)
     password_guard_end_index = _shell_closing_fi_index(
         release_section,
@@ -622,6 +632,7 @@ def test_upgrade_release_installed_rollback_restores_service_env_before_start() 
         < api_export_index
         < api_guard_end_index
         < password_guard_index
+        < password_require_index
         < password_export_index
         < password_guard_end_index
         < release_section.index(start_line)

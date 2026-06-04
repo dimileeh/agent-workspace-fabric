@@ -1242,6 +1242,45 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HJDHP`:
+
+- `docs/UPGRADE.md` now requires the existing
+  `AWF_POSTGRES_PASSWORD` before release-installed and virtualenv rollback
+  `awf start` when `.env` does not already persist it.
+- `tests/unit/docs/test_public_docs_status.py` now rejects rollback docs that
+  default the password to `awf_dev` instead of requiring the running local Core
+  password.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start -q
+```
+
+Red-phase result after tightening the focused assertion: failed because
+`docs/UPGRADE.md` still omitted the required `AWF_POSTGRES_PASSWORD` restore
+line and defaulted to `awf_dev`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start -q
+```
+
+Final focused repair result: `1 passed in 0.68s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
