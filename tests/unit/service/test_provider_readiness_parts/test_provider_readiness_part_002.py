@@ -268,7 +268,7 @@ def test_provider_readiness_claude_file_reports_overlay_isolation(
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
-    monkeypatch.setattr(provider_readiness, "claude_auth_isolation_label", lambda: label)
+    monkeypatch.setattr(provider_readiness, "claude_auth_isolation_label", lambda **_: label)
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -298,7 +298,7 @@ def test_provider_readiness_claude_json_only_reports_copy_isolation(
     home.mkdir()
     (home / ".claude.json").write_text('{"token":"claude_file_secret"}')
     monkeypatch.setattr(
-        provider_readiness, "claude_auth_isolation_label", lambda: "per_workspace_overlay"
+        provider_readiness, "claude_auth_isolation_label", lambda **_: "per_workspace_overlay"
     )
 
     payload = collect_agent_readiness(
@@ -332,7 +332,7 @@ def test_provider_readiness_claude_dir_keeps_overlay_json_stays_copy(
     (home / ".claude" / "settings.json").write_text('{"token":"claude_dir_secret"}')
     (home / ".claude.json").write_text('{"token":"claude_json_secret"}')
     monkeypatch.setattr(
-        provider_readiness, "claude_auth_isolation_label", lambda: "per_workspace_overlay"
+        provider_readiness, "claude_auth_isolation_label", lambda **_: "per_workspace_overlay"
     )
 
     payload = collect_agent_readiness(
@@ -350,6 +350,51 @@ def test_provider_readiness_claude_dir_keeps_overlay_json_stays_copy(
         "~/.claude": "per_workspace_overlay",
         "~/.claude.json": "per_workspace_copy",
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("force_copy_env", "expected"),
+    [
+        ("true", "per_workspace_copy"),
+        ("", "per_workspace_overlay"),
+    ],
+)
+def test_provider_readiness_claude_honors_preflighted_force_copy_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_copy_env: str,
+    expected: str,
+) -> None:
+    """The force-copy probe reads the passed ``environ``, not ``os.environ``.
+
+    ``awf service bootstrap`` on a non-propagating host folds
+    ``AWF_CLAUDE_AUTH_FORCE_COPY=true`` into the readiness ``environ`` dict rather
+    than the CLI process environment, so readiness must read that dict or it would
+    report ``per_workspace_overlay`` while the worker uses the copy fallback. Here
+    overlayfs is advertised as available, so the label only flips to copy when the
+    passed env requests it.
+    """
+    import awf.node.auth_mounts as auth_mounts
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
+    monkeypatch.setattr(auth_mounts, "_overlay_filesystem_available", lambda: True)
+    # The process environment must NOT carry the request; only the passed env does.
+    monkeypatch.delenv("AWF_CLAUDE_AUTH_FORCE_COPY", raising=False)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"AWF_CLAUDE_AUTH_FORCE_COPY": force_copy_env},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["ok"] is True
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["isolation"] == expected
+    assert all(source["isolation"] == expected for source in claude["credential_sources"])
 
 
 @pytest.mark.unit

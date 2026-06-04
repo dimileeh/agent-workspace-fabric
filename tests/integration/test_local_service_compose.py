@@ -201,14 +201,18 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}",
         f"{expected_work_dir}:{expected_work_dir}",
     }
-    # The worker mounts the host work dir ``:rshared`` so an overlay it mounts
-    # under the work dir is visible to the sibling agent container the host
-    # daemon launches (see docker/compose/local-service.yml). It is the same
+    # The worker mounts the host work dir with a bind-propagation flag (default
+    # ``rshared``) so an overlay it mounts under the work dir is visible to the
+    # sibling agent container the host daemon launches (see
+    # docker/compose/local-service.yml). The ``awf service bootstrap``
+    # mount-propagation preflight gates the flag via
+    # ``AWF_WORK_DIR_BIND_PROPAGATION`` on non-propagating hosts. It is the same
     # base mount set with the work-dir bind carrying the propagation flag.
+    expected_work_dir_propagation = "${AWF_WORK_DIR_BIND_PROPAGATION:-rshared}"
     expected_worker_base_mounts = {
         "/var/run/docker.sock:/var/run/docker.sock",
         f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}",
-        f"{expected_work_dir}:{expected_work_dir}:rshared",
+        f"{expected_work_dir}:{expected_work_dir}:{expected_work_dir_propagation}",
     }
     shared_volumes = data["x-awf-service"]["volumes"]
     assert expected_base_mounts.issubset(set(shared_volumes))
