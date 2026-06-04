@@ -170,6 +170,61 @@ def test_compose_env_file_values_honors_escaped_quote_in_single_quoted_values(
 
 
 @pytest.mark.unit
+def test_compose_env_file_values_handles_literal_and_malformed_env_lines(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "# comment",
+                "export ONLY_KEY",
+                "1INVALID=value",
+                "EMPTY=",
+                "PLAIN=before # comment",
+                "HASH_IN_VALUE=before#not-comment",
+                "SINGLE_TRAILING_BACKSLASH='value\\",
+                r"SINGLE_NONQUOTE_BACKSLASH='C:\awf\service'",
+                'DOUBLE_TRAILING_BACKSLASH="value\\',
+                "LONE_DOLLAR=$",
+                "BAD_SUFFIX=$-suffix",
+                "UNCLOSED=${HOME",
+                "INVALID_BRACE=${}",
+                "UNKNOWN_FORMAT=${HOME/foo}",
+                "ESCAPED_DOLLAR=$$HOME",
+                "PLAIN_VAR=$HOME",
+                "MISSING_PLAIN=$MISSING",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MISSING", raising=False)
+
+    values = compose_env_file_values(env_file, environ={"HOME": "/home/operator"})
+
+    assert "ONLY_KEY" not in values
+    assert "1INVALID" not in values
+    assert values["EMPTY"] == ""
+    assert values["PLAIN"] == "before"
+    assert values["HASH_IN_VALUE"] == "before#not-comment"
+    assert values["SINGLE_TRAILING_BACKSLASH"] == "value\\"
+    assert values["SINGLE_NONQUOTE_BACKSLASH"] == r"C:\awf\service"
+    assert values["DOUBLE_TRAILING_BACKSLASH"] == "value\\"
+    assert values["LONE_DOLLAR"] == "$"
+    assert values["BAD_SUFFIX"] == "$-suffix"
+    assert values["UNCLOSED"] == "${HOME"
+    assert values["INVALID_BRACE"] == "${}"
+    assert values["UNKNOWN_FORMAT"] == "${HOME/foo}"
+    assert values["ESCAPED_DOLLAR"] == "$HOME"
+    assert values["PLAIN_VAR"] == "/home/operator"
+    assert values["MISSING_PLAIN"] == ""
+
+
+@pytest.mark.unit
 def test_compose_env_file_values_expands_unquoted_and_double_quoted_references(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -286,6 +341,50 @@ def test_compose_env_file_values_expands_nested_default_interpolation(
 
 
 @pytest.mark.unit
+def test_compose_env_file_values_matches_compose_operator_semantics(
+    tmp_path,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "EMPTY=",
+                "SET=present",
+                "DASH_EMPTY=${EMPTY-default}",
+                "DASH_MISSING=${MISSING-default}",
+                "COLON_DASH_EMPTY=${EMPTY:-default}",
+                "PLUS_SET=${SET+alt}",
+                "PLUS_EMPTY=${EMPTY+alt}",
+                "PLUS_MISSING=${MISSING+alt}",
+                "COLON_PLUS_SET=${SET:+${HOME}/alt}",
+                "COLON_PLUS_EMPTY=${EMPTY:+alt}",
+                "COLON_PLUS_MISSING=${MISSING:+alt}",
+                "COLON_REQUIRED_SET=${SET:?must set}",
+                "PLAIN_REQUIRED_SET=${SET?must set}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    values = compose_env_file_values(env_file, environ={"HOME": "/home/operator"})
+
+    assert values["DASH_EMPTY"] == ""
+    assert values["DASH_MISSING"] == "default"
+    assert values["COLON_DASH_EMPTY"] == "default"
+    assert values["PLUS_SET"] == "alt"
+    assert values["PLUS_EMPTY"] == "alt"
+    assert values["PLUS_MISSING"] == ""
+    assert values["COLON_PLUS_SET"] == "/home/operator/alt"
+    assert values["COLON_PLUS_EMPTY"] == ""
+    assert values["COLON_PLUS_MISSING"] == ""
+    assert values["COLON_REQUIRED_SET"] == "present"
+    assert values["PLAIN_REQUIRED_SET"] == "present"
+
+
+@pytest.mark.unit
 def test_compose_env_file_values_raises_for_missing_mandatory_interpolation(
     tmp_path,
 ) -> None:
@@ -293,6 +392,19 @@ def test_compose_env_file_values_raises_for_missing_mandatory_interpolation(
 
     env_file = tmp_path / ".env"
     env_file.write_text("API_TOKEN=${MISSING_TOKEN:?set MISSING_TOKEN}\n", encoding="utf-8")
+
+    with pytest.raises(ComposeEnvInterpolationError, match="set MISSING_TOKEN"):
+        compose_env_file_values(env_file, environ={})
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_raises_for_unset_plain_mandatory_interpolation(
+    tmp_path,
+) -> None:
+    from awf.service.environment import ComposeEnvInterpolationError, compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("API_TOKEN=${MISSING_TOKEN?set MISSING_TOKEN}\n", encoding="utf-8")
 
     with pytest.raises(ComposeEnvInterpolationError, match="set MISSING_TOKEN"):
         compose_env_file_values(env_file, environ={})
@@ -337,6 +449,123 @@ def test_compose_interpolation_keys_ignores_unreadable_and_non_utf8_files(
 
     assert compose_interpolation_keys(missing_file) == ()
     assert compose_interpolation_keys(invalid_file) == ()
+
+
+@pytest.mark.unit
+def test_compose_interpolation_keys_handles_yaml_include_shapes(tmp_path) -> None:
+    from awf.service.environment import compose_interpolation_keys
+
+    root_compose = tmp_path / "compose.yml"
+    directory_include = tmp_path / "included-dir"
+    file_include = tmp_path / "included-file.yml"
+    directory_include.mkdir()
+    (directory_include / "compose.yaml").write_text(
+        """
+services:
+  worker:
+    environment:
+      DIR_TOKEN: ${AWF_DIR_TOKEN:-}
+""",
+        encoding="utf-8",
+    )
+    file_include.write_text(
+        """
+services:
+  api:
+    environment:
+      FILE_TOKEN: ${AWF_FILE_TOKEN:-}
+""",
+        encoding="utf-8",
+    )
+    root_compose.write_text(
+        """
+include:
+  path:
+    - included-dir
+    - included-file.yml
+    - ${DYNAMIC_COMPOSE}
+services:
+  console:
+    environment:
+      ROOT_TOKEN: ${AWF_ROOT_TOKEN:-}
+""",
+        encoding="utf-8",
+    )
+
+    assert compose_interpolation_keys(root_compose) == (
+        "AWF_DIR_TOKEN",
+        "AWF_FILE_TOKEN",
+        "AWF_ROOT_TOKEN",
+        "DYNAMIC_COMPOSE",
+    )
+
+
+@pytest.mark.unit
+def test_compose_interpolation_keys_handles_mapping_scalar_absolute_and_cyclic_includes(
+    tmp_path,
+) -> None:
+    from awf.service.environment import compose_interpolation_keys
+
+    root_compose = tmp_path / "compose.yml"
+    child_compose = tmp_path / "child.yml"
+    absolute_compose = tmp_path / "absolute.yml"
+    root_compose.write_text(
+        """
+include:
+  path: child.yml
+services:
+  root:
+    environment:
+      ROOT_TOKEN: ${AWF_ROOT_TOKEN:-}
+""",
+        encoding="utf-8",
+    )
+    child_compose.write_text(
+        f"""
+include:
+  - {absolute_compose}
+  - compose.yml
+services:
+  child:
+    environment:
+      CHILD_TOKEN: $AWF_CHILD_TOKEN
+""",
+        encoding="utf-8",
+    )
+    absolute_compose.write_text(
+        """
+services:
+  absolute:
+    environment:
+      ABSOLUTE_TOKEN: ${AWF_ABSOLUTE_TOKEN:-}
+""",
+        encoding="utf-8",
+    )
+
+    assert compose_interpolation_keys(root_compose) == (
+        "AWF_ABSOLUTE_TOKEN",
+        "AWF_CHILD_TOKEN",
+        "AWF_ROOT_TOKEN",
+    )
+
+
+@pytest.mark.unit
+def test_compose_interpolation_keys_handles_non_mapping_and_invalid_yaml(tmp_path) -> None:
+    import yaml
+
+    from awf.service.environment import compose_interpolation_keys
+
+    sequence_compose = tmp_path / "sequence-compose.yml"
+    scalar_include_compose = tmp_path / "scalar-include-compose.yml"
+    invalid_compose = tmp_path / "invalid-compose.yml"
+    sequence_compose.write_text("- ${IGNORED_SEQUENCE_TOKEN}\n", encoding="utf-8")
+    scalar_include_compose.write_text("include\n", encoding="utf-8")
+    invalid_compose.write_text("include: [", encoding="utf-8")
+
+    assert compose_interpolation_keys(sequence_compose) == ("IGNORED_SEQUENCE_TOKEN",)
+    assert compose_interpolation_keys(scalar_include_compose) == ()
+    with pytest.raises(yaml.YAMLError, match="could not parse Compose YAML"):
+        compose_interpolation_keys(invalid_compose)
 
 
 @pytest.mark.unit

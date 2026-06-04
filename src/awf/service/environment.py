@@ -601,8 +601,7 @@ def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
             if _is_escaped_compose_interpolation(value, match.start()):
                 continue
             key = match.group("braced") or match.group("plain")
-            if key:
-                keys.add(key)
+            keys.add(cast(str, key))
         return
     if isinstance(value, Mapping):
         # Compose 2.x interpolates YAML scalar values, not mapping keys such as
