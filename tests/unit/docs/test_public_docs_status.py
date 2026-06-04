@@ -594,7 +594,10 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
 
     for heading in source_lane_headings:
         source_section = _markdown_section(quickstart_text, heading)
-        uninstall_section = source_section.split("\nUninstall:\n", maxsplit=1)[1]
+        uninstall_label = "\nUninstall:\n"
+        uninstall_start = source_section.find(uninstall_label)
+        assert uninstall_start != -1, f"{heading} is missing standalone Uninstall label"
+        uninstall_section = source_section[uninstall_start + len(uninstall_label) :]
         section_words = " ".join(uninstall_section.split())
         if heading == "## Lane 3: Source Checkout With No Global Install":
             replacement_setup = (
