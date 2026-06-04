@@ -548,6 +548,9 @@ def _contains_secret_bytes(
     decoded = content.decode("latin-1")
     if redact_secrets(decoded) != decoded:
         return True
+    # Retain service preflight patterns for edge cases the shared redaction
+    # patterns intentionally do not cover, such as tokens adjacent to "_" and
+    # URL credentials without a word-boundary prefix.
     if provider_readiness_service.TOKEN_RE.search(decoded) is not None:
         return True
     # Additionally block URL credentials that the text path would redact.

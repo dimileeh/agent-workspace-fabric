@@ -19,6 +19,11 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log reads do not expose pattern-only secret
   assignment values when the assignment key prefix is outside the fixed context
   window.
+- Complete: Support-bundle setup-state collection returns a redacted failed
+  setup-state payload if loaded config summarization raises after the config
+  reader succeeds.
+- Complete: MCP binary secret detection documents why service-side token/URL
+  regexes are retained after the shared redaction guard.
 - Complete: Existing first-run rendering behavior was left unchanged.
 
 ## Evidence
@@ -146,6 +151,39 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/u
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 # Success: no issues found in 1 source file
 ```
+
+## Review-Level Comment `issue:4620175517` Iteration
+
+Additional files changed:
+
+- `src/awf/service/support_bundle.py`
+- `src/awf/mcp/server.py`
+- `tests/unit/service/test_support_bundle.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_loaded_config_summary_errors
+# failed: RuntimeError escaped _setup_state while summarizing source-checkout marker_count
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k 'setup_state_degrades_loaded_config_summary_errors or setup_state_degrades_unexpected_config_reader_errors or setup_state_redacts_config_load_errors'
+# 3 passed, 16 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py src/awf/mcp/server.py tests/unit/service/test_support_bundle.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/mcp/server.py
+# Success: no issues found in 2 source files
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
 
 ## Gaps
 

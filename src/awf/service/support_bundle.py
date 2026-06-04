@@ -240,31 +240,45 @@ def _setup_state(
             unexpected_payload["details"] = _redact_value(details, secrets)
         return unexpected_payload
 
-    return {
-        "status": "loaded",
-        "config": {
-            "version": config.version,
-            "install_channel": _redact_text(config.install.channel, secrets),
-            "api_host_port": config.api.host_port,
-            "work_dir_configured": bool(config.work_dir),
-        },
-        "providers": {
-            str(_redact_value(name, secrets)): _provider_setup_summary(provider, secrets=secrets)
-            for name, provider in sorted(config.providers.items())
-        },
-        "clients": {
-            str(_redact_value(name, secrets)): {
-                "status": _redact_text(client.status, secrets),
-                "updated_at": _isoformat(client.updated_at),
-            }
-            for name, client in sorted(config.clients.items())
-        },
-        "consent": {
-            "plain_file_secrets": config.consent.plain_file_secrets,
-            "source_checkout_assets": config.consent.source_checkout_assets,
-        },
-        "source_checkout": _source_checkout_summary(config),
-    }
+    try:
+        return {
+            "status": "loaded",
+            "config": {
+                "version": config.version,
+                "install_channel": _redact_text(config.install.channel, secrets),
+                "api_host_port": config.api.host_port,
+                "work_dir_configured": bool(config.work_dir),
+            },
+            "providers": {
+                str(_redact_value(name, secrets)): _provider_setup_summary(
+                    provider,
+                    secrets=secrets,
+                )
+                for name, provider in sorted(config.providers.items())
+            },
+            "clients": {
+                str(_redact_value(name, secrets)): {
+                    "status": _redact_text(client.status, secrets),
+                    "updated_at": _isoformat(client.updated_at),
+                }
+                for name, client in sorted(config.clients.items())
+            },
+            "consent": {
+                "plain_file_secrets": config.consent.plain_file_secrets,
+                "source_checkout_assets": config.consent.source_checkout_assets,
+            },
+            "source_checkout": _source_checkout_summary(config),
+        }
+    except Exception as exc:
+        summary_payload: dict[str, object] = {
+            "status": "failed",
+            "reason_code": str(getattr(exc, "reason_code", "HOST_SETUP_CONFIG_SUMMARY_FAILED")),
+            "message": _redact_text(str(exc), secrets),
+        }
+        details = getattr(exc, "details", None)
+        if details is not None:
+            summary_payload["details"] = _redact_value(details, secrets)
+        return summary_payload
 
 
 def _provider_setup_summary(

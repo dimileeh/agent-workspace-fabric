@@ -32,6 +32,13 @@ credential entry, or unrelated refactors are included.
   more than the fixed redaction context into a long `TOKEN=`/`PASSWORD=` value.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes MCP log-read handling plus a focused regression.
+- Review-level comment `issue:4620175517` identified two final hardening points:
+  document the retained MCP binary secret-detection regex safety nets, and make
+  loaded setup-state summarization degrade if malformed config data raises after
+  the reader succeeds.
+- This repair remains inside the existing T17 redaction/support-bundle scope and
+  only changes the MCP comment, setup-state loaded-path guard, focused
+  regression, and this plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -48,6 +55,11 @@ credential entry, or unrelated refactors are included.
   requested offsets cannot reveal substrings of configured secrets.
 - MCP workspace log reads do not expose pattern-only secret assignment values
   when the assignment key prefix is outside the fixed context window.
+- Support-bundle setup-state collection returns a redacted failed setup-state
+  payload if loaded config summarization raises after the config reader
+  succeeds.
+- MCP binary secret detection documents why service-side token/URL regexes are
+  retained after the shared redaction guard.
 - Existing first-run rendering behavior remains compatible.
 
 ## Implementation Steps
@@ -74,6 +86,11 @@ credential entry, or unrelated refactors are included.
    inside a pattern-only `TOKEN=` value, confirm it fails, then ensure the MCP
    log read redacts an unknown leading token fragment instead of returning it as
    ordinary text.
+10. Add a focused regression for loaded setup-state summarization failure,
+    confirm it fails, then catch and redact summary-building exceptions without
+    discarding the rest of the support bundle.
+11. Add a concise comment explaining the retained MCP binary secret-detection
+    safety nets after the shared `redact_secrets` guard.
 
 ## Verification Commands
 
@@ -106,6 +123,14 @@ Review-thread `PRRT_kwDOSJAM6s6HAjVz` repair checks:
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k pattern_only_secret_assignment
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```
+
+Review-level comment `issue:4620175517` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_loaded_config_summary_errors
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py src/awf/mcp/server.py tests/unit/service/test_support_bundle.py
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/mcp/server.py
 ```
 
 Focused lint/type checks, adjusted to touched files:
