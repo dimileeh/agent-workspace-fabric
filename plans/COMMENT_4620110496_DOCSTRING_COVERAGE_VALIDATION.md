@@ -44,6 +44,33 @@ Evidence after Iteration 2:
 - `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_read_workspace_log_uses_byte_offsets_after_multibyte_text -q`
   passed: `1 passed in 1.95s`.
 
+## Iteration 3
+
+Later review-cycle log byte-offset commits expanded the PR's Python diff again.
+The focused added-line AST audit reported additional PR-added definitions
+without docstrings in `src/awf/runtime/logs.py` and
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`.
+This iteration added concise behavior-neutral docstrings only.
+
+Evidence after Iteration 3:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=14`, `added_defs=64`,
+  `missing_docstrings_on_added_defs=3`.
+- Follow-up audit after the first docstring insertion exposed one adjacent
+  added helper without a docstring:
+  `src/awf/runtime/logs.py::_read_log_chunk`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=14`, `added_defs=64`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check src/awf/runtime/logs.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+  passed.
+- `git diff --check` passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_read_workspace_log_does_not_skip_short_non_eof_expanded_read -q`
+  passed: `1 passed in 1.64s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring

@@ -1162,6 +1162,7 @@ class TestWorkspaceLogs:
             limit_bytes: int = 65_536,
             include_bytes: bool = False,
         ) -> dict[str, object]:
+            """Return a short non-EOF byte chunk for cursor advancement checks."""
             assert workspace_id == "ws_short"
             assert stream_id == "agent.stdout"
             assert offset == 0

@@ -41,6 +41,20 @@ unchanged.
 5. Create `plans/COMMENT_4620110496_DOCSTRING_COVERAGE_VALIDATION.md` with
    requirement status and command evidence.
 
+### Iteration 3 Update
+
+Later review-cycle log byte-offset commits expanded the PR's Python diff and
+the same focused audit now reports additional PR-added definitions without
+docstrings:
+
+- `src/awf/runtime/logs.py::read_log_chunk_bytes`
+- `src/awf/runtime/logs.py::_read_log_chunk`
+- `src/awf/runtime/logs.py::_read_log_chunk_bytes`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::short_read_log`
+
+Add concise behavior-neutral docstrings to those definitions only, re-run the
+focused audit, and run narrow Ruff plus the affected targeted MCP log test.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports
