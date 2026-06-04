@@ -66,6 +66,11 @@ _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 # recorded a teardown yet. The overlay may still be live in the worker namespace,
 # so removing the auth dir would strand the mount; GC must surface this loudly.
 _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE = "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE"
+# Logged when a capable process unmounted the overlay but the ``.overlay-unmounted``
+# marker write failed (ENOSPC, transient FS error). Distinct from
+# ``UNMOUNT_INCAPABLE`` (a capability gap): the process here *is* capable, so this
+# is a filesystem write fault, and alerting keyed on the two must not conflate them.
+_CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED"
 # Marker written under ``auth/<id>/claude`` by a capability-holding process (the
 # worker, or any root+CAP_SYS_ADMIN context) once it has unmounted — or verified
 # the absence of — the overlay. It is the cross-namespace signal that lets a
@@ -1235,7 +1240,7 @@ def _write_overlay_unmounted_marker(claude_root: Path, marker: Path) -> None:
     except OSError as exc:
         _log.warning(
             "claude_auth_overlay_unmounted_marker_write_failed",
-            reason_code=_CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
+            reason_code=_CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED,
             workspace_auth_root=str(claude_root),
             error=str(exc),
         )

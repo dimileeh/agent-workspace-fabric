@@ -17,6 +17,7 @@ from structlog.testing import capture_logs
 
 from awf.node import auth_mounts as auth_mounts_mod
 from awf.node.auth_mounts import (
+    _CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED,
     _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
     _OVERLAY_UNMOUNTED_MARKER,
     OverlayUnmountUnverifiableError,
@@ -344,7 +345,14 @@ def test_teardown_marker_write_failure_clears_overlay_scratch(
     # clean no-op instead of an indefinite Unverifiable failure.
     assert not (claude_root / "upper").exists()
     assert not (claude_root / "work").exists()
-    assert any(entry.get("reason_code") == _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE for entry in logs)
+    # A marker-write fault is logged with its own reason code, never the
+    # capability-gap code ``UNMOUNT_INCAPABLE`` — the process here is capable.
+    assert any(
+        entry.get("reason_code") == _CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED for entry in logs
+    )
+    assert not any(
+        entry.get("reason_code") == _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE for entry in logs
+    )
 
     teardown_workspace_auth_overlay(
         work_dir=work_dir,
