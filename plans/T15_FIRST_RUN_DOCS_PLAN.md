@@ -265,6 +265,13 @@ first-run snippets must persist an `AWF_DATABASE_URL` derived from the same
 the matching `AWF_POSTGRES_HOST_PORT` too so custom host ports do not leave the
 host-side database URL stale.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKZLt`: the Quickstart
+package-lane first-run block must preserve existing `.env` entries when
+persisting AWF-managed local service values. Replace only
+`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and
+`AWF_DATABASE_URL`; do not truncate provider tokens, non-default AWF settings,
+or application config before `awf setup` / `awf start`.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

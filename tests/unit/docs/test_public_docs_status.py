@@ -243,7 +243,14 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
     host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
     database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
-    persist_target = "} > .env"
+    env_tmp = 'awf_env_tmp="$(mktemp)"'
+    preserve_existing_env = (
+        "    sed "
+        "'/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
+        "\\|AWF_DATABASE_URL\\)=/d' .env"
+    )
+    persist_target = 'mv "$awf_env_tmp" .env'
+    unsafe_persist_target = "} > .env"
     setup_command = "\nawf setup\n"
 
     assert "persist" in first_run_section.lower()
@@ -251,21 +258,26 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     assert password_export in first_run_section
     assert host_port_export in first_run_section
     assert database_url_export in first_run_section
+    assert env_tmp in first_run_section
     assert api_persist in first_run_section
     assert password_persist in first_run_section
     assert host_port_persist in first_run_section
     assert database_url_persist in first_run_section
+    assert preserve_existing_env in first_run_section
     assert persist_target in first_run_section
+    assert unsafe_persist_target not in first_run_section
     assert setup_command in first_run_section
     assert (
         first_run_section.index(api_export)
         < first_run_section.index(password_export)
         < first_run_section.index(host_port_export)
         < first_run_section.index(database_url_export)
+        < first_run_section.index(env_tmp)
         < first_run_section.index(api_persist)
         < first_run_section.index(password_persist)
         < first_run_section.index(host_port_persist)
         < first_run_section.index(database_url_persist)
+        < first_run_section.index(preserve_existing_env)
         < first_run_section.index(persist_target)
         < first_run_section.index(setup_command)
     )
