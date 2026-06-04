@@ -63,6 +63,34 @@ SOURCE_CHECKOUT_ENV_READ_LINES = {
         'AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
     ),
 }
+SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES = {
+    "AWF_API_TOKEN": (
+        '  case "$AWF_PERSISTED_API_TOKEN" in',
+        (
+            '    \\"*\\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\\"}"; '
+            'AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\"}" ;;'
+        ),
+        (
+            "    \\'*\\') AWF_PERSISTED_API_TOKEN=\"${AWF_PERSISTED_API_TOKEN#\\'}\"; "
+            'AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\\'}" ;;'
+        ),
+        "  esac",
+    ),
+    "AWF_POSTGRES_PASSWORD": (
+        '  case "$AWF_PERSISTED_POSTGRES_PASSWORD" in',
+        (
+            '    \\"*\\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\"}"; '
+            'AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\"}" ;;'
+        ),
+        (
+            "    \\'*\\') AWF_PERSISTED_POSTGRES_PASSWORD="
+            '"${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"; '
+            "AWF_PERSISTED_POSTGRES_PASSWORD="
+            '"${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}" ;;'
+        ),
+        "  esac",
+    ),
+}
 
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\((?P<target>[^)]+)\)")
 FENCE_DELIMITER_RE = re.compile(r"^ {0,3}```", re.MULTILINE)
@@ -710,6 +738,50 @@ def test_package_upgrade_env_restore_accepts_export_prefixed_dotenv_entries(
                 f"{label} must accept export-prefixed persisted {key}: "
                 f"{guard_line!r}; stderr={result.stderr!r}"
             )
+
+
+@pytest.mark.parametrize("doc_name", ("QUICKSTART.md", "UNINSTALL.md", "UPGRADE.md"))
+def test_source_checkout_env_restore_strips_quoted_dotenv_entries(
+    doc_name: str,
+    tmp_path: Path,
+) -> None:
+    """Assert source-checkout snippets do not export dotenv quotes as secret bytes."""
+    doc_text = (REPO_ROOT / "docs" / doc_name).read_text(encoding="utf-8")
+    env_file = tmp_path / ".env"
+
+    for key, persisted_var in (
+        ("AWF_API_TOKEN", "AWF_PERSISTED_API_TOKEN"),
+        ("AWF_POSTGRES_PASSWORD", "AWF_PERSISTED_POSTGRES_PASSWORD"),
+    ):
+        expressions = set(re.findall(rf"sed -n '([^']*{key}[^']*)'", doc_text))
+        assert len(expressions) == 1
+        expression = expressions.pop()
+        script = "\n".join(
+            [
+                'env_file="$1"',
+                f'{persisted_var}="$(sed -n {shlex.quote(expression)} "$env_file" | head -n 1)"',
+                *SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES[key],
+                f'printf "%s\\n" "${{{persisted_var}}}"',
+            ]
+        )
+
+        for raw_value, expected_value in (
+            ('"from-double-quotes"', "from-double-quotes"),
+            ("'from-single-quotes'", "from-single-quotes"),
+        ):
+            env_file.write_text(
+                f"{key}_BACKUP=keep\nexport {key}={raw_value}\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(  # noqa: S602
+                ["bash", "-c", script, "bash", str(env_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            assert result.stdout == expected_value + "\n"
 
 
 def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
@@ -2034,6 +2106,7 @@ def _assert_source_checkout_api_token_restore(
     token_loop_line = "for env_file in docker/compose/.env .env; do"
     token_file_guard_line = '  [ -f "$env_file" ] || continue'
     token_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_API_TOKEN"]
+    token_quote_strip_lines = SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"]
     token_break_line = '  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break'
     token_loop_end_line = "done"
     token_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
@@ -2053,6 +2126,10 @@ def _assert_source_checkout_api_token_restore(
     assert token_loop_line in section, f"{label} must inspect source checkout env files"
     assert token_file_guard_line in section, f"{label} must skip absent env files"
     assert token_read_line in section, f"{label} must read persisted AWF_API_TOKEN"
+    for token_quote_strip_line in token_quote_strip_lines:
+        assert token_quote_strip_line in section, (
+            f"{label} must strip quoted persisted AWF_API_TOKEN values"
+        )
     assert token_break_line in section, f"{label} must prefer the first persisted API token"
     assert token_guard_line in section, f"{label} must branch on persisted API token"
     assert token_persisted_export_line in section, (
@@ -2072,7 +2149,22 @@ def _assert_source_checkout_api_token_restore(
         token_loop_index,
     )
     token_read_index = _required_index(section, token_read_line, label, token_file_guard_index)
-    token_break_index = _required_index(section, token_break_line, label, token_read_index)
+    token_quote_strip_indexes: list[int] = []
+    token_quote_strip_index = token_read_index
+    for token_quote_strip_line in token_quote_strip_lines:
+        token_quote_strip_index = _shell_line_index(
+            section,
+            token_quote_strip_line,
+            label,
+            token_quote_strip_index,
+        )
+        token_quote_strip_indexes.append(token_quote_strip_index)
+    token_break_index = _required_index(
+        section,
+        token_break_line,
+        label,
+        token_quote_strip_indexes[-1],
+    )
     token_loop_end_index = _required_index(
         section,
         token_loop_end_line,
@@ -2115,6 +2207,8 @@ def _assert_source_checkout_api_token_restore(
         < token_loop_index
         < token_file_guard_index
         < token_read_index
+        < min(token_quote_strip_indexes)
+        <= max(token_quote_strip_indexes)
         < token_break_index
         < token_loop_end_index
         < token_guard_index
@@ -2138,6 +2232,7 @@ def _assert_source_checkout_postgres_password_restore(
     password_loop_line = "for env_file in docker/compose/.env .env; do"
     password_file_guard_line = '  [ -f "$env_file" ] || continue'
     password_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"]
+    password_quote_strip_lines = SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_PASSWORD"]
     password_break_line = '  [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break'
     password_loop_end_line = "done"
     password_guard_line = 'if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then'
@@ -2158,6 +2253,10 @@ def _assert_source_checkout_postgres_password_restore(
     assert password_loop_line in section, f"{label} must inspect source checkout env files"
     assert password_file_guard_line in section, f"{label} must skip absent env files"
     assert password_read_line in section, f"{label} must read persisted AWF_POSTGRES_PASSWORD"
+    for password_quote_strip_line in password_quote_strip_lines:
+        assert password_quote_strip_line in section, (
+            f"{label} must strip quoted persisted AWF_POSTGRES_PASSWORD values"
+        )
     assert password_break_line in section, f"{label} must prefer the first persisted password"
     assert password_guard_line in section, f"{label} must branch on persisted password"
     assert password_persisted_export_line in section, (
@@ -2181,7 +2280,22 @@ def _assert_source_checkout_postgres_password_restore(
     password_read_index = _required_index(
         section, password_read_line, label, password_file_guard_index
     )
-    password_break_index = _required_index(section, password_break_line, label, password_read_index)
+    password_quote_strip_indexes: list[int] = []
+    password_quote_strip_index = password_read_index
+    for password_quote_strip_line in password_quote_strip_lines:
+        password_quote_strip_index = _shell_line_index(
+            section,
+            password_quote_strip_line,
+            label,
+            password_quote_strip_index,
+        )
+        password_quote_strip_indexes.append(password_quote_strip_index)
+    password_break_index = _required_index(
+        section,
+        password_break_line,
+        label,
+        password_quote_strip_indexes[-1],
+    )
     password_loop_end_index = _required_index(
         section,
         password_loop_end_line,
@@ -2226,6 +2340,8 @@ def _assert_source_checkout_postgres_password_restore(
         < password_loop_index
         < password_file_guard_index
         < password_read_index
+        < min(password_quote_strip_indexes)
+        <= max(password_quote_strip_indexes)
         < password_break_index
         < password_loop_end_index
         < password_guard_index

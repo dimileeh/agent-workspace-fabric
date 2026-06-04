@@ -92,6 +92,10 @@ AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_API_TOKEN" in
+    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
+    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -104,6 +108,10 @@ AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
+    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
+    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -139,6 +147,10 @@ AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_API_TOKEN" in
+    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
+    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -151,6 +163,10 @@ AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
+    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
+    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -207,6 +223,10 @@ AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_API_TOKEN" in
+    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
+    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -219,6 +239,10 @@ AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
+    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
+    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -247,6 +271,10 @@ AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_API_TOKEN" in
+    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
+    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -259,6 +287,10 @@ AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
+    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
+    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
