@@ -1752,3 +1752,50 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HNvc_` Multiline Private-Key Assignment Plan
+
+### Problem Statement And Scope
+
+The inline review reports that the shared token-assignment regex recognizes
+`PRIVATE_KEY` keys but still captures only the first whitespace-delimited token
+as the value. PEM-style assignments such as
+`SSH_PRIVATE_KEY=-----BEGIN OPENSSH PRIVATE KEY-----\n...` therefore redact
+only `-----BEGIN` and can leak the remaining key header/body through runtime
+logs, audit text, and MCP log-slice assignment context.
+
+This repair is limited to shared assignment-style redaction for PEM private-key
+values and the MCP helper that uses the same named capture groups. It does not
+change exact-secret discovery, provider refs, service-log subprocess behavior,
+or broad validation ownership.
+
+### Requirements Checklist
+
+- Shared token-assignment matching treats PEM private-key assignment values as
+  multiline values through the matching `-----END ... PRIVATE KEY-----` marker.
+- Runtime and audit text redaction mask the full PEM private-key assignment
+  value while preserving the assignment key, separator, optional quotes, and
+  surrounding non-secret text.
+- MCP workspace-log assignment byte coverage treats bytes inside the multiline
+  PEM value body as covered by the visible private-key assignment context.
+- Existing single-token assignment matching remains compatible.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused failing regressions for shared runtime/audit private-key
+   assignment redaction and MCP assignment byte coverage inside a PEM body.
+2. Extend the shared assignment regex value branch with a PEM private-key
+   multiline alternative while preserving the existing named groups.
+3. Run the targeted regressions, adjacent token-pattern/log-redaction tests, and
+   narrow ruff checks for touched files. Broad AWF/GitHub validation remains
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py tests/unit/common/test_token_patterns.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+```

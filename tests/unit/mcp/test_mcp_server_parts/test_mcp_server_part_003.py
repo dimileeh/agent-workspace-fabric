@@ -163,6 +163,22 @@ def test_workspace_log_assignment_value_covers_byte_ignores_out_of_range_context
 
 
 @pytest.mark.unit
+def test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key() -> None:
+    """Treat bytes inside a PEM private-key body as covered by assignment context."""
+    text = (
+        "prefix SSH_PRIVATE_KEY=-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n"
+        "-----END OPENSSH PRIVATE KEY----- suffix"
+    )
+    body_offset = len(text[: text.index("b3BlbnNzaC1rZXktdjE")].encode())
+
+    assert metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        text,
+        body_offset,
+    )
+
+
+@pytest.mark.unit
 def test_workspace_log_assignment_value_covers_byte_breaks_using_byte_offsets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

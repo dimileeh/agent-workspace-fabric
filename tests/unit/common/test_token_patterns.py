@@ -13,6 +13,7 @@ from awf.common.token_patterns import (
     PROVIDER_REF_KEY_SUFFIX_PATTERN,
     PROVIDER_REF_PATTERN,
     compile_known_token_re,
+    compile_token_assignment_re,
 )
 from awf.host_setup import rendering
 
@@ -50,6 +51,42 @@ def test_first_run_redactor_uses_shared_provider_ref_patterns() -> None:
     assert rendering._PROVIDER_REF_RE.flags & re.IGNORECASE  # noqa: SLF001
     assert rendering._PROVIDER_REF_KEY_RE.flags & re.IGNORECASE  # noqa: SLF001
     assert rendering._PROVIDER_REF_KEY_SUFFIX_RE.flags & re.IGNORECASE  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("prefix", "suffix", "runtime_prefix", "audit_prefix"),
+    [
+        ("SSH_PRIVATE_KEY=", "", "SSH_PRIVATE_KEY=<redacted>", "SSH_PRIVATE_KEY=[redacted]"),
+        ('PRIVATE_KEY="', '"', 'PRIVATE_KEY="<redacted>"', 'PRIVATE_KEY="[redacted]"'),
+    ],
+)
+def test_shared_assignment_redactors_mask_multiline_private_key_values(
+    prefix: str,
+    suffix: str,
+    runtime_prefix: str,
+    audit_prefix: str,
+) -> None:
+    """Verify PEM private-key assignments are masked beyond the first token."""
+    pem_value = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+    text = f"{prefix}{pem_value}{suffix}\nstatus=ready"
+    match = compile_token_assignment_re().search(text)
+
+    assert match is not None
+    assert match.group("value") == pem_value
+    runtime_redacted = redaction.redact_secrets(text)
+    audit_redacted = audit.redact_audit_text(text, limit=5000)
+
+    for redacted in (runtime_redacted, audit_redacted):
+        assert "OPENSSH PRIVATE KEY" not in redacted
+        assert "b3BlbnNzaC1rZXktdjE" not in redacted
+        assert "status=ready" in redacted
+    assert runtime_prefix in runtime_redacted
+    assert audit_prefix in audit_redacted
 
 
 @pytest.mark.unit

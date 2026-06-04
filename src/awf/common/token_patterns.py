@@ -29,7 +29,11 @@ TOKEN_ASSIGNMENT_PATTERN: Final = (
     r")\b"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<quote>[\"']?)"
-    r"(?P<value>[^\s\"'`,;)}\]]+)"
+    r"(?P<value>"
+    r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]*?"
+    r"-----END [A-Z0-9 -]*PRIVATE KEY-----"
+    r"|[^\s\"'`,;)}\]]+"
+    r")"
     r"(?P=quote)"
 )
 PROVIDER_REF_PATTERN: Final = (

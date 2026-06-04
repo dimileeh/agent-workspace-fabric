@@ -1953,6 +1953,59 @@ uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/
 
 None found.
 
+## Review Thread `PRRT_kwDOSJAM6s6HNvc_` Multiline Private-Key Assignment Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: shared token-assignment matching treats PEM private-key assignment
+  values as multiline values through the matching `-----END ... PRIVATE KEY-----`
+  marker.
+- Complete: runtime and audit text redaction mask the full PEM private-key
+  assignment value while preserving the assignment key, separator, optional
+  quotes, and surrounding non-secret text.
+- Complete: MCP workspace-log assignment byte coverage treats bytes inside the
+  multiline PEM value body as covered by the visible private-key assignment
+  context.
+- Complete: existing single-token assignment matching remains covered by the
+  adjacent runtime log-redaction assignment test.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/common/token_patterns.py`
+- `tests/unit/common/test_token_patterns.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key -q --tb=short -ra
+# 3 failed: unquoted PEM matched only `-----BEGIN`, quoted PEM did not match, and MCP byte coverage returned False for a PEM body byte
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key -q --tb=short -ra
+# 3 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key -q --tb=short -ra
+# 31 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py tests/unit/common/test_token_patterns.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed!
+```
+
+## Gaps
+
+None found.
+
 ## Review Thread `PRRT_kwDOSJAM6s6HNslE` Service Log Default Env Sentinel Iteration
 
 Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
