@@ -23,7 +23,6 @@ from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import MergeCandidate, Workspace, WorkspaceEvent
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
@@ -43,6 +42,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     RecordedSleep,
     issue_comment_node,
     make_runner,
+    mock_completed_compose_manager,
     pr_payload,
     seed_monitoring_workspace,
     thread_node,
@@ -73,37 +73,6 @@ def sleep_fn() -> RecordedSleep:
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-
-
-def _mock_completed_compose_manager(
-    result: ComposeTeardownResult | None = None,
-) -> tuple[object, list[tuple[str, Path, str, bool]]]:
-    calls: list[tuple[str, Path, str, bool]] = []
-    resolved_result = result or ComposeTeardownResult(
-        status="succeeded",
-        reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
-    )
-
-    class _FakeComposeManager:
-        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
-            self.work_dir = work_dir
-            self.template_path = template_path
-
-        async def teardown_project(
-            self,
-            *,
-            project_name: str,
-            compose_file: Path,
-            workspace_id: str,
-            remove_volumes: bool = True,
-        ) -> ComposeTeardownResult:
-            calls.append((project_name, compose_file, workspace_id, remove_volumes))
-            return resolved_result
-
-    return patch(
-        "awf.runtime.pr_monitor_runner.lifecycle.ComposeManager",
-        new=_FakeComposeManager,
-    ), calls
 
 
 def _green_status(
@@ -596,7 +565,7 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
         worktrees_root=worktrees_root,
         auto_merge=False,
     )
-    compose_patch, compose_calls = _mock_completed_compose_manager()
+    compose_patch, compose_calls = mock_completed_compose_manager()
     with (
         compose_patch,
         patch(
@@ -887,7 +856,7 @@ async def test_release_monitor_factory_uses_manual_merge_contract(
         max_outer_iterations=4,
     )
     runner._deps.sleep = sleep_fn
-    compose_patch, _compose_calls = _mock_completed_compose_manager()
+    compose_patch, _compose_calls = mock_completed_compose_manager()
     with compose_patch, structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,

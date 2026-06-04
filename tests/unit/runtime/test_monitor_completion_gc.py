@@ -34,6 +34,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    mock_completed_compose_manager,
     pr_payload,
     seed_monitoring_workspace,
 )
@@ -75,33 +76,6 @@ def _mock_worktree_remove_success() -> object:
             )
         ),
     )
-
-
-def _mock_completed_compose_manager(
-    result: ComposeTeardownResult,
-) -> tuple[object, list[tuple[str, Path, str, bool]]]:
-    calls: list[tuple[str, Path, str, bool]] = []
-
-    class _FakeComposeManager:
-        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
-            self.work_dir = work_dir
-            self.template_path = template_path
-
-        async def teardown_project(
-            self,
-            *,
-            project_name: str,
-            compose_file: Path,
-            workspace_id: str,
-            remove_volumes: bool = True,
-        ) -> ComposeTeardownResult:
-            calls.append((project_name, compose_file, workspace_id, remove_volumes))
-            return result
-
-    return patch(
-        "awf.runtime.pr_monitor_runner.lifecycle.ComposeManager",
-        new=_FakeComposeManager,
-    ), calls
 
 
 def _empty_workspace_gc_result(work_dir: Path) -> WorkspaceGCResult:
@@ -170,7 +144,7 @@ async def test_completed_workspace_compose_teardown_callback_uses_candidate_meta
 
     monitor_compose_file = tmp_path / "monitor" / "compose.yml"
     candidate_compose_file = tmp_path / "candidate" / "compose.yml"
-    compose_patch, compose_calls = _mock_completed_compose_manager(
+    compose_patch, compose_calls = mock_completed_compose_manager(
         ComposeTeardownResult(
             status="succeeded",
             reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
@@ -336,7 +310,7 @@ async def test_completed_monitor_reclaims_recent_workspace_pressure_dirs_immedia
         sleep_fn=sleep_fn,
         worktrees_root=worktrees_root,
     )
-    compose_patch, _compose_calls = _mock_completed_compose_manager(
+    compose_patch, _compose_calls = mock_completed_compose_manager(
         ComposeTeardownResult(
             status="succeeded",
             reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
@@ -674,7 +648,7 @@ async def test_completed_monitor_invokes_target_branch_reconciler(
         worktrees_root=worktrees_root,
         post_merge_target_reconciler=_reconcile,
     )
-    compose_patch, _compose_calls = _mock_completed_compose_manager(
+    compose_patch, _compose_calls = mock_completed_compose_manager(
         ComposeTeardownResult(
             status="succeeded",
             reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
@@ -715,7 +689,7 @@ async def test_completed_monitor_passes_volume_reaping_compose_teardown_to_files
         captured_teardown["callback"] = kwargs.get("compose_teardown")
         return _empty_workspace_gc_result(work_dir)
 
-    compose_patch, compose_calls = _mock_completed_compose_manager(
+    compose_patch, compose_calls = mock_completed_compose_manager(
         ComposeTeardownResult(
             status="succeeded",
             reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
@@ -809,7 +783,7 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
         sleep_fn=sleep_fn,
         worktrees_root=worktrees_root,
     )
-    compose_patch, compose_calls = _mock_completed_compose_manager(
+    compose_patch, compose_calls = mock_completed_compose_manager(
         ComposeTeardownResult(
             status="failed",
             reason_code="DOCKER_UNAVAILABLE",
