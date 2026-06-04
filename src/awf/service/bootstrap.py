@@ -328,15 +328,20 @@ def _path_within_mount(mount_point: str, path: str) -> bool:
 def _work_dir_mount_entry(mountinfo_path: Path, target: Path) -> _MountInfoEntry | None:
     """Return the longest-prefix mount entry backing ``target``, or ``None``.
 
-    Matches on the literal absolute path (no symlink/existence resolution) so the
-    parse is deterministic and unit-testable without a real mount table.
+    Resolves symlinks in ``target`` (``realpath``) before prefix-matching: the
+    kernel records mount points in ``/proc/self/mountinfo`` as fully
+    symlink-resolved canonical paths, so a work dir reached through a symlink
+    (e.g. a symlinked ``$HOME``) would otherwise fail to match and silently force
+    the copy fallback even where propagation is fine. ``realpath`` does not
+    require the path to exist (it resolves the symlinked prefix and keeps any
+    non-existent tail) and is a no-op on plain, symlink-free paths.
     """
 
     try:
         text = mountinfo_path.read_text()
     except OSError:
         return None
-    resolved = os.path.abspath(os.fspath(target))  # noqa: PTH100 - normalize without FS/symlink access
+    resolved = os.path.realpath(os.fspath(target))  # noqa: PTH100 - match kernel canonical mount paths
     best: _MountInfoEntry | None = None
     for entry in _parse_mountinfo(text):
         if not _path_within_mount(entry.mount_point, resolved):

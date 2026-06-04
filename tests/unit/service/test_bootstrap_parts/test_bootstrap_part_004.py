@@ -120,6 +120,33 @@ def test_preflight_shared_mount_is_ensured_without_subprocess(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+def test_preflight_resolves_symlinked_work_dir_to_canonical_mount(tmp_path: Path) -> None:
+    # The kernel records mount points in mountinfo as symlink-resolved canonical
+    # paths. A work dir reached through a symlink must resolve to that canonical
+    # path so it still prefix-matches its shared mount, rather than silently
+    # forcing the copy fallback.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"23 28 0:21 / {real} rw,relatime shared:1 - ext4 /dev/sda rw\n",
+        encoding="utf-8",
+    )
+
+    result = ensure_work_dir_mount_propagation(
+        str(link),
+        run_subprocess=_unexpected_runner,
+        environ={},
+        mountinfo_path=mountinfo,
+    )
+
+    assert result.propagation == "rshared"
+    assert not result.force_copy
+
+
+@pytest.mark.unit
 def test_preflight_private_mount_made_rshared_via_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
