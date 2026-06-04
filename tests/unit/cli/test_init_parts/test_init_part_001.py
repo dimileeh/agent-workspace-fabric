@@ -54,6 +54,12 @@ def _doctor_report(*diagnostics: Any) -> Any:
     )
 
 
+def _write_awf_source_markers(root: Path) -> None:
+    (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    (root / "src" / "awf").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
+
+
 def _stub_bootstrap_mode(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1260,7 +1266,12 @@ def test_init_without_path_seeds_root_env_when_missing(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
+    _write_awf_source_markers(tmp_path)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     example = tmp_path / ".env.example"
     example.write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
@@ -1284,7 +1295,12 @@ def test_init_without_path_uses_root_env_example_not_legacy_compose_example(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
+    _write_awf_source_markers(tmp_path)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     compose_example = compose / ".env.example"
     compose_example.write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
@@ -1376,6 +1392,11 @@ def test_init_without_path_reports_legacy_env_migration_without_values(
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    _write_awf_source_markers(tmp_path)
+    (tmp_path / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (tmp_path / ".env").write_text(
         "\n".join(
             [
@@ -1423,6 +1444,11 @@ def test_init_without_path_json_reports_legacy_env_migration_without_values(
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    _write_awf_source_markers(tmp_path)
+    (tmp_path / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (tmp_path / ".env").write_text(
         "AWF_API_TOKEN=migrated-token\n",
         encoding="utf-8",

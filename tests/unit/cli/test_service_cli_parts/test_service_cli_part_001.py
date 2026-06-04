@@ -66,6 +66,12 @@ def _write_root_service_compose(root: Path) -> Path:
     return compose_file
 
 
+def _write_awf_source_markers(root: Path) -> None:
+    (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    (root / "src" / "awf").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
+
+
 @pytest.fixture
 def _default_local_service_compose_file(
     monkeypatch: pytest.MonkeyPatch,
@@ -894,6 +900,7 @@ def test_service_bootstrap_cli_migrates_legacy_compose_env(
 
     workspace_root = tmp_path / "workspace"
     compose_file = _write_root_service_compose(workspace_root)
+    _write_awf_source_markers(workspace_root)
     legacy_env = workspace_root / "docker" / "compose" / ".env"
     root_env = workspace_root / ".env"
     database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
@@ -960,7 +967,7 @@ def test_service_bootstrap_cli_migrates_legacy_compose_env(
 
 
 @pytest.mark.unit
-def test_service_bootstrap_cli_migrates_legacy_env_from_current_root(
+def test_service_bootstrap_cli_does_not_migrate_legacy_env_from_current_project(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1002,15 +1009,16 @@ def test_service_bootstrap_cli_migrates_legacy_env_from_current_root(
 
     assert result.exit_code == 0, result.output
     settings = captured["settings"]
-    assert settings.database_url == database_url
-    assert settings.docker_host == docker_host
-    assert settings.api_base_url == api_base_url
+    assert settings.database_url != database_url
+    assert settings.docker_host != docker_host
+    assert settings.api_base_url != api_base_url
     assert captured["compose_file"] == Path("compose.yaml")
-    assert captured["env_file"] == Path(".env")
+    assert captured["env_file"] is None
     service_environ = captured["service_environ"]
-    assert service_environ["AWF_DATABASE_URL"] == database_url
-    assert service_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
-    assert not legacy_env.exists()
+    assert service_environ.get("AWF_DATABASE_URL") != database_url
+    assert service_environ.get("AWF_POSTGRES_PASSWORD") == "awf_dev"
+    assert legacy_env.exists()
+    assert "env_migration" not in json.loads(result.stdout)
 
 
 @pytest.mark.unit

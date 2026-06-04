@@ -16,6 +16,13 @@ import typer
 from awf.cli.common import OutputFormat, _emit, _list_value, _mapping_value
 from awf.service.smoke import _PROFILE_MARKER_PATHS as _PROJECT_PROFILE_MARKER_PATHS
 
+_AWF_SOURCE_ROOT_ENV_MIGRATION_MARKERS = (
+    "pyproject.toml",
+    "src/awf/__init__.py",
+    "compose.yaml",
+    "docker/compose/local-service.yml",
+)
+
 
 class _EnvSeedMergeError(ValueError):
     """Raised when env seed merging cannot preserve dotenv semantics."""
@@ -535,6 +542,8 @@ def _migrate_legacy_service_env_file(env_file: Path, env_example: Path) -> objec
     )
 
     canonical_env_file = env_file.expanduser()
+    if not _legacy_service_env_migration_allowed(canonical_env_file):
+        return None
     legacy_env_file = default_legacy_compose_env_file(canonical_env_file)
     if not legacy_env_file.exists():
         return None
@@ -543,6 +552,15 @@ def _migrate_legacy_service_env_file(env_file: Path, env_example: Path) -> objec
         env_example_file=env_example,
         legacy_env_file=legacy_env_file,
     )
+
+
+def _legacy_service_env_migration_allowed(canonical_env_file: Path) -> bool:
+    """Return whether legacy Compose env migration is safe for this root."""
+
+    if canonical_env_file.name != ".env":
+        return False
+    root = canonical_env_file.parent if canonical_env_file.is_absolute() else Path.cwd()
+    return all((root / marker).is_file() for marker in _AWF_SOURCE_ROOT_ENV_MIGRATION_MARKERS)
 
 
 def _add_env_migration_payload(

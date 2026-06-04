@@ -17,6 +17,12 @@ from tests.unit.cli.test_init_parts._bootstrap_helper import invoke_init_service
 _runner = CliRunner()
 
 
+def _write_awf_source_markers(root: Path) -> None:
+    (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    (root / "src" / "awf").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
+
+
 def _docker_diagnostic(status: str = "ok") -> Any:
     from awf.service.doctor.models import DoctorDiagnostic
 
@@ -302,6 +308,11 @@ def test_init_without_path_uses_compose_env_host_work_dir_for_state_directory(
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    _write_awf_source_markers(tmp_path)
+    (tmp_path / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (compose / ".env").write_text(
         f"AWF_HOST_WORK_DIR={compose_state_dir}\n",
         encoding="utf-8",
