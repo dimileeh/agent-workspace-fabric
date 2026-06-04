@@ -97,7 +97,13 @@ def _auth_unmount_skipped_outcome(
     reason visible in the GC payload.
     """
 
-    assert auth_unmount_failure is not None  # guarded by _auth_overlay_unmount_skips_target
+    if auth_unmount_failure is None:
+        # Guarded by ``_auth_overlay_unmount_skips_target`` at every call site, so this
+        # is unreachable in practice. Raise an explicit error rather than asserting:
+        # ``assert`` is stripped under ``python -O``, which would turn a bypassed guard
+        # into an opaque ``TypeError`` from the tuple unpack below instead of this clear
+        # contract violation.
+        raise ValueError("_auth_unmount_skipped_outcome called without an unmount failure")
     reason_code, message = auth_unmount_failure
     return WorkspaceGCPathOutcome(
         workspace_id=candidate.workspace_id,
