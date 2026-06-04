@@ -468,16 +468,28 @@ def test_pinned_dir_scan_tolerates_missing_auth_root(tmp_path: Path) -> None:
 
 
 def _make_overlay_scratch(
-    work_dir: Path, ws: str, *, pin: str | None = None, unmounted: bool = False
+    work_dir: Path,
+    ws: str,
+    *,
+    pin: str | None = None,
+    unmounted: bool = False,
+    empty_upper: bool = False,
 ) -> Path:
     """Create a workspace overlay scratch (``claude/upper``) for ``ws``.
 
-    Optionally writes a ``base.signature`` pin and/or the ``.overlay-unmounted``
-    teardown marker so tests can exercise the unverifiable-live-overlay guard.
+    By default the ``upper`` carries an entry — the writable layer of a genuinely
+    mounted overlay, the case the unverifiable-live-overlay guard must protect.
+    ``empty_upper=True`` leaves it empty to model a failed first mount that fell
+    back to the legacy full copy (no live overlay lower; ``_overlay_upper_has_data``
+    ignores it). Optionally writes a ``base.signature`` pin and/or the
+    ``.overlay-unmounted`` teardown marker so tests can exercise the guard.
     """
 
     claude_root = work_dir / "auth" / ws / "claude"
-    (claude_root / "upper").mkdir(parents=True)
+    upper = claude_root / "upper"
+    upper.mkdir(parents=True)
+    if not empty_upper:
+        (upper / "settings.json").write_text("{}\n")
     if pin is not None:
         (claude_root / "base.signature").write_text(pin + "\n")
     if unmounted:
@@ -515,6 +527,31 @@ def test_declines_to_reap_when_live_mount_unverifiable(tmp_path: Path) -> None:
     )
     # The possibly-live base was not reclaimed.
     assert base_super.is_dir()
+
+
+@pytest.mark.unit
+def test_empty_upper_does_not_trip_unverifiable_guard(tmp_path: Path) -> None:
+    # A ``claude/upper`` left empty by a failed first overlay mount is *not* a live
+    # overlay — provisioning fell back to the legacy full copy and ignores such an
+    # empty ``upper`` via ``_overlay_upper_has_data``. So even for an incapable
+    # process with no pin, an empty ``upper`` must not masquerade as a possibly-live
+    # overlay and indefinitely block GC-B from reaping superseded bases.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    _make_overlay_scratch(work_dir, "ws_failed_mount", empty_upper=True)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=True,
+        capability_probe=lambda: False,
+    )
+
+    assert report["reaped"] == ["sigsuper0000000"]
+    assert report["unverifiable"] == []
+    assert not base_super.parent.exists()
 
 
 @pytest.mark.unit

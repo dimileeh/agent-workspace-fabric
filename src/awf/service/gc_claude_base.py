@@ -38,6 +38,7 @@ from awf.node.auth_mounts import (
     _SHARED_AUTH_DIRNAME,
     _has_cap_sys_admin,
     _host_claude_signature,
+    _overlay_upper_has_data,
     _shared_claude_base_dir,
     iter_overlay_lowerdirs,
 )
@@ -128,7 +129,7 @@ def _has_unverifiable_live_overlay(
 ) -> bool:
     """Return whether a surviving overlay may be live but cannot be pinned to a base.
 
-    A workspace whose ``claude/upper`` overlay scratch exists but that carries
+    A workspace whose ``claude/upper`` overlay scratch carries data but has
     *neither* a ``base.signature`` pin *nor* an ``.overlay-unmounted`` teardown
     marker may still hold a **live** overlay in the worker's mount namespace, mounted
     against a base that this process cannot observe via its own ``/proc/mounts`` — the
@@ -136,8 +137,11 @@ def _has_unverifiable_live_overlay(
     worker-mounted lowerdir never appears here. Such a base is invisible to the
     live-mount protection *and* has no pin to fall back on, so it cannot be safely
     classified as superseded. Mirrors the incapable branch of
-    :func:`auth_mounts.teardown_workspace_auth_overlay`. ``pruned_auth_dirs`` (the
-    terminal candidates this pass deletes) are excluded — they will not remount.
+    :func:`auth_mounts.teardown_workspace_auth_overlay`. An *empty* ``upper`` (a
+    failed first mount that fell back to the legacy full copy) is not a live overlay
+    and is ignored, matching provisioning's ``_overlay_upper_has_data`` check.
+    ``pruned_auth_dirs`` (the terminal candidates this pass deletes) are excluded —
+    they will not remount.
     """
 
     auth_root = work_dir / "auth"
@@ -152,9 +156,13 @@ def _has_unverifiable_live_overlay(
         if workspace_dir.resolve(strict=False) in pruned:
             continue
         claude_root = workspace_dir / "claude"
-        if not (claude_root / "upper").exists():
-            # No overlay scratch (legacy full-copy workspace, or never provisioned):
-            # nothing that could be a live overlay lower.
+        if not _overlay_upper_has_data(claude_root / "upper"):
+            # No overlay scratch (legacy full-copy workspace, or never provisioned),
+            # or only an *empty* ``upper`` left by a failed first mount that fell back
+            # to the legacy full copy: nothing that could be a live overlay lower.
+            # Provisioning ignores such an empty ``upper`` via the same
+            # ``_overlay_upper_has_data`` check, so an empty leftover here must not
+            # masquerade as a possibly-live overlay and block GC-B indefinitely.
             continue
         if (claude_root / _OVERLAY_UNMOUNTED_MARKER).exists():
             # A capable process (the worker) recorded teardown: the old base is no
