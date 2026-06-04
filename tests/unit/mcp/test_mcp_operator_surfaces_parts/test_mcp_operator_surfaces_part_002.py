@@ -1069,6 +1069,7 @@ class TestMcpOperatorSurfaceParityPart001:
         assert fallback_result["checks"]["db"]["ok"] is True
         assert fallback_result["checks"]["db"]["status"] == "ok"
         for key in (
+            "worker",
             "docker_cli",
             "docker_daemon",
             "docker_compose",
@@ -1109,6 +1110,30 @@ class TestMcpOperatorSurfaceParityPart001:
         assert fallback_result["checks"]["db"]["ok"] is True
         assert fallback_result["checks"]["db"]["status"] == "ok"
         assert fallback_result["checks"]["db"]["reason"] is None
+
+    @pytest.mark.unit
+    async def test_readiness_fallback_reports_missing_worker_heartbeat(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        settings = resource_stack.settings.model_copy(
+            update={"worker_node_id": "missing-mcp-worker"}
+        )
+
+        fallback_result = await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=settings,
+            session_factory=resource_stack.factory,
+        )
+
+        worker_check = fallback_result["checks"]["worker"]
+        assert worker_check["ok"] is False
+        assert worker_check["status"] == "fail"
+        assert worker_check["reason"] == "WORKER_HEARTBEAT_MISSING"
+        assert worker_check["detail"] == (
+            "No worker heartbeat recorded for node 'missing-mcp-worker'"
+        )
+        assert fallback_result["status"] == "fail"
 
     @pytest.mark.unit
     async def test_readiness_fallback_propagates_auto_cleanup_orphans(

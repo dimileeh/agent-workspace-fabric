@@ -382,10 +382,12 @@ async def _provided_readiness(
         _check_docker_compose,
         _check_docker_daemon,
         _check_orphan_resources_with_concurrent_scans,
+        _check_worker_heartbeat,
         _workspace_view_for_readyz,
     )
     from awf.common.commands import AsyncioSubprocessRunner
     from awf.service.config import resolve_service_settings
+    from awf.service.node_identity import effective_service_node_id
     from awf.service.orphan_resources import (
         CHECK_TIMEOUT_SECONDS,
         ResourceScan,
@@ -399,8 +401,12 @@ async def _provided_readiness(
     if validated_strict_providers is not None:
         readiness_kwargs["validated_strict_providers"] = validated_strict_providers
     service_settings = resolve_service_settings(settings)
+    worker_node_id = effective_service_node_id(service_settings)
     runner = AsyncioSubprocessRunner()
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(session_factory))
+    worker_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_worker_heartbeat(session_factory, node_id=worker_node_id)
+    )
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
     daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
     compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
@@ -443,6 +449,7 @@ async def _provided_readiness(
     )
     await asyncio.gather(
         db_check_task,
+        worker_check_task,
         cli_check_task,
         daemon_check_task,
         compose_check_task,
@@ -451,6 +458,7 @@ async def _provided_readiness(
         orphan_check_task,
     )
     db_check = db_check_task.result()
+    worker_check = worker_check_task.result()
     cli_check = cli_check_task.result()
     daemon_check = daemon_check_task.result()
     compose_check = compose_check_task.result()
@@ -459,6 +467,7 @@ async def _provided_readiness(
     orphan_check = orphan_check_task.result()
     checks = {
         "db": db_check,
+        "worker": worker_check,
         "docker_cli": cli_check,
         "docker_daemon": daemon_check,
         "docker_compose": compose_check,
