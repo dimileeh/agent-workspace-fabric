@@ -77,6 +77,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: Implemented Parity Coverage Reference
+
+### Problem Statement And Scope
+
+GitHub CI fails
+`tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference`
+because the MCP parity matrix now marks `Local first-run setup/start/init/client`
+as `MCP implemented`, but the implemented-parity coverage reference map does
+not point that row at executable MCP contract coverage.
+
+Scope is limited to adding the missing traceability entry for the already
+implemented first-run setup/start/init/client MCP tools. The parity row,
+tool behavior, and quality gate stay unchanged.
+
+### Requirements Checklist
+
+- Keep `Local first-run setup/start/init/client` marked `MCP implemented`.
+- Add explicit executable coverage references for the local first-run MCP row.
+- Use existing focused MCP setup-tool tests that cover setup, start, init, and
+  client instruction behavior.
+- Run the focused failing repro and the referenced setup-tool tests.
+- Leave broad AWF/GitHub validation and full coverage gates to AWF after the
+  agent phase.
+
+### Implementation Steps
+
+1. Confirm the focused CI repro fails with the missing coverage-reference
+   assertion.
+2. Add the missing implemented-parity coverage map entry pointing at existing
+   `tests/unit/mcp/test_setup_tools.py` node IDs.
+3. Re-run the focused CI repro and the referenced setup-tool tests.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_setup_tools_are_registered tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_uses_onboarding_writer tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HB0-m
 
 ### Problem Statement And Scope

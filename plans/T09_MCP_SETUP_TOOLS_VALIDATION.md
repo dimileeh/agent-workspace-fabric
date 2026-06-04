@@ -53,6 +53,48 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: Implemented Parity Coverage Reference
+
+### Requirement Status
+
+- Keep `Local first-run setup/start/init/client` marked `MCP implemented`:
+  Complete.
+- Add explicit executable coverage references for the local first-run MCP row:
+  Complete.
+- Use existing focused MCP setup-tool tests that cover setup, start, init, and
+  client instruction behavior: Complete.
+- Run the focused failing repro and the referenced setup-tool tests: Complete.
+- Leave broad AWF/GitHub validation and full coverage gates to AWF after the
+  agent phase: Complete.
+
+### Evidence
+
+Files changed:
+
+- `tests/unit/contracts/test_registry_smoke.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_setup_tools_are_registered tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_uses_onboarding_writer tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free -q
+uv run --python 3.12 --extra dev ruff check tests/unit/contracts/test_registry_smoke.py
+```
+
+Latest results:
+
+- Focused CI repro failed before the repair with missing coverage reference:
+  `['Local first-run setup/start/init/client']`.
+- Focused CI repro after the repair: 1 passed.
+- Referenced setup-tool tests: 5 passed.
+- Focused ruff: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HB0-m
 
 ### Requirement Status

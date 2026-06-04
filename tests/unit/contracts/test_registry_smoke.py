@@ -140,6 +140,13 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
         "tests/unit/contracts/test_if_match_alignment.py::test_mcp_control_tools_expose_optional_expected_version",
         "tests/unit/contracts/test_if_match_alignment.py::test_rest_stale_if_match_returns_version_conflict_envelope",
     ),
+    "Local first-run setup/start/init/client": (
+        "tests/unit/mcp/test_setup_tools.py::test_setup_tools_are_registered",
+        "tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs",
+        "tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation",
+        "tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_uses_onboarding_writer",
+        "tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free",
+    ),
 }
 
 
