@@ -100,6 +100,53 @@ async def test_record_heartbeat_handles_concurrent_first_writes() -> None:
 
 
 @pytest.mark.unit
+async def test_fallback_record_heartbeat_returns_insert_without_redundant_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        worker_id = "worker_fallback_first_insert_no_get"
+        started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+        last_heartbeat_at = started_at + timedelta(seconds=1)
+        original_get = WorkerHeartbeatRepository.get
+
+        async def fail_redundant_get(
+            self: WorkerHeartbeatRepository,
+            *,
+            worker_id: str,
+        ) -> WorkerHeartbeat | None:
+            raise AssertionError("fallback insert success should not issue a get()")
+
+        monkeypatch.setattr(WorkerHeartbeatRepository, "get", fail_redundant_get)
+
+        async with factory() as session, session.begin():
+            heartbeat = await WorkerHeartbeatRepository(
+                session,
+                dialect_name="unsupported",
+            ).record_heartbeat(
+                worker_id=worker_id,
+                node_id="node-a",
+                started_at=started_at,
+                last_heartbeat_at=last_heartbeat_at,
+                poll_interval_seconds=5.0,
+            )
+
+        async with factory() as session:
+            persisted = await original_get(
+                WorkerHeartbeatRepository(session),
+                worker_id=worker_id,
+            )
+
+    assert heartbeat.worker_id == worker_id
+    assert heartbeat.node_id == "node-a"
+    assert heartbeat.started_at == started_at
+    assert heartbeat.last_heartbeat_at == last_heartbeat_at
+    assert heartbeat.poll_interval_seconds == 5.0
+    assert persisted is not None
+    assert persisted.worker_id == worker_id
+
+
+@pytest.mark.unit
 async def test_fallback_record_heartbeat_handles_concurrent_first_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

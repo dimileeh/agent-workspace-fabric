@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -163,16 +163,16 @@ class WorkerHeartbeatRepository:
         if heartbeat is not None:
             return heartbeat
 
+        inserted_heartbeat = WorkerHeartbeat(
+            **heartbeat_values,
+            created_at=now,
+            updated_at=now,
+        )
         try:
             async with self._session.begin_nested():
-                await self._session.execute(
-                    insert(WorkerHeartbeat).values(
-                        **heartbeat_values,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-        except IntegrityError:
+                self._session.add(inserted_heartbeat)
+                await self._session.flush()
+        except IntegrityError as exc:
             heartbeat = await self._update_existing_heartbeat(
                 worker_id=worker_id,
                 node_id=node_id,
@@ -182,13 +182,12 @@ class WorkerHeartbeatRepository:
             )
             if heartbeat is not None:
                 return heartbeat
-        else:
-            await self._session.flush()
+            heartbeat = await self.get(worker_id=worker_id)
+            if heartbeat is None:
+                raise RuntimeError("Worker heartbeat fallback did not persist a row.") from exc
+            return heartbeat
 
-        heartbeat = await self.get(worker_id=worker_id)
-        if heartbeat is None:
-            raise RuntimeError("Worker heartbeat fallback did not persist a row.")
-        return heartbeat
+        return inserted_heartbeat
 
     async def _update_existing_heartbeat(
         self,
