@@ -69,6 +69,8 @@ from awf.service.worker_heartbeat import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from awf.service.gc_reconcile import OrphanDirReconcileResult
     from awf.service.orphan_resources import OrphanReapResult
 
@@ -92,6 +94,7 @@ class ControlWorker(WorkerDelegatesMixin):
         open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
         orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
         classified_orphan_reaper: Callable[[], Awaitable[OrphanReapResult]] | None = None,
+        auth_overlay_work_dir: Path | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
@@ -102,6 +105,10 @@ class ControlWorker(WorkerDelegatesMixin):
         self._open_pr_resolver = open_pr_resolver
         self._orphan_dir_reconciler = orphan_dir_reconciler
         self._classified_orphan_reaper = classified_orphan_reaper
+        # The host work dir that backs ``auth/<id>/claude/...`` overlays. When set,
+        # the terminal-runtime-release sweep unmounts a reaped workspace's overlay
+        # in the worker's (CAP_SYS_ADMIN) mount namespace before GC removes the dir.
+        self._auth_overlay_work_dir = auth_overlay_work_dir
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
