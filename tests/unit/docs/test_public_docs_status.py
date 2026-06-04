@@ -660,6 +660,7 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     """Assert no-global checkout rollback does not require a global awf executable."""
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    no_global_heading = "For the source checkout with no global install lane"
     stop_guard_line = "if [ -f docker/compose/.env ]; then"
     stop_env_file_line = (
         "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
@@ -677,22 +678,68 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
         ),
     )
 
-    assert "source checkout with no global install" in rollback_section.lower()
-    assert stop_guard_line in rollback_section
-    assert stop_env_file_line in rollback_section
-    assert stop_fallback_line in rollback_section
-    assert stop_guard_end_line in rollback_section
-    stop_fallback_index = rollback_section.index(stop_fallback_line)
+    assert no_global_heading in rollback_section
+    no_global_section = rollback_section.split(no_global_heading, maxsplit=1)[1]
+    assert stop_guard_line in no_global_section
+    assert stop_env_file_line in no_global_section
+    assert stop_fallback_line in no_global_section
+    assert stop_guard_end_line in no_global_section
+    stop_fallback_index = no_global_section.index(stop_fallback_line)
     assert (
-        rollback_section.index("uv sync --extra dev")
-        < rollback_section.index(stop_guard_line)
-        < rollback_section.index(stop_env_file_line)
+        no_global_section.index("uv sync --extra dev")
+        < no_global_section.index(stop_guard_line)
+        < no_global_section.index(stop_env_file_line)
         < stop_fallback_index
-        < rollback_section.index(stop_guard_end_line, stop_fallback_index)
-        < rollback_section.index(setup_line)
+        < no_global_section.index(stop_guard_end_line, stop_fallback_index)
+        < no_global_section.index(setup_line)
     )
     for command in no_global_commands:
-        assert command in rollback_section
+        assert command in no_global_section
+
+
+def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
+    """Assert global-tool checkout rollback refreshes persisted source metadata."""
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    global_heading = "For the source checkout with global tool install lane"
+    no_global_heading = "For the source checkout with no global install lane"
+    stop_guard_line = "if [ -f docker/compose/.env ]; then"
+    stop_env_file_line = (
+        "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+    )
+    stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
+    stop_guard_end_line = "fi"
+    setup_line = 'awf setup --source-checkout "$PWD"'
+    global_commands = (
+        setup_line,
+        'awf start --source-checkout "$PWD"',
+        "awf service status --format pretty",
+        "awf smoke run --project <path> --mocked-local --format pretty",
+    )
+
+    assert global_heading in rollback_section
+    assert no_global_heading in rollback_section
+    global_section = rollback_section.split(global_heading, maxsplit=1)[1].split(
+        no_global_heading,
+        maxsplit=1,
+    )[0]
+    assert "cd /path/to/aira-agent-workspace-fabric" in global_section
+    assert "uv tool install . --force" in global_section
+    assert stop_guard_line in global_section
+    assert stop_env_file_line in global_section
+    assert stop_fallback_line in global_section
+    assert stop_guard_end_line in global_section
+    stop_fallback_index = global_section.index(stop_fallback_line)
+    assert (
+        global_section.index("uv tool install . --force")
+        < global_section.index(stop_guard_line)
+        < global_section.index(stop_env_file_line)
+        < stop_fallback_index
+        < global_section.index(stop_guard_end_line, stop_fallback_index)
+        < global_section.index(setup_line)
+    )
+    for command in global_commands:
+        assert command in global_section
 
 
 def test_uninstall_no_global_source_checkout_cleanup_uses_uv_run() -> None:

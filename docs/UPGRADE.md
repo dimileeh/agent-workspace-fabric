@@ -99,10 +99,28 @@ If a local upgrade blocks development:
    version for your lane.
 2. Run the rollback commands that match your lane.
 
-For lanes that put `awf` on `PATH`:
+For release-installed lanes, and for virtualenv/pip installs after activating
+the restored environment:
 
 ```bash
 awf start
+awf service status --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
+```
+
+For the source checkout with global tool install lane, run from the restored
+checkout and refresh persisted source-checkout metadata before starting:
+
+```bash
+cd /path/to/aira-agent-workspace-fabric
+uv tool install . --force
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty
 ```

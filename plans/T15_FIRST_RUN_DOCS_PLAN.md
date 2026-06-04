@@ -125,6 +125,12 @@ upgrade snippets must not require `docker/compose/.env` when the source-checkout
 first-run lane only exported shell values. Guard `--env-file docker/compose/.env`
 behind an existence check and provide a fallback stop command that omits it.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HF4n7`: the rollback guide's
+global `awf` path must not also cover source-checkout/global-tool rollbacks. That
+source lane must stop local Core, refresh persisted source-checkout metadata with
+`awf setup --source-checkout "$PWD"`, then start with
+`awf start --source-checkout "$PWD"` from the restored checkout.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

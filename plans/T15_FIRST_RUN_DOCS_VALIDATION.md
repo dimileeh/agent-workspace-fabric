@@ -625,6 +625,50 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HF4n7`:
+
+- `docs/UPGRADE.md` now separates release-installed/virtualenv rollback from
+  the source-checkout/global-tool rollback lane.
+- The source-checkout/global-tool rollback lane now reinstalls the global tool
+  from the restored checkout, stops local Core with the same optional
+  `docker/compose/.env` guard used by source upgrade snippets, refreshes
+  persisted source-checkout metadata with `awf setup --source-checkout "$PWD"`,
+  then starts with `awf start --source-checkout "$PWD"`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects global-tool
+  source-checkout rollback docs that omit the metadata refresh, and the
+  existing no-global rollback test now scopes its assertions to the no-global
+  subsection.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/UPGRADE.md` did not contain a source-checkout/global-tool rollback block
+that refreshed persisted metadata before start.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+```
+
+Final focused rollback result: `2 passed in 0.64s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `43 passed in 1.19s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
