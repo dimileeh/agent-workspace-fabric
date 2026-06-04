@@ -933,6 +933,53 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py src/awf/common/red
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review Thread `PRRT_kwDOSJAM6s6HFLSV` Compose Secret-Key Parity Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP workspace log exact-secret discovery now uses the same broad
+  service secret-key predicate as service logs for local Compose env values.
+- Complete: a Compose-only `CUSTOM_CLIENT_SECRET` value that does not match
+  token-shape or assignment-pattern redaction is masked when read through an
+  overlapping MCP byte slice.
+- Complete: existing Compose provider-key exact redaction remains covered by
+  the adjacent focused regression.
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k compose_env_custom_secret
+# failed: returned raw "bare-compose-custom-value" from MCP workspace log read
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k compose_env_custom_secret
+# 1 passed, 39 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'compose_env_provider_secret or compose_env_custom_secret'
+# 2 passed, 38 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+# Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

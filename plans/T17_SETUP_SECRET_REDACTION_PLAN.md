@@ -646,3 +646,50 @@ uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py src/awf/common/redaction.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/runtime/test_log_redaction.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py src/awf/common/redaction.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HFLSV` Compose Secret-Key Parity Plan
+
+### Problem Statement And Scope
+
+The review thread reports that MCP workspace log reads collect exact Compose
+secret values only for provider keys in `KNOWN_SECRET_ENV_KEYS`, while service
+logs already treat broader secret-looking env names such as `*_SECRET`,
+`*_PASSWORD`, and `*_API_KEY` as exact secrets. A bare Compose env value under
+one of those broader keys can therefore be masked by `awf service logs` but
+leak through `awf_read_workspace_log` if the value does not match token-shape
+or assignment-pattern redaction.
+
+This repair is limited to MCP workspace log exact-secret discovery, a focused
+MCP regression, and this plan/validation evidence. It does not change token
+pattern definitions, service-log behavior, support bundles, MCP log projection,
+or broad AWF/GitHub validation scope.
+
+### Requirements Checklist
+
+- MCP workspace log exact-secret discovery includes local Compose env values
+  whose keys match the same broad service secret-key convention as service
+  logs.
+- Bare non-pattern Compose secret values are redacted when an MCP caller reads
+  a byte slice that overlaps the exact value.
+- Existing provider-key exact redaction and pattern redaction behavior remains
+  unchanged.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression with a Compose-only `*_SECRET` value
+   that does not match token or assignment redaction patterns.
+2. Update MCP exact-secret collection to use the broad service secret-key
+   predicate already used by service logs.
+3. Run the focused MCP regression and narrow lint/type checks for touched
+   files only.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with requirement
+   status and evidence. Broad AWF/GitHub validation remains owned by AWF after
+   agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k compose_env_custom_secret
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```

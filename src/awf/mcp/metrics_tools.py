@@ -50,10 +50,10 @@ from awf.mcp.server import (
     _tool_result,
 )
 from awf.service import config as service_config
-from awf.service import provider_readiness as provider_readiness_service
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
+from awf.service.logs import _is_service_secret_env_key as _is_service_log_secret_env_key
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
     DEFAULT_SUMMARY_WINDOW_HOURS,
@@ -158,7 +158,7 @@ def _workspace_log_redaction_secrets(
             secrets.append(secret)
     provider_environ = _workspace_log_redaction_provider_environ()
     for key, value in provider_environ.items():
-        if key.upper() in provider_readiness_service.KNOWN_SECRET_ENV_KEYS and len(value) >= 4:
+        if _is_service_log_secret_env_key(key) and len(value) >= 4:
             secrets.append(value)
     return tuple(dict.fromkeys(secrets))
 
