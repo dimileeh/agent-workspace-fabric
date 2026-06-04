@@ -1391,6 +1391,46 @@ def test_reconcile_per_file_copy_error_is_skipped(
 
 
 @pytest.mark.unit
+def test_reconcile_preserves_destination_when_source_vanishes_after_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for the ``_safe_overlay_copy`` ftruncate-ordering fix: if the legacy
+    # source disappears in the window after ``src.stat()`` succeeds but before
+    # ``src.open("rb")`` acquires a read fd, the pre-existing destination (the agent's
+    # overlay-era edit, visible through the live ``merged`` mount) must be left intact,
+    # never zeroed by an early ``ftruncate``.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    (legacy / "f").write_text("legacy edit\n")  # base lacks it -> fallback edit
+    # An older ``upper`` entry so the strictly-newer legacy edit is selected to forward.
+    (upper / "f").write_text("agent overlay edit\n")
+    # Pre-existing destination content seen through the live overlay's ``merged`` mount.
+    (merged / "f").write_text("agent overlay edit\n")
+    legacy_mtime_ns = (legacy / "f").stat().st_mtime_ns
+    os.utime(upper / "f", ns=(legacy_mtime_ns - 1_000_000, legacy_mtime_ns - 1_000_000))
+
+    real_open = Path.open
+
+    def _open_vanished(self: Path, *args: object, **kwargs: object) -> object:
+        # Simulate the source being removed in the sub-µs window after its ``stat``.
+        if os.fspath(self) == os.fspath(legacy / "f") and args and args[0] == "rb":
+            raise OSError("source vanished")
+        return real_open(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", _open_vanished)
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # The source open failed and was swallowed best-effort; the destination keeps its
+    # original content instead of being truncated to empty.
+    assert (merged / "f").read_text() == "agent overlay edit\n"
+
+
+@pytest.mark.unit
 def test_reconcile_writes_through_merged_not_directly_into_upper(tmp_path: Path) -> None:
     # A genuine fallback edit (absent from base, absent from upper) is forwarded
     # *through* the live ``merged`` mount, not poked straight into the underlying

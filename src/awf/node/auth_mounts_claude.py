@@ -492,12 +492,12 @@ def _host_claude_signature(host_home: Path) -> str:
             entry = root_path / name
             rel = entry.relative_to(source).as_posix()
             try:
-                stat = entry.stat()
+                entry_stat = entry.stat()
             except OSError:
                 entries.append(f"{rel}\0missing")
                 continue
             entries.append(
-                f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}\0{stat.st_ctime_ns}\0{stat.st_mode}"
+                f"{rel}\0{entry_stat.st_size}\0{entry_stat.st_mtime_ns}\0{entry_stat.st_ctime_ns}\0{entry_stat.st_mode}"
             )
     digest = hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
     return digest[:16]
@@ -637,12 +637,14 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
             # live reader): never write to it — refuse the structural conflict.
             return
         src_st = src.stat()
-        os.ftruncate(dst_fd, 0)
-        with (
-            src.open("rb") as src_file,
-            os.fdopen(dst_fd, "wb", closefd=False) as dst_file,
-        ):
-            shutil.copyfileobj(src_file, dst_file)
+        # Open the source before truncating ``dst``: if the legacy file is removed in
+        # the window after ``src.stat()`` succeeds, ``src.open`` raises and the existing
+        # ``upper`` entry (the agent's overlay-era edit) is left intact rather than
+        # silently zeroed. ``ftruncate`` only runs once a read fd on the content holds.
+        with src.open("rb") as src_file:
+            os.ftruncate(dst_fd, 0)
+            with os.fdopen(dst_fd, "wb", closefd=False) as dst_file:
+                shutil.copyfileobj(src_file, dst_file)
         os.fchmod(dst_fd, stat.S_IMODE(src_st.st_mode))
         os.utime(dst_fd, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
     except OSError:
