@@ -249,6 +249,281 @@ async def test_pre_push_validation_fix_pass_runs_cleanup_after_commit(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_detects_agent_self_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fix-pass agent that self-commits (HEAD advances, clean tree) is not rolled back."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="self-committed fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fix_start_head = "1" * 40
+    advanced_head = "2" * 40
+    rev_parse_results: list[str | None] = [fix_start_head, advanced_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Clean worktree after the agent self-committed: nothing left to commit."""
+        return False
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        cleanup_calls.append(cast(dict[str, object], kwargs))
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+        )
+
+    async def _rollback_should_not_run(*_args: object, **_kwargs: object) -> str | None:
+        raise AssertionError("self-committed repair must not be rolled back")
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_should_not_run,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    assert cleanup_calls == [
+        {
+            "worktree_path": worktree,
+            "restore_ref": advanced_head,
+        }
+    ]
+    assert rev_parse_results == []
+    joined_calls = [
+        " ".join(call.args) for call in cast(FakeCommandRunner, runner._deps.runner).calls
+    ]
+    assert not any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("post_commit_head", ["fix_start", None])
+async def test_pre_push_validation_fix_pass_genuine_no_commit_still_rolls_back(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    post_commit_head: str | None,
+) -> None:
+    """A clean worktree with HEAD unchanged (or unreadable) still rolls back to fix_start_head."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="no-op fix\n")
+    cmd = FakeCommandRunner()
+    fix_start_head = "1" * 40
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    reread_head = fix_start_head if post_commit_head == "fix_start" else None
+    rev_parse_results: list[str | None] = [fix_start_head, reread_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return False
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        cleanup_calls.append(cast(dict[str, object], kwargs))
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+        )
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    (
+        committed,
+        rollback_failure_reason,
+    ) = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is False
+    assert rollback_failure_reason is None
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": fix_start_head}]
+    assert rev_parse_results == []
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_self_commit_cleanup_failure_surfaces_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup failure against a self-committed head surfaces the cleanup reason code."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="self-committed fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fix_start_head = "1" * 40
+    advanced_head = "2" * 40
+    rev_parse_results: list[str | None] = [fix_start_head, advanced_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return False
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
+    async def _rollback_should_not_run(*_args: object, **_kwargs: object) -> str | None:
+        raise AssertionError("self-committed repair must not be rolled back")
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_should_not_run,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert rev_parse_results == []
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_commit_head_capture_failure_is_infrastructure(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -480,6 +755,9 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     cmd = FakeCommandRunner()
     fix_start_head = "e" * 40
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # Re-read HEAD after a clean (no-commit) fix pass: HEAD did not advance, so
+    # the fix pass is classified as a genuine no-op and rolled back.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
     cmd.queue_result(returncode=0, stdout="?? generated.tmp\n")
     cmd.queue_result(returncode=0)
@@ -691,7 +969,9 @@ async def test_pre_push_validation_fix_pass_rollback_failure_is_bubbled_as_pre_p
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
-    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {'f' * 8}\n")
+    # Re-read HEAD after a clean (no-commit) fix pass shows HEAD unchanged, so the
+    # genuine-no-commit rollback path runs.
+    cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
     cmd.queue_result(returncode=0, stdout="")
     adapter = FakeAdapter()
     adapter.queue(stdout="attempted fix\n")
@@ -752,6 +1032,9 @@ async def test_pre_push_validation_fix_pass_post_reset_cleanup_failure_surfaces_
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
     cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    # Re-read HEAD after a clean (no-commit) fix pass shows HEAD unchanged, so the
+    # genuine-no-commit rollback path runs (not the self-commit path).
     cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {restore_ref[:8]}\n")
     cmd.queue_result(returncode=0, stdout="?? validation-artifact.log\n")
