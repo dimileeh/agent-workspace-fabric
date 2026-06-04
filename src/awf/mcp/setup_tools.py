@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Protocol, cast
@@ -412,8 +413,14 @@ def _client_integration_instructions_result(
         "command": "awf setup --client",
         "summary": _client_instructions_summary(plans, blocked=bool(blocked)),
         "env_file": str(env_file),
-        "clients": [_client_instruction_payload(plan) for plan in plans],
-        "next_steps": _client_instruction_next_steps(plans, blocked=bool(blocked)),
+        "clients": [
+            _client_instruction_payload(plan, source_checkout=source_path) for plan in plans
+        ],
+        "next_steps": _client_instruction_next_steps(
+            plans,
+            blocked=bool(blocked),
+            source_checkout=source_path,
+        ),
     }
     if blocked:
         payload["reason_code"] = CLIENT_CONFIG_CONFLICT
@@ -531,7 +538,11 @@ def _setup_status_issues(value: Any) -> list[dict[str, Any]]:
     return issues
 
 
-def _client_instruction_payload(plan: ClientConfigPlan) -> dict[str, Any]:
+def _client_instruction_payload(
+    plan: ClientConfigPlan,
+    *,
+    source_checkout: Path | None,
+) -> dict[str, Any]:
     descriptor = plan.descriptor or CLIENT_DESCRIPTORS[plan.client]
     desired_entry = dict(plan.desired_entry)
     payload: dict[str, Any] = {
@@ -542,7 +553,7 @@ def _client_instruction_payload(plan: ClientConfigPlan) -> dict[str, Any]:
         "method": plan.method,
         "desired_entry": desired_entry,
         "manual_config": {descriptor.servers_key: {AWF_MCP_SERVER_KEY: desired_entry}},
-        "apply_command": f"awf setup --client {plan.client}",
+        "apply_command": _client_apply_command(plan.client, source_checkout=source_checkout),
     }
     if plan.cli_command is not None:
         payload["client_cli_command"] = list(plan.cli_command)
@@ -563,16 +574,25 @@ def _client_instruction_next_steps(
     plans: list[ClientConfigPlan],
     *,
     blocked: bool,
+    source_checkout: Path | None,
 ) -> list[str]:
     if blocked:
         return [
             "Resolve the conflicting client config entries, then re-run this MCP instruction tool.",
         ]
     return [
-        f"Run `awf setup --client {plan.client}` to apply the {plan.client} client integration."
+        f"Run `{_client_apply_command(plan.client, source_checkout=source_checkout)}` "
+        f"to apply the {plan.client} client integration."
         for plan in plans
         if plan.action != "no_change"
     ] or ["No client config changes are needed."]
+
+
+def _client_apply_command(client: str, *, source_checkout: Path | None) -> str:
+    command = ["awf", "setup", "--client", client]
+    if source_checkout is not None:
+        command.extend(["--source-checkout", str(source_checkout)])
+    return shlex.join(command)
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

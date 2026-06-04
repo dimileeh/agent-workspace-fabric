@@ -53,6 +53,51 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6G_-yQ
+
+### Requirement Status
+
+- Preserve existing client instruction commands when `source_checkout` is not
+  provided: Complete.
+- Include `--source-checkout <path>` in each per-client `apply_command` when an
+  explicit checkout is used to build the plan: Complete.
+- Include the same explicit-checkout command in the top-level next steps:
+  Complete.
+- Keep client instructions secret-free and otherwise schema-compatible:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_preserve_explicit_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `apply_command` remained `awf setup --client claude` without the explicit
+  `--source-checkout` argument.
+- Regression test after the implementation change: 1 passed.
+- Focused setup-tools test file: 12 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HM
 
 ### Requirement Status

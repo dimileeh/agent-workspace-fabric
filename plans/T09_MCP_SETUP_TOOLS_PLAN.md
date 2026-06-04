@@ -82,6 +82,46 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6G_-yQ
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` builds
+the client plan against an explicit `source_checkout` env file, but returns an
+apply command and next step that omit `--source-checkout`. Running the returned
+command can then resolve a persisted/default env file instead of the checkout
+used for the MCP instructions.
+
+Scope is limited to preserving the explicit checkout path in MCP client
+instruction commands and adding a focused regression.
+
+### Requirements Checklist
+
+- Preserve existing client instruction commands when `source_checkout` is not
+  provided.
+- Include `--source-checkout <path>` in each per-client `apply_command` when an
+  explicit checkout is used to build the plan.
+- Include the same explicit-checkout command in the top-level next steps.
+- Keep client instructions secret-free and otherwise schema-compatible.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for explicit source-checkout client
+   instructions.
+2. Thread the explicit checkout path into client instruction payload and
+   next-step rendering.
+3. Run the targeted regression and focused setup-tools test file.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_preserve_explicit_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HM
 
 ### Problem Statement And Scope
