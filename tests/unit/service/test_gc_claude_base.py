@@ -28,6 +28,7 @@ from awf.service.gc_claude_base import (
     CLAUDE_BASE_SUPERSEDED_REAPED,
     _pinned_base_dirs,
     _reap_one_base,
+    _reap_status,
     reap_superseded_claude_bases,
 )
 
@@ -752,3 +753,38 @@ def test_pinned_base_dirs_empty_when_auth_root_absent(tmp_path: Path) -> None:
     # returning an empty set rather than raising.
     work_dir = tmp_path / "work-without-auth"
     assert _pinned_base_dirs(work_dir) == set()
+
+
+@pytest.mark.unit
+def test_reap_status_errors_take_precedence_over_unverifiable() -> None:
+    # Reap errors must win the top-level ``reason_code`` over an unverifiable
+    # overlay so alerting keyed on ``CLAUDE_BASE_REAP_PARTIAL`` still fires even when
+    # both conditions are reported in the same pass; the per-entry ``errors`` detail
+    # carries the unverifiable note separately.
+    status, reason_code = _reap_status(
+        reaped=[],
+        planned=[],
+        errors=[{"signature": "sig0", "reason_code": CLAUDE_BASE_REAP_PERMISSION_DENIED}],
+        unverifiable=["sig1"],
+        execute=True,
+    )
+    assert status == "partial"
+    assert reason_code == CLAUDE_BASE_REAP_PARTIAL
+
+
+@pytest.mark.unit
+def test_reap_status_unverifiable_escalates_to_partial_only_on_execute() -> None:
+    # With no reap errors, an unverifiable overlay drives the dedicated reason code;
+    # execute escalates to ``partial`` (bases left leaked) while a dry run stays a
+    # ``skipped`` preview that reaped nothing it set out to.
+    execute_status, execute_reason = _reap_status(
+        reaped=[], planned=[], errors=[], unverifiable=["sig1"], execute=True
+    )
+    assert execute_status == "partial"
+    assert execute_reason == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+
+    dry_status, dry_reason = _reap_status(
+        reaped=[], planned=[], errors=[], unverifiable=["sig1"], execute=False
+    )
+    assert dry_status == "skipped"
+    assert dry_reason == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE

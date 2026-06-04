@@ -378,20 +378,13 @@ def reap_superseded_claude_bases(
     report["unverifiable"] = unverifiable
     report["errors"] = errors
     report["status"], report["reason_code"] = _reap_status(
-        reaped=reaped, planned=planned, errors=errors
+        reaped=reaped,
+        planned=planned,
+        errors=errors,
+        unverifiable=unverifiable,
+        execute=execute,
     )
     if unverifiable:
-        # A superseded base was identified but deliberately not reaped because the
-        # live-mount view is untrustworthy and the overlay is unpinned. Surface it
-        # loudly with a dedicated reason code so this is never a silent no-op.
-        report["reason_code"] = CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
-        if execute:
-            # On execute the superseded bases were left on disk, so this pass
-            # reclaimed nothing it set out to. Mark the sub-step ``partial`` (not
-            # the ``skipped`` ``_reap_status`` returns for an empty reap) so
-            # ``_gc_result`` drives the whole run partial and the CLI does not exit
-            # 0 while the targeted multi-GB bases stay leaked (PRRT_kwDOSJAM6s6HLNDz).
-            report["status"] = "partial"
         _log.warning(
             "gc.claude_base_reap_live_mount_unverifiable",
             reason_code=CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE,
@@ -406,11 +399,35 @@ def _reap_status(
     reaped: list[str],
     planned: list[str],
     errors: list[dict[str, str]],
+    unverifiable: list[str],
+    execute: bool,
 ) -> tuple[str, str]:
-    """Return the ``(status, reason_code)`` summarizing a reap pass."""
+    """Return the ``(status, reason_code)`` summarizing a reap pass.
+
+    ``errors`` take precedence over ``unverifiable``: reap failures (e.g. a
+    permission-denied ``rmtree``) keep the ``CLAUDE_BASE_REAP_PARTIAL`` code so
+    alerting keyed on reap failures still fires, even if unverifiable overlays are
+    also present. The per-entry ``errors`` detail still carries the failure cause,
+    and the caller still logs the unverifiable condition separately. (In the
+    current single-pass guard ``errors`` and ``unverifiable`` are mutually
+    exclusive — a blind live-mount view declines to reap at all — but the
+    precedence is made explicit here so the top-level code can never be masked.)
+    """
 
     if errors:
         return "partial", CLAUDE_BASE_REAP_PARTIAL
+    if unverifiable:
+        # A superseded base was identified but deliberately not reaped because the
+        # live-mount view is untrustworthy and the overlay is unpinned. Surface it
+        # loudly with a dedicated reason code so this is never a silent no-op. On
+        # execute the targeted bases were left on disk, so this pass reclaimed
+        # nothing it set out to: escalate to ``partial`` (not the ``skipped`` an
+        # empty reap would yield) so ``_gc_result`` drives the whole run partial
+        # and the CLI does not exit 0 while multi-GB bases stay leaked
+        # (PRRT_kwDOSJAM6s6HLNDz). A dry run reaps nothing regardless, so its
+        # unverifiable preview stays an honest ``skipped`` plan.
+        status = "partial" if execute else "skipped"
+        return status, CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
     if reaped:
         return "ok", CLAUDE_BASE_SUPERSEDED_REAPED
     if planned:
