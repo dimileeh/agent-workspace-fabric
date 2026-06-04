@@ -40,6 +40,10 @@ def redact_secrets(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     redacted = _TOKEN_ASSIGNMENT_RE.sub(_redact_assignment, redacted)
     redacted = _BEARER_RE.sub(r"\1" + REDACTION_MARKER, redacted)
     redacted = _KNOWN_TOKEN_RE.sub(REDACTION_MARKER, redacted)
+    # Full-text redaction can search exact caller-supplied secrets after regex
+    # masking because already-masked values no longer need original offsets.
+    # Slice helpers compute all spans on the original text so requested offsets
+    # keep projecting to the caller's source window.
     exact_spans = _merge_redaction_spans(_exact_secret_redaction_spans(redacted, extra_secrets))
     if not exact_spans:
         return redacted
@@ -129,7 +133,7 @@ def _exact_secret_redaction_spans(
     text: str,
     extra_secrets: Iterable[str],
 ) -> list[_RedactionSpan]:
-    """Find exact caller-supplied secret values in the original text."""
+    """Find exact caller-supplied secret values in text."""
     spans: list[_RedactionSpan] = []
     for secret in sorted({secret for secret in extra_secrets if len(secret) >= 4}, key=len):
         cursor = 0

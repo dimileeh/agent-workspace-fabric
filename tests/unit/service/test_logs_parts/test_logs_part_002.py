@@ -298,6 +298,90 @@ def test_service_logs_follow_broken_stdout_pipe_terminates_default_process(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_follow_simultaneous_broken_pipes_terminate_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent downstream pipe closures should not race subprocess cleanup."""
+
+    class _BrokenFlushSink:
+        """Sink that waits for both stream threads before failing flush."""
+
+        def __init__(self, barrier: threading.Barrier) -> None:
+            """Initialize the shared synchronization point."""
+            self._barrier = barrier
+
+        def write(self, text: str) -> int:
+            """Accept streamed text before simulating a closed pipe."""
+            return len(text)
+
+        def flush(self) -> None:
+            """Raise after both stdout and stderr reach their downstream sink."""
+            self._barrier.wait(timeout=1.0)
+            raise BrokenPipeError
+
+    class _FollowProcess:
+        """Follow process double that records cleanup calls."""
+
+        stdout = io.StringIO("stdout before downstream closes\n")
+        stderr = io.StringIO("stderr before downstream closes\n")
+
+        def __init__(self) -> None:
+            """Track termination calls made by racing stream threads."""
+            self.terminated = threading.Event()
+            self.terminate_count = 0
+            self.killed = False
+            self._lock = threading.Lock()
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Return only after the runner terminates the followed process."""
+            wait_timeout = 0.25 if timeout is None else timeout
+            if not self.terminated.wait(wait_timeout):
+                raise AssertionError(
+                    "follow process was not terminated after downstream pipes closed"
+                )
+            return -signal.SIGTERM
+
+        def terminate(self) -> None:
+            """Record graceful termination from the streaming runner."""
+            with self._lock:
+                self.terminate_count += 1
+            self.terminated.set()
+
+        def kill(self) -> None:
+            """Record forced termination from the streaming runner."""
+            self.killed = True
+            self.terminated.set()
+
+    processes: list[_FollowProcess] = []
+
+    def _popen(_args: list[str], **kwargs: object) -> _FollowProcess:
+        """Create a follow-process double with piped stdout and stderr."""
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        process = _FollowProcess()
+        processes.append(process)
+        return process
+
+    barrier = threading.Barrier(2)
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(sys, "stdout", _BrokenFlushSink(barrier))
+    monkeypatch.setattr(sys, "stderr", _BrokenFlushSink(barrier))
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+    )
+
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert len(processes) == 1
+    assert processes[0].terminate_count == 1
+    assert processes[0].killed is False
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_non_follow_keyboard_interrupt_propagates() -> None:
     def _run(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise KeyboardInterrupt

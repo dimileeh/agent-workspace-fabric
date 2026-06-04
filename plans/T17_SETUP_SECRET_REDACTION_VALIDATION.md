@@ -878,6 +878,61 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review-Level Comment `issue:4620175517` Streaming Follow-Up Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: the reported invalid-byte decode gap was already fixed in the
+  current checkout with `encoding="utf-8"` and `errors="replace"` on the
+  followed service-log `Popen` call; the existing invalid-byte regression still
+  passes.
+- Complete: simultaneous stdout/stderr broken-pipe callbacks now terminate the
+  followed subprocess at most once.
+- Complete: existing followed-log broken-pipe and invalid-byte handling remains
+  covered by focused service-log tests.
+- Complete: `redact_secrets` now documents why full-text exact-secret matching
+  runs after regex masking while slice helpers compute spans from the original
+  text.
+
+Additional files changed:
+
+- `src/awf/common/redaction.py`
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k simultaneous_broken_pipes
+# failed: terminate_count was 2 when both stream threads hit BrokenPipeError
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'simultaneous_broken_pipes or invalid_bytes'
+# 2 passed, 22 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k 'redact_secrets_preserves_context or redact_secrets_byte_slice'
+# 5 passed, 22 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q
+# 24 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py src/awf/common/redaction.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/runtime/test_log_redaction.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py src/awf/common/redaction.py
+# Success: no issues found in 2 source files
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

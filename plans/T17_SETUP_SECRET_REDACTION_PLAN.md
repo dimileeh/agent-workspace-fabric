@@ -96,6 +96,15 @@ credential entry, or unrelated refactors are included.
   lines are drained or written.
 - This repair remains inside the existing T17 service-log redaction scope and
   only changes the followed subprocess decode policy plus a focused regression.
+- Review-level comment `issue:4620175517` follow-up found the invalid-UTF-8
+  streaming decode gap already fixed and covered, but identified two remaining
+  review items: concurrent stdout/stderr broken-pipe handlers can both try to
+  terminate the followed subprocess, and `redact_secrets` should document why
+  exact-secret matching runs after regex masking while slice helpers compute
+  spans on the original text.
+- This repair remains inside the existing T17 redaction/service-log scope and
+  only changes the broken-pipe termination guard, the redaction comment,
+  focused regression, and this plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -135,8 +144,12 @@ credential entry, or unrelated refactors are included.
   prefix.
 - Followed service-log streaming replaces invalid bytes before redaction so
   non-UTF-8 container output cannot terminate a stream reader.
+- Followed service-log streaming terminates the followed subprocess at most
+  once when both redaction threads observe downstream broken pipes.
 - Followed service-log streaming documents that the current per-line redaction
   boundary depends on single-line secret/provider-ref patterns.
+- `redact_secrets` documents the deliberate post-regex exact-secret matching
+  order and its relationship to original-text span helpers.
 - Support-bundle setup-state generic fallback reason codes are centralized.
 - Support-bundle setup-state collection returns a redacted failed setup-state
   payload if loaded config summarization raises after the config reader
@@ -210,6 +223,12 @@ credential entry, or unrelated refactors are included.
 23. Add a focused regression for followed service logs containing invalid UTF-8
     bytes, confirm it fails, then set an explicit replacement decode policy on
     the followed subprocess pipes.
+24. Verify the invalid-UTF-8 decode policy is already present, add a focused
+    regression for simultaneous stdout/stderr broken pipes, then guard broken
+    pipe termination so only the first stream performs subprocess cleanup.
+25. Add a concise `redact_secrets` comment explaining why exact caller-supplied
+    secrets are searched after regex substitutions in the full-text path while
+    slice helpers derive all spans from the original text.
 
 ## Verification Commands
 
@@ -577,4 +596,53 @@ bundle behavior, or broader validation scope.
 uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k overlapping_exact_secret
 uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py tests/unit/runtime/test_log_redaction.py
 uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
+```
+
+## Review-Level Comment `issue:4620175517` Streaming Follow-Up Plan
+
+### Problem Statement And Scope
+
+The review-level comment reported that followed service logs could crash on
+non-UTF-8 Docker output, could terminate the streaming subprocess twice if both
+stdout and stderr redaction threads observe broken pipes, and asked for a
+maintainer note about the deliberate full-text/slice exact-secret matching
+ordering in `awf.common.redaction`.
+
+The invalid-byte decode policy is already present in the current checkout
+(`encoding="utf-8", errors="replace"`) and has a focused regression. This
+repair is limited to the remaining concurrent broken-pipe guard, the explanatory
+redaction comment, focused tests/checks, and validation evidence.
+
+### Requirements Checklist
+
+- Preserve the existing followed service-log invalid-byte replacement behavior.
+- Ensure simultaneous stdout/stderr broken-pipe callbacks terminate the
+  streaming subprocess at most once.
+- Preserve successful followed-log handling when only one stream breaks.
+- Document why full-text `redact_secrets` runs exact-secret matching after
+  regex masking while slice helpers compute all redaction spans from the
+  original text.
+
+### Implementation Steps
+
+1. Add a focused failing regression where both followed-log stream sinks raise
+   `BrokenPipeError` and the fake process fails if termination is attempted
+   more than once.
+2. Change the broken-pipe callback to let only the first thread terminate the
+   subprocess.
+3. Add a concise comment in `redact_secrets` explaining the post-regex
+   exact-secret matching order and its equivalence with original-text span
+   helpers.
+4. Run focused pytest/ruff/mypy commands for the touched files only.
+5. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with requirement
+   status and evidence. Broad AWF/GitHub validation remains owned by AWF after
+   agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'simultaneous_broken_pipes or invalid_bytes'
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k 'redact_secrets_preserves_context or redact_secrets_byte_slice'
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py src/awf/common/redaction.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/runtime/test_log_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py src/awf/common/redaction.py
 ```

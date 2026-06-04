@@ -278,11 +278,15 @@ def _run_streaming_subprocess(
     )
 
     stream_broken_pipe = threading.Event()
+    stream_broken_pipe_lock = threading.Lock()
 
     def _handle_stream_broken_pipe() -> None:
         """Stop the streaming child after the downstream pipe closes."""
-        stream_broken_pipe.set()
-        _terminate_streaming_subprocess(process)
+        with stream_broken_pipe_lock:
+            if stream_broken_pipe.is_set():
+                return
+            stream_broken_pipe.set()
+            _terminate_streaming_subprocess(process)
 
     stdout_thread = _start_redacted_stream_thread(
         process.stdout,
