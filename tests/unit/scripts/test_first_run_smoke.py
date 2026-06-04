@@ -17,7 +17,7 @@ from scripts import first_run_smoke as smoke
 @pytest.mark.parametrize("method", ["uv", "pipx"])
 def test_installer_fixture_command_is_local_dry_run(tmp_path: Path, method: str) -> None:
     """The fixture installer lane uses local file URLs and never plans a real install."""
-    installer = Path("/repo/packaging/install.sh")
+    installer = smoke.DEFAULT_INSTALLER
 
     command = smoke.installer_fixture_command(tmp_path, method=method, installer=installer)
 
@@ -56,7 +56,7 @@ def test_release_lane_skips_without_explicit_gate(tmp_path: Path) -> None:
         allow_release=False,
         release_dist_dir=None,
         release_manifest=None,
-        installer=Path("/repo/packaging/install.sh"),
+        installer=smoke.DEFAULT_INSTALLER,
         timeout_seconds=5,
         runner=lambda command, timeout_seconds: _record_run(calls, command, timeout_seconds),
     )
@@ -84,7 +84,7 @@ def test_release_lane_uses_local_release_manifest_when_gated(tmp_path: Path) -> 
         allow_release=True,
         release_dist_dir=dist_dir,
         release_manifest=manifest_path,
-        installer=Path("/repo/packaging/install.sh"),
+        installer=smoke.DEFAULT_INSTALLER,
         timeout_seconds=5,
         runner=lambda command, timeout_seconds: _record_run(calls, command, timeout_seconds),
     )
@@ -97,7 +97,7 @@ def test_release_lane_uses_local_release_manifest_when_gated(tmp_path: Path) -> 
 
     assert command.argv == (
         "bash",
-        "/repo/packaging/install.sh",
+        str(smoke.DEFAULT_INSTALLER),
         "--dry-run",
         "--method",
         "uv",
