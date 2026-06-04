@@ -1054,13 +1054,69 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
 
+## Review-Level Comment `issue:4620175517` Dead Wrapper And Secret-Key Helper Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports two final cleanup issues in the current T17
+redaction branch: `src/awf/runtime/logs.py` still contains an unreachable
+sync `_read_log_chunk()` wrapper after the public async text read path was
+refactored through `read_log_chunk_bytes()`, and MCP modules import the private
+`_is_service_secret_env_key()` helper from `awf.service.logs`.
+
+This repair is limited to removing the dead sync wrapper, promoting the
+secret-env-key classifier to a public provider-readiness helper next to the
+existing `KNOWN_SECRET_ENV_KEYS` constants, updating current call sites, adding
+a focused classifier regression, and recording validation evidence. It does not
+change redaction semantics, log window sizing, Compose env loading, or broad
+AWF/GitHub validation ownership.
+
+### Requirements Checklist
+
+- `read_log_chunk()` continues to decode bytes returned by
+  `read_log_chunk_bytes()` with replacement semantics.
+- The unused private `_read_log_chunk()` sync wrapper is removed from
+  `src/awf/runtime/logs.py`.
+- Secret-env-key classification is exposed through a public helper in
+  `awf.service.provider_readiness`.
+- `awf.service.logs`, `awf.mcp.server`, and `awf.mcp.metrics_tools` no longer
+  import `_is_service_secret_env_key()` across module boundaries.
+- Existing service-log and MCP exact-secret selection behavior remains
+  unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing provider-readiness regression for the public
+   secret-env-key classifier.
+2. Move the classifier implementation into `awf.service.provider_readiness`,
+   update service-log and MCP imports/call sites, and remove the old private
+   helper plus its now-local constants from `awf.service.logs`.
+3. Remove the unreachable `_read_log_chunk()` wrapper.
+4. Run the targeted classifier regression, adjacent service-log/MCP redaction
+   checks, and narrow ruff/mypy checks for touched files.
+5. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py -q -k secret_env_key --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_logs.py -q -k 'read_uses_threaded_bounded_file_read or read_clamps_offsets' --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k 'short_secret_values or compose_env_provider_secret or custom_compose_env_secret' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/runtime/logs.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py
+uv run --python 3.12 --extra dev mypy src/awf/runtime/logs.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
+```
+
 ## Review-Level Comment `issue:4620175517` Service-Log Short Secret Filter Plan
 
 ### Problem Statement And Scope
 
 The review-level comment includes three follow-ups. Local code already aligns
 MCP payload/artifact secret-key discovery with MCP log/service-log discovery by
-using `_is_service_secret_env_key()` in `_mcp_secret_values()`. The MCP
+using `is_secret_env_key()` in `_mcp_secret_values()`. The MCP
 per-call Compose/env reread concern is a non-blocking latency trade-off already
 kept outside this repair's correctness scope. The remaining actionable cleanup
 is that `_service_log_secret_values()` collects short secret-like values before
@@ -1079,7 +1135,7 @@ existing token/provider-ref redaction behavior.
 - Longer secret-like values from the same sources remain selected for exact
   service-log redaction.
 - The MCP `_mcp_secret_values()` key-filter item is documented as stale because
-  the local code already uses `_is_service_secret_env_key()`.
+  the local code already uses `is_secret_env_key()`.
 - The MCP env-file caching item is documented as a deferred performance
   trade-off, not a correctness or leak fix in this comment cycle.
 - Run only focused tests and narrow lint/type checks for touched files; leave

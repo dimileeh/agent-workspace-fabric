@@ -26,25 +26,13 @@ from awf.service.environment import (
     env_lookup,
     non_empty_env_value,
 )
-from awf.service.provider_readiness import KNOWN_SECRET_ENV_KEYS
+from awf.service.provider_readiness import is_secret_env_key
 
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 _STREAMING_INTERRUPT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
-_SERVICE_SECRET_ENV_KEY_SUFFIXES = (
-    "_TOKEN",
-    "_API_KEY",
-    "_API_TOKEN",
-    "_ACCESS_KEY",
-    "_PASSWORD",
-    "_PASSWD",
-    "_SECRET",
-)
-_SERVICE_SECRET_ENV_KEY_NAMES = {
-    suffix.removeprefix("_") for suffix in _SERVICE_SECRET_ENV_KEY_SUFFIXES
-}
 
 
 def _resolve_local_service_compose_file(compose_file: Path) -> Path:
@@ -380,7 +368,7 @@ def _service_log_secret_values(
     secret_values = [
         value
         for key, value in compose_env_file_values(compose_env_file).items()
-        if value and len(value) >= 4 and _is_service_secret_env_key(key)
+        if value and len(value) >= 4 and is_secret_env_key(key)
     ]
     for source_environ in (os.environ, environ):
         if source_environ is None:
@@ -388,19 +376,9 @@ def _service_log_secret_values(
         secret_values.extend(
             value
             for key, value in source_environ.items()
-            if value and len(value) >= 4 and _is_service_secret_env_key(key)
+            if value and len(value) >= 4 and is_secret_env_key(key)
         )
     return tuple(dict.fromkeys(secret_values))
-
-
-def _is_service_secret_env_key(key: str) -> bool:
-    """Return true when an env key conventionally carries a secret value."""
-    normalized = key.upper().replace("-", "_")
-    return (
-        normalized in KNOWN_SECRET_ENV_KEYS
-        or normalized in _SERVICE_SECRET_ENV_KEY_NAMES
-        or normalized.endswith(_SERVICE_SECRET_ENV_KEY_SUFFIXES)
-    )
 
 
 def _docker_cli_environ(

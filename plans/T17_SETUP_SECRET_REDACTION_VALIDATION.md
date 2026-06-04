@@ -1459,7 +1459,7 @@ Requirement status:
   service-log exact-secret redaction.
 - Complete: the MCP `_mcp_secret_values()` key-filter item is stale in the
   local branch; `src/awf/mcp/server.py` already imports and uses
-  `_is_service_secret_env_key()` when selecting provider env exact secrets.
+  `is_secret_env_key()` when selecting provider env exact secrets.
 - Complete: the MCP env-file caching item is treated as a deferred performance
   trade-off in this comment cycle; it does not create a direct secret leak and
   the current per-call path keeps env-file changes visible.
@@ -1541,6 +1541,63 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp
 
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
+```
+
+## Review-Level Comment `issue:4620175517` Dead Wrapper And Secret-Key Helper Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `read_log_chunk()` still decodes the byte-preserving
+  `read_log_chunk_bytes()` result with UTF-8 replacement semantics.
+- Complete: the dead private `_read_log_chunk()` sync wrapper was removed from
+  `src/awf/runtime/logs.py`.
+- Complete: secret-env-key classification is now exposed as public
+  `awf.service.provider_readiness.is_secret_env_key()` next to
+  `KNOWN_SECRET_ENV_KEYS`.
+- Complete: `src/awf/service/logs.py`, `src/awf/mcp/server.py`, and
+  `src/awf/mcp/metrics_tools.py` now use the public helper instead of importing
+  `_is_service_secret_env_key()` from `awf.service.logs`.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/runtime/logs.py`
+- `src/awf/service/provider_readiness.py`
+- `src/awf/service/logs.py`
+- `src/awf/mcp/server.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py -q -k secret_env_key --tb=short -ra
+# failed: provider_readiness had no public is_secret_env_key helper
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py -q -k secret_env_key --tb=short -ra
+# 1 passed, 39 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_logs.py -q -k 'read_uses_threaded_bounded_file_read or read_clamps_offsets' --tb=short -ra
+# 2 passed, 24 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k 'short_secret_values or compose_env_provider_secret or custom_compose_env_secret' --tb=short -ra
+# 4 passed, 67 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/runtime/logs.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/runtime/logs.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 5 source files
 ```
 
 ## Gaps

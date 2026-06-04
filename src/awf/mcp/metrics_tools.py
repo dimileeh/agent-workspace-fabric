@@ -54,7 +54,6 @@ from awf.service import config as service_config
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
-from awf.service.logs import _is_service_secret_env_key as _is_service_log_secret_env_key
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
     DEFAULT_SUMMARY_WINDOW_HOURS,
@@ -70,7 +69,7 @@ from awf.service.metrics import (
 from awf.service.operations import build_operation_list_response
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
-from awf.service.provider_readiness import ProviderName
+from awf.service.provider_readiness import ProviderName, is_secret_env_key
 from awf.service.resource_capacity import LocalCapacityLimits
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
@@ -164,7 +163,7 @@ def _workspace_log_redaction_secrets(
         compose_env_file=compose_env_file,
     )
     for key, value in provider_environ.items():
-        if _is_service_log_secret_env_key(key) and len(value) >= 4:
+        if is_secret_env_key(key) and len(value) >= 4:
             secrets.append(value)
     return tuple(dict.fromkeys(secrets))
 

@@ -36,9 +36,8 @@ from awf.service import provider_readiness as provider_readiness_service
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.local_capacity import detect_local_capacity
-from awf.service.logs import _is_service_secret_env_key
 from awf.service.orphan_resources import OrphanResourceSummary
-from awf.service.provider_readiness import ProviderName
+from awf.service.provider_readiness import ProviderName, is_secret_env_key
 from awf.service.resource_capacity import LocalCapacityLimits
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import (
@@ -537,9 +536,7 @@ def _mcp_secret_values(
         service_settings.api_token,
         service_settings.github_token,
     ]
-    values.extend(
-        value for key, value in provider_environ.items() if _is_service_secret_env_key(key)
-    )
+    values.extend(value for key, value in provider_environ.items() if is_secret_env_key(key))
     return tuple(dict.fromkeys(value for value in values if value and len(value) >= 4))
 
 

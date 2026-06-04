@@ -286,12 +286,6 @@ async def read_log_chunk_bytes(
     return await asyncio.to_thread(_read_log_chunk_bytes, path, offset, limit_bytes)
 
 
-def _read_log_chunk(path: Path, offset: int, limit_bytes: int) -> tuple[str, int, bool]:
-    """Read a decoded text chunk while preserving byte-offset semantics."""
-    chunk, next_offset, eof = _read_log_chunk_bytes(path, offset, limit_bytes)
-    return chunk.decode("utf-8", errors="replace"), next_offset, eof
-
-
 def _read_log_chunk_bytes(path: Path, offset: int, limit_bytes: int) -> tuple[bytes, int, bool]:
     """Read a bounded byte chunk and return the next byte offset."""
     with path.open("rb") as handle:
