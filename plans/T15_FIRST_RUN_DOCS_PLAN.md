@@ -281,6 +281,12 @@ Replace only `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`,
 or other checkout-specific Compose env before `awf setup --source-checkout` /
 `awf start --source-checkout`.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HMj0f`: the Quickstart
+source-checkout first-run blocks must preserve checkout-root `.env` entries
+when `docker/compose/.env` does not yet exist. Select `docker/compose/.env`
+first, then root `.env` as the fallback input before creating the Compose env
+file, while still replacing only the AWF-managed local service keys.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

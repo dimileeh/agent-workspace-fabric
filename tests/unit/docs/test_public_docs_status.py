@@ -425,6 +425,16 @@ def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
     host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
     database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
     env_tmp = 'awf_env_tmp="$(mktemp)"'
+    source_fallback = "\n".join(
+        (
+            'awf_env_source=""',
+            "if [ -f docker/compose/.env ]; then",
+            '  awf_env_source="docker/compose/.env"',
+            "elif [ -f .env ]; then",
+            '  awf_env_source=".env"',
+            "fi",
+        )
+    )
     preserve_existing_env = "\n".join(
         (
             "    sed \\",
@@ -432,7 +442,7 @@ def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
             "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
             "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
             "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
-            "      docker/compose/.env",
+            '      "$awf_env_source"',
         )
     )
     gnu_only_sed_alternation = (
@@ -448,6 +458,7 @@ def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
     assert host_port_export in first_run_section
     assert database_url_export in first_run_section
     assert env_tmp in first_run_section
+    assert source_fallback in first_run_section
     assert api_persist in first_run_section
     assert password_persist in first_run_section
     assert host_port_persist in first_run_section
@@ -463,6 +474,7 @@ def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
         < first_run_section.index(host_port_export)
         < first_run_section.index(database_url_export)
         < first_run_section.index(env_tmp)
+        < first_run_section.index(source_fallback)
         < first_run_section.index(api_persist)
         < first_run_section.index(password_persist)
         < first_run_section.index(host_port_persist)
@@ -522,6 +534,71 @@ def test_quickstart_source_checkout_first_run_strips_exported_awf_compose_env_en
         "AWF_HOST_WORK_DIR=/tmp/awf-workspaces",
         "PROVIDER_TOKEN=keep",
         "AWF_API_TOKEN_BACKUP=keep",
+    ]
+
+
+@pytest.mark.parametrize(
+    "heading",
+    (
+        "## Lane 2: Source Checkout With Global Tool Install",
+        "## Lane 3: Source Checkout With No Global Install",
+    ),
+)
+def test_quickstart_source_checkout_first_run_uses_root_env_fallback(
+    heading: str,
+    tmp_path: Path,
+) -> None:
+    """Assert source-checkout first run preserves root .env before compose .env exists."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lane_section = _markdown_section(quickstart_text, heading)
+    first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
+    source_fallback = "\n".join(
+        (
+            'awf_env_source=""',
+            "if [ -f docker/compose/.env ]; then",
+            '  awf_env_source="docker/compose/.env"',
+            "elif [ -f .env ]; then",
+            '  awf_env_source=".env"',
+            "fi",
+        )
+    )
+    preserve_root_input = 'if [ -n "$awf_env_source" ]; then'
+
+    assert source_fallback in first_run_section
+    assert preserve_root_input in first_run_section
+    assert first_run_section.index(source_fallback) < first_run_section.index(
+        preserve_root_input,
+    )
+
+    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", first_run_section, re.MULTILINE)
+    assert len(sed_expressions) == 4
+
+    root_env = tmp_path / ".env"
+    root_env.write_text(
+        "\n".join(
+            (
+                "AWF_API_TOKEN=old-token",
+                "export AWF_POSTGRES_PASSWORD=old-password",
+                "AWF_DATABASE_URL=old-url",
+                "AWF_GITHUB_TOKEN=keep",
+                "CUSTOM_AWF_SETTING=keep",
+                "PROVIDER_TOKEN=keep",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = ["sed"]
+    for expression in sed_expressions:
+        command.extend(("-e", expression))
+    command.append(str(root_env))
+
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    assert result.stdout.splitlines() == [
+        "AWF_GITHUB_TOKEN=keep",
+        "CUSTOM_AWF_SETTING=keep",
+        "PROVIDER_TOKEN=keep",
     ]
 
 

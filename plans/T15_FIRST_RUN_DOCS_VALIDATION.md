@@ -1974,6 +1974,45 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HMj0f`:
+
+- `docs/QUICKSTART.md` source-checkout first-run snippets now select an existing
+  `docker/compose/.env` first, then checkout-root `.env` as the fallback input,
+  before creating the Compose env file.
+- The snippets still write `docker/compose/.env` through a temporary file and
+  still replace only `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`,
+  `AWF_POSTGRES_HOST_PORT`, and `AWF_DATABASE_URL`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  Quickstart snippets that omit the checkout-root `.env` fallback and exercises
+  the documented cleanup expressions against a root `.env` fixture.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_uses_root_env_fallback -q
+```
+
+Red-phase result after adding the focused regression: failed with four expected
+failures because both Quickstart source-checkout first-run snippets only read
+`docker/compose/.env` and had no checkout-root `.env` fallback.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_uses_root_env_fallback tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_strips_exported_awf_compose_env_entries -q
+```
+
+Final focused repair result: `6 passed in 0.75s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 passed in 0.83s`; `All checks passed!`;
+`1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
