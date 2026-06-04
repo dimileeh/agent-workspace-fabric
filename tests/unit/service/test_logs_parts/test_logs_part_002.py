@@ -545,6 +545,33 @@ def test_service_logs_default_follow_runner_redacts_streamed_output(
 
 
 @pytest.mark.unit
+def test_service_logs_default_follow_runner_replaces_invalid_bytes(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Keep followed streams alive when container logs contain non-UTF-8 bytes."""
+    script = (
+        "import sys; "
+        "sys.stdout.buffer.write(b'stdout before-\\xff-after\\n'); "
+        "sys.stdout.flush(); "
+        "sys.stderr.buffer.write(b'stderr before-\\xfe-after\\n'); "
+        "sys.stderr.flush()"
+    )
+
+    result = _run_subprocess(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=False,
+        text=True,
+    )
+
+    replacement = "\N{REPLACEMENT CHARACTER}"
+    captured = capfd.readouterr()
+    assert result.returncode == 0
+    assert f"stdout before-{replacement}-after" in captured.out
+    assert f"stderr before-{replacement}-after" in captured.err
+
+
+@pytest.mark.unit
 def test_service_logs_finds_default_compose_file_from_parent_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

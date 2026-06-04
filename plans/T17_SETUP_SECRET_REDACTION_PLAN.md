@@ -90,6 +90,12 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 service-log redaction scope and
   only changes Compose-env provider-secret discovery, service-log redaction
   threading, focused regressions, and this plan/validation evidence.
+- Review thread `PRRT_kwDOSJAM6s6HE7vW` identified that followed service-log
+  streaming decodes Docker log pipes with Python's default strict text mode,
+  so invalid UTF-8 bytes can kill a redaction reader thread before later log
+  lines are drained or written.
+- This repair remains inside the existing T17 service-log redaction scope and
+  only changes the followed subprocess decode policy plus a focused regression.
 
 ## Requirements Checklist
 
@@ -127,6 +133,8 @@ credential entry, or unrelated refactors are included.
   values loaded from the selected Compose env file, even when those values do
   not match token shape patterns and appear without an assignment or bearer
   prefix.
+- Followed service-log streaming replaces invalid bytes before redaction so
+  non-UTF-8 container output cannot terminate a stream reader.
 - Followed service-log streaming documents that the current per-line redaction
   boundary depends on single-line secret/provider-ref patterns.
 - Support-bundle setup-state generic fallback reason codes are centralized.
@@ -199,6 +207,9 @@ credential entry, or unrelated refactors are included.
     Compose-only provider secret value without a visible assignment prefix,
     confirm they fail, then include selected Compose env provider secrets in the
     service-log redactor.
+23. Add a focused regression for followed service logs containing invalid UTF-8
+    bytes, confirm it fails, then set an explicit replacement decode policy on
+    the followed subprocess pipes.
 
 ## Verification Commands
 
@@ -247,6 +258,15 @@ Review-thread `PRRT_kwDOSJAM6s6HDiER` repair checks:
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k compose_env_provider_secret
 uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/service/logs.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HE7vW` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k replaces_invalid_bytes
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'follow or replaces_invalid_bytes'
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
 
 Review-level comment `issue:4620175517` repair checks:
