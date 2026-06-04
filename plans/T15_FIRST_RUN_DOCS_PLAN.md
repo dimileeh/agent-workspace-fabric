@@ -65,6 +65,12 @@ URL prose must document the actual default smoke probe targets,
 `http://localhost:8000` and `http://localhost:3000`, unless the code defaults
 change.
 
+Post-review adjustment for review-level comment `issue:4620140358`: lifecycle
+guides must document the virtualenv/pip path that README still advertises, the
+focused Markdown section helper must reject H3-or-deeper headings instead of
+silently over-capturing, and the hosted-curl omission assertion must fail with a
+clear document-specific message.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

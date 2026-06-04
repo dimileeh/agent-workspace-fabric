@@ -164,7 +164,10 @@ def test_quickstart_presents_available_complete_first_run_lanes() -> None:
 
     assert "## Lane 1: Curl Installer" not in quickstart_text
     assert "curl -fsSL https://aira.pro/install.sh | sh" not in quickstart_text
-    assert re.search(r"hosted curl\s+installer lane is intentionally omitted", quickstart_text)
+    assert re.search(
+        r"hosted curl\s+installer lane is intentionally omitted",
+        quickstart_text,
+    ), "Expected hosted curl installer omission note in docs/QUICKSTART.md"
     assert "uv tool install agent-workspace-fabric" in quickstart_text
     assert "pipx install agent-workspace-fabric" in quickstart_text
     assert "uv tool install . --force" in quickstart_text
@@ -234,6 +237,15 @@ def test_markdown_section_reports_missing_heading_clearly() -> None:
     """Assert missing section headings fail with a useful assertion message."""
     with pytest.raises(AssertionError, match=r"Markdown heading '## Missing' not found"):
         _markdown_section("## Present\nbody\n", "## Missing")
+
+
+@pytest.mark.parametrize("heading", ("### Target", "#### Target"))
+def test_markdown_section_rejects_h3_or_deeper_headings(heading: str) -> None:
+    """Assert unsupported heading depth fails instead of over-capturing."""
+    text = "## Parent\nintro\n### Target\nbody\n### Next\nother\n"
+
+    with pytest.raises(ValueError, match=r"Only H2 headings are supported"):
+        _markdown_section(text, heading)
 
 
 def test_getting_started_uses_runnable_startup_path() -> None:
@@ -397,6 +409,22 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     assert "pipx uninstall agent-workspace-fabric" in uninstall_text
     assert "rm -rf" in uninstall_text
     assert "does not delete local AWF service state" in uninstall_text
+
+
+def test_virtualenv_lifecycle_docs_cover_readme_install_path() -> None:
+    """Assert README-supported virtualenv installs have upgrade/uninstall guidance."""
+    readme_text = README_PATH.read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+
+    assert "python -m venv .venv" in readme_text
+    assert "pip install agent-workspace-fabric" in readme_text
+    assert "## Virtualenv / pip" in upgrade_text
+    assert "pip install --upgrade agent-workspace-fabric" in upgrade_text
+    assert ". .venv/bin/activate" in upgrade_text
+    assert "## Virtualenv / pip" in uninstall_text
+    assert "pip uninstall agent-workspace-fabric" in uninstall_text
+    assert "deactivate" in uninstall_text
 
 
 def test_public_first_run_docs_do_not_advertise_unpublished_curl_installer() -> None:
@@ -626,8 +654,10 @@ def _markdown_section(text: str, heading: str) -> str:
     """Return the body of the first matching H2 heading up to the next H2.
 
     Only H2 (``##``) headings are supported as the stop sentinel.
-    Passing an H3 or deeper heading will over-capture up to the next H2.
     """
+    if not re.match(r"^##(?!#)(?:[ \t]|$)", heading):
+        raise ValueError(f"Only H2 headings are supported: {heading!r}")
+
     normalized_text = text.replace("\r\n", "\n")
     heading_match = re.search(
         rf"(?m)^{re.escape(heading)}[ \t]*(?:\n|$)",

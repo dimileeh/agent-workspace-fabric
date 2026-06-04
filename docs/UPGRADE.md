@@ -1,11 +1,11 @@
 # Upgrade Guide
 
-Use the upgrade path that matches the first-run lane you chose. After upgrading,
-run `awf start` and mocked smoke against the project initialized during first
-run to refresh local Core and prove the operator path still works. Replace
-`<path>` below with that project path. The hosted curl installer lane is
-intentionally omitted until its public installer, manifest, checksums, and
-distribution artifacts are published and verified.
+Use the upgrade path that matches the first-run lane or install path you chose.
+After upgrading, run `awf start` and mocked smoke against the project
+initialized during first run to refresh local Core and prove the operator path
+still works. Replace `<path>` below with that project path. The hosted curl
+installer lane is intentionally omitted until its public installer, manifest,
+checksums, and distribution artifacts are published and verified.
 
 ## uv tool
 
@@ -24,6 +24,20 @@ The `pipx` lane is release-installed and package-manager mediated:
 
 ```bash
 pipx upgrade agent-workspace-fabric
+awf start
+awf service status --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
+```
+
+## Virtualenv / pip
+
+Use this path only when you installed AWF into an active virtualenv with
+`pip install agent-workspace-fabric` instead of an isolated tool manager:
+
+```bash
+cd /path/to/project-or-env
+. .venv/bin/activate
+pip install --upgrade agent-workspace-fabric
 awf start
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty

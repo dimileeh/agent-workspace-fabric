@@ -1,10 +1,10 @@
 # Uninstall Guide
 
-Use the uninstall path that matches the first-run lane you chose. Uninstalling
-the CLI or source checkout does not delete local AWF service state, workspace
-state, Docker volumes, logs, or artifacts. The hosted curl installer lane is
-intentionally omitted until its public installer, manifest, checksums, and
-distribution artifacts are published and verified.
+Use the uninstall path that matches the first-run lane or install path you
+chose. Uninstalling the CLI or source checkout does not delete local AWF service state,
+workspace state, Docker volumes, logs, or artifacts. The hosted curl installer
+lane is intentionally omitted until its public installer, manifest, checksums,
+and distribution artifacts are published and verified.
 
 For destructive cleanup, use the targeted steps in
 [Troubleshooting](TROUBLESHOOTING.md) only when you intentionally want to remove
@@ -29,6 +29,21 @@ pipx uninstall agent-workspace-fabric
 ```
 
 This removes the isolated tool environment created by `pipx install`.
+
+## Virtualenv / pip
+
+Use this path only when you installed AWF into an active virtualenv with
+`pip install agent-workspace-fabric`:
+
+```bash
+cd /path/to/project-or-env
+. .venv/bin/activate
+pip uninstall agent-workspace-fabric
+deactivate
+```
+
+Remove the virtualenv directory only if it was dedicated to AWF and you no
+longer need it.
 
 ## Source Checkout With Global Tool Install
 

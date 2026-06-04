@@ -27,6 +27,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   clear distinction between CLI/source removal and destructive local state
   cleanup.
 - Complete: Update focused docs tests so stale command grammar is rejected.
+- Complete: Address review-level comment `issue:4620140358` by documenting the
+  README-supported virtualenv/pip lifecycle path and tightening focused test
+  helper diagnostics.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -225,6 +228,42 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Final repair result: `3 passed in 0.56s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `docs/UPGRADE.md` now documents the virtualenv/pip upgrade path advertised by
+  README with `pip install --upgrade agent-workspace-fabric`.
+- `docs/UNINSTALL.md` now documents the matching virtualenv/pip uninstall path
+  with `pip uninstall agent-workspace-fabric`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects H3-or-deeper
+  `_markdown_section` calls with `ValueError` and gives the hosted curl
+  omission assertion a document-specific failure message.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_markdown_section_rejects_h3_or_deeper_headings tests/unit/docs/test_public_docs_status.py::test_virtualenv_lifecycle_docs_cover_readme_install_path -q
+```
+
+Red-phase result after adding the focused assertions: failed because
+`_markdown_section` did not raise `ValueError` for an H3 heading and
+`docs/UPGRADE.md` lacked `## Virtualenv / pip`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_markdown_section_rejects_h3_or_deeper_headings tests/unit/docs/test_public_docs_status.py::test_virtualenv_lifecycle_docs_cover_readme_install_path tests/unit/docs/test_public_docs_status.py::test_quickstart_presents_available_complete_first_run_lanes tests/unit/docs/test_public_docs_status.py::test_upgrade_and_uninstall_docs_cover_all_first_run_lanes -q
+```
+
+Final repair result: `5 passed in 0.64s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `33 passed in 0.95s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
