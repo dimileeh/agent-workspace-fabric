@@ -29,6 +29,44 @@ Plan reference: `plans/T14_E2E_SMOKE_HARNESS_PLAN.md`
 - File-scoped lint:
   `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
   passed.
+- File-scoped format check:
+  `uv run --python 3.12 --extra dev ruff format --check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: issue 4620148180
+
+### Requirement Status
+
+- Complete: `run_tool_install_lane` now uses `_run_source_command_sequence` for
+  installed post-install command probes, matching the source lanes'
+  first-failure stop behavior.
+- Complete: Preserved the source-checkout proof behavior where setup dry-run
+  return code `1` can pass only after parseable JSON identifies the selected
+  checkout and no source-checkout reason codes are present.
+- Complete: Added an inline comment explaining that ordinary host-readiness
+  blockers can make setup dry-run exit `1` even when source-checkout selection
+  is correct.
+- Complete: Added focused unit coverage for the fail-fast regression and the
+  non-source readiness blocker exit-code behavior.
+
+### Evidence
+
+- Confirmed pre-fix focused regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure -q`
+  failed because the tool-install lane returned one passed install result plus
+  four failed post-install command results.
+- Post-fix review-specific tests:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_accepts_non_source_readiness_blocker_exit_one -q`
+  passed with `2 passed`.
+- Focused module test:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py -q`
+  passed with `14 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
 
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.

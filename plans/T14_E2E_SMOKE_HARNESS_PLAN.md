@@ -67,3 +67,47 @@ new first-run smoke harness.
   must pass after implementation.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: issue 4620148180
+
+### Problem Statement And Scope
+
+Review-level comment `issue:4620148180` flags two clarity issues in
+`scripts/first_run_smoke.py`: the tool-install post-install command loop keeps
+running after the first installed-command failure, and the setup dry-run result
+accepts exit code `1` without documenting that ordinary readiness blockers are
+outside the source-checkout proof this smoke lane is meant to perform.
+
+### Requirements Checklist
+
+- Make `run_tool_install_lane` fail fast on post-install command failures, with
+  behavior matching the source install lanes.
+- Preserve the intentional source-checkout proof behavior where setup dry-run
+  exit code `1` can pass only after JSON parsing proves the selected checkout
+  and no source-checkout reason codes are present.
+- Document why exit code `1` is parsed instead of immediately failing.
+- Add focused unit coverage for the fail-fast regression and the documented
+  setup dry-run exit-code behavior.
+
+### Implementation Steps
+
+1. Add a unit test that simulates a successful wheel build and tool install,
+   then a failing installed `awf --help`, and asserts no later installed
+   commands run.
+2. Add a focused unit test documenting that setup dry-run return code `1` is
+   acceptable for non-source readiness blockers when the JSON payload identifies
+   the selected checkout.
+3. Reuse `_run_source_command_sequence` in `run_tool_install_lane` for
+   post-install commands.
+4. Add a short comment above the setup dry-run return-code allowance.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_accepts_non_source_readiness_blocker_exit_one -q`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.

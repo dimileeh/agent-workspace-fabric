@@ -504,16 +504,21 @@ def run_tool_install_lane(
         awf_bin = Path(env["UV_TOOL_BIN_DIR" if method == "uv" else "PIPX_BIN_DIR"]) / "awf"
         outside = smoke_root / f"outside-{method}"
         outside.mkdir(parents=True, exist_ok=True)
-        for command in _installed_awf_commands(
+        commands = _installed_awf_commands(
             awf_bin=awf_bin,
             checkout=checkout_root,
             outside_cwd=outside,
             env=env,
-        ):
-            completed = run(command, timeout_seconds)
-            results.append(
-                _source_command_result(Lane.TOOL_INSTALL, command, completed, checkout_root)
+        )
+        results.extend(
+            _run_source_command_sequence(
+                Lane.TOOL_INSTALL,
+                commands,
+                checkout=checkout_root,
+                timeout_seconds=timeout_seconds,
+                runner=run,
             )
+        )
     return tuple(results)
 
 
@@ -725,6 +730,9 @@ def _source_setup_result(
 ) -> SmokeResult:
     stdout_tail = _tail(completed.stdout)
     stderr_tail = _tail(completed.stderr)
+    # Host-readiness blockers can make setup dry-run exit 1 even when the
+    # selected source checkout is correct, so parse JSON before deciding whether
+    # this source-checkout smoke proof failed.
     if completed.returncode not in {0, 1}:
         return SmokeResult(
             lane=lane,

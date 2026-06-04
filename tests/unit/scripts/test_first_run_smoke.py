@@ -157,6 +157,58 @@ def test_tool_install_command_pins_requested_python(
 
 
 @pytest.mark.unit
+def test_tool_install_lane_stops_after_first_post_install_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Installed command probes stop at the first failure for clear diagnostics."""
+    monkeypatch.setattr(smoke.shutil, "which", lambda name: f"/usr/bin/{name}")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    post_install_commands: list[smoke.CommandSpec] = []
+
+    def runner(
+        command: smoke.CommandSpec,
+        _timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        if command.argv[:3] == ("uv", "build", "--wheel"):
+            dist_dir = Path(command.argv[4])
+            dist_dir.mkdir(parents=True, exist_ok=True)
+            (dist_dir / "agent_workspace_fabric-0.1.0-py3-none-any.whl").write_bytes(b"wheel\n")
+            return subprocess.CompletedProcess(
+                args=command.argv,
+                returncode=0,
+                stdout="built\n",
+                stderr="",
+            )
+        if command.argv[:3] == ("uv", "tool", "install"):
+            return subprocess.CompletedProcess(
+                args=command.argv,
+                returncode=0,
+                stdout="installed\n",
+                stderr="",
+            )
+        post_install_commands.append(command)
+        return subprocess.CompletedProcess(
+            args=command.argv,
+            returncode=2,
+            stdout="",
+            stderr="awf missing\n",
+        )
+
+    results = smoke.run_tool_install_lane(
+        checkout_root=checkout,
+        smoke_root=tmp_path / "smoke",
+        methods=("uv",),
+        timeout_seconds=5,
+        runner=runner,
+    )
+
+    assert [result.status for result in results] == ["passed", "failed"]
+    assert [command.argv[1:] for command in post_install_commands] == [("--help",)]
+
+
+@pytest.mark.unit
 def test_copy_source_checkout_preserves_markers_and_excludes_dev_state(tmp_path: Path) -> None:
     """The copied checkout keeps source markers but drops git, caches, and build state."""
     source = _write_source_checkout(tmp_path / "source")
@@ -278,6 +330,43 @@ def test_source_setup_result_exposes_full_stdout_source_checkout(tmp_path: Path)
     assert result.source_checkout == {"root": str(checkout.resolve())}
     assert len(result.stdout_tail) == smoke._TAIL_CHARS
     assert not result.stdout_tail.startswith("{")
+
+
+@pytest.mark.unit
+def test_source_setup_result_accepts_non_source_readiness_blocker_exit_one(
+    tmp_path: Path,
+) -> None:
+    """Return code 1 is acceptable when JSON proves the selected checkout."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(
+        argv=(
+            "awf",
+            "setup",
+            "--dry-run",
+            "--source-checkout",
+            str(checkout),
+            "--format",
+            "json",
+        ),
+        env={},
+        cwd=tmp_path / "outside",
+    )
+    payload = {
+        "issues": [{"reason_code": "DOCKER_UNAVAILABLE"}],
+        "details": {"source_checkout": {"root": str(checkout.resolve())}},
+    }
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=1,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    result = smoke._source_setup_result(smoke.Lane.SOURCE_UV_RUN, command, completed, checkout)
+
+    assert result.status == "passed"
+    assert result.source_checkout == {"root": str(checkout.resolve())}
 
 
 def _record_run(
