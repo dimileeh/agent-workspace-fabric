@@ -789,7 +789,7 @@ async def test_initialize_project_profile_file_exists_is_structured_mcp_error(
     monkeypatch.setattr(setup_tools, "preview_project_onboarding", lambda *_a, **_k: preview)
 
     def fail_write(_preview: Any, *, force: bool) -> Path:
-        raise FileExistsError("profile already exists")
+        raise FileExistsError(17, "File exists", project / ".awf" / "workspace.yml")
 
     monkeypatch.setattr(setup_tools, "write_workspace_profile", fail_write)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
@@ -799,10 +799,13 @@ async def test_initialize_project_profile_file_exists_is_structured_mcp_error(
         {"project_path": str(project), "write_profile": True},
     )
     payload = _payload(result)
+    rendered = _json_text(result)
 
     assert result.isError is True
     assert payload["error_code"] == "PROJECT_PROFILE_EXISTS"
+    assert payload["message"] == "project profile already exists; pass force=true to overwrite"
     assert payload["detail"]["project_path"] == str(project.resolve())
+    assert "[Errno" not in rendered
 
 
 @pytest.mark.unit

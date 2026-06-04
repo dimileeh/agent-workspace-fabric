@@ -361,11 +361,11 @@ def _initialize_project_profile_result(
     if write_profile:
         try:
             written_path = write_workspace_profile(preview, force=force)
-        except FileExistsError as exc:
+        except FileExistsError:
             return _error_result(
                 safe_result,
                 PROJECT_PROFILE_EXISTS,
-                str(exc),
+                "project profile already exists; pass force=true to overwrite",
                 detail={"project_path": str(repository), "force": force},
             )
         except OSError as exc:
