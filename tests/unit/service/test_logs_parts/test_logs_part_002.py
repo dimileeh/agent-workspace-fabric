@@ -289,6 +289,7 @@ def test_service_logs_default_subprocess_runner_executes_command() -> None:
 def test_service_logs_default_follow_runner_redacts_streamed_output(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
+    """Exercise streaming redaction in the default follow subprocess runner."""
     token = "ghp_serviceLogsSecret123456"
     plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
     script = (

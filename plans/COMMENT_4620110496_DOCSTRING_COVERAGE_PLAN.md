@@ -65,6 +65,19 @@ PR-added test sentinel method without a docstring:
 Add a concise behavior-neutral docstring to that method only, re-run the
 focused audit, and run narrow Ruff plus the affected sentinel unit test.
 
+### Iteration 5 Update
+
+Later service-log follow fixes expanded the PR's Python diff and the focused
+audit now reports four PR-added definitions without docstrings:
+
+- `src/awf/service/logs.py::_run_streaming_subprocess`
+- `src/awf/service/logs.py::_start_redacted_stream_thread`
+- `src/awf/service/logs.py::_stream_redacted_pipe`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_default_follow_runner_redacts_streamed_output`
+
+Add concise behavior-neutral docstrings to those definitions only, re-run the
+focused audit, and run narrow Ruff plus the affected service-log follow test.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

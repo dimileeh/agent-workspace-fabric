@@ -217,6 +217,7 @@ def _run_streaming_subprocess(
     text: Literal[True],
     env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
+    """Run a subprocess while streaming redacted stdout and stderr."""
     process = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -238,6 +239,7 @@ def _start_redacted_stream_thread(
     source: IO[str] | None,
     sink: IO[str],
 ) -> threading.Thread:
+    """Start a thread that redacts a subprocess pipe before writing it."""
     thread = threading.Thread(
         target=_stream_redacted_pipe,
         args=(source, sink),
@@ -247,6 +249,7 @@ def _start_redacted_stream_thread(
 
 
 def _stream_redacted_pipe(source: IO[str] | None, sink: IO[str]) -> None:
+    """Copy pipe lines to a sink after applying shared secret redaction."""
     if source is None:
         return
     for line in source:
