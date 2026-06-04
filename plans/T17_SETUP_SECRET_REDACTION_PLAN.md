@@ -112,6 +112,14 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes custom Compose env-file plumbing, focused regressions, and this
   plan/validation evidence.
+- Review-level comment `issue:4620175517` identified one remaining followed
+  service-log teardown gap: downstream write failures delivered as `OSError`
+  or `ValueError` instead of `BrokenPipeError` can let the Docker follow
+  subprocess continue running until it exits on its own.
+- This repair keeps the MCP compose/env reread and lookback notes as
+  non-blocking latency trade-offs, because current MCP code already short
+  circuits visible assignment context and the remaining env-file caching concern
+  is not a correctness or leak defect.
 
 ## Requirements Checklist
 
@@ -155,6 +163,9 @@ credential entry, or unrelated refactors are included.
   non-UTF-8 container output cannot terminate a stream reader.
 - Followed service-log streaming terminates the followed subprocess at most
   once when both redaction threads observe downstream broken pipes.
+- Followed service-log streaming terminates the followed subprocess when a
+  downstream write or flush fails with `OSError` or `ValueError`, not only
+  `BrokenPipeError`.
 - Followed service-log streaming documents that the current per-line redaction
   boundary depends on single-line secret/provider-ref patterns.
 - `redact_secrets` documents the deliberate post-regex exact-secret matching
@@ -241,6 +252,10 @@ credential entry, or unrelated refactors are included.
 26. Add focused regressions for a custom MCP `--env-file` provider secret,
     confirm the default-only helper path misses it, then pass the selected
     Compose env file into MCP workspace-log exact-secret discovery.
+27. Add a focused regression for followed service-log downstream `OSError` and
+    `ValueError` during flush, confirm it leaves the process unterminated, then
+    route those downstream write/flush failures through the existing
+    broken-pipe cleanup path.
 
 ## Verification Commands
 

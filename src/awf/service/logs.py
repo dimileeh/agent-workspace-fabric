@@ -355,8 +355,16 @@ def _stream_redacted_pipe(
         for line in source:
             # Current token/provider-ref patterns are single-line; multiline
             # patterns will need carry-over context instead of per-line redaction.
-            sink.write(redact_secrets(line, extra_secrets=extra_secret_values))
-            sink.flush()
+            redacted_line = redact_secrets(line, extra_secrets=extra_secret_values)
+            try:
+                sink.write(redacted_line)
+                sink.flush()
+            except (OSError, ValueError):
+                try:
+                    source.close()
+                finally:
+                    on_broken_pipe()
+                return
     except BrokenPipeError:
         try:
             source.close()

@@ -298,6 +298,78 @@ def test_service_logs_follow_broken_stdout_pipe_terminates_default_process(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+@pytest.mark.parametrize("failure_type", [OSError, ValueError])
+def test_service_logs_follow_downstream_stdout_error_terminates_default_process(
+    failure_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A downstream stdout write failure must not leave the followed process running."""
+
+    class _FailingFlushSink:
+        """Sink that accepts writes but fails with a downstream error on flush."""
+
+        def write(self, text: str) -> int:
+            """Accept streamed text before simulating a downstream I/O failure."""
+            return len(text)
+
+        def flush(self) -> None:
+            """Raise a non-BrokenPipe write failure variant."""
+            raise failure_type("downstream stdout unavailable")
+
+    class _FollowProcess:
+        """Follow process double that waits for explicit termination."""
+
+        stdout = io.StringIO("line before downstream errors\n")
+        stderr = io.StringIO("")
+
+        def __init__(self) -> None:
+            """Track termination and kill calls made by the streaming runner."""
+            self.terminated = threading.Event()
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Return only after the runner terminates the followed process."""
+            if not self.terminated.wait(0.25):
+                raise AssertionError(
+                    "follow process was not terminated after downstream stdout error"
+                )
+            return -signal.SIGTERM
+
+        def terminate(self) -> None:
+            """Record graceful termination from the streaming runner."""
+            self.terminated.set()
+
+        def kill(self) -> None:
+            """Record forced termination from the streaming runner."""
+            self.killed = True
+            self.terminated.set()
+
+    processes: list[_FollowProcess] = []
+
+    def _popen(_args: list[str], **kwargs: object) -> _FollowProcess:
+        """Create a follow-process double with piped stdout and stderr."""
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        process = _FollowProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(sys, "stdout", _FailingFlushSink())
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+    )
+
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert len(processes) == 1
+    assert processes[0].terminated.is_set()
+    assert processes[0].killed is False
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_follow_simultaneous_broken_pipes_terminate_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -38,6 +38,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log reads do not skip data when the expanded log read
   is short without EOF; `next_offset` advances only through bytes actually
   covered by the expanded result.
+- Complete: Followed service-log streaming terminates the followed subprocess
+  when downstream write or flush failures are delivered as `OSError` or
+  `ValueError`, not only `BrokenPipeError`.
 - Complete: MCP workspace log reads mask an unknown leading value fragment when
   assignment lookback cannot read enough context to prove the fragment safe.
 - Complete: Support-bundle setup-state collection returns a redacted failed
@@ -1038,6 +1041,58 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py src/awf
 
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py src/awf/mcp/server.py src/awf/cli/mcp_commands.py
 # Success: no issues found in 3 source files
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
+## Review-Level Comment `issue:4620175517` Downstream Write Failure Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: followed service-log streaming now routes downstream
+  `OSError`/`ValueError` write or flush failures through the existing
+  broken-pipe cleanup path.
+- Complete: the followed subprocess is terminated and the stream result is
+  treated as an empty successful interrupt-style result when the downstream
+  sink is unavailable.
+- Complete: existing broken-pipe and simultaneous broken-pipe teardown behavior
+  remains covered by the adjacent focused tests.
+
+Scope note: MCP compose/env-file reread caching remains a non-blocking latency
+trade-off because it is not a correctness or redaction leak defect in this
+review cycle.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k oserror_stdout_pipe
+# failed: OSError escaped the stream thread and the followed process was not terminated
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k downstream_stdout_error
+# 2 passed, 24 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'downstream_stdout_error or broken_stdout_pipe or simultaneous_broken_pipes or default_follow_runner'
+# 6 passed, 20 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
 ```
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
