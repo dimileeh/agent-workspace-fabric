@@ -816,11 +816,15 @@ def _safe_overlay_dest(merged: Path, rel: Path) -> Path | None:
     through a planted link. The final destination is refused too if it is a symlink *or*
     an existing directory: ``copy2`` treats a directory ``dst`` as a containing dir and
     writes ``dst / basename(src)`` inside it, so an agent-created directory holding an
-    inner symlink would still let the root copy escape the tree. The returned destination
-    is therefore guaranteed to be neither a symlink nor a directory, so the subsequent
-    ``copy2`` writes a plain file and cannot follow a link out of the tree. Returns
-    ``None`` — skip this file, best-effort — on any structural conflict (symlinked or
-    non-dir component, or a symlink/directory at the destination) or ``OSError``.
+    inner symlink would still let the root copy escape the tree. Any other existing
+    *non-regular* destination (FIFO/socket/device) is refused too: ``copy2`` ``open``s
+    ``dst`` for writing, and a FIFO with no peer reader would block the root worker
+    indefinitely, hanging provisioning. The returned destination is therefore guaranteed
+    to be a non-existent path or a plain regular file — never a symlink, directory, or
+    special file — so the subsequent ``copy2`` writes a plain file and can neither follow
+    a link out of the tree nor block on a special file. Returns ``None`` — skip this file,
+    best-effort — on any structural conflict (symlinked or non-dir component, or a
+    symlink/directory/special file at the destination) or ``OSError``.
     """
 
     current = merged
@@ -848,6 +852,14 @@ def _safe_overlay_dest(merged: Path, rel: Path) -> Path | None:
         # also a file/dir type conflict regardless. Refuse the structural conflict.
         # (``dest`` is not a symlink here — that is rejected above — so ``is_dir`` cannot
         # be fooled by a symlink-to-directory.)
+        return None
+    if dest.exists() and not dest.is_file():
+        # An existing *non-regular* destination (FIFO/socket/device) the agent planted in
+        # the live ``merged`` upper layer. ``shutil.copy2`` ``open``s ``dst`` for writing,
+        # and a FIFO with no peer reader blocks the root worker indefinitely, hanging
+        # provisioning. (Symlinks and directories are already rejected above; this catches
+        # the remaining special-file types.) Only a non-existent path or a plain file is a
+        # safe copy target — refuse anything else.
         return None
     return dest
 
@@ -939,6 +951,15 @@ def _reconcile_fallback_edits_into_upper(
                 # primitive. The destination guard below only blocks writes *through* a
                 # dest link, so a source link must be skipped here. Best-effort: drop just
                 # this entry, never block provisioning.
+                continue
+            if not legacy_file.is_file():
+                # Not a regular file: the agent can ``mkfifo`` (or plant a socket/device)
+                # in the ``rw`` legacy copy during the fallback session. ``_safe_mtime_ns``
+                # ``stat``s a FIFO fine, so it would otherwise slip through — but
+                # ``shutil.copy2`` then ``open``s the source for reading, and a FIFO with no
+                # peer writer blocks the root worker *indefinitely*, hanging provisioning
+                # rather than completing the copy. (Not a symlink here — that is skipped
+                # above.) Best-effort: drop just this entry.
                 continue
             legacy_mtime_ns = _safe_mtime_ns(legacy_file)
             if legacy_mtime_ns is None:

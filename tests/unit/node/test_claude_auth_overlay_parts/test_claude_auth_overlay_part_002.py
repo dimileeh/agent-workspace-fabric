@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -1444,3 +1445,53 @@ def test_reconcile_refuses_directory_destination(tmp_path: Path) -> None:
     assert secret.read_text() == "original\n"
     # The planted inner symlink is left intact, never materialized into a real file.
     assert (merged / "f" / "f").is_symlink()
+
+
+@pytest.mark.unit
+def test_reconcile_skips_source_fifo_so_root_worker_cannot_block(tmp_path: Path) -> None:
+    # The agent can ``mkfifo`` in the ``rw`` legacy copy during the fallback session. A
+    # FIFO ``stat``s fine, so ``_safe_mtime_ns`` would treat it as a brand-new fallback
+    # edit (absent from base/upper) — but ``shutil.copy2`` then ``open``s the source for
+    # reading, and a FIFO with no peer writer blocks the root worker *indefinitely*,
+    # hanging provisioning. The source must be skipped before any open: a regular source
+    # file is required. (If this regressed, the test itself would hang.)
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    os.mkfifo(legacy / "pipe")
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # Nothing was read from or forwarded for the FIFO, and it is left intact.
+    assert list(merged.iterdir()) == []
+    assert list(upper.iterdir()) == []
+    assert stat.S_ISFIFO((legacy / "pipe").stat().st_mode)
+
+
+@pytest.mark.unit
+def test_reconcile_refuses_fifo_destination(tmp_path: Path) -> None:
+    # The agent (writing the live ``merged`` upper layer) planted a FIFO at the same
+    # relative path as a legacy regular-file edit. ``shutil.copy2`` ``open``s ``dst`` for
+    # writing, and a FIFO with no peer reader blocks the root worker indefinitely, hanging
+    # provisioning. ``_safe_overlay_dest`` only rejected symlinks and directories, so the
+    # special-file dest slipped through. It must refuse the FIFO destination and forward
+    # nothing. (If this regressed, the test itself would hang.)
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    # A genuine fallback edit (absent from base and upper).
+    (legacy / "f").write_text("fallback edit\n")
+    # The agent-planted destination FIFO surviving in the live merged mount.
+    os.mkfifo(merged / "f")
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # The FIFO is left intact, never opened/clobbered, and nothing reached ``upper``.
+    assert stat.S_ISFIFO((merged / "f").stat().st_mode)
+    assert not (upper / "f").exists()
