@@ -120,6 +120,19 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
+def test_readme_first_run_grammar_reuses_initialized_project_path() -> None:
+    """Assert README smoke command validates the path initialized just above it."""
+    readme_text = README_PATH.read_text(encoding="utf-8")
+    first_run_section = _markdown_section(readme_text, "## Installation").split(
+        "For the full lane-specific commands",
+        maxsplit=1,
+    )[0]
+
+    assert "awf init <path>" in first_run_section
+    assert "awf smoke run --project <path> --mocked-local --format pretty" in first_run_section
+    assert "awf smoke run --mocked-local --format pretty" not in first_run_section
+
+
 def test_quickstart_presents_available_complete_first_run_lanes() -> None:
     """Assert each advertised Quickstart lane is complete and currently available."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")

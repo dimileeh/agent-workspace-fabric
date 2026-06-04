@@ -163,7 +163,7 @@ After installing in any lane, the first-run command grammar is:
 awf setup
 awf start
 awf init <path>
-awf smoke run --mocked-local --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
 ```
 
 For the full lane-specific commands, including source checkout variants, see:
