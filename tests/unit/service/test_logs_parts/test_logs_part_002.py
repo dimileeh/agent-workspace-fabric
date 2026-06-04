@@ -205,6 +205,8 @@ def test_service_logs_follow_keyboard_interrupt_reaps_default_process(
         """Return the fake process while preserving Popen pipe assertions."""
         assert kwargs["stdout"] == subprocess.PIPE
         assert kwargs["stderr"] == subprocess.PIPE
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
         process = _InterruptingFollowProcess()
         processes.append(process)
         return process

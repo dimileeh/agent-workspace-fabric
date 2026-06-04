@@ -272,6 +272,7 @@ def _run_streaming_subprocess(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
+        encoding="utf-8",
         errors="replace",
         env=env,
     )
