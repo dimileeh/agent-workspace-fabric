@@ -105,6 +105,13 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 redaction/service-log scope and
   only changes the broken-pipe termination guard, the redaction comment,
   focused regression, and this plan/validation evidence.
+- Review-level comment `issue:4620175517` identified a remaining MCP log-read
+  exact-secret gap for non-default deployments: `awf mcp serve --env-file` can
+  start with a custom Compose env file, but `_workspace_log_redaction_provider_environ`
+  still resolves provider secrets from the default local-service env file.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes custom Compose env-file plumbing, focused regressions, and this
+  plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -138,6 +145,8 @@ credential entry, or unrelated refactors are included.
 - MCP workspace log exact-secret redaction includes provider credentials loaded
   from the local Compose env file, even when those values are not exported in
   the MCP process environment.
+- MCP workspace log exact-secret redaction honors the explicitly selected MCP
+  Compose env file when the service is started with a custom `--env-file`.
 - Captured and followed service-log output redact exact provider credential
   values loaded from the selected Compose env file, even when those values do
   not match token shape patterns and appear without an assignment or bearer
@@ -229,6 +238,9 @@ credential entry, or unrelated refactors are included.
 25. Add a concise `redact_secrets` comment explaining why exact caller-supplied
     secrets are searched after regex substitutions in the full-text path while
     slice helpers derive all spans from the original text.
+26. Add focused regressions for a custom MCP `--env-file` provider secret,
+    confirm the default-only helper path misses it, then pass the selected
+    Compose env file into MCP workspace-log exact-secret discovery.
 
 ## Verification Commands
 
@@ -328,6 +340,15 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_unexpected_config_reader_errors_without_reason_code
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py src/awf/service/logs.py src/awf/service/support_bundle.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/service/test_support_bundle.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py src/awf/service/logs.py src/awf/service/support_bundle.py
+```
+
+Review-level comment `issue:4620175517` custom MCP env-file checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k custom_compose_env_file_provider_secret
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_mcp_cli.py -q -k mcp_serve_runs_stdio_with_env_file
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py src/awf/mcp/server.py src/awf/cli/mcp_commands.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/cli/test_mcp_cli.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py src/awf/mcp/server.py src/awf/cli/mcp_commands.py
 ```
 
 Review-thread `PRRT_kwDOSJAM6s6HCoIm` repair checks:

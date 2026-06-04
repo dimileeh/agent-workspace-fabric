@@ -27,6 +27,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log exact-secret redaction includes provider
   credentials loaded from the local Compose env file when they are absent from
   the MCP process environment.
+- Complete: MCP workspace log exact-secret redaction honors the explicitly
+  selected MCP Compose env file when the service is started with a custom
+  `--env-file`.
 - Complete: Captured and followed service-log output redact exact provider
   credential values loaded from the selected Compose env file when the log emits
   the bare value without an assignment or bearer prefix.
@@ -975,6 +978,66 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/u
 
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 # Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
+## Review-Level Comment `issue:4620175517` Custom MCP Env-File Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `_workspace_log_redaction_provider_environ` now accepts caller
+  compose inputs and resolves exact provider secrets from the selected Compose
+  env file instead of always using the default local-service env file.
+- Complete: `build_mcp_server` and metrics tool registration carry the selected
+  env file into `awf_read_workspace_log`.
+- Complete: `awf mcp serve --env-file` passes the resolved env-file path to the
+  MCP server factory while omitted env-file startup preserves default discovery
+  semantics.
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `src/awf/mcp/server.py`
+- `src/awf/cli/mcp_commands.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `tests/unit/cli/test_mcp_cli.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing checks before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k custom_compose_env_file_provider_secret
+# failed: build_mcp_server() got an unexpected keyword argument 'compose_env_file'
+
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_mcp_cli.py -q -k mcp_serve_runs_stdio_with_env_file
+# failed: build_mcp_server test double did not receive required compose_env_file
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k custom_compose_env_file_provider_secret
+# 1 passed, 40 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_mcp_cli.py -q -k mcp_serve_runs_stdio_with_env_file
+# 1 passed, 6 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'compose_env_provider_secret or compose_env_custom_secret or custom_compose_env_file_provider_secret'
+# 3 passed, 38 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_mcp_cli.py -q -k 'mcp_serve_runs_stdio_with_env_file or mcp_serve_runs_stdio_without_env_file'
+# 2 passed, 5 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py src/awf/mcp/server.py src/awf/cli/mcp_commands.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/cli/test_mcp_cli.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py src/awf/mcp/server.py src/awf/cli/mcp_commands.py
+# Success: no issues found in 3 source files
 ```
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds

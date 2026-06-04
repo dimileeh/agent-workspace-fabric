@@ -48,9 +48,15 @@ def _run_mcp_server(*, env_file: Path | None) -> None:
     """
     from awf.db.session import make_engine, make_session_factory
     from awf.mcp.server import build_mcp_server
+    from awf.service import config as service_config
     from awf.service.workspaces import WorkspaceService
 
     settings = _resolve_mcp_settings(env_file=env_file)
+    compose_env_file = (
+        env_file.expanduser().resolve()
+        if env_file is not None
+        else service_config.COMPOSE_ENV_FILE_OMITTED
+    )
 
     async def _run_stdio_and_dispose() -> None:
         engine = make_engine(settings.database_url)
@@ -58,6 +64,7 @@ def _run_mcp_server(*, env_file: Path | None) -> None:
             server = build_mcp_server(
                 service=WorkspaceService(make_session_factory(engine), settings=settings),
                 settings=settings,
+                compose_env_file=compose_env_file,
             )
             await server.run_stdio_async()
         finally:

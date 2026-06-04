@@ -107,6 +107,7 @@ def build_mcp_server(
     name: str = "awf",
     instructions: str | None = None,
     settings: Settings | None = None,
+    compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
     disk_check_provider: DiskCheckProvider | None = None,
     local_capacity_provider: LocalCapacityProvider | None = None,
     orphan_resource_summary_provider: OrphanResourceSummaryProvider | None = None,
@@ -159,6 +160,7 @@ def build_mcp_server(
         runtime_health_summary_provider=runtime_health_summary_provider,
         readiness_provider=readiness_provider,
         health_provider=health_provider,
+        compose_env_file=compose_env_file,
     )
     register_control_tools(
         mcp=mcp,

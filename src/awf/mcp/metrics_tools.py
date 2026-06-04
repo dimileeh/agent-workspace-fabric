@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
@@ -145,6 +146,9 @@ def _workspace_log_redaction_secrets(
     settings: Settings,
     *,
     service_settings: service_config.ServiceSettings,
+    compose_env_file: service_config.ComposeEnvFileInput = (
+        service_config.COMPOSE_ENV_FILE_OMITTED
+    ),
 ) -> tuple[str, ...]:
     """Return exact secret values that need context-aware log slice redaction."""
     secrets: list[str] = []
@@ -156,20 +160,34 @@ def _workspace_log_redaction_secrets(
     ):
         if secret and len(secret) >= 4:
             secrets.append(secret)
-    provider_environ = _workspace_log_redaction_provider_environ()
+    provider_environ = _workspace_log_redaction_provider_environ(
+        compose_env_file=compose_env_file,
+    )
     for key, value in provider_environ.items():
         if _is_service_log_secret_env_key(key) and len(value) >= 4:
             secrets.append(value)
     return tuple(dict.fromkeys(secrets))
 
 
-def _workspace_log_redaction_provider_environ() -> Mapping[str, str]:
+def _workspace_log_redaction_provider_environ(
+    *,
+    compose_file: Path | None = None,
+    compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
+) -> Mapping[str, str]:
     """Return local provider env values whose exact secrets must be redacted."""
+    resolved_compose_env_file: service_config.ComposeEnvFileInput
+    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
+        resolved_compose_env_file = service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    else:
+        resolved_compose_env_file = compose_env_file
+
     return service_config.resolve_local_service_provider_environ(
         provider_environ=None,
         environ=os.environ,
-        compose_file=service_config.LOCAL_SERVICE_COMPOSE_FILE,
-        compose_env_file=service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE,
+        compose_file=(
+            compose_file if compose_file is not None else service_config.LOCAL_SERVICE_COMPOSE_FILE
+        ),
+        compose_env_file=resolved_compose_env_file,
     )
 
 
@@ -373,6 +391,7 @@ def register_metrics_tools(
     runtime_health_summary_provider: RuntimeHealthSummaryProvider | None,
     readiness_provider: ReadinessProvider | None,
     health_provider: HealthProvider | None,
+    compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
 ) -> None:
     _safe_result = safe_result
 
@@ -546,6 +565,7 @@ def register_metrics_tools(
         extra_secrets = _workspace_log_redaction_secrets(
             settings_value,
             service_settings=service_settings,
+            compose_env_file=compose_env_file,
         )
         redaction_context = _workspace_log_redaction_context_bytes(extra_secrets)
         read_offset = _workspace_log_read_offset(
