@@ -267,6 +267,14 @@ entries when persisting AWF-managed local service values. Replace only
 work directories, and other checkout-specific env intact before
 `awf setup --source-checkout` / `awf start --source-checkout`.
 
+Post-review adjustment for review `4431599164` / inline comment `3359010583`:
+Getting Started's later Configure Environment source-checkout bootstrap block
+must also preserve existing `docker/compose/.env` entries when refreshing
+AWF-managed local service values. Prefer an existing Compose env file as input,
+fall back to the checkout-root `.env` or example template when needed, and
+write `docker/compose/.env` through a temporary file before
+`uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"`.
+
 Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKQiy`: Quickstart
 first-run snippets must persist an `AWF_DATABASE_URL` derived from the same
 `AWF_POSTGRES_PASSWORD` that Compose uses to initialize local Postgres. Persist

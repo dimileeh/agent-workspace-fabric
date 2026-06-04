@@ -276,21 +276,35 @@ export AWF_GITHUB_TOKEN="$(gh auth token)"
 export AWF_POSTGRES_HOST_PORT=${AWF_POSTGRES_HOST_PORT:-5433}
 export AWF_API_HOST_PORT=${AWF_API_HOST_PORT:-8000}
 # Persist Compose-interpolated values into docker/compose/.env.
-env_example=docker/compose/.env.example
-if [ ! -f "$env_example" ]; then
-  env_example=.env.example
+awf_env_source=""
+if [ -f docker/compose/.env ]; then
+  awf_env_source="docker/compose/.env"
+elif [ -f .env ]; then
+  awf_env_source=".env"
+else
+  awf_env_source="docker/compose/.env.example"
+  if [ ! -f "$awf_env_source" ]; then
+    awf_env_source=".env.example"
+  fi
 fi
-if [ ! -f "$env_example" ]; then
+if [ ! -f "$awf_env_source" ]; then
   echo "Missing env template: docker/compose/.env.example or .env.example" >&2
   exit 1
 fi
+awf_env_tmp="$(mktemp)"
 {
-  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' "$env_example"
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_API_HOST_PORT=%s\n' "$AWF_API_HOST_PORT"
-} > docker/compose/.env
+  sed \
+    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
+    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \
+    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
+    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_HOST_PORT[[:space:]]*=/d' \
+    "$awf_env_source"
+} > "$awf_env_tmp"
+mv "$awf_env_tmp" docker/compose/.env
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 ```

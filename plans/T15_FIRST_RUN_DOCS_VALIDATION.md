@@ -2051,6 +2051,45 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for review `4431599164` / inline comment `3359010583`:
+
+- `docs/GETTING_STARTED.md` Configure Environment source-checkout bootstrap now
+  selects an existing `docker/compose/.env` first, then checkout-root `.env`,
+  then the example template before creating the Compose env file.
+- The snippet now writes `docker/compose/.env` through a temporary file,
+  replacing only the regenerated `AWF_API_TOKEN`, `AWF_GITHUB_TOKEN`,
+  `AWF_POSTGRES_HOST_PORT`, and `AWF_API_HOST_PORT` entries.
+- Existing unrelated Compose env entries such as `AWF_POSTGRES_PASSWORD`,
+  `AWF_HOST_WORK_DIR`, provider tokens, and custom settings are preserved
+  before `uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects direct
+  `} > docker/compose/.env` truncation in the Configure Environment
+  source-checkout block and exercises the cleanup expressions against an
+  existing Compose env fixture.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_configure_environment_preserves_compose_env -q
+```
+
+Red-phase result after adding the focused regression: failed with the expected
+assertion because the Configure Environment source-checkout block did not
+select an existing env source and still redirected directly to
+`docker/compose/.env`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_configure_environment_preserves_compose_env -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_uses_runnable_startup_path tests/unit/docs/test_public_docs_status.py::test_getting_started_configure_environment_preserves_compose_env tests/unit/docs/test_public_docs_status.py::test_getting_started_cli_host_port_derivation_matches_cli_default -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `1 passed in 0.67s`; `3 passed in 0.73s`;
+`1 passed in 0.75s`; `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

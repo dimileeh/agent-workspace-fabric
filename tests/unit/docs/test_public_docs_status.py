@@ -1502,6 +1502,73 @@ def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
     )
 
 
+def test_getting_started_configure_environment_preserves_compose_env(
+    tmp_path: Path,
+) -> None:
+    """Assert source-checkout configuration does not truncate Compose env files."""
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+    configure_section = getting_started_text.split(
+        "### Configure Environment",
+        maxsplit=1,
+    )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
+    source_selection = "\n".join(
+        (
+            'awf_env_source=""',
+            "if [ -f docker/compose/.env ]; then",
+            '  awf_env_source="docker/compose/.env"',
+            "elif [ -f .env ]; then",
+            '  awf_env_source=".env"',
+            "else",
+            '  awf_env_source="docker/compose/.env.example"',
+        )
+    )
+
+    assert source_selection in configure_section
+    assert 'awf_env_tmp="$(mktemp)"' in configure_section
+    assert 'mv "$awf_env_tmp" docker/compose/.env' in configure_section
+    assert "} > docker/compose/.env" not in configure_section
+    assert (
+        configure_section.index(source_selection)
+        < configure_section.index('awf_env_tmp="$(mktemp)"')
+        < configure_section.index('mv "$awf_env_tmp" docker/compose/.env')
+        < configure_section.index(
+            'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+        )
+    )
+
+    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", configure_section, re.MULTILINE)
+    assert len(sed_expressions) == 4
+
+    env_file = tmp_path / "compose.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "export AWF_API_TOKEN=old-token",
+                "AWF_GITHUB_TOKEN=old-github-token",
+                "\tAWF_POSTGRES_HOST_PORT = 15432",
+                " export AWF_API_HOST_PORT = 9001",
+                "AWF_POSTGRES_PASSWORD=keep-password",
+                "AWF_HOST_WORK_DIR=/tmp/awf",
+                "PROVIDER_TOKEN=keep",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = ["sed"]
+    for expression in sed_expressions:
+        command.extend(("-e", expression))
+    command.append(str(env_file))
+
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    assert result.stdout.splitlines() == [
+        "AWF_POSTGRES_PASSWORD=keep-password",
+        "AWF_HOST_WORK_DIR=/tmp/awf",
+        "PROVIDER_TOKEN=keep",
+    ]
+
+
 def test_getting_started_cli_host_port_derivation_matches_cli_default() -> None:
     """Assert Getting Started documents the CLI's localhost host-port derivation."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
