@@ -118,6 +118,29 @@ Evidence after Iteration 5:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_default_follow_runner_redacts_streamed_output -q`
   passed: `1 passed in 0.46s`.
 
+## Iteration 6
+
+A later follow-log interrupt cleanup commit expanded the PR's Python diff. The
+focused added-line AST audit reported seven PR-added test/helper definitions
+without docstrings in
+`tests/unit/service/test_logs_parts/test_logs_part_002.py`. This iteration
+added concise behavior-neutral docstrings only.
+
+Evidence after Iteration 6:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=15`, `added_defs=94`,
+  `missing_docstrings_on_added_defs=7`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=15`, `added_defs=94`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/service/test_logs_parts/test_logs_part_002.py`
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_keyboard_interrupt_reaps_default_process -q`
+  passed: `2 passed in 0.43s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring

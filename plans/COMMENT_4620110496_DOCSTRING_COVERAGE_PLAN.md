@@ -78,6 +78,24 @@ audit now reports four PR-added definitions without docstrings:
 Add concise behavior-neutral docstrings to those definitions only, re-run the
 focused audit, and run narrow Ruff plus the affected service-log follow test.
 
+### Iteration 6 Update
+
+A later follow-log interrupt cleanup commit expanded the PR's Python diff and
+the focused audit now reports seven PR-added test/helper definitions without
+docstrings:
+
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_keyboard_interrupt_reaps_default_process`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_InterruptingFollowProcess`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_InterruptingFollowProcess.__init__`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_InterruptingFollowProcess.wait`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_InterruptingFollowProcess.terminate`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_InterruptingFollowProcess.kill`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_popen`
+
+Add concise behavior-neutral docstrings to those definitions only, re-run the
+focused audit, and run narrow Ruff plus the affected parametrized service-log
+interrupt test.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

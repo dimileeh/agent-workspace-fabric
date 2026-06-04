@@ -166,16 +166,22 @@ def test_service_logs_follow_keyboard_interrupt_reaps_default_process(
     expected_wait_timeouts: list[float | None],
     expected_killed: bool,
 ) -> None:
+    """Verify followed log processes are reaped when waiting is interrupted."""
+
     class _InterruptingFollowProcess:
+        """Fake follow process that interrupts the first wait call."""
+
         stdout = io.StringIO("")
         stderr = io.StringIO("")
 
         def __init__(self) -> None:
+            """Initialize cleanup state captured by the assertions."""
             self.terminated = False
             self.killed = False
             self.wait_timeouts: list[float | None] = []
 
         def wait(self, timeout: float | None = None) -> int:
+            """Record waits and simulate interrupt or terminate timeout paths."""
             self.wait_timeouts.append(timeout)
             if len(self.wait_timeouts) == 1:
                 raise KeyboardInterrupt
@@ -184,14 +190,17 @@ def test_service_logs_follow_keyboard_interrupt_reaps_default_process(
             return -signal.SIGKILL if self.killed else -signal.SIGTERM
 
         def terminate(self) -> None:
+            """Record that graceful termination was requested."""
             self.terminated = True
 
         def kill(self) -> None:
+            """Record that forceful process cleanup was requested."""
             self.killed = True
 
     processes: list[_InterruptingFollowProcess] = []
 
     def _popen(_args: list[str], **kwargs: object) -> _InterruptingFollowProcess:
+        """Return the fake process while preserving Popen pipe assertions."""
         assert kwargs["stdout"] == subprocess.PIPE
         assert kwargs["stderr"] == subprocess.PIPE
         process = _InterruptingFollowProcess()
