@@ -607,6 +607,45 @@ def test_shared_base_build_copytree_failure_cleans_staging_and_falls_back(
 
 
 @pytest.mark.unit
+def test_shared_base_build_lock_open_failure_cleans_staging_and_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+
+    real_open = auth_mounts_mod.os.open
+
+    def _open_fails(path: object, *args: object, **kwargs: object) -> int:
+        # Only the staging build-lock open fails (disk full while creating the
+        # lock file); all other ``os.open`` calls proceed normally.
+        if str(path).endswith(_CLAUDE_BASE_BUILD_LOCK_NAME):
+            raise OSError("No space left on device")
+        return real_open(path, *args, **kwargs)
+
+    # ``os.open`` failing before the lock is acquired must still reclaim the
+    # ``mkdtemp`` staging dir via the ``finally`` rather than orphaning it, and
+    # provisioning degrades to the legacy full copy.
+    monkeypatch.setattr(auth_mounts_mod.os, "open", _open_fails)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_lock_open_fail",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=True),
+    )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_lock_open_fail" / "claude"
+    # Legacy full copy took over after the shared-base build failed.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    # No orphaned staging dir remains under the shared root.
+    assert list(base.parent.glob(".claude-base-*")) == []
+
+
+@pytest.mark.unit
 def test_shared_base_build_reaps_stale_orphan_staging_dirs(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"

@@ -1301,14 +1301,17 @@ def _ensure_shared_claude_base(
     # build. The kernel releases the lock automatically on process death
     # (OOM/SIGKILL/crash) — exactly the orphan case a duration heuristic could not
     # tell apart from a legitimately long build.
-    lock_fd = os.open(build_lock, os.O_CREAT | os.O_WRONLY, 0o600)
+    lock_fd = None
     # ``finally`` guarantees the lock fd is closed (releasing the lock) and the
-    # staging dir is reclaimed on every exit: a copytree/chown OSError (disk full,
-    # permissions) that propagates to the caller's legacy-copy fallback, a lost
-    # build race, or the success path (where ``replace`` has already moved
-    # ``staged_base`` out). Without it a failed copy/chown would orphan the staging
-    # tree under the shared root.
+    # staging dir is reclaimed on every exit: an ``os.open`` OSError (disk full,
+    # permissions) before the lock is even acquired, a copytree/chown OSError that
+    # propagates to the caller's legacy-copy fallback, a lost build race, or the
+    # success path (where ``replace`` has already moved ``staged_base`` out).
+    # ``os.open`` lives inside the ``try`` (with ``lock_fd`` pre-set to ``None``) so
+    # that a failure creating the lock file still reclaims the ``mkdtemp`` staging
+    # tree rather than orphaning it under the shared root.
     try:
+        lock_fd = os.open(build_lock, os.O_CREAT | os.O_WRONLY, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         shutil.copytree(
             host_home / ".claude",
@@ -1340,7 +1343,8 @@ def _ensure_shared_claude_base(
             )
             raise
     finally:
-        os.close(lock_fd)
+        if lock_fd is not None:
+            os.close(lock_fd)
         shutil.rmtree(staging, ignore_errors=True)
     return base
 
