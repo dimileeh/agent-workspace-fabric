@@ -249,7 +249,7 @@ def _get_setup_status_result(
         },
         "providers": _provider_statuses(config.providers),
         "clients": _client_statuses(config.clients),
-        "source_checkout": _source_checkout_status(config),
+        "source_checkout": _setup_status_source_checkout(config, details),
         "issues": _setup_status_issues(rendered.get("issues")),
         "next_steps": _list_of_strings(rendered.get("next_steps")),
     }
@@ -510,6 +510,28 @@ def _source_checkout_status(config: HostSetupConfig) -> dict[str, Any]:
         "verified_at": config.source_checkout.verified_at.isoformat(),
         "marker_count": len(config.source_checkout.markers),
     }
+
+
+def _setup_status_source_checkout(
+    config: HostSetupConfig,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    persisted = _source_checkout_status(config)
+    if persisted["present"]:
+        return persisted
+
+    probed = _mapping(details.get("source_checkout"))
+    root = probed.get("root")
+    verified_at = probed.get("verified_at")
+    if not isinstance(root, str) or not isinstance(verified_at, str):
+        return persisted
+
+    payload: dict[str, Any] = {
+        "present": True,
+        "root": root,
+        "verified_at": verified_at,
+    }
+    return payload
 
 
 def _safe_setup_checks(value: Any) -> list[dict[str, str]]:

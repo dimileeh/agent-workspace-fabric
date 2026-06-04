@@ -41,6 +41,59 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/ser
 Full AWF/GitHub validation and coverage gates are intentionally left to AWF
 after the agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAbmv
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` drops explicit
+`source_checkout` probe metadata from the setup readiness payload. The CLI
+dry-run JSON includes the probed checkout under `details.source_checkout`, but
+the MCP wrapper currently builds top-level `source_checkout` only from persisted
+host config. On explicit-checkout dry-runs the wrapper intentionally uses an
+empty in-memory config, so the response incorrectly reports
+`source_checkout.present=false`.
+
+Scope is limited to MCP setup status parity for explicit source-checkout
+metadata and its focused regression test.
+
+### Requirements Checklist
+
+- Preserve persisted-config `source_checkout` status behavior when
+  `source_checkout` is not provided.
+- Preserve explicit `source_checkout` status behavior that skips
+  `read_host_setup_config()` after `_run_setup`.
+- Surface safe probed checkout metadata from rendered readiness details on the
+  explicit-checkout path.
+- Add a focused regression proving explicit-checkout setup status reports the
+  probed checkout as present.
+
+### Implementation Steps
+
+1. Update the explicit source-checkout MCP regression to expect top-level
+   probed checkout metadata.
+2. Add a small setup-status helper that falls back from persisted config
+   metadata to rendered readiness `details.source_checkout`.
+3. Use the helper in `_get_setup_status_result`.
+4. Run the targeted regression and a focused lint check for the changed files.
+
+### Assumptions/Changes
+
+- Also assert the existing no-explicit-checkout path still returns persisted
+  source-checkout metadata, because the fallback helper intentionally preserves
+  persisted config metadata before consulting rendered readiness details.
+- Add a focused type check for the changed production module.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_skips_host_config_read -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates are intentionally left to AWF
+after the agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HK
 
 ### Problem Statement And Scope

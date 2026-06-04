@@ -53,6 +53,50 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAbmv
+
+### Requirement Status
+
+- Preserve persisted-config `source_checkout` status behavior when
+  `source_checkout` is not provided: Complete.
+- Preserve explicit `source_checkout` status behavior that skips
+  `read_host_setup_config()` after `_run_setup`: Complete.
+- Surface safe probed checkout metadata from rendered readiness details on the
+  explicit-checkout path: Complete.
+- Add a focused regression proving explicit-checkout setup status reports the
+  probed checkout as present: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_skips_host_config_read -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_skips_host_config_read -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Pre-implementation regression: failed as expected because
+  `payload["source_checkout"]` was `{"present": false}` despite
+  `details.source_checkout` containing the probed checkout.
+- Focused setup-status regressions: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HAAxL
 
 ### Requirement Status

@@ -30,6 +30,7 @@ from awf.host_setup.rendering import (
     first_run_failure_payload,
     first_run_success_payload,
 )
+from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
 from awf.mcp.server import build_mcp_server
 from awf.service.bootstrap import (
     SERVICE_BOOTSTRAP_TIMEOUT,
@@ -209,6 +210,11 @@ async def test_get_setup_status_returns_only_status_and_safe_refs(
             )
         },
         consent=ConsentConfig(plain_file_secrets=True, source_checkout_assets=True),
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=tmp_path / "stored-awf",
+            verified_at=datetime(2026, 1, 2, tzinfo=UTC),
+            markers=("pyproject.toml", "README.md"),
+        ),
     )
     run_calls: list[dict[str, Any]] = []
 
@@ -247,6 +253,12 @@ async def test_get_setup_status_returns_only_status_and_safe_refs(
         "credential_ref": {"present": False},
     }
     assert payload["clients"]["claude"]["status"] == "configured"
+    assert payload["source_checkout"] == {
+        "present": True,
+        "root": str(tmp_path / "stored-awf"),
+        "verified_at": "2026-01-02T00:00:00+00:00",
+        "marker_count": 2,
+    }
     assert raw_token not in rendered
     assert "GITHUB_TOKEN" not in rendered
     assert "env://GITHUB_TOKEN" not in rendered
@@ -293,12 +305,14 @@ async def test_get_setup_status_source_checkout_skips_host_config_read(
     from awf.mcp import setup_tools
 
     checkout = tmp_path / "awf"
+    verified_at = datetime(2026, 2, 3, tzinfo=UTC).isoformat()
     readiness = first_run_success_payload(
         command="awf setup",
         summary="source checkout ready",
         details={
             "selected_providers": [],
             "checks": [{"name": "docker", "level": "ok"}],
+            "source_checkout": {"root": str(checkout), "verified_at": verified_at},
         },
         next_steps=("Run awf start.",),
     )
@@ -341,7 +355,11 @@ async def test_get_setup_status_source_checkout_skips_host_config_read(
     assert payload["setup"]["source_checkout_assets_consent"] is False
     assert payload["providers"] == {}
     assert payload["clients"] == {}
-    assert payload["source_checkout"] == {"present": False}
+    assert payload["source_checkout"] == {
+        "present": True,
+        "root": str(checkout),
+        "verified_at": verified_at,
+    }
 
 
 @pytest.mark.unit
