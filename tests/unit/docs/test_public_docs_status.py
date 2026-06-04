@@ -245,6 +245,7 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     assert api_persist in first_run_section
     assert password_persist in first_run_section
     assert persist_target in first_run_section
+    assert setup_command in first_run_section
     assert (
         first_run_section.index(api_export)
         < first_run_section.index(password_export)
@@ -288,6 +289,7 @@ def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
     assert api_persist in first_run_section
     assert password_persist in first_run_section
     assert persist_target in first_run_section
+    assert f"\n{setup_command}\n" in first_run_section
     assert (
         first_run_section.index(api_export)
         < first_run_section.index(password_export)
