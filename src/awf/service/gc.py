@@ -1271,8 +1271,10 @@ def _gc_result(
     companion_prune_failed = (
         companion_image_prune is not None and companion_image_prune.get("status") == "failed"
     )
+    compose_teardown_failed = any(not teardown.ok for teardown in compose_teardowns.values())
     has_errors = (
         bool(delete_errors)
+        or compose_teardown_failed
         or any(v.get("error") is not None for v in res_releases.values())
         or companion_prune_failed
     )

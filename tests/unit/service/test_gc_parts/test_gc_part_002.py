@@ -412,6 +412,53 @@ async def test_single_workspace_gc_dry_run_for_missing_workspace(
 
 
 @pytest.mark.unit
+async def test_single_workspace_gc_reports_failed_missing_workspace_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = "ws_missing"
+    calls: list[tuple[str, str, Path]] = []
+
+    async def _compose_teardown(candidate: object) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append((candidate.workspace_id, candidate.reason_code, candidate.compose.path))
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+            error="volume still in use",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert result.plan.candidates == []
+    assert result.deleted_paths == []
+    assert result.delete_errors == []
+    assert result.status == "partial"
+    assert result.reason_code == "CLEANUP_EXECUTION_PARTIAL"
+    assert result.compose_teardowns[workspace_id].to_dict() == {
+        "status": "failed",
+        "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
+        "error": "volume still in use",
+    }
+    assert calls == [
+        (
+            workspace_id,
+            "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN",
+            work_dir / "compose" / workspace_id,
+        )
+    ]
+
+
+@pytest.mark.unit
 async def test_gc_execution_reports_refused_file_symlink_and_out_of_root_paths(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
