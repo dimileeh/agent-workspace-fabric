@@ -466,6 +466,44 @@ async def test_single_workspace_gc_reports_failed_missing_workspace_compose_tear
 
 
 @pytest.mark.unit
+async def test_single_workspace_gc_records_raised_missing_workspace_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = "ws_missing_raised"
+    calls: list[str] = []
+
+    async def _compose_teardown(candidate: object) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(candidate.workspace_id)
+        raise OSError("docker socket vanished")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert calls == [workspace_id]
+    assert result.status == "partial"
+    assert result.reason_code == "CLEANUP_EXECUTION_PARTIAL"
+    assert result.deleted_paths == []
+    assert result.delete_errors == []
+    assert result.secret_lease_revocations == {}
+    assert result.reservation_releases == {}
+    assert result.compose_teardowns[workspace_id].to_dict() == {
+        "status": "failed",
+        "reason_code": "COMPOSE_TEARDOWN_CALLBACK_RAISED",
+        "error": "OSError: docker socket vanished",
+    }
+
+
+@pytest.mark.unit
 async def test_single_workspace_gc_cleanup_disabled_skips_missing_workspace_fallback_compose_teardown(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

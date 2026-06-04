@@ -107,6 +107,7 @@ COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
 COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
+COMPOSE_TEARDOWN_CALLBACK_RAISED = "COMPOSE_TEARDOWN_CALLBACK_RAISED"
 
 _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES = frozenset(
     {
@@ -1089,7 +1090,16 @@ async def _run_gc_compose_teardowns(
     if not candidates and fallback_candidate is not None:
         candidates = [fallback_candidate]
     for candidate in candidates:
-        teardown = await _run_compose_teardown(candidate, compose_teardown)
+        try:
+            teardown = await _run_compose_teardown(candidate, compose_teardown)
+        except Exception as exc:
+            error = str(exc)
+            error_message = f"{type(exc).__name__}: {error}" if error else type(exc).__name__
+            teardown = WorkspaceGCComposeTeardownResult(
+                status="failed",
+                reason_code=COMPOSE_TEARDOWN_CALLBACK_RAISED,
+                error=error_message[:400],
+            )
         if teardown is not None:
             compose_teardowns[candidate.workspace_id] = teardown
     return compose_teardowns

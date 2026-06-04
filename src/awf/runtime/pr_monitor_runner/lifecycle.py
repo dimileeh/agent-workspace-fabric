@@ -835,13 +835,16 @@ async def _gc_completed_workspace_filesystem(
         return
     if not result.plan.candidates and result.plan.preserved:
         preserved = result.plan.preserved[0]
-        _log.info(
-            "monitor.filesystem_gc_deferred",
-            workspace_id=workspace_id,
-            reason_code=preserved.reason_code,
-            age_hours=preserved.age_hours,
-            retention_hours=result.plan.min_age_hours,
-        )
+        deferred_log_fields: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "reason_code": preserved.reason_code,
+            "age_hours": preserved.age_hours,
+            "retention_hours": result.plan.min_age_hours,
+        }
+        teardown = result.compose_teardowns.get(workspace_id)
+        if teardown is not None:
+            deferred_log_fields["compose_teardown_status"] = teardown.status
+        _log.info("monitor.filesystem_gc_deferred", **deferred_log_fields)
         return
     _log.info(
         "monitor.filesystem_gc_ok",
