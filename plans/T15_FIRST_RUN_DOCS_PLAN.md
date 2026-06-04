@@ -359,6 +359,18 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKggm`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKiIB`: Getting Started
+first-run snippets that persist `AWF_POSTGRES_PASSWORD` must also persist the
+matching `AWF_POSTGRES_HOST_PORT` and derived `AWF_DATABASE_URL`, so host-side
+database checks authenticate with the same password Compose uses for local
+Postgres.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKiIB`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
 Focused lint command:
 
 ```bash

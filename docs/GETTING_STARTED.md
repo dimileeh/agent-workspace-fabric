@@ -96,14 +96,18 @@ For package-manager or virtualenv installs:
 
 Persist the generated local service values in the current first-run directory's
 `.env` before setup/start so later upgrades can restore the same running Core
-token and password.
+token and password, and so host-side database checks use that same password.
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
 } > .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
@@ -117,14 +121,19 @@ awf smoke run --project <path> --mocked-local --format pretty
 For a source checkout with a global `awf` executable, run from the checkout:
 
 Persist the generated local service values into the checkout's Compose env file
-before setup/start so later upgrades can restore them.
+before setup/start so later upgrades can restore them and host-side database
+checks use the same password.
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
 } > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
@@ -138,14 +147,19 @@ awf smoke run --project <path> --mocked-local --format pretty
 For a source checkout with no global install, run from the checkout:
 
 Persist the generated local service values into the checkout's Compose env file
-before setup/start so later upgrades can restore them.
+before setup/start so later upgrades can restore them and host-side database
+checks use the same password.
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
 } > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.

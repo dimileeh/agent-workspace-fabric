@@ -1657,6 +1657,44 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HKiIB`:
+
+- `docs/GETTING_STARTED.md` now derives `AWF_DATABASE_URL` from the same
+  `AWF_POSTGRES_PASSWORD` used by Compose in all three recommended first-run
+  snippets.
+- `docs/GETTING_STARTED.md` now persists the matching `AWF_POSTGRES_HOST_PORT`
+  and derived `AWF_DATABASE_URL` to `.env` for package/virtualenv installs and
+  `docker/compose/.env` for both source-checkout snippets before setup/start.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Getting Started
+  first-run snippets that persist `AWF_POSTGRES_PASSWORD` without the matching
+  host-side database URL.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade -q
+```
+
+Red-phase result after adding the focused assertion: failed because the
+Getting Started package/virtualenv first-run block omitted
+`AWF_POSTGRES_HOST_PORT` and the matching derived `AWF_DATABASE_URL` before
+setup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Final focused repair result: `2 passed in 0.75s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

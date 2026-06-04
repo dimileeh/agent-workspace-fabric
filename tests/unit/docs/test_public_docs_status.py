@@ -910,8 +910,15 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     )
     api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
     password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
+    database_url_export = (
+        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
+        '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+    )
     api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
     password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
+    host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
+    database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
 
     assert package_heading in startup_section
     assert source_global_heading in startup_section
@@ -947,14 +954,24 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         assert "persist" in section.lower(), f"{label} should explain env persistence"
         assert api_export in section, f"{label} is missing AWF_API_TOKEN generation"
         assert password_export in section, f"{label} is missing AWF_POSTGRES_PASSWORD generation"
+        assert host_port_export in section, f"{label} is missing AWF_POSTGRES_HOST_PORT default"
+        assert database_url_export in section, (
+            f"{label} must derive AWF_DATABASE_URL from AWF_POSTGRES_PASSWORD"
+        )
         assert api_persist in section, f"{label} must persist AWF_API_TOKEN"
         assert password_persist in section, f"{label} must persist AWF_POSTGRES_PASSWORD"
+        assert host_port_persist in section, f"{label} must persist AWF_POSTGRES_HOST_PORT"
+        assert database_url_persist in section, f"{label} must persist AWF_DATABASE_URL"
         assert persist_target in section, f"{label} must write the expected env file"
         assert (
             section.index(api_export)
             < section.index(password_export)
+            < section.index(host_port_export)
+            < section.index(database_url_export)
             < section.index(api_persist)
             < section.index(password_persist)
+            < section.index(host_port_persist)
+            < section.index(database_url_persist)
             < section.index(persist_target)
             < section.index(setup_command)
         ), f"{label} must persist service env before setup"
