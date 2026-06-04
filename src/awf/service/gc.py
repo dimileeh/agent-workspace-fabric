@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,6 +25,7 @@ from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector
 from awf.service import gc_predicates as _gc_predicates
+from awf.service import gc_results as _gc_results
 from awf.service import gc_worktrees as _gc_worktrees
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
@@ -69,6 +70,15 @@ _run_worktree_remove = _gc_worktrees.run_worktree_remove
 _worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
 _worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 
+# Leaf result/data dataclasses live in ``gc_results`` (file-size budget);
+# re-exported so the historical ``awf.service.gc.<name>`` surface is unchanged.
+WorkspaceCleanupExecutionStatus = _gc_results.WorkspaceCleanupExecutionStatus
+WorkspaceCleanupPathStatus = _gc_results.WorkspaceCleanupPathStatus
+WorkspaceGCComposeTeardownResult = _gc_results.WorkspaceGCComposeTeardownResult
+WorkspaceGCDeleteError = _gc_results.WorkspaceGCDeleteError
+WorkspaceGCPathOutcome = _gc_results.WorkspaceGCPathOutcome
+WorkspaceGCPreserved = _gc_results.WorkspaceGCPreserved
+
 # SQL predicate builders live in ``gc_predicates`` (file-size budget); re-aliased
 # under their historical ``_workspace_*`` names for callers/tests.
 _workspace_gc_candidate_predicate = _gc_predicates.workspace_gc_candidate_predicate
@@ -101,9 +111,6 @@ CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
 CLEANUP_EXECUTION_PARTIAL = "CLEANUP_EXECUTION_PARTIAL"
 
-WorkspaceCleanupExecutionStatus = Literal["dry_run", "succeeded", "partial"]
-WorkspaceCleanupPathStatus = Literal["planned", "deleted", "already_removed", "skipped", "failed"]
-
 TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
     {
         WorkspaceStatus.completed.value,
@@ -130,76 +137,6 @@ PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
         WorkspaceStatus.destroying.value,
     }
 )
-
-
-@dataclass(frozen=True)
-class WorkspaceGCPreserved:
-    """A workspace considered by policy but intentionally not cleaned."""
-
-    workspace_id: str
-    status: str
-    updated_at: datetime
-    age_hours: int
-    reason_code: str
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "workspace_id": self.workspace_id,
-            "status": self.status,
-            "updated_at": self.updated_at.isoformat(),
-            "age_hours": self.age_hours,
-            "reason_code": self.reason_code,
-        }
-
-
-@dataclass(frozen=True)
-class WorkspaceGCComposeTeardownResult:
-    """Structured outcome for optional compose teardown before filesystem deletion."""
-
-    status: Literal["succeeded", "failed", "skipped"]
-    reason_code: str
-    error: str | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.status in {"succeeded", "skipped"}
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "status": self.status,
-            "reason_code": self.reason_code,
-        }
-        if self.error:
-            payload["error"] = self.error
-        return payload
-
-
-@dataclass(frozen=True)
-class WorkspaceGCPathOutcome:
-    """Structured execution outcome for one pressure-directory target."""
-
-    workspace_id: str
-    kind: str
-    path: Path
-    status: WorkspaceCleanupPathStatus
-    reason_code: str
-    deleted: bool = False
-    error: str | None = None
-    estimated_bytes: int = 0
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "workspace_id": self.workspace_id,
-            "kind": self.kind,
-            "path": str(self.path),
-            "status": self.status,
-            "reason_code": self.reason_code,
-            "deleted": self.deleted,
-            "estimated_bytes": self.estimated_bytes,
-        }
-        if self.error is not None:
-            payload["error"] = self.error
-        return payload
 
 
 @dataclass(frozen=True)
@@ -359,26 +296,6 @@ class WorkspaceGCPlan:
             "total_estimated_bytes": self.total_estimated_bytes,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "preserved": [preserved.to_dict() for preserved in self.preserved],
-        }
-
-
-@dataclass(frozen=True)
-class WorkspaceGCDeleteError:
-    """One deletion failure captured without aborting the rest of the GC run."""
-
-    workspace_id: str
-    kind: str
-    path: Path
-    error: str
-    reason_code: str = PATH_DELETE_FAILED
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "workspace_id": self.workspace_id,
-            "kind": self.kind,
-            "path": str(self.path),
-            "reason_code": self.reason_code,
-            "error": self.error,
         }
 
 
