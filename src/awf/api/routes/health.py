@@ -22,7 +22,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 
 from awf import __version__
 from awf.api.deps import require_api_token
@@ -296,7 +295,7 @@ async def _check_worker_heartbeat(factory: Any, *, node_id: str) -> CheckResult:
             reason=WORKER_HEARTBEAT_UNAVAILABLE_REASON,
             detail=f"Worker heartbeat lookup exceeded {_CHECK_TIMEOUT_SECONDS}s",
         )
-    except (SQLAlchemyError, RuntimeError, OSError) as exc:
+    except Exception as exc:
         return CheckResult(
             ok=False,
             status="fail",

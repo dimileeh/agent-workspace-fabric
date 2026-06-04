@@ -251,6 +251,20 @@ async def test_readyz_includes_egress_audit_check(
         work_dir=str(tmp_path / "readyz-work"),
     )
     monkeypatch.setattr(health_route, "get_settings", lambda: test_settings)
+    monkeypatch.setattr(
+        health_route,
+        "collect_agent_readiness",
+        lambda *_args, **_kwargs: {"status": "ok", "providers": {}},
+    )
+
+    async def _worker_ok(*_args: object, **_kwargs: object) -> health_route.CheckResult:
+        return health_route.CheckResult(
+            ok=True,
+            status="ok",
+            reason="WORKER_HEARTBEAT_FRESH",
+        )
+
+    monkeypatch.setattr(health_route, "_check_worker_heartbeat", _worker_ok)
     app = client._transport.app  # noqa: SLF001
     runner = FakeCommandRunner()
     _queue_all_ok(runner)

@@ -374,7 +374,7 @@ class ControlWorker(WorkerDelegatesMixin):
         try:
             await self._record_heartbeat()
             self._last_heartbeat_written_at = now
-        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError) as exc:
+        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError, TypeError) as exc:
             self._last_heartbeat_written_at = now
             _log.warning(
                 "worker.heartbeat_write_failed",
@@ -414,7 +414,7 @@ class ControlWorker(WorkerDelegatesMixin):
             return
         try:
             await self._prune_stale_heartbeats()
-        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError) as exc:
+        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError, TypeError) as exc:
             _log.warning(
                 "worker.heartbeat_prune_failed",
                 reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
