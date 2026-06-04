@@ -16,7 +16,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -31,14 +30,21 @@ from awf.db.repositories import (
     WorkspaceRepository,
     sync_candidate_readiness,
 )
-from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import (
+    DefaultMergeMethodGitHubClient,
+)
+from tests.shared.monitor_runner import (
+    mock_completed_compose_manager as _mock_completed_compose_manager,
+)
+
+# Preserve the existing fixture-module import path for older runtime tests.
+mock_completed_compose_manager = _mock_completed_compose_manager
 
 
 @dataclass
@@ -133,38 +139,6 @@ class RecordedSleep:
     async def __call__(self, seconds: float) -> None:
         """Record the requested sleep duration without delaying."""
         self.calls.append(seconds)
-
-
-def mock_completed_compose_manager(
-    result: ComposeTeardownResult | None = None,
-) -> tuple[object, list[tuple[str, Path, str, bool]]]:
-    """Patch completed-workspace compose teardown and record teardown calls."""
-    calls: list[tuple[str, Path, str, bool]] = []
-    resolved_result = result or ComposeTeardownResult(
-        status="succeeded",
-        reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
-    )
-
-    class _FakeComposeManager:
-        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
-            self.work_dir = work_dir
-            self.template_path = template_path
-
-        async def teardown_project(
-            self,
-            *,
-            project_name: str,
-            compose_file: Path,
-            workspace_id: str,
-            remove_volumes: bool = True,
-        ) -> ComposeTeardownResult:
-            calls.append((project_name, compose_file, workspace_id, remove_volumes))
-            return resolved_result
-
-    return patch(
-        "awf.runtime.pr_monitor_runner.lifecycle.ComposeManager",
-        new=_FakeComposeManager,
-    ), calls
 
 
 def pr_payload(
