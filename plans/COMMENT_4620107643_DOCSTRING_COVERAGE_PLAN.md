@@ -37,6 +37,15 @@ behavior-neutral helper docstring, re-run the diff-scoped AST audit, run focused
 Ruff/pytest checks for the touched docs test file, and update the validation
 record.
 
+## Additional follow-up iteration for current HEAD
+
+A later re-audit after additional review repairs found one new PR-touched helper
+without a docstring: `_assert_package_upgrade_restores_service_env` in
+`tests/unit/docs/test_public_docs_status.py`. This iteration will add a concise
+behavior-neutral helper docstring, re-run the diff-scoped AST audit, run focused
+Ruff/pytest checks for the touched docs test file, and update the validation
+record.
+
 ## Verification commands and pass criteria
 
 - Diff-scoped AST audit over `origin/development...HEAD` reports

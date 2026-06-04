@@ -51,3 +51,24 @@ Focused validation:
 
 Full AWF/GitHub validation, full coverage, and broad external docstring
 coverage remain managed after agent completion.
+
+## Additional follow-up validation for current HEAD
+
+After later review repairs, a fresh diff-scoped AST audit found one new
+PR-touched helper without a docstring:
+`tests/unit/docs/test_public_docs_status.py:1096 _assert_package_upgrade_restores_service_env`.
+This iteration added a concise behavior-neutral helper docstring only.
+
+Focused validation:
+
+- Pre-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `python_files=2`, `touched_defs=35`, `missing_docstrings_on_touched_defs=1`.
+- Post-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `python_files=2`, `touched_defs=35`, `missing_docstrings_on_touched_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q`:
+  `44 passed in 1.25s`.
+
+Full AWF/GitHub validation, full coverage, and broad external docstring
+coverage remain managed after agent completion.

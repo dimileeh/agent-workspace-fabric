@@ -1098,6 +1098,7 @@ def _assert_package_upgrade_restores_service_env(
     section: str,
     upgrade_line: str,
 ) -> None:
+    """Assert package upgrade snippets restore service environment before restart."""
     api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' .env 2>/dev/null; then"
     api_export_line = '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     password_guard_line = "if ! grep -q '^AWF_POSTGRES_PASSWORD=.' .env 2>/dev/null; then"
