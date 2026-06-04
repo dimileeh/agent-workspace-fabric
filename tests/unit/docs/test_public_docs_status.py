@@ -269,6 +269,18 @@ def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
 def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -> None:
     """Assert Quickstart does not leave source-checkout metadata stale."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    core_stop_guidance = "Stop local Core before refreshing source-checkout metadata"
+    port_block_guidance = (
+        "`awf setup` checks the API and Postgres host ports and blocks while the previous "
+        "Core stack still holds them"
+    )
+    no_stop_guidance = "Editing `~/.awf/config.yml` remains the no-stop option"
+    stop_guard_line = "if [ -f docker/compose/.env ]; then"
+    stop_env_file_line = (
+        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+    )
+    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
+    stop_guard_end_line = "\nfi\n"
     source_lane_headings = (
         "## Lane 2: Source Checkout With Global Tool Install",
         "## Lane 3: Source Checkout With No Global Install",
@@ -276,17 +288,35 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
 
     for heading in source_lane_headings:
         source_section = _markdown_section(quickstart_text, heading)
+        uninstall_section = source_section.split("\nUninstall:\n", maxsplit=1)[1]
+        section_words = " ".join(uninstall_section.split())
         replacement_setup = (
             "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
         )
-        assert "~/.awf/config.yml" in source_section
-        assert "remove only the top-level `source_checkout:` block" in source_section
-        assert replacement_setup in source_section
-        assert source_section.index("~/.awf/config.yml") < source_section.index(
+        assert "~/.awf/config.yml" in uninstall_section
+        assert "remove only the top-level `source_checkout:` block" in uninstall_section
+        assert replacement_setup in uninstall_section
+        assert core_stop_guidance in section_words
+        assert port_block_guidance in section_words
+        assert no_stop_guidance in section_words
+        assert stop_guard_line in uninstall_section
+        assert stop_env_file_line in uninstall_section
+        assert stop_fallback_line in uninstall_section
+        assert stop_guard_end_line in uninstall_section
+        stop_fallback_index = uninstall_section.index(stop_fallback_line)
+        assert section_words.index(core_stop_guidance) < section_words.index(port_block_guidance)
+        assert (
+            uninstall_section.index(stop_guard_line)
+            < uninstall_section.index(stop_env_file_line)
+            < stop_fallback_index
+            < uninstall_section.index(stop_guard_end_line, stop_fallback_index)
+            < uninstall_section.index(replacement_setup)
+        )
+        assert uninstall_section.index("~/.awf/config.yml") < uninstall_section.index(
             "rm -rf aira-agent-workspace-fabric"
         )
         if heading == "## Lane 2: Source Checkout With Global Tool Install":
-            assert source_section.index(replacement_setup) < source_section.index(
+            assert uninstall_section.index(replacement_setup) < uninstall_section.index(
                 "uv tool uninstall agent-workspace-fabric"
             )
 

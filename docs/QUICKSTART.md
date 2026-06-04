@@ -159,10 +159,19 @@ awf smoke run --project ../awf-eval-project --mocked-local --format pretty
 Uninstall:
 
 Before uninstalling the global tool or deleting the checkout, make sure
-`~/.awf/config.yml` no longer records it under `source_checkout`. Either refresh
-the persisted path:
+`~/.awf/config.yml` no longer records it under `source_checkout`. Refreshing
+through `awf setup --source-checkout ...` is not metadata-only. Stop local Core
+before refreshing source-checkout metadata; `awf setup` checks the API and
+Postgres host ports and blocks while the previous Core stack still holds them.
+Editing `~/.awf/config.yml` remains the no-stop option. To refresh the persisted
+path:
 
 ```bash
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 
@@ -232,9 +241,18 @@ uv run --python 3.12 --extra dev awf smoke run --project ../awf-eval-project --m
 Uninstall:
 
 Before deleting the checkout, make sure `~/.awf/config.yml` no longer records it
-under `source_checkout`. Either refresh the persisted path:
+under `source_checkout`. Refreshing through `awf setup --source-checkout ...` is
+not metadata-only. Stop local Core before refreshing source-checkout metadata;
+`awf setup` checks the API and Postgres host ports and blocks while the previous
+Core stack still holds them. Editing `~/.awf/config.yml` remains the no-stop
+option. To refresh the persisted path:
 
 ```bash
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 uv run --python 3.12 --extra dev awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 
