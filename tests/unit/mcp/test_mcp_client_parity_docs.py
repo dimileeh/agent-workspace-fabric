@@ -65,6 +65,13 @@ IDEMPOTENT_MCP_CONTROL_TOOLS = {
     "awf_rebase_workspace",
 }
 
+FIRST_RUN_SETUP_TOOLS = {
+    "awf_get_setup_status",
+    "awf_start_local_service",
+    "awf_initialize_project_profile",
+    "awf_get_client_integration_instructions",
+}
+
 
 def _split_cell(cell: str) -> list[str]:
     """Split a cell by comma or semicolon, stripping whitespace and backticks."""
@@ -97,6 +104,10 @@ def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
         "awf_refresh_workspace",
         "awf_rebase_workspace",
         "awf_retry_workspace",
+        "awf_get_setup_status",
+        "awf_start_local_service",
+        "awf_initialize_project_profile",
+        "awf_get_client_integration_instructions",
         "Artifact content/download",
         "If-Match",
     ):
@@ -104,6 +115,7 @@ def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
 
     assert "not arbitrary shell" in doc
     assert "unrestricted Docker exec" in doc
+    assert "no env-file contents" in doc
 
 
 @pytest.mark.unit
@@ -235,6 +247,29 @@ def test_retry_workspace_row_reflects_registered_mcp_tool() -> None:
     assert not any(tool.startswith("No ") for tool in tools)
     assert row.get("Status", "").strip() in {"MCP implemented", "MCP partial"}
     assert backlog != "TODO§P1-mcp-retry"
+
+
+@pytest.mark.unit
+def test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface() -> None:
+    """Test first-run setup MCP tools are documented with their local security boundary."""
+    rows = _parity_rows()
+    row = _row_for_capability(rows, "Local first-run setup/start/init/client")
+    tools = set(_split_cell(row.get("MCP tool name", "")))
+    cli_cell = _strip_backticks(row.get("CLI surface", ""))
+    rest_cell = _strip_backticks(row.get("Canonical REST surface", ""))
+    security_cell = row.get("Security Boundary", "")
+    mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
+
+    assert tools >= FIRST_RUN_SETUP_TOOLS
+    assert row.get("Status", "").strip() == "MCP implemented"
+    assert rest_cell == "Local first-run setup contract (REST unchanged)"
+    for command in ("awf setup --dry-run", "awf start", "awf init", "awf setup --client"):
+        assert command in cli_cell
+    assert "no credential-value inputs" in security_cell
+    assert "no env-file contents" in security_cell
+    assert "safe refs/status only" in security_cell
+    for tool_name in FIRST_RUN_SETUP_TOOLS:
+        assert tool_name in mcp_ref
 
 
 @pytest.mark.unit

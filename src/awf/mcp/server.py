@@ -138,6 +138,7 @@ def build_mcp_server(
 
     from awf.mcp.control_tools import register_control_tools
     from awf.mcp.metrics_tools import register_metrics_tools
+    from awf.mcp.setup_tools import register_setup_tools
     from awf.mcp.workspace_tools import register_workspace_tools
 
     register_workspace_tools(
@@ -163,6 +164,11 @@ def build_mcp_server(
         mcp=mcp,
         service=service,
         safe_result=_safe_result,
+    )
+    register_setup_tools(
+        mcp=mcp,
+        safe_result=_safe_result,
+        settings_value=settings_value,
     )
 
     return mcp

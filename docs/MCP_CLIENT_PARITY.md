@@ -42,6 +42,14 @@ returns an `OperationListResponse` envelope; clients should iterate `items`
 and honor `has_more`, `limit`, and `cursor` instead of treating the result as a
 top-level list.
 
+**MCP first-run setup note:** `awf_get_setup_status`,
+`awf_start_local_service`, `awf_initialize_project_profile`, and
+`awf_get_client_integration_instructions` are local first-run MCP controls.
+They mirror CLI setup/start/init/client intent rather than adding REST routes.
+They do not accept credential-value inputs, do not read env-file contents into
+responses, and return only status, paths, command arguments, and safe
+credential-reference metadata.
+
 ## Status Vocabulary
 
 - `MCP implemented`: MCP exposes the same operator data or control intent as
@@ -90,6 +98,7 @@ top-level list.
 | Rebase workspace | `POST /v1/workspaces/{workspace_id}/rebase` | `awf workspace rebase --idempotency-key --if-match --reason` | `awf_rebase_workspace` | `OperationResponse`; NOT_FOUND, WORKSPACE_STATE_NOT_REBASEABLE, MERGE_CANDIDATE_NOT_FOUND, WORKSPACE_REBASE_CONFLICT, WORKSPACE_OPERATION_CONFLICT, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT | `require_api_token`; MCP: audited control-plane operation, preserves validation provenance | MCP implemented | — |
 | Retry workspace | `POST /v1/workspaces/{workspace_id}/retry` | `awf workspace retry` | `awf_retry_workspace` | `WorkspaceRetryResponse`; WORKSPACE_NOT_FOUND, WORKSPACE_NOT_RETRYABLE, WORKSPACE_RETRY_EXHAUSTED, WORKSPACE_RETRY_SALVAGE_UNAVAILABLE, PROVIDER_READINESS_PRECHECK_FAILED | `require_api_token`; MCP: preserves retry lineage and provider-readiness policy without shell access | MCP implemented | — |
 | Optimistic concurrency on controls | `If-Match` header on REST cancel, stop, destroy, remonitor, refresh, validate, and rebase | `awf workspace cancel --if-match`, `awf workspace stop --if-match`, `awf workspace destroy --if-match`, `awf workspace remonitor --if-match`, `awf workspace refresh --if-match`, `awf workspace validate --if-match`, `awf workspace rebase --if-match` | `awf_cancel_workspace`, `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`, `awf_request_workspace_validation`, `awf_refresh_workspace`, `awf_rebase_workspace` | `WorkspaceControlResponse`; `OperationResponse`; VERSION_CONFLICT | `require_api_token`; MCP: all 7 control tools require `idempotency_key` and expose optional `expected_version`; no shell, no exec, no credential dump | MCP implemented | — |
+| Local first-run setup/start/init/client | Local first-run setup contract (REST unchanged) | `awf setup --dry-run`, `awf start`, `awf init`, `awf setup --client` | `awf_get_setup_status`, `awf_start_local_service`, `awf_initialize_project_profile`, `awf_get_client_integration_instructions` | `FirstRunPayload`; structured setup/start/init/client payloads | Local MCP only; no credential-value inputs; no env-file contents; setup status returns safe refs/status only | MCP implemented | — |
 | Live workspace stream | `WebSocket /v1/workspaces/{workspace_id}/ws` | CLI absent | No streaming MCP tool | N/A (out of scope) | WebSocket excluded: MCP prefers bounded snapshots over streaming transport | Out of scope | — |
 | Secret lease status | `GET /v1/workspaces/{workspace_id}/secret-leases` | CLI absent | No MCP tool | `WorkspaceSecretLeaseListResponse` | `require_api_token`; Secret and credential material must not flow through MCP responses; REST-only and intentionally out-of-scope for MCP | Out of scope | — |
 
@@ -97,7 +106,10 @@ top-level list.
 
 MCP may expose AWF-managed runtime snapshots, durable logs, artifact metadata,
 bounded artifact content, operations, metrics, health, readiness, and audited
-safe control-plane operations.
+safe control-plane operations. MCP may also expose bounded local first-run
+setup/start/init/client controls when those tools delegate to AWF's existing
+setup/start/onboarding/client-planning helpers and do not carry raw credential
+values.
 
 MCP must expose AWF controls, not arbitrary shell. It must not provide
 unrestricted Docker exec, raw container exec, host filesystem browsing,
