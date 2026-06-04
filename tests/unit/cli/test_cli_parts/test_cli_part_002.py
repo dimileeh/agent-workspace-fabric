@@ -904,6 +904,7 @@ class TestBaseUrlResolution:
         monkeypatch.delenv("AWF_BASE_URL", raising=False)
         monkeypatch.delenv("AWF_CLI_BASE_URL", raising=False)
         monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+        monkeypatch.setattr(cli_common, "local_service_environ", lambda _environ: {})
         monkeypatch.setattr(
             cli_common,
             "_cli_base_url_deprecation_notice_emitted",
@@ -994,6 +995,26 @@ class TestBaseUrlResolution:
 
         assert result.exit_code == 0, result.output
         assert mock.call_args[0][1].startswith("http://localhost:8800")
+        assert self._DEPRECATION_NOTICE not in result.stderr
+
+    @pytest.mark.unit
+    def test_compose_env_api_host_port_derives_default_host_cli_url(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Derive the default operator URL from the root Compose env file."""
+        self._clear_base_url_env(monkeypatch)
+        monkeypatch.setattr(
+            cli_common,
+            "local_service_environ",
+            lambda _environ: {"AWF_API_HOST_PORT": "9100"},
+        )
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0][1].startswith("http://localhost:9100")
         assert self._DEPRECATION_NOTICE not in result.stderr
 
     @pytest.mark.unit

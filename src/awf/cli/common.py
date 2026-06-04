@@ -80,6 +80,9 @@ def _base_url(override: str | None) -> str:
     host_port = os.environ.get("AWF_API_HOST_PORT")
     if host_port:
         return f"http://localhost:{_parse_api_host_port(host_port)}"
+    service_host_port = local_service_environ(os.environ).get("AWF_API_HOST_PORT")
+    if service_host_port:
+        return f"http://localhost:{_parse_api_host_port(service_host_port)}"
     return _DEFAULT_BASE_URL
 
 
