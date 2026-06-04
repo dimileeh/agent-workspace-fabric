@@ -423,6 +423,14 @@ class Settings(BaseSettings):
         gt=0,
         description="Interval between worker orphan-directory reconcile sweeps.",
     )
+    classified_orphan_reap_scan_interval_seconds: float = Field(
+        default=DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
+        gt=0,
+        description=(
+            "Interval between worker classified-orphan resource reaper sweeps "
+            "(Docker resources and managed worktrees)."
+        ),
+    )
     orphan_reconcile_max_per_scan: int = Field(
         default=DEFAULT_ORPHAN_RECONCILE_LIMIT,
         gt=0,

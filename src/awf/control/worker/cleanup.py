@@ -35,6 +35,7 @@ from awf.control.worker.config import (
     effective_worker_config_node_id,
 )
 from awf.control.worker.constants import (
+    _CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE,
     _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
@@ -196,6 +197,48 @@ async def _maybe_reconcile_orphan_dirs(self: Any) -> None:
 
     interval = max(0.0, self._config.orphan_reconcile_scan_interval_seconds)
     self._next_orphan_reconcile_scan_at = monotonic() + interval
+
+
+async def _maybe_reap_classified_orphans(self: Any) -> None:
+    """Periodically reap classified orphan Docker resources and worktrees.
+
+    Unlike the orphan-directory reconciler callback, this loop gates callback
+    execution directly on ``auto_cleanup_orphans`` so the worker does not build
+    Docker/worktree inventories while destructive cleanup is disabled. Failures
+    are logged and rescheduled, matching ``_maybe_reconcile_orphan_dirs`` so one
+    failed sweep cannot block provisioning or dispatch.
+    """
+    if self._classified_orphan_reaper is None:
+        return
+    if not self._config.auto_cleanup_orphans:
+        return
+
+    now = monotonic()
+    if now < self._next_classified_orphan_reap_scan_at:
+        return
+
+    try:
+        await self._classified_orphan_reaper()
+    except Exception as exc:
+        if _worker_exception_is_transient_db_connection(exc):
+            _log.warning(
+                "worker.classified_orphan_reap_db_connection_closed",
+                reason_code=DB_CONNECTION_CLOSED_REASON,
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+        else:
+            _log.exception(
+                "worker.classified_orphan_reap_failed",
+                reason_code=_CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE,
+                error_type=type(exc).__name__,
+            )
+        interval = max(0.0, self._config.classified_orphan_reap_scan_interval_seconds)
+        self._next_classified_orphan_reap_scan_at = monotonic() + interval
+        return
+
+    interval = max(0.0, self._config.classified_orphan_reap_scan_interval_seconds)
+    self._next_classified_orphan_reap_scan_at = monotonic() + interval
 
 
 async def _release_terminal_runtime_resources(self: Any) -> None:

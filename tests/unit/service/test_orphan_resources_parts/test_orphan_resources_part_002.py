@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from awf.service.orphan_resources import (
+    ORPHAN_REAP_OK,
+    ORPHAN_REAP_SKIPPED_UNKNOWN,
     WorkspaceIdView,
     build_orphan_resource_summary,
     empty_docker_scan,
@@ -589,6 +592,125 @@ def test_reaper_reaps_aged_missing_worktree(tmp_path: Path) -> None:
     reaped_kinds = [outcome.kind for outcome in result.reaped]
     assert reaped_kinds == ["worktree"]
     assert not worktree.exists()
+
+
+class _SessionScope:
+    def __init__(self, session: object | None = None, error: SQLAlchemyError | None = None) -> None:
+        self._session = session or object()
+        self._error = error
+
+    async def __aenter__(self) -> object:
+        if self._error is not None:
+            raise self._error
+        return self._session
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_scans_classifies_and_reaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import sweep_classified_orphans
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    docker_hosts: list[str] = []
+
+    def _run(args: list[str], **kwargs: object) -> _Completed:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        docker_hosts.append(str(env["DOCKER_HOST"]))
+        return _run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_dead-agent-1",
+                    "project": "awf_ws_dead",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        )(args, **kwargs)
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.session_scope",
+        lambda _factory: _SessionScope(),
+    )
+
+    async def _workspace_view(_session: object, **kwargs: object) -> WorkspaceIdView:
+        assert kwargs["min_retention_hours"] == 0
+        return _ok_view()
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.workspace_id_view_from_session",
+        _workspace_view,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            run_subprocess=_run,
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.reason_code == ORPHAN_REAP_OK
+    assert teardown.calls == [
+        ("awf_ws_dead", tmp_path / "compose" / "ws_dead" / "compose.yml", "ws_dead")
+    ]
+    assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+    assert set(docker_hosts) == {"unix:///test-docker.sock"}
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_skips_when_workspace_view_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import sweep_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.session_scope",
+        lambda _factory: _SessionScope(error=SQLAlchemyError("db unavailable")),
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            run_subprocess=_run_for(
+                containers=_jsonl(
+                    {
+                        "id": "c1",
+                        "name": "awf_ws_dead-agent-1",
+                        "project": "awf_ws_dead",
+                        "service": "agent",
+                        "state": "exited",
+                        "status": "Exited",
+                    }
+                )
+            ),
+        )
+    )
+
+    assert result.status == "skipped"
+    assert result.reason_code == ORPHAN_REAP_SKIPPED_UNKNOWN
+    assert teardown.calls == []
+    assert worktree.exists()
 
 
 @pytest.mark.unit

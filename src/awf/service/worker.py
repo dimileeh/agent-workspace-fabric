@@ -49,6 +49,11 @@ from awf.service.gc_reconcile import (
     reconcile_orphaned_workspace_dirs,
 )
 from awf.service.node_identity import effective_service_node_id
+from awf.service.orphan_resources import (
+    OrphanReapResult,
+    build_orphan_compose_teardown,
+    sweep_classified_orphans,
+)
 from awf.service.staleness import TargetBranchState
 from awf.service.target_branch_monitor import (
     GitCheckoutTargetBranchStateProvider,
@@ -235,6 +240,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         usage_sampler=usage_collector,
     )
     orphan_dir_teardown = build_default_compose_teardown(compose)
+    classified_orphan_teardown = build_orphan_compose_teardown(compose)
 
     async def _reconcile_orphan_dirs() -> OrphanDirReconcileResult:
         # Flag off => report-only (execute=False) so operators still see the
@@ -248,6 +254,16 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             execute=settings.auto_cleanup_orphans,
         )
 
+    async def _reap_classified_orphans() -> OrphanReapResult:
+        return await sweep_classified_orphans(
+            session_factory,
+            work_dir=work_dir,
+            docker_host=settings.docker_host,
+            compose_teardown=classified_orphan_teardown,
+            enabled=settings.auto_cleanup_orphans,
+            min_age_hours=settings.orphan_reconcile_min_age_hours,
+        )
+
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=provisioner,
@@ -255,12 +271,16 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         runtime_cleaner=runtime_cleaner,
         open_pr_resolver=open_pr_resolver,
         orphan_dir_reconciler=_reconcile_orphan_dirs,
+        classified_orphan_reaper=_reap_classified_orphans,
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,
             max_concurrent_executions=settings.worker_max_concurrent_executions,
             orphan_reconcile_scan_interval_seconds=(
                 settings.orphan_reconcile_scan_interval_seconds
+            ),
+            classified_orphan_reap_scan_interval_seconds=(
+                settings.classified_orphan_reap_scan_interval_seconds
             ),
             orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
             orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,

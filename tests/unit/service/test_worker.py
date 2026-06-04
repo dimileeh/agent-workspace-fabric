@@ -28,6 +28,7 @@ def _settings(
     github_token: str | None = None,
     planning_max_iterations_default: int = 4,
     auto_cleanup_orphans: bool = False,
+    classified_orphan_reap_scan_interval_seconds: float = 3600.0,
     orphan_reconcile_max_per_scan: int = 50,
     orphan_reconcile_min_age_hours: float = 168.0,
 ) -> ServiceSettings:
@@ -49,6 +50,7 @@ def _settings(
         agent_idle_timeout_seconds=22,
         planning_max_iterations_default=planning_max_iterations_default,
         auto_cleanup_orphans=auto_cleanup_orphans,
+        classified_orphan_reap_scan_interval_seconds=(classified_orphan_reap_scan_interval_seconds),
         orphan_reconcile_max_per_scan=orphan_reconcile_max_per_scan,
         orphan_reconcile_min_age_hours=orphan_reconcile_min_age_hours,
         node_id="node-1",
@@ -207,6 +209,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             runtime_cleaner: object,
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
+            classified_orphan_reaper: object = None,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
@@ -215,6 +218,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["worker_runtime_cleaner"] = runtime_cleaner
             created["worker_open_pr_resolver"] = open_pr_resolver
             created["worker_orphan_dir_reconciler"] = orphan_dir_reconciler
+            created["worker_classified_orphan_reaper"] = classified_orphan_reaper
             created["worker_config"] = config
 
     engine = _Engine()
@@ -310,7 +314,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].max_concurrent_executions == 4
     assert created["worker_config"].node_id == "node-1"
     assert callable(created["worker_orphan_dir_reconciler"])
+    assert callable(created["worker_classified_orphan_reaper"])
     assert created["worker_config"].auto_cleanup_orphans is False
+    assert created["worker_config"].classified_orphan_reap_scan_interval_seconds == 3600.0
     assert created["worker_config"].orphan_reconcile_max_per_scan == 50
     # Issue #299: the provisioner receives the ComposeManager as its
     # service-startup diagnostics capturer so companion logs/healthcheck state
@@ -727,10 +733,12 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     class _ControlWorker:
         def __init__(self, *args: object, **kwargs: object) -> None:
             created["orphan_dir_reconciler"] = kwargs["orphan_dir_reconciler"]
+            created["classified_orphan_reaper"] = kwargs["classified_orphan_reaper"]
             created["worker_config"] = kwargs["config"]
 
+    session_factory = object()
     monkeypatch.setattr(worker_mod, "make_engine", lambda _url: _Engine())
-    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
     for name in (
         "AsyncioSubprocessRunner",
         "LogStore",
@@ -755,6 +763,10 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
     monkeypatch.setattr(worker_mod, "build_default_compose_teardown", lambda _manager: object())
+    classified_teardown = object()
+    monkeypatch.setattr(
+        worker_mod, "build_orphan_compose_teardown", lambda _manager: classified_teardown
+    )
 
     async def _fake_reconcile(*args: object, **kwargs: object) -> object:
         created["reconcile_kwargs"] = kwargs
@@ -762,15 +774,24 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
 
     monkeypatch.setattr(worker_mod, "reconcile_orphaned_workspace_dirs", _fake_reconcile)
 
+    async def _fake_sweep_classified_orphans(*args: object, **kwargs: object) -> object:
+        created["classified_sweep_args"] = args
+        created["classified_sweep_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(worker_mod, "sweep_classified_orphans", _fake_sweep_classified_orphans)
+
     settings = _settings(
         tmp_path,
         auto_cleanup_orphans=auto_cleanup_orphans,
+        classified_orphan_reap_scan_interval_seconds=123.0,
         orphan_reconcile_max_per_scan=9,
         orphan_reconcile_min_age_hours=4.0,
     )
     worker_mod.build_worker_runtime(settings)
 
     assert created["worker_config"].auto_cleanup_orphans is auto_cleanup_orphans
+    assert created["worker_config"].classified_orphan_reap_scan_interval_seconds == 123.0
     assert created["worker_config"].orphan_reconcile_max_per_scan == 9
     reconciler = created["orphan_dir_reconciler"]
     assert callable(reconciler)
@@ -778,6 +799,16 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     assert created["reconcile_kwargs"]["execute"] is auto_cleanup_orphans
     assert created["reconcile_kwargs"]["limit"] == 9
     assert created["reconcile_kwargs"]["min_age_hours"] == 4.0
+
+    classified_reaper = created["classified_orphan_reaper"]
+    assert callable(classified_reaper)
+    asyncio.run(classified_reaper())
+    assert created["classified_sweep_args"][0] is session_factory
+    assert created["classified_sweep_kwargs"]["work_dir"] == Path(settings.work_dir).resolve()
+    assert created["classified_sweep_kwargs"]["docker_host"] == settings.docker_host
+    assert created["classified_sweep_kwargs"]["compose_teardown"] is classified_teardown
+    assert created["classified_sweep_kwargs"]["enabled"] is auto_cleanup_orphans
+    assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
 
 
 @pytest.mark.unit
@@ -819,6 +850,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             runtime_cleaner: object,
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
+            classified_orphan_reaper: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -906,6 +938,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             runtime_cleaner: object,
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
+            classified_orphan_reaper: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
