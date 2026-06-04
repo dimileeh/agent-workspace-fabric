@@ -307,13 +307,16 @@ async def _workspace_log_assignment_lookback_projection(
     if read_limit <= 0:
         return result_text, projection_offset, True
 
-    lookback_result = await service.read_log(
-        workspace_id,
-        stream_id,
-        offset=lookback_offset,
-        limit_bytes=read_limit,
-        include_bytes=True,
-    )
+    try:
+        lookback_result = await service.read_log(
+            workspace_id,
+            stream_id,
+            offset=lookback_offset,
+            limit_bytes=read_limit,
+            include_bytes=True,
+        )
+    except Exception:
+        return result_text, projection_offset, True
     required_next_offset = min(
         requested_offset + requested_limit_bytes,
         int(result["next_offset"]),

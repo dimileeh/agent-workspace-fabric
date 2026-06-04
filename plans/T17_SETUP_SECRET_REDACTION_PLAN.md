@@ -863,3 +863,49 @@ uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py
 uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py tests/unit/runtime/test_log_redaction.py
 uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
 ```
+
+## Review-Level Comment `issue:4620175517` MCP Lookback Exception Guard Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports that
+`_workspace_log_assignment_lookback_projection()` performs a secondary
+`WorkspaceService.read_log()` call to recover assignment context, but lets
+exceptions from that secondary read escape. The primary log read has already
+succeeded at that point, so a transient lookback failure should degrade to the
+existing conservative unknown-fragment fallback instead of failing the
+`awf_read_workspace_log` MCP tool.
+
+This repair is limited to the MCP workspace-log lookback path, a focused
+regression in the existing MCP workspace-log tests, and validation evidence. It
+does not change primary log-read error handling or broad validation ownership.
+
+### Requirements Checklist
+
+- Keep successful assignment lookback behavior unchanged.
+- If the secondary assignment-lookback `read_log()` raises, return the
+  conservative fallback tuple that treats the leading fragment as untrusted.
+- Ensure the MCP tool still returns usable redacted data from the primary read
+  instead of surfacing the secondary exception.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression where the primary log read succeeds and
+   the secondary assignment-lookback read raises.
+2. Guard the secondary lookback read and return the existing conservative
+   `(result_text, projection_offset, True)` fallback on exception.
+3. Run the targeted regression, the relevant MCP workspace-log test file, and
+   narrow ruff/mypy checks for touched files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k assignment_lookback_exception
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```

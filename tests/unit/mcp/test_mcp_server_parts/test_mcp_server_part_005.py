@@ -996,6 +996,88 @@ class TestWorkspaceLogs:
         assert fragment not in str(chunk["data"])
 
     @pytest.mark.unit
+    async def test_read_workspace_log_redacts_assignment_lookback_exception(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mask an unknown assignment fragment if secondary lookback fails."""
+        for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+
+        settings = Settings(_env_file=None)
+        requested_offset = 10_000
+        fragment = "exception-assignment-tail"
+        requested_limit_bytes = len(fragment.encode())
+        redaction_context = _log_redaction_context_for_settings(settings)
+        first_offset = metrics_tools_mod._workspace_log_read_offset(  # noqa: SLF001
+            requested_offset=requested_offset,
+            redaction_context=redaction_context,
+        )
+        first_read_limit = (
+            requested_offset - first_offset + requested_limit_bytes + redaction_context
+        )
+        leading_bytes = b"x" * (requested_offset - first_offset)
+        narrow_bytes = leading_bytes + fragment.encode() + b" done\n"
+        first_next_offset = first_offset + len(narrow_bytes)
+        calls: list[tuple[int, int]] = []
+
+        service = WorkspaceService(factory)
+
+        async def failing_lookback_read_log(
+            workspace_id: str,
+            stream_id: str,
+            *,
+            offset: int = 0,
+            limit_bytes: int = 65_536,
+            include_bytes: bool = False,
+        ) -> dict[str, object]:
+            """Raise after the primary read succeeds."""
+            assert workspace_id == "ws_lookback_exception"
+            assert stream_id == "setup.stdout"
+            assert include_bytes is True
+            calls.append((offset, limit_bytes))
+            if len(calls) == 1:
+                assert offset == first_offset
+                return {
+                    "stream_id": stream_id,
+                    "offset": offset,
+                    "next_offset": first_next_offset,
+                    "eof": False,
+                    "text": narrow_bytes.decode(),
+                    "raw_bytes": narrow_bytes,
+                }
+            if len(calls) == 2:
+                assert offset == 0
+                raise RuntimeError("transient lookback read failure")
+            raise AssertionError("unexpected read_log call")
+
+        monkeypatch.setattr(service, "read_log", failing_lookback_read_log)
+        mcp = build_mcp_server(service=service, settings=settings)
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": "ws_lookback_exception",
+                "stream_id": "setup.stdout",
+                "offset": requested_offset,
+                "limit_bytes": requested_limit_bytes,
+            },
+        )
+
+        assert isinstance(chunk, dict)
+        assert calls == [
+            (first_offset, first_read_limit),
+            (0, first_next_offset),
+        ]
+        assert chunk["offset"] == requested_offset
+        assert chunk["next_offset"] == requested_offset + requested_limit_bytes
+        assert chunk["eof"] is False
+        assert chunk["data"] == REDACTION_MARKER
+        assert fragment not in str(chunk["data"])
+
+    @pytest.mark.unit
     async def test_read_workspace_log_redacts_assignment_lookback_still_mid_fragment(
         self,
         factory: async_sessionmaker[AsyncSession],

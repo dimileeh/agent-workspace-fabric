@@ -1254,6 +1254,56 @@ uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review-Level Comment `issue:4620175517` MCP Lookback Exception Guard Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: successful assignment lookback behavior was left unchanged; the
+  only production change wraps the secondary lookback `read_log()` call.
+- Complete: when the secondary assignment-lookback `read_log()` raises, the
+  helper now returns the existing conservative `(result_text,
+  projection_offset, True)` fallback.
+- Complete: the MCP tool now returns usable redacted data from the primary read
+  instead of surfacing the secondary exception.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k assignment_lookback_exception --tb=short -ra
+# failed: ToolError wrapping RuntimeError("transient lookback read failure")
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k assignment_lookback_exception --tb=short -ra
+# 1 passed, 17 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q --tb=short -ra
+# 18 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+# Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.
