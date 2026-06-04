@@ -249,6 +249,62 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
             )
 
 
+def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
+    """Assert source-checkout upgrades refresh persisted asset metadata."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    cases = (
+        (
+            "Quickstart Lane 2",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 2: Source Checkout With Global Tool Install",
+            ),
+            "uv tool install . --force",
+            'awf setup --source-checkout "$PWD"',
+            'awf start --source-checkout "$PWD"',
+        ),
+        (
+            "Quickstart Lane 3",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 3: Source Checkout With No Global Install",
+            ),
+            "uv sync --extra dev",
+            'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+            'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"',
+        ),
+        (
+            "Upgrade source checkout with global tool install",
+            _markdown_section(
+                upgrade_text,
+                "## Source Checkout With Global Tool Install",
+            ),
+            "uv tool install . --force",
+            'awf setup --source-checkout "$PWD"',
+            'awf start --source-checkout "$PWD"',
+        ),
+        (
+            "Upgrade source checkout with no global install",
+            _markdown_section(
+                upgrade_text,
+                "## Source Checkout With No Global Install",
+            ),
+            "uv sync --extra dev",
+            'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+            'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"',
+        ),
+    )
+
+    for label, section, refresh_prereq, setup_line, start_line in cases:
+        assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
+        assert setup_line in section, f"{label} does not refresh source_checkout metadata"
+        assert start_line in section, f"{label} is missing source-checkout start"
+        assert (
+            section.index(refresh_prereq) < section.index(setup_line) < section.index(start_line)
+        ), f"{label} must refresh metadata after upgrade and before start"
+
+
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
     """Assert Quickstart local URLs match the default smoke probe targets."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
@@ -732,6 +788,13 @@ def _markdown_section(text: str, heading: str) -> str:
     if next_heading is None:
         return normalized_text[start:]
     return normalized_text[start : start + next_heading.start()]
+
+
+def _quickstart_upgrade_section(text: str, heading: str) -> str:
+    section = _markdown_section(text, heading)
+    assert "Upgrade:" in section, f"{heading} is missing Upgrade block"
+    assert "Uninstall:" in section, f"{heading} is missing Uninstall block"
+    return section.split("Upgrade:", maxsplit=1)[1].split("Uninstall:", maxsplit=1)[0]
 
 
 def _public_docs() -> set[str]:

@@ -52,6 +52,7 @@ that checkout:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv tool install . --force
+awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty
@@ -66,6 +67,7 @@ running AWF through `uv run` from the checkout:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv sync --extra dev
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf service status --format pretty
 uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty

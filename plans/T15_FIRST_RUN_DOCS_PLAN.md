@@ -92,6 +92,12 @@ blanket `127.0.0.1` first-run statement, and the Quickstart optional GitHub
 token assertion must calibrate itself from the advertised lane headings instead
 of hard-coding the current lane count.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HC6Eb`: source-checkout
+upgrade snippets in `docs/QUICKSTART.md` and `docs/UPGRADE.md` must refresh
+persisted source-checkout metadata with `awf setup --source-checkout "$PWD"`
+after the pull/install or sync step and before the matching
+`awf start --source-checkout "$PWD"` command.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

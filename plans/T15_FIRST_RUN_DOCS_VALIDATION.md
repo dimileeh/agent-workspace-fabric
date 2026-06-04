@@ -403,6 +403,44 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HC6Eb`:
+
+- `docs/QUICKSTART.md` source-checkout upgrade snippets now run
+  `awf setup --source-checkout "$PWD"` after `uv tool install . --force`, or
+  the `uv run` equivalent after `uv sync --extra dev`, before starting from the
+  checkout.
+- `docs/UPGRADE.md` applies the same metadata refresh in both source-checkout
+  upgrade lanes.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  upgrade snippets that start from the explicit checkout without first
+  refreshing persisted `source_checkout` metadata after upgrade.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/QUICKSTART.md` Lane 2 did not refresh `source_checkout` metadata before
+`awf start --source-checkout "$PWD"`.
+
+Final repair result: `1 passed in 0.59s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result after formatting the edited docs test file: `35 passed in 1.05s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

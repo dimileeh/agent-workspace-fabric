@@ -98,6 +98,7 @@ Upgrade:
 ```bash
 git pull
 uv tool install . --force
+awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf smoke run --project ../awf-eval-project --mocked-local --format pretty
 ```
@@ -158,6 +159,7 @@ Upgrade:
 ```bash
 git pull
 uv sync --extra dev
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf smoke run --project ../awf-eval-project --mocked-local --format pretty
 ```
