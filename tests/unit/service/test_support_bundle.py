@@ -767,6 +767,7 @@ def test_support_bundle_setup_state_degrades_unexpected_config_reader_errors_wit
     plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
 
     def _config_reader() -> HostSetupConfig:
+        """Raise an unexpected reader error without a reason code."""
         raise RuntimeError(f"reader failed for {plain_ref}")
 
     setup_state = support_bundle_mod._setup_state(

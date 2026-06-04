@@ -176,20 +176,28 @@ def test_workspace_log_assignment_value_covers_byte_breaks_using_byte_offsets(
     requested_byte = value_start_bytes - 1
 
     class _FakeMatch:
+        """Expose the match methods used by the byte-offset helper."""
+
         def __init__(self, value_start: int, value: str) -> None:
+            """Capture the synthetic value span for the fake regex match."""
             self._value_start = value_start
             self._value = value
 
         def start(self, group: str) -> int:
+            """Return the synthetic value start index."""
             assert group == "value"
             return self._value_start
 
         def group(self, group: str) -> str:
+            """Return the synthetic value text."""
             assert group == "value"
             return self._value
 
     class _FakeTokenAssignmentRe:
+        """Yield one fake token assignment before the expected early break."""
+
         def finditer(self, candidate: str):  # type: ignore[no-untyped-def]
+            """Yield the first assignment and fail if scanning continues."""
             assert candidate == text
             yield _FakeMatch(value_start_chars, "value")
             raise AssertionError("byte-aware early break should skip later matches")

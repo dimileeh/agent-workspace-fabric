@@ -141,6 +141,31 @@ Evidence after Iteration 6:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_keyboard_interrupt_reaps_default_process -q`
   passed: `2 passed in 0.43s`.
 
+## Iteration 7
+
+Later redaction follow-up commits expanded the PR's Python diff again. The
+focused added-line AST audit reported seven PR-added nested test/helper
+definitions without docstrings in
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py` and
+`tests/unit/service/test_support_bundle.py`. This iteration added concise
+behavior-neutral docstrings only.
+
+Evidence after Iteration 7:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=15`, `added_defs=108`,
+  `missing_docstrings_on_added_defs=7`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=15`, `added_defs=108`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/service/test_support_bundle.py`
+  passed.
+- `git diff --check` passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_workspace_log_assignment_value_covers_byte_breaks_using_byte_offsets tests/unit/service/test_support_bundle.py::test_support_bundle_setup_state_degrades_unexpected_config_reader_errors_without_reason_code -q`
+  passed: `2 passed in 0.86s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring
