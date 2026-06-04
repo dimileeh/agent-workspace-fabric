@@ -113,6 +113,8 @@ WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
 COMPOSE_TEARDOWN_CALLBACK_RAISED = "COMPOSE_TEARDOWN_CALLBACK_RAISED"
 
+# Extension point: add preserved-workspace reason codes here when future states
+# should allow compose teardown before their filesystem retention expires.
 _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES: frozenset[str] = frozenset()
 
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"

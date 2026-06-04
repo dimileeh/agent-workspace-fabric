@@ -704,6 +704,10 @@ def _completed_workspace_compose_teardown(
     compose_file: Path | None,
 ) -> WorkspaceGCComposeTeardown | None:
     """Build a volume-removing compose teardown callback for post-merge GC."""
+    # ``None`` means monitor-side compose context is unavailable. An empty
+    # project string is still accepted so persisted GC candidate metadata can
+    # supply the project name; callers that rely on the fallback pass a real
+    # monitor project.
     if compose_project is None or compose_file is None:
         return None
     fallback_compose_project = compose_project
