@@ -1324,3 +1324,58 @@ def test_reconcile_writes_through_merged_not_directly_into_upper(tmp_path: Path)
     assert (merged / "nested" / "f").read_text() == "fallback edit\n"
     # ...never written directly into ``upper`` under the live overlay.
     assert not (upper / "nested").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_refuses_symlinked_destination(tmp_path: Path) -> None:
+    # The live ``merged`` overlay's upper layer is written by the (untrusted) agent.
+    # A prior overlay run may have left an agent-created symlink at the destination
+    # ``rel``. ``shutil.copy2`` follows destination symlinks by default, so as the root
+    # worker it would write the legacy file's content *through* the link to a target
+    # outside the ``.claude`` tree — an arbitrary root-write primitive. The reconcile
+    # must refuse to follow it and leave the out-of-tree target untouched.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    for directory in (legacy, merged, upper, base, outside):
+        directory.mkdir()
+    secret = outside / "secret"
+    secret.write_text("original\n")
+    # A genuine fallback edit (absent from base and upper) the attacker wants written.
+    (legacy / "f").write_text("attacker payload\n")
+    # The agent-planted destination symlink, surviving in the live merged mount.
+    (merged / "f").symlink_to(secret)
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # copy2 must NOT have followed the symlink to overwrite the out-of-tree target.
+    assert secret.read_text() == "original\n"
+    # The planted symlink is skipped, never materialized into a real file.
+    assert (merged / "f").is_symlink()
+
+
+@pytest.mark.unit
+def test_reconcile_refuses_symlinked_parent_component(tmp_path: Path) -> None:
+    # The same escape, planted one level up: an agent-created symlink at a *parent*
+    # directory of ``rel``. ``mkdir(parents=True)`` would traverse through it and
+    # ``copy2`` would then write inside the escaped directory. The reconcile must
+    # refuse the symlinked parent and write nothing outside the tree.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    for directory in (legacy, merged, upper, base, outside):
+        directory.mkdir()
+    (legacy / "nested").mkdir()
+    (legacy / "nested" / "f").write_text("attacker payload\n")
+    # The agent planted ``nested`` as a symlink to an out-of-tree dir in the upper layer.
+    (merged / "nested").symlink_to(outside)
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # The escaped directory must not receive the forwarded file.
+    assert not (outside / "f").exists()
+    assert list(outside.iterdir()) == []

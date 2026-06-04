@@ -801,6 +801,43 @@ def _safe_mtime_ns(path: Path) -> int | None:
         return None
 
 
+def _safe_overlay_dest(merged: Path, rel: Path) -> Path | None:
+    """Resolve ``merged / rel`` for a root write, refusing any symlinked component.
+
+    The destination lives under the live ``merged`` overlay whose upper layer was
+    written by the (untrusted) agent. A prior overlay run may have left an agent-created
+    symlink at ``rel`` — or at any parent component — and ``shutil.copy2`` follows
+    destination symlinks by default. As the root worker that would write the legacy
+    file's content *through* the link to a target outside the ``.claude`` tree, turning
+    agent-controlled overlay contents into an arbitrary root-write primitive.
+
+    So walk every component of ``rel`` and refuse (return ``None``) if any is a symlink,
+    materializing missing parent dirs one level at a time so ``mkdir`` never traverses
+    through a planted link. The returned destination is guaranteed not to be a symlink,
+    so the subsequent ``copy2`` cannot follow one out of the tree. Returns ``None`` —
+    skip this file, best-effort — on any structural conflict (symlinked or non-dir
+    component) or ``OSError``.
+    """
+
+    current = merged
+    for part in rel.parent.parts:
+        current = current / part
+        if current.is_symlink():
+            return None
+        try:
+            current.mkdir(exist_ok=True)
+        except OSError:
+            # A non-directory already occupies the component (FileExistsError) or the
+            # dir is otherwise uncreatable: cannot descend safely, so skip the file.
+            return None
+    dest = current / rel.name
+    if dest.is_symlink():
+        # A planted destination symlink: refuse to follow it (``copy2`` would write
+        # through to its target) rather than escape the tree or clobber the agent's link.
+        return None
+    return dest
+
+
 def _reconcile_fallback_edits_into_upper(
     *, legacy: Path, merged: Path, upper: Path, base: Path
 ) -> None:
@@ -835,7 +872,11 @@ def _reconcile_fallback_edits_into_upper(
       and only a *strictly newer* legacy edit overwrites it.
 
     Per-file ``OSError`` is caught and skipped — best-effort, never blocks
-    provisioning. Never logs file contents (no secret leakage).
+    provisioning. Never logs file contents (no secret leakage). Each destination is
+    resolved through :func:`_safe_overlay_dest`, which refuses any symlinked path
+    component: ``merged``'s upper layer is agent-controlled, and ``copy2`` follows
+    destination symlinks, so a planted link would otherwise let this root write escape
+    the ``.claude`` tree.
 
     Known limitation: if the host ``~/.claude`` changed between when the overlay's
     base was built and when the fallback copy was taken, unedited legacy files may
@@ -879,9 +920,13 @@ def _reconcile_fallback_edits_into_upper(
             upper_mtime_ns = _safe_mtime_ns(upper_file)
             if upper_mtime_ns is not None and legacy_mtime_ns <= upper_mtime_ns:
                 continue
-            merged_file = merged / rel
+            merged_file = _safe_overlay_dest(merged, rel)
+            if merged_file is None:
+                # A symlinked (or otherwise unsafe) destination component: refuse the
+                # write so an agent-planted link cannot redirect this root copy outside
+                # the ``.claude`` tree. Best-effort — drop just this file.
+                continue
             try:
-                merged_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy_file, merged_file)
             except OSError:
                 continue
