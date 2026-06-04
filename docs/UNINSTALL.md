@@ -81,7 +81,15 @@ rm -rf /path/to/aira-agent-workspace-fabric
 This lane uses inspectable source with no global install, so there is no global
 `awf` executable to uninstall. After the persisted `source_checkout` metadata no
 longer points at this checkout, remove the checkout only if you no longer need
-the inspected source tree:
+the inspected source tree. To refresh the persisted path without a global `awf`
+executable, run the setup command through `uv run` from the current checkout
+before deleting it:
+
+```bash
+uv run --python 3.12 --extra dev awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
+```
+
+Then remove the checkout:
 
 ```bash
 rm -rf /path/to/aira-agent-workspace-fabric

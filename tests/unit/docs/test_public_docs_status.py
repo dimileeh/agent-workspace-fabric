@@ -596,6 +596,22 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     assert "does not delete local AWF service state" in uninstall_text
 
 
+def test_uninstall_no_global_source_checkout_cleanup_uses_uv_run() -> None:
+    """Assert no-global checkout cleanup does not require a global awf executable."""
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+    source_section = _markdown_section(
+        uninstall_text,
+        "## Source Checkout With No Global Install",
+    )
+    replacement_setup = (
+        "uv run --python 3.12 --extra dev awf setup "
+        "--source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+    )
+
+    assert replacement_setup in source_section
+    assert source_section.index(replacement_setup) < source_section.index("rm -rf")
+
+
 def test_virtualenv_lifecycle_docs_cover_readme_install_path() -> None:
     """Assert README-supported virtualenv installs have upgrade/uninstall guidance."""
     readme_text = README_PATH.read_text(encoding="utf-8")
