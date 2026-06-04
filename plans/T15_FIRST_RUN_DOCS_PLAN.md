@@ -223,6 +223,14 @@ require operators to restore the running local Core `AWF_POSTGRES_PASSWORD`
 when `.env` does not already persist it. It must not fall back to `awf_dev`,
 because the existing Postgres volume may require a non-default password.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HJVcU`: Getting Started's
+recommended first-run sequence must not present a bare `awf setup` / `awf start`
+block as copy-pasteable for the no-global source-checkout lane. Scope the bare
+block to installs with `awf` on `PATH` and show the no-global
+`uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"` /
+`start --source-checkout "$PWD"` startup variant so a fresh checkout is selected
+even when persisted source-checkout metadata is stale or absent.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

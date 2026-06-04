@@ -86,11 +86,13 @@ passing formula audit; it is not a supported install channel yet.
 
 ### Recommended First-Run Sequence
 
-Once AWF is installed, the runnable first-run sequence is setup, start, project
-onboarding, then mocked smoke. Export the required local service values before
-starting Core so Compose can interpolate the API, worker, and Postgres service
-environment. The mocked smoke proof does not require GitHub CLI auth; add a
-GitHub token later when you create or monitor PRs:
+The runnable first-run sequence is setup, start, project onboarding, then mocked
+smoke. Export the required local service values before starting Core so Compose
+can interpolate the API, worker, and Postgres service environment. The mocked
+smoke proof does not require GitHub CLI auth; add a GitHub token later when you
+create or monitor PRs.
+
+For package-manager or virtualenv installs:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
@@ -104,11 +106,42 @@ awf init <path> --write-profile --yes
 awf smoke run --project <path> --mocked-local --format pretty
 ```
 
-`awf setup` runs bounded host readiness checks without starting Core.
-`awf start` starts local AWF Core and reports the local API and console URLs.
-For first-run probes, Quickstart keeps those URLs aligned with the current smoke
-defaults. `awf service status --format pretty`
-confirms API, database, Docker, image, disk, provider, and cleanup health.
+For a source checkout with a global `awf` executable, run from the checkout:
+
+```bash
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
+# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
+awf service status --format pretty
+awf init <path> --write-profile --yes
+awf smoke run --project <path> --mocked-local --format pretty
+```
+
+For a source checkout with no global install, run from the checkout:
+
+```bash
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
+# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf service status --format pretty
+uv run --python 3.12 --extra dev awf init <path> --write-profile --yes
+uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty
+```
+
+The `setup` command runs bounded host readiness checks without starting Core.
+The `start` command starts local AWF Core and reports the local API and console
+URLs. Source-checkout startup commands pass `--source-checkout "$PWD"` so setup
+and start use the checkout's Compose assets instead of packaged/default assets
+or stale persisted metadata. For first-run probes, Quickstart keeps those URLs
+aligned with the current smoke defaults.
+`awf service status --format pretty` confirms API, database, Docker, image,
+disk, provider, and cleanup health.
 
 If setup, startup, or first-run health checks fail, use the
 [First run troubleshooting guide](TROUBLESHOOTING.md#first-run-troubleshooting)

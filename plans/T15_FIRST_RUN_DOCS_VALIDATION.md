@@ -1281,6 +1281,53 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HJVcU`:
+
+- `docs/GETTING_STARTED.md` now scopes the bare `awf setup` / `awf start`
+  first-run block to package-manager and virtualenv installs.
+- The same section now includes source-checkout startup forms for both the
+  global `awf` lane and the no-global `uv run --python 3.12 --extra dev awf`
+  lane, with `--source-checkout "$PWD"` on setup/start so fresh checkout assets
+  are selected explicitly.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Getting Started
+  source-checkout setup/start commands that omit the explicit checkout flag, and
+  rejects bare no-global setup/start wrappers.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_uses_runnable_startup_path -q
+```
+
+Red-phase result after tightening the focused assertion: failed because
+`docs/GETTING_STARTED.md` did not include `awf setup --source-checkout "$PWD"`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_uses_runnable_startup_path -q
+```
+
+Final focused repair result: `1 passed in 0.68s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_uses_runnable_startup_path tests/unit/docs/test_public_docs_status.py::test_getting_started_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_awf_commands_mentioned_in_public_docs_exist_in_cli_help_tree -q
+```
+
+Focused related result: `4 passed in 0.77s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

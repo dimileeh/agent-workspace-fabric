@@ -734,8 +734,38 @@ def test_getting_started_uses_runnable_startup_path() -> None:
         maxsplit=1,
     )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
 
-    assert "awf setup" in startup_section
-    assert "awf start" in startup_section
+    assert len(re.findall(r"(?m)^awf setup\s*$", startup_section)) == 1
+    assert len(re.findall(r"(?m)^awf start\s*$", startup_section)) == 1
+    assert len(re.findall(r'(?m)^awf setup --source-checkout "\$PWD"\s*$', startup_section)) == 1
+    assert len(re.findall(r'(?m)^awf start --source-checkout "\$PWD"\s*$', startup_section)) == 1
+    assert (
+        len(
+            re.findall(
+                (
+                    r"(?m)^uv run --python 3\.12 --extra dev awf setup "
+                    r'--source-checkout "\$PWD"\s*$'
+                ),
+                startup_section,
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            re.findall(
+                (
+                    r"(?m)^uv run --python 3\.12 --extra dev awf start "
+                    r'--source-checkout "\$PWD"\s*$'
+                ),
+                startup_section,
+            )
+        )
+        == 1
+    )
+    assert not re.search(
+        r"(?m)^uv run --python 3\.12 --extra dev awf (setup|start)\s*$",
+        startup_section,
+    )
     assert "awf init <path> --write-profile --yes" in startup_section
     assert "awf smoke run --project <path> --mocked-local --format pretty" in startup_section
     assert "AWF_SETUP_PLACEHOLDER" not in startup_section
