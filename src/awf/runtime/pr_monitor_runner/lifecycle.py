@@ -814,6 +814,9 @@ async def _gc_completed_workspace_filesystem(
         candidate.workspace_id == workspace_id for candidate in result.plan.candidates
     ):
         teardown = result.compose_teardowns.get(workspace_id)
+        # A failed fallback teardown may leave agent containers alive. Keep the
+        # overlay mounted in that case so runtime side effects stay preserved
+        # together with the failed compose teardown evidence.
         if teardown is not None and teardown.ok:
             await asyncio.to_thread(
                 _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id

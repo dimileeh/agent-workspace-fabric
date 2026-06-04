@@ -1105,6 +1105,10 @@ def _workspace_ids_after_compose_teardown(
         teardown = compose_teardowns.get(candidate.workspace_id)
         if teardown is None or teardown.ok:
             workspace_ids.append(candidate.workspace_id)
+    # Non-candidate compose teardowns come from the single-workspace fallback
+    # path only: missing rows or preserved terminal-status workspaces. Once
+    # compose teardown succeeds there, release runtime side effects even when
+    # filesystem paths remain under retention.
     for workspace_id, teardown in compose_teardowns.items():
         if workspace_id not in candidate_ids and teardown.ok:
             workspace_ids.append(workspace_id)
