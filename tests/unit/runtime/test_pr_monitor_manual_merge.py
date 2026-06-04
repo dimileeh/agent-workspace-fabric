@@ -42,6 +42,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     RecordedSleep,
     issue_comment_node,
     make_runner,
+    mock_completed_compose_manager,
     pr_payload,
     seed_monitoring_workspace,
     thread_node,
@@ -555,7 +556,6 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
-    cmd.queue_result(returncode=0)  # docker compose down
 
     runner = make_runner(
         factory=factory,
@@ -565,7 +565,9 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
         worktrees_root=worktrees_root,
         auto_merge=False,
     )
+    compose_patch, compose_calls = mock_completed_compose_manager()
     with (
+        compose_patch,
         patch(
             "awf.service.gc._default_worktree_remover",
             new=AsyncMock(
@@ -596,16 +598,14 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
     assert candidate.status == "merged"
     assert candidate.merged_at is not None
     assert not candidate.manual_merge_required
-    assert _call_index(cmd, _is_docker_down) > _call_index(cmd, _is_pr_comment)
-    docker_down = _calls(cmd, _is_docker_down)[0]
-    assert docker_down[-3:] == ["down", "--remove-orphans", "--volumes"]
+    assert not _has_call(cmd, _is_docker_down)
+    assert compose_calls == [(f"awf_{ws_id}", Path(f"/tmp/awf/{ws_id}/compose.yml"), ws_id, True)]
     # On a successful (externally-driven) merge the pressure dirs are reclaimed
     # immediately, bypassing the retention window; the durable record stays.
     assert not worktree.exists()
     assert not auth_dir.exists()
     assert log_file.exists()
     assert not _has_call(cmd, _is_pr_merge)
-    assert any(record.get("event") == "monitor.compose_teardown_ok" for record in captured)
     assert any(record.get("event") == "monitor.filesystem_gc_ok" for record in captured)
     assert not any(record.get("event") == "monitor.filesystem_gc_deferred" for record in captured)
 
@@ -840,7 +840,6 @@ async def test_release_monitor_factory_uses_manual_merge_contract(
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
-    cmd.queue_result(returncode=0)  # docker compose down
 
     runner = build_release_pr_monitor(
         session_factory=factory,
@@ -857,7 +856,8 @@ async def test_release_monitor_factory_uses_manual_merge_contract(
         max_outer_iterations=4,
     )
     runner._deps.sleep = sleep_fn
-    with structlog.testing.capture_logs() as captured:
+    compose_patch, _compose_calls = mock_completed_compose_manager()
+    with compose_patch, structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
@@ -872,6 +872,10 @@ async def test_release_monitor_factory_uses_manual_merge_contract(
     assert ws.status == WorkspaceStatus.completed.value
     assert events[-1].reason_code == "MONITOR_DONE"
     assert len(_calls(cmd, _is_pr_comment)) == 1
-    assert _has_call(cmd, _is_docker_down)
+    assert not _has_call(cmd, _is_docker_down)
     assert not _has_call(cmd, _is_pr_merge)
+    assert any(
+        record.get("event") == "monitor.compose_teardown_ok" and record.get("workspace_id") == ws_id
+        for record in captured
+    )
     assert sleep_fn.calls == [60]

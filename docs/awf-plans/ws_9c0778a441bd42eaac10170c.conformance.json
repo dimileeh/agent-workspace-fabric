@@ -1,0 +1,5 @@
+{
+  "status": "satisfied",
+  "summary": "The current implementation satisfies the saved #373/#377 plan: missing compose files fall back to label-scoped volume teardown, genuine no-resource cleanup remains idempotent, ComposeOperationError reason codes are preserved, and post-merge filesystem GC now receives a volume-removing compose_teardown callback so the GC engine gates path deletion on teardown failure. Focused pytest, ruff, mypy, and documented substitute focused coverage evidence are present; full AWF/GitHub validation remains owned by the post-agent validation phase.",
+  "gaps": []
+}
