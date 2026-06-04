@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAciC
+
+### Requirement Status
+
+- Preserve existing client instruction commands when `source_checkout` is not
+  provided: Complete.
+- Preserve existing absolute explicit-checkout command rendering: Complete.
+- Resolve a relative explicit `source_checkout` before rendering each
+  per-client `apply_command`: Complete.
+- Include the same resolved explicit-checkout command in the top-level next
+  steps: Complete.
+- Keep client instructions secret-free and otherwise schema-compatible:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_resolves_relative_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `_resolve_client_env_file` received `source checkout` and the rendered
+  command kept that relative path instead of the checkout resolved from the MCP
+  server cwd.
+- Regression test after the implementation change: 1 passed.
+- Focused setup-tools test file: 15 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HAbmv
 
 ### Requirement Status

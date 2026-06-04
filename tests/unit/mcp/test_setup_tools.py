@@ -682,6 +682,50 @@ async def test_client_integration_instructions_preserve_explicit_source_checkout
 
 
 @pytest.mark.unit
+async def test_client_integration_instructions_resolves_relative_source_checkout_apply_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    env_file = checkout / "docker" / "compose" / ".env"
+    home = tmp_path / "home"
+    home.mkdir()
+    resolve_calls: list[tuple[Path | None, bool]] = []
+
+    def fake_resolve_client_env_file(
+        source_checkout: Path | None,
+        require_existing: bool = False,
+    ) -> Path:
+        resolve_calls.append((source_checkout, require_existing))
+        return env_file
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fake_resolve_client_env_file)
+    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
+    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
+    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(setup_tools, "_client_env", lambda: {})
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"], "source_checkout": "source checkout"},
+    )
+    payload = _payload(result)
+
+    resolved_checkout = checkout.resolve()
+    expected_command = f"awf setup --client claude --source-checkout '{resolved_checkout}'"
+    assert result.isError is False
+    assert resolve_calls == [(resolved_checkout, False)]
+    assert payload["clients"][0]["apply_command"] == expected_command
+    assert payload["next_steps"] == [
+        f"Run `{expected_command}` to apply the claude client integration."
+    ]
+
+
+@pytest.mark.unit
 async def test_client_integration_instructions_unknown_client_is_structured_error(
     tmp_path: Path,
 ) -> None:

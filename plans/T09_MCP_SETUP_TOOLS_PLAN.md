@@ -262,6 +262,49 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAciC
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` validates
+an explicit relative `source_checkout` against the MCP server's current working
+directory, but renders `apply_command` and `next_steps` with the unresolved
+relative path. An operator copying the returned command from a different shell
+directory can then apply or validate a different checkout than the one used for
+the displayed plan.
+
+Scope is limited to resolving an explicit checkout path before it is used for
+MCP client instruction planning and command rendering.
+
+### Requirements Checklist
+
+- Preserve existing client instruction commands when `source_checkout` is not
+  provided.
+- Preserve existing absolute explicit-checkout command rendering.
+- Resolve a relative explicit `source_checkout` before rendering each
+  per-client `apply_command`.
+- Include the same resolved explicit-checkout command in the top-level next
+  steps.
+- Keep client instructions secret-free and otherwise schema-compatible.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for relative explicit
+   source-checkout client instructions.
+2. Resolve explicit client-instruction `source_checkout` paths before passing
+   them into env-file resolution and command rendering.
+3. Run the targeted regression and focused setup-tools test file.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_resolves_relative_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HM
 
 ### Problem Statement And Scope

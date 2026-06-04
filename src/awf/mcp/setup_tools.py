@@ -380,7 +380,7 @@ def _client_integration_instructions_result(
     clients: list[str],
     source_checkout: str | None,
 ) -> CallToolResult:
-    source_path = Path(source_checkout).expanduser() if source_checkout is not None else None
+    source_path = _resolve_client_source_checkout_path(source_checkout)
     try:
         selected = normalize_clients(clients)
         env_file = _resolve_client_env_file(source_path, False)
@@ -621,6 +621,22 @@ def _client_apply_command(client: str, *, source_checkout: Path | None) -> str:
     if source_checkout is not None:
         command.extend(["--source-checkout", str(source_checkout)])
     return shlex.join(command)
+
+
+def _resolve_client_source_checkout_path(source_checkout: str | None) -> Path | None:
+    if source_checkout is None:
+        return None
+
+    candidate = Path(source_checkout)
+    try:
+        expanded = candidate.expanduser()
+    except (OSError, RuntimeError):
+        return candidate.absolute()
+
+    try:
+        return expanded.resolve()
+    except (OSError, RuntimeError):
+        return expanded.absolute()
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
