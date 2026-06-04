@@ -697,7 +697,7 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
         "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
     )
     stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
-    stop_guard_end_line = "fi"
+    stop_guard_end_line = "\nfi\n"
     api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     postgres_password_export_line = (
         'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
@@ -747,7 +747,7 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
         "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
     )
     stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
-    stop_guard_end_line = "fi"
+    stop_guard_end_line = "\nfi\n"
     api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     postgres_password_export_line = (
         'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
