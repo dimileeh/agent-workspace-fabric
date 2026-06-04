@@ -125,6 +125,96 @@ def _empty_workspace_gc_result(work_dir: Path) -> WorkspaceGCResult:
     )
 
 
+@pytest.mark.unit
+async def test_completed_workspace_compose_teardown_callback_uses_candidate_metadata(
+    tmp_path: Path,
+) -> None:
+    class _Runner:
+        _work_dir = tmp_path
+
+    monitor_compose_file = tmp_path / "monitor" / "compose.yml"
+    candidate_compose_file = tmp_path / "candidate" / "compose.yml"
+    compose_patch, compose_calls = _mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+
+    with compose_patch:
+        callback = lifecycle._completed_workspace_compose_teardown(
+            _Runner(),
+            compose_project="monitor_project",
+            compose_file=monitor_compose_file,
+        )
+        assert callback is not None
+
+        candidate_with_metadata = WorkspaceGCCandidate(
+            workspace_id="ws-candidate-meta",
+            status=WorkspaceStatus.completed.value,
+            updated_at=datetime.now(UTC),
+            age_hours=0,
+            reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+            worktree=WorkspaceGCPath(
+                kind="worktree",
+                path=tmp_path / "worktrees" / "ws-candidate-meta",
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose=WorkspaceGCPath(
+                kind="compose",
+                path=tmp_path / "compose" / "ws-candidate-meta",
+                exists=True,
+                estimated_bytes=0,
+            ),
+            auth=WorkspaceGCPath(
+                kind="auth",
+                path=tmp_path / "auth" / "ws-candidate-meta",
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose_project_name="candidate_project",
+            compose_file_path=str(candidate_compose_file),
+        )
+        result = await callback(candidate_with_metadata)
+
+        candidate_without_metadata = WorkspaceGCCandidate(
+            workspace_id="ws-monitor-meta",
+            status=WorkspaceStatus.completed.value,
+            updated_at=datetime.now(UTC),
+            age_hours=0,
+            reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+            worktree=WorkspaceGCPath(
+                kind="worktree",
+                path=tmp_path / "worktrees" / "ws-monitor-meta",
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose=WorkspaceGCPath(
+                kind="compose",
+                path=tmp_path / "compose" / "ws-monitor-meta",
+                exists=True,
+                estimated_bytes=0,
+            ),
+            auth=WorkspaceGCPath(
+                kind="auth",
+                path=tmp_path / "auth" / "ws-monitor-meta",
+                exists=True,
+                estimated_bytes=0,
+            ),
+        )
+        fallback_result = await callback(candidate_without_metadata)
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert fallback_result.status == "succeeded"
+    assert fallback_result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert compose_calls == [
+        ("candidate_project", candidate_compose_file, "ws-candidate-meta", True),
+        ("monitor_project", monitor_compose_file, "ws-monitor-meta", True),
+    ]
+
+
 async def _seed_old_completed_pr_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
