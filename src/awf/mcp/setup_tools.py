@@ -200,7 +200,7 @@ def register_setup_tools(
         return await asyncio.to_thread(
             _client_integration_instructions_result,
             safe_result=safe_result,
-            clients=clients or list(CLIENT_DESCRIPTORS),
+            clients=list(CLIENT_DESCRIPTORS) if clients is None else clients,
             source_checkout=source_checkout,
         )
 

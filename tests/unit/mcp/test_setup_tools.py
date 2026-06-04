@@ -924,6 +924,36 @@ async def test_client_integration_instructions_are_secret_free(
 
 
 @pytest.mark.unit
+async def test_client_integration_instructions_preserves_explicit_empty_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    env_file = tmp_path / ".env"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
+    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
+    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
+    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(setup_tools, "_client_env", lambda: {})
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": []},
+    )
+    payload = _payload(result)
+
+    assert result.isError is False
+    assert payload["status"] == "success"
+    assert payload["clients"] == []
+    assert payload["next_steps"] == ["No client config changes are needed."]
+
+
+@pytest.mark.unit
 async def test_client_integration_instructions_preserve_explicit_source_checkout_apply_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -77,6 +77,42 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HB0-m
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` treats an
+explicit empty `clients` array the same as omitting `clients`, because the MCP
+wrapper passes `clients or list(CLIENT_DESCRIPTORS)` into the helper. That
+causes a request for no client plans to expand to every supported MCP client.
+
+Scope is limited to preserving the difference between omitted `clients` and an
+explicit empty list at the MCP tool boundary.
+
+### Requirements Checklist
+
+- Preserve omitted `clients` behavior: default to every supported client.
+- Preserve explicit non-empty `clients` behavior.
+- Treat explicit `clients: []` as zero requested client plans.
+- Add a focused regression for the explicit empty-client request.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for `clients: []`.
+2. Change the MCP wrapper defaulting expression to check `clients is None`.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_preserves_explicit_empty_clients -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 ValueError Preview Redaction
 
 ### Problem Statement And Scope
