@@ -92,3 +92,32 @@ def test_redact_secrets_handles_token_assignments_and_bearer_values(
 
     assert expected in redacted
     assert "123456" not in redacted
+
+
+@pytest.mark.unit
+def test_redact_secrets_redacts_provider_refs_and_plain_file_paths() -> None:
+    raw_refs = (
+        "keyring://awf/github/default",
+        "env://OPENAI_API_KEY",
+        "plain-file:///home/user/.awf/secrets/codex.default",
+    )
+    raw_token = "ghp_providerRefToken123456"
+    text = (
+        f"github={raw_refs[0]} "
+        f"codex credential_ref={raw_refs[1]} "
+        f"plain ref {raw_refs[2]} "
+        f"token={raw_token} "
+        "repo https://user:plain-password@github.com/example/repo.git"
+    )
+
+    redacted = redact_secrets(text)
+
+    for raw_ref in raw_refs:
+        assert raw_ref not in redacted
+    assert "/home/user/.awf/secrets/codex.default" not in redacted
+    assert raw_token not in redacted
+    assert "plain-password" not in redacted
+    assert redacted.count(REDACTION_MARKER) >= 5
+    assert "github=" in redacted
+    assert "codex credential_ref=" in redacted
+    assert "plain ref" in redacted

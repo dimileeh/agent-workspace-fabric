@@ -1058,3 +1058,58 @@ class TestWorkspaceLogs:
 
         assert missing_workspace is None
         assert missing_stream is None
+
+    @pytest.mark.unit
+    async def test_read_workspace_log_redacts_setup_secret_refs(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(service=service)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe redacted logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        token = "ghp_mcpWorkspaceLogSecret123456"
+        plain_ref = "plain-file:///home/user/.awf/secrets/codex.default"
+        env_ref = "env://OPENAI_API_KEY"
+        raw_text = f"setup token={token} ref={plain_ref} env={env_ref}\n"
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="setup.stdout",
+            source="setup",
+            name="Setup stdout",
+            kind="stdout",
+        )
+        await sink.write(raw_text)
+        await sink.close()
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "setup.stdout",
+                "offset": 0,
+                "limit_bytes": len(raw_text),
+            },
+        )
+
+        assert isinstance(chunk, dict)
+        assert chunk["stream_id"] == "setup.stdout"
+        assert chunk["offset"] == 0
+        assert int(chunk["next_offset"]) > 0
+        assert chunk["eof"] is True
+        data = str(chunk["data"])
+        for raw in (token, plain_ref, env_ref, "/home/user/.awf/secrets/codex.default"):
+            assert raw not in data
+        assert "<redacted>" in data

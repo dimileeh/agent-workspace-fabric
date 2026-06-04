@@ -6,13 +6,19 @@ import asyncio
 import dataclasses
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
 from awf import __version__
 from awf.db.session import make_engine, make_session_factory
+from awf.host_setup.config import (
+    HostSetupConfig,
+    HostSetupConfigError,
+    ProviderConfig,
+    read_host_setup_config,
+)
 from awf.service.config import (
     COMPOSE_ENV_FILE_OMITTED,
     ComposeEnvFileInput,
@@ -76,6 +82,7 @@ async def collect_support_bundle(
     status_collector: Any = None,
     doctor_collector: Any = None,
     failure_analysis_collector: Any = None,
+    setup_config_reader: Callable[[], HostSetupConfig] | None = None,
 ) -> dict[str, object]:
     """Collect a telemetry-free, redacted support bundle."""
     env = os.environ if environ is None else environ
@@ -173,6 +180,9 @@ async def collect_support_bundle(
         }
 
     config_fingerprint = service_config_payload(settings)
+    if setup_config_reader is None:
+        setup_config_reader = _default_setup_config_reader
+    setup_state = _setup_state(setup_config_reader, secrets=secrets)
 
     log_pointers = [
         "Service logs: run `awf service logs --tail 100`",
@@ -189,11 +199,108 @@ async def collect_support_bundle(
         "orphan_cleanup_posture": _redact_value(orphan_cleanup_posture, secrets),
         "recent_failure_summary": recent_failure_summary,
         "config_fingerprint": _redact_value(config_fingerprint, secrets),
+        "setup_state": setup_state,
         "log_pointers": [_redact_text(ptr, secrets) for ptr in log_pointers],
         "issue_template_pointer": ISSUE_TEMPLATE_PATH,
     }
 
     return bundle
+
+
+def _default_setup_config_reader() -> HostSetupConfig:
+    return read_host_setup_config()
+
+
+def _setup_state(
+    setup_config_reader: Callable[[], HostSetupConfig],
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    try:
+        config = setup_config_reader()
+    except HostSetupConfigError as exc:
+        payload: dict[str, object] = {
+            "status": "failed",
+            "reason_code": exc.reason_code,
+            "message": _redact_text(exc.message, secrets),
+        }
+        if exc.details:
+            payload["details"] = _redact_value(exc.details, secrets)
+        return payload
+
+    return {
+        "status": "loaded",
+        "config": {
+            "version": config.version,
+            "install_channel": _redact_text(config.install.channel, secrets),
+            "api_host_port": config.api.host_port,
+            "work_dir_configured": bool(config.work_dir),
+        },
+        "providers": {
+            str(_redact_value(name, secrets)): _provider_setup_summary(provider, secrets=secrets)
+            for name, provider in sorted(config.providers.items())
+        },
+        "clients": {
+            str(_redact_value(name, secrets)): {
+                "status": _redact_text(client.status, secrets),
+                "updated_at": _isoformat(client.updated_at),
+            }
+            for name, client in sorted(config.clients.items())
+        },
+        "consent": {
+            "plain_file_secrets": config.consent.plain_file_secrets,
+            "source_checkout_assets": config.consent.source_checkout_assets,
+        },
+        "source_checkout": _source_checkout_summary(config),
+    }
+
+
+def _provider_setup_summary(
+    provider: ProviderConfig,
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    credential_ref = provider.credential_ref
+    return {
+        "status": _redact_text(provider.status, secrets),
+        "backend": _optional_redacted_text(provider.backend, secrets),
+        "source": _optional_redacted_text(provider.source, secrets),
+        "credential_ref_present": credential_ref is not None,
+        "credential_ref_kind": _credential_ref_kind(credential_ref),
+    }
+
+
+def _source_checkout_summary(config: HostSetupConfig) -> dict[str, object]:
+    source_checkout = config.source_checkout
+    if source_checkout is None:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "verified_at": _isoformat(source_checkout.verified_at),
+        "marker_count": len(source_checkout.markers),
+    }
+
+
+def _credential_ref_kind(credential_ref: str | None) -> str | None:
+    if credential_ref is None:
+        return None
+    if credential_ref.startswith("keyring://"):
+        return "keyring"
+    if credential_ref.startswith("env://"):
+        return "env_ref"
+    if credential_ref.startswith("plain-file://"):
+        return "plain_file"
+    return "unknown"
+
+
+def _optional_redacted_text(value: str | None, secrets: frozenset[str]) -> str | None:
+    return None if value is None else _redact_text(value, secrets)
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def write_support_bundle(

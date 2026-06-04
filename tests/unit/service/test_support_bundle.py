@@ -10,6 +10,14 @@ from pathlib import Path
 
 import pytest
 
+from awf.host_setup.config import (
+    ClientIntegrationConfig,
+    ConsentConfig,
+    HostSetupConfig,
+    HostSetupConfigError,
+    ProviderConfig,
+)
+from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
 from awf.service import support_bundle as support_bundle_mod
 from awf.service.config import ServiceSettings
 from awf.service.support_bundle import (
@@ -421,6 +429,175 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
         assert secret not in written
     assert "<redacted>" in serialized
     assert "<redacted>" in written
+
+
+@pytest.mark.unit
+def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    raw_refs = (
+        "keyring://awf/github/default",
+        "env://OPENAI_API_KEY",
+        "plain-file:///home/user/.awf/secrets/codex.default",
+    )
+    source_root = tmp_path / "private" / "source-checkout"
+    config = HostSetupConfig(
+        providers={
+            "github": ProviderConfig(
+                credential_ref=raw_refs[0],
+                backend="keyring",
+                source="gh",
+                status="ready",
+            ),
+            "openai": ProviderConfig(
+                credential_ref=raw_refs[1],
+                backend="env_ref",
+                source="environment",
+                status="ready",
+            ),
+            "codex": ProviderConfig(
+                credential_ref=raw_refs[2],
+                backend="plain_file",
+                source="setup",
+                status="ready",
+            ),
+        },
+        clients={
+            "codex": ClientIntegrationConfig(
+                status="configured",
+                updated_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+            )
+        },
+        consent=ConsentConfig(
+            plain_file_secrets=True,
+            source_checkout_assets=True,
+        ),
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=source_root,
+            verified_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+        ),
+    )
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=lambda: config,
+        )
+    )
+
+    setup_state = bundle["setup_state"]
+    assert isinstance(setup_state, dict)
+    assert setup_state["status"] == "loaded"
+    assert setup_state["providers"] == {
+        "github": {
+            "status": "ready",
+            "backend": "keyring",
+            "source": "gh",
+            "credential_ref_present": True,
+            "credential_ref_kind": "keyring",
+        },
+        "openai": {
+            "status": "ready",
+            "backend": "env_ref",
+            "source": "environment",
+            "credential_ref_present": True,
+            "credential_ref_kind": "env_ref",
+        },
+        "codex": {
+            "status": "ready",
+            "backend": "plain_file",
+            "source": "setup",
+            "credential_ref_present": True,
+            "credential_ref_kind": "plain_file",
+        },
+    }
+    assert setup_state["clients"] == {
+        "codex": {
+            "status": "configured",
+            "updated_at": "2026-05-28T12:00:00Z",
+        }
+    }
+    assert setup_state["consent"] == {
+        "plain_file_secrets": True,
+        "source_checkout_assets": True,
+    }
+    assert setup_state["source_checkout"] == {
+        "configured": True,
+        "verified_at": "2026-05-28T12:00:00Z",
+        "marker_count": 14,
+    }
+
+    serialized = json.dumps(bundle, sort_keys=True)
+    bundle_path = write_support_bundle(bundle, directory=tmp_path / "bundles")
+    written = bundle_path.read_text()
+    for raw_ref in raw_refs:
+        assert raw_ref not in serialized
+        assert raw_ref not in written
+    assert "/home/user/.awf/secrets/codex.default" not in serialized
+    assert "/home/user/.awf/secrets/codex.default" not in written
+    assert str(source_root) not in serialized
+    assert str(source_root) not in written
+
+
+@pytest.mark.unit
+def test_support_bundle_setup_state_redacts_config_load_errors(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    def _config_reader() -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message=f"bad credential ref {plain_ref}",
+            path=tmp_path / "home" / ".awf" / "config.yml",
+            details={"credential_ref": plain_ref},
+        )
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=_config_reader,
+        )
+    )
+
+    setup_state = bundle["setup_state"]
+    assert isinstance(setup_state, dict)
+    assert setup_state["status"] == "failed"
+    assert setup_state["reason_code"] == "HOST_SETUP_CONFIG_CORRUPT"
+    serialized = json.dumps(bundle, sort_keys=True)
+    assert plain_ref not in serialized
+    assert "/home/user/.awf/secrets/github.default" not in serialized
+    assert "<redacted>" in serialized
 
 
 @pytest.mark.unit

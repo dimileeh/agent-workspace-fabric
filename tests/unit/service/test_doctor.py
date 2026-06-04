@@ -828,6 +828,8 @@ def test_doctor_output_redacts_secrets_from_pretty_and_json(tmp_path: Path) -> N
     github_secret = "ghp_doctorsecret123456"
     anthropic_secret = "sk-ant-doctorsecret123456"
     db_secret = "doctor-db-secret"
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+    env_ref = "env://OPENAI_API_KEY"
     status = _green_status()
     checks = status["checks"]
     assert isinstance(checks, dict)
@@ -848,8 +850,10 @@ def test_doctor_output_redacts_secrets_from_pretty_and_json(tmp_path: Path) -> N
         "ok": False,
         "status": "fail",
         "reason": "GITHUB_AUTH_UNUSABLE",
-        "message": f"bad token {github_secret}",
-        "detail": f"anthropic={anthropic_secret}",
+        "message": f"bad token {github_secret} ref {plain_ref}",
+        "detail": f"anthropic={anthropic_secret} credential_ref={env_ref}",
+        "credential_ref": plain_ref,
+        "credential_ref_source": env_ref,
     }
 
     async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
@@ -878,7 +882,16 @@ def test_doctor_output_redacts_secrets_from_pretty_and_json(tmp_path: Path) -> N
     pretty = render_doctor_pretty(report)
     serialized = json.dumps(report.to_dict(), sort_keys=True)
 
-    for secret in (api_secret, openai_secret, github_secret, anthropic_secret, db_secret):
+    for secret in (
+        api_secret,
+        openai_secret,
+        github_secret,
+        anthropic_secret,
+        db_secret,
+        plain_ref,
+        env_ref,
+        "/home/user/.awf/secrets/github.default",
+    ):
         assert secret not in pretty
         assert secret not in serialized
     assert "<redacted>" in serialized

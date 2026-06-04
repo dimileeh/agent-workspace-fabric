@@ -44,8 +44,10 @@ from awf.mcp.server import (
     _provided_orphan_resources,
     _provided_readiness,
     _provided_runtime_health,
+    _redact_sensitive_text,
     _tool_result,
 )
+from awf.service import config as service_config
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
@@ -318,12 +320,18 @@ def register_metrics_tools(
         )
         if result is None:
             return None
+        service_settings = service_config.resolve_service_settings(settings_value)
+        data = _redact_sensitive_text(
+            str(result["text"]),
+            settings_value,
+            service_settings=service_settings,
+        )
         return WorkspaceLogReadResponse(
             stream_id=str(result["stream_id"]),
             offset=int(result["offset"]),
             next_offset=int(result["next_offset"]),
             eof=bool(result["eof"]),
-            data=str(result["text"]),
+            data=data,
         ).model_dump(mode="json")
 
     @mcp.tool(name="awf_list_tasks")

@@ -214,6 +214,45 @@ def test_service_logs_failure_prefers_stderr_then_stdout_then_generic_detail() -
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_redacts_captured_output_and_failure_detail() -> None:
+    token = "ghp_serviceLogsSecret123456"
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+    env_ref = "env://OPENAI_API_KEY"
+
+    def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            returncode=0,
+            stdout=f"stdout token={token} ref={plain_ref}",
+            stderr=f"stderr credential_ref={env_ref}",
+        )
+
+    result = run_service_logs(services=[ServiceLogName.api], run_subprocess=success_run)
+
+    rendered_success = result.stdout + result.stderr
+    for raw in (token, plain_ref, env_ref, "/home/user/.awf/secrets/github.default"):
+        assert raw not in rendered_success
+    assert "<redacted>" in rendered_success
+
+    def failure_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            returncode=2,
+            stdout="",
+            stderr=f"provider token={token} ref={plain_ref}",
+        )
+
+    with pytest.raises(ServiceLogsError) as exc_info:
+        run_service_logs(services=[ServiceLogName.api], run_subprocess=failure_run)
+
+    assert exc_info.value.returncode == 2
+    for raw in (token, plain_ref, "/home/user/.awf/secrets/github.default"):
+        assert raw not in exc_info.value.detail
+    assert "<redacted>" in exc_info.value.detail
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_follow_success_discards_uncaptured_output() -> None:
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert kwargs["capture_output"] is False

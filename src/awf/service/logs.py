@@ -13,6 +13,7 @@ from typing import Literal, Protocol
 
 import yaml
 
+from awf.common.redaction import redact_secrets
 from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.environment import (
     cleared_docker_cli_client_keys,
@@ -150,7 +151,7 @@ def run_service_logs(
             compose_env_file=compose_env_file,
         )
     except yaml.YAMLError as exc:
-        raise ServiceLogsError(returncode=1, detail=str(exc)) from exc
+        raise ServiceLogsError(returncode=1, detail=redact_secrets(str(exc))) from exc
     command = service_logs_command(
         services=services,
         tail=tail,
@@ -169,14 +170,15 @@ def run_service_logs(
     except FileNotFoundError as exc:
         raise ServiceLogsError(returncode=127, detail="docker binary not found on PATH") from exc
     except OSError as exc:
-        raise ServiceLogsError(returncode=1, detail=f"{type(exc).__name__}: {exc}") from exc
+        detail = redact_secrets(f"{type(exc).__name__}: {exc}")
+        raise ServiceLogsError(returncode=1, detail=detail) from exc
     except KeyboardInterrupt:
         if follow:
             return ServiceLogsResult(stdout="", stderr="")
         raise
 
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
+    stdout = redact_secrets(result.stdout or "")
+    stderr = redact_secrets(result.stderr or "")
     if follow and result.returncode in _FOLLOW_INTERRUPT_RETURN_CODES:
         return ServiceLogsResult(stdout="", stderr="")
     if result.returncode != 0:

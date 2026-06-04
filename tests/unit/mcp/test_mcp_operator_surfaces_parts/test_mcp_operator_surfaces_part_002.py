@@ -868,6 +868,8 @@ class TestMcpOperatorSurfaceParityPart001:
 
         api_secret = "api-secret-do-not-leak-12345"
         provider_secret = "ghp_providerSecretDoNotLeak12345"
+        plain_ref = "plain-file:///home/user/.awf/secrets/codex.default"
+        env_ref = "env://OPENAI_API_KEY"
         settings = Settings(
             _env_file=None,
             api_token=api_secret,
@@ -876,7 +878,11 @@ class TestMcpOperatorSurfaceParityPart001:
         payload: dict[str, Any] = {
             "outer": [
                 "plain text",
-                {"inner": f"token {api_secret}", "provider": provider_secret},
+                {
+                    "inner": f"token {api_secret} ref {plain_ref}",
+                    "provider": provider_secret,
+                    "env_ref": env_ref,
+                },
             ],
             "list": ["another", {"deep": ["one", "two"]}],
         }
@@ -893,8 +899,15 @@ class TestMcpOperatorSurfaceParityPart001:
         redacted = mcp_server._redact_sensitive_payload(payload, settings)
 
         rendered = json.dumps(redacted, sort_keys=True)
-        assert api_secret not in rendered
-        assert provider_secret not in rendered
+        for raw in (
+            api_secret,
+            provider_secret,
+            plain_ref,
+            env_ref,
+            "/home/user/.awf/secrets/codex.default",
+        ):
+            assert raw not in rendered
+        assert "<redacted>" in rendered
         assert calls == 1
 
     @pytest.mark.unit

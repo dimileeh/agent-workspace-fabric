@@ -29,6 +29,7 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
 )
 from awf.common.config import Settings, get_settings
+from awf.common.redaction import redact_secrets
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
@@ -545,6 +546,8 @@ def _contains_secret_bytes(
     # patterns (e.g. ghp_..., github_pat_..., sk-proj-...) even when the
     # exact value is not present in current settings or environment.
     decoded = content.decode("latin-1")
+    if redact_secrets(decoded) != decoded:
+        return True
     if provider_readiness_service.TOKEN_RE.search(decoded) is not None:
         return True
     # Additionally block URL credentials that the text path would redact.
@@ -614,7 +617,8 @@ def _redact_sensitive_text(
     for secret in (settings.api_token, settings.github_token):
         if secret and len(secret) >= 4:
             redacted = redacted.replace(secret, "<redacted>")
-    return provider_readiness_service.redact_launch_preflight_text(service_settings, redacted)
+    redacted = provider_readiness_service.redact_launch_preflight_text(service_settings, redacted)
+    return redact_secrets(redacted)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
