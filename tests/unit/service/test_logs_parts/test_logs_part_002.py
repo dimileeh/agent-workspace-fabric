@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import awf.service.logs as logs_mod
 from awf.service.logs import (
     DEFAULT_LOG_TAIL,
     LOCAL_SERVICE_COMPOSE_FILE,
@@ -543,6 +544,143 @@ def test_service_logs_follow_simultaneous_broken_pipes_terminate_once(
     assert len(processes) == 1
     assert processes[0].terminate_count == 1
     assert processes[0].killed is False
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_follow_joins_peer_stream_after_watchdog_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Give a peer stream one more bounded drain after a broken-pipe teardown."""
+
+    class _BrokenFlushSink:
+        """Sink that fails after the peer stream enters its downstream write."""
+
+        def __init__(self, peer_write_started: threading.Event) -> None:
+            """Initialize the peer-stream synchronization point."""
+            self._peer_write_started = peer_write_started
+
+        def write(self, text: str) -> int:
+            """Accept streamed text before simulating a closed pipe."""
+            return len(text)
+
+        def flush(self) -> None:
+            """Raise a downstream pipe closure while the peer stream is active."""
+            if not self._peer_write_started.wait(timeout=1.0):
+                raise AssertionError("peer stream did not enter downstream write")
+            raise BrokenPipeError
+
+    class _PeerSink:
+        """Sink that stays in write until the post-watchdog join releases it."""
+
+        def __init__(self) -> None:
+            """Initialize peer stream write synchronization."""
+            self.write_started = threading.Event()
+            self.release_write = threading.Event()
+            self.write_finished = threading.Event()
+
+        def write(self, text: str) -> int:
+            """Block in the peer write until teardown reaches the extra join."""
+            self.write_started.set()
+            self.release_write.wait(timeout=1.0)
+            self.write_finished.set()
+            return len(text)
+
+        def flush(self) -> None:
+            """Flush succeeds after the peer write drains."""
+
+    class _FollowProcess:
+        """Follow process double that records cleanup calls."""
+
+        stdout = io.StringIO("stdout before downstream closes\n")
+        stderr = io.StringIO("stderr already read before teardown\n")
+
+        def __init__(self) -> None:
+            """Track termination calls made by the streaming runner."""
+            self.terminated = threading.Event()
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Return only after the runner terminates the followed process."""
+            wait_timeout = 0.25 if timeout is None else timeout
+            if not self.terminated.wait(wait_timeout):
+                raise AssertionError(
+                    "follow process was not terminated after downstream pipe closed"
+                )
+            return -signal.SIGTERM
+
+        def terminate(self) -> None:
+            """Record graceful termination from the streaming runner."""
+            self.terminated.set()
+
+        def kill(self) -> None:
+            """Record forced termination from the streaming runner."""
+            self.killed = True
+            self.terminated.set()
+
+    processes: list[_FollowProcess] = []
+
+    def _popen(_args: list[str], **kwargs: object) -> _FollowProcess:
+        """Create a follow-process double with piped stdout and stderr."""
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        process = _FollowProcess()
+        processes.append(process)
+        return process
+
+    peer_sink = _PeerSink()
+    broken_sink = _BrokenFlushSink(peer_sink.write_started)
+    blocked_join_timeout = 0.01
+    blocked_join_counts: dict[int, int] = {}
+    original_join = threading.Thread.join
+
+    def _join_with_peer_release(
+        thread: threading.Thread,
+        timeout: float | None = None,
+    ) -> None:
+        """Release the peer write only when teardown attempts the extra join."""
+        target = getattr(thread, "_target", None)  # noqa: SLF001
+        if (
+            target is logs_mod._stream_redacted_pipe  # noqa: SLF001
+            and thread.is_alive()
+            and peer_sink.write_started.is_set()
+            and timeout == blocked_join_timeout
+        ):
+            thread_key = id(thread)
+            blocked_join_counts[thread_key] = blocked_join_counts.get(thread_key, 0) + 1
+            if blocked_join_counts[thread_key] >= 2:
+                peer_sink.release_write.set()
+        return original_join(thread, timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(sys, "stdout", broken_sink)
+    monkeypatch.setattr(sys, "stderr", peer_sink)
+    monkeypatch.setattr(threading.Thread, "join", _join_with_peer_release)
+    monkeypatch.setattr(
+        logs_mod,
+        "_STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS",
+        blocked_join_timeout,
+    )
+    monkeypatch.setattr(
+        logs_mod,
+        "_STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS",
+        0.001,
+    )
+
+    try:
+        result = run_service_logs(
+            services=[ServiceLogName.api],
+            follow=True,
+        )
+
+        assert result == ServiceLogsResult(stdout="", stderr="")
+        assert peer_sink.write_finished.is_set()
+        assert any(count >= 2 for count in blocked_join_counts.values())
+        assert len(processes) == 1
+        assert processes[0].terminated.is_set()
+        assert processes[0].killed is False
+    finally:
+        peer_sink.release_write.set()
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

@@ -342,13 +342,14 @@ def _run_streaming_subprocess(
         daemon=True,
     )
     watchdog_thread.start()
+    stream_threads = (stdout_thread, stderr_thread)
     try:
         returncode = process.wait()
     except KeyboardInterrupt:
         _terminate_streaming_subprocess(process)
         raise
     finally:
-        _join_stream_threads((stdout_thread, stderr_thread))
+        _join_stream_threads(stream_threads)
         stream_watch_stop.set()
         watchdog_thread.join(
             timeout=(
@@ -357,6 +358,9 @@ def _run_streaming_subprocess(
                 else None
             )
         )
+        if stream_broken_pipe.is_set():
+            for thread in stream_threads:
+                thread.join(timeout=_STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS)
     if stream_broken_pipe.is_set():
         return subprocess.CompletedProcess(args, 0, stdout=None, stderr=None)
     if check and returncode != 0:

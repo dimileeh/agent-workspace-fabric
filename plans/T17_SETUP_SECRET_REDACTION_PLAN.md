@@ -120,6 +120,13 @@ credential entry, or unrelated refactors are included.
   non-blocking latency trade-offs, because current MCP code already short
   circuits visible assignment context and the remaining env-file caching concern
   is not a correctness or leak defect.
+- Review-level comment `issue:4620175517` identified two final review notes:
+  the short non-EOF MCP log offset projection is correct but needs a clarifying
+  comment, and followed service-log broken-pipe teardown should give peer stream
+  threads one more bounded join after the watchdog is stopped.
+- This repair remains inside the existing T17 MCP/service-log scope and only
+  changes the explanatory MCP offset comment, followed service-log teardown, a
+  focused regression, and this plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -166,6 +173,8 @@ credential entry, or unrelated refactors are included.
 - Followed service-log streaming terminates the followed subprocess when a
   downstream write or flush fails with `OSError` or `ValueError`, not only
   `BrokenPipeError`.
+- Followed service-log broken-pipe teardown gives peer stream threads a final
+  bounded drain opportunity after the blocked-write watchdog is stopped.
 - Followed service-log streaming documents that the current per-line redaction
   boundary depends on single-line secret/provider-ref patterns.
 - `redact_secrets` documents the deliberate post-regex exact-secret matching
@@ -313,6 +322,56 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'follow or replaces_invalid_bytes'
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```
+
+## Review-Level Comment `issue:4620175517` Followed Service Logs Final Join Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports that after a followed service-log broken pipe,
+`_join_stream_threads` gives each redaction stream thread only one short timeout
+before returning. A peer stream thread that already read a line from Docker can
+briefly outlive teardown and write to stdout/stderr after the caller continues.
+
+The same comment also notes that MCP short non-EOF workspace-log offset
+projection is correct but subtle. This repair is limited to documenting that
+offset decision and adding one extra bounded service-log stream-thread join
+after the watchdog has been stopped. It does not change redaction rules,
+subprocess command construction, MCP offset behavior, or broad validation
+ownership.
+
+### Requirements Checklist
+
+- MCP short non-EOF `next_offset` projection has an in-code comment explaining
+  why `eof=False` may require a follow-up poll at the covered offset.
+- Followed service-log broken-pipe teardown stops the blocked-write watchdog
+  before giving stream threads one more bounded join opportunity.
+- The extra join remains bounded so a truly blocked downstream sink cannot hang
+  the caller.
+- Existing followed-log broken-pipe, blocked-write, and default streaming
+  behavior remain covered by focused tests.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing regression where one followed stream triggers a broken
+   pipe while the peer stream is still in a downstream write, then expect the
+   peer to complete during the post-watchdog bounded join.
+2. Add the MCP offset projection comment without changing return values.
+3. Reuse the existing stream-thread tuple and add a final bounded join after
+   `stream_watch_stop` is set and the watchdog thread has been joined.
+4. Run the targeted regression, adjacent followed-log checks, and narrow
+   ruff/mypy checks for touched files. Broad AWF/GitHub validation remains
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k peer_stream_after_watchdog_stop --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'peer_stream_after_watchdog_stop or broken_stdout_pipe or downstream_stdout_error or simultaneous_broken_pipes or blocked_downstream_write or default_follow_runner' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py src/awf/mcp/metrics_tools.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py src/awf/mcp/metrics_tools.py
 ```
 
 Review-level comment `issue:4620175517` repair checks:

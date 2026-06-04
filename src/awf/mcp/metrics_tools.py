@@ -378,6 +378,8 @@ def _requested_log_window_offsets(
         safe_offset = min(requested_offset, file_size)
         next_offset = min(safe_offset + limit_bytes, file_size)
         return next_offset, next_offset >= file_size
+    # If the expanded read is short without EOF, advance only through the
+    # returned bytes so callers can poll again without skipping growing logs.
     covered_next_offset = min(requested_offset + limit_bytes, expanded_next_offset)
     return max(requested_offset, covered_next_offset), False
 

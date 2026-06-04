@@ -41,6 +41,8 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: Followed service-log streaming terminates the followed subprocess
   when downstream write or flush failures are delivered as `OSError` or
   `ValueError`, not only `BrokenPipeError`.
+- Complete: Followed service-log broken-pipe teardown stops the blocked-write
+  watchdog before giving peer stream threads one final bounded drain join.
 - Complete: MCP workspace log reads mask an unknown leading value fragment when
   assignment lookback cannot read enough context to prove the fragment safe.
 - Complete: Support-bundle setup-state collection returns a redacted failed
@@ -1795,6 +1797,56 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/s
 
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 # Success: no issues found in 1 source file
+```
+
+## Review-Level Comment `issue:4620175517` Followed Service Logs Final Join Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP short non-EOF `next_offset` projection now has an in-code
+  comment explaining the short-read polling behavior without changing offsets.
+- Complete: followed service-log broken-pipe teardown stops the watchdog and
+  then gives stdout/stderr redaction threads one more timeout-bounded join.
+- Complete: the extra peer-stream join remains bounded by
+  `_STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS`.
+- Complete: existing followed-log broken-pipe, blocked-write, simultaneous pipe,
+  and default follow streaming behavior remain covered by adjacent focused
+  checks.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k peer_stream_after_watchdog_stop --tb=short -ra
+# failed: peer stream write_finished was still unset when run_service_logs returned
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k peer_stream_after_watchdog_stop --tb=short -ra
+# 1 passed, 33 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'peer_stream_after_watchdog_stop or broken_stdout_pipe or downstream_stdout_error or simultaneous_broken_pipes or blocked_downstream_write or default_follow_runner' --tb=short -ra
+# 8 passed, 26 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py src/awf/mcp/metrics_tools.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 2 source files
 ```
 
 ## Gaps
