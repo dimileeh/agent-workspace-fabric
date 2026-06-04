@@ -218,6 +218,45 @@ def test_preflight_make_rshared_failure_forces_copy_fallback(
 
 
 @pytest.mark.unit
+def test_preflight_make_rshared_failure_unwinds_leaked_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "23 28 0:21 / /host/work rw,relatime - ext4 /dev/sda rw\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "_mount_binary_available", lambda: True)
+
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        # ``--bind`` succeeds, ``--make-rshared`` fails (namespace disallows it).
+        returncode = 1 if args[:2] == ["mount", "--make-rshared"] else 0
+        return subprocess.CompletedProcess(args, returncode=returncode, stdout="", stderr="")
+
+    result = ensure_work_dir_mount_propagation(
+        "/host/work",
+        run_subprocess=_run,
+        environ={},
+        mountinfo_path=mountinfo,
+    )
+
+    assert result.propagation == "rprivate"
+    assert result.force_copy is True
+    assert result.reason_code == "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE"
+    # The successful bind must be unwound so the host mount table does not leak.
+    assert calls == [
+        ["mount", "--bind", "/host/work", "/host/work"],
+        ["mount", "--make-rshared", "/host/work"],
+        ["umount", "/host/work"],
+    ]
+
+
+@pytest.mark.unit
 def test_preflight_make_rshared_oserror_forces_copy_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

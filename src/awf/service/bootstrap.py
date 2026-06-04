@@ -352,14 +352,17 @@ def _try_make_work_dir_rshared(
     Returns whether both commands succeeded (exit 0). Any non-zero exit or
     ``OSError`` (e.g. ``mount`` missing, not root) means we could not make the
     work dir shared and the caller falls back to the copy posture.
+
+    If the ``--bind`` succeeds but ``--make-rshared`` fails (e.g. the mount
+    namespace disallows propagation-mode changes), the self-referential bind is
+    unwound with ``umount`` before returning ``False`` — otherwise repeated
+    bootstrap runs that hit this edge would accumulate one stale entry per
+    attempt in the host mount table. The unwind is itself best-effort.
     """
 
     env = dict(environ) if environ is not None else None
-    commands = (
-        ["mount", "--bind", str(target), str(target)],
-        ["mount", "--make-rshared", str(target)],
-    )
-    for command in commands:
+
+    def _run(command: list[str]) -> bool:
         try:
             result = run_subprocess(
                 command,
@@ -372,8 +375,15 @@ def _try_make_work_dir_rshared(
             )
         except OSError:
             return False
-        if result.returncode != 0:
-            return False
+        return result.returncode == 0
+
+    if not _run(["mount", "--bind", str(target), str(target)]):
+        return False
+    if not _run(["mount", "--make-rshared", str(target)]):
+        # The bind landed but the propagation-mode change did not; unwind the
+        # self-referential bind so repeated bootstraps don't leak mount entries.
+        _run(["umount", str(target)])
+        return False
     return True
 
 
