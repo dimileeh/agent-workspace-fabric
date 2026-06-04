@@ -257,6 +257,10 @@ def _start_success_payload(
         "health": service_status.get("status", "unknown"),
     }
     next_steps = (
+        # Lead with the provider-free local health proof: a skeptic can verify
+        # local Core health without handing AWF GitHub/PR authority or a token.
+        "Run awf smoke run --mocked-local to prove local AWF Core health "
+        "without provider credentials or GitHub access.",
         "Run awf init <path> to onboard a project repository.",
         "Run awf service status --format pretty to inspect local Core health.",
         f"Open the console at {console_url} to use the local UI.",
