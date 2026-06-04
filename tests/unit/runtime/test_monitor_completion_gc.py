@@ -24,9 +24,12 @@ from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor_runner import lifecycle
 from awf.service.gc import (
+    WorkspaceCleanupExecutionStatus,
     WorkspaceGCCandidate,
+    WorkspaceGCComposeTeardownResult,
     WorkspaceGCPath,
     WorkspaceGCPlan,
+    WorkspaceGCPreserved,
     WorkspaceGCResult,
     WorkspaceGCWorktreeRemoveResult,
 )
@@ -79,28 +82,41 @@ def _mock_worktree_remove_success() -> object:
     )
 
 
-def _empty_workspace_gc_result(work_dir: Path) -> WorkspaceGCResult:
+def _empty_workspace_gc_result(
+    work_dir: Path,
+    *,
+    workspace_id: str | None = None,
+    include_statuses: tuple[str, ...] = (WorkspaceStatus.completed.value,),
+    preserved: list[WorkspaceGCPreserved] | None = None,
+    compose_teardown: WorkspaceGCComposeTeardownResult | None = None,
+    status: WorkspaceCleanupExecutionStatus = "succeeded",
+    reason_code: str = "CLEANUP_EXECUTION_SUCCEEDED",
+) -> WorkspaceGCResult:
     now = datetime.now(UTC)
     return WorkspaceGCResult(
         plan=WorkspaceGCPlan(
             work_dir=work_dir,
             min_age_hours=24,
             cutoff_at=now,
-            include_statuses=(WorkspaceStatus.completed.value,),
+            include_statuses=include_statuses,
             exclude_statuses=(),
             candidates=[],
-            preserved=[],
+            preserved=preserved or [],
         ),
         dry_run=False,
         deleted_paths=[],
         delete_errors=[],
         path_outcomes=[],
-        compose_teardowns={},
+        compose_teardowns=(
+            {workspace_id: compose_teardown}
+            if workspace_id is not None and compose_teardown is not None
+            else {}
+        ),
         secret_lease_revocations={},
         worktree_removes={},
         reservation_releases={},
-        status="succeeded",
-        reason_code="CLEANUP_EXECUTION_SUCCEEDED",
+        status=status,
+        reason_code=reason_code,
     )
 
 
@@ -302,6 +318,143 @@ async def test_completed_workspace_gc_unmounts_auth_overlay_when_plan_is_empty(
     expected_compose_calls = [("proj_from_monitor", compose_file, ws_id, True)]
     assert compose_calls == expected_compose_calls
     assert teardown_calls == [(work_dir, ws_id, expected_compose_calls)]
+
+
+@pytest.mark.unit
+async def test_completed_monitor_preserved_compose_teardown_failure_logs_filesystem_gc_failed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-preserved-compose-failed"
+    now = datetime.now(UTC)
+    teardown = WorkspaceGCComposeTeardownResult(
+        status="failed",
+        reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+        error="volume still in use",
+    )
+    fake_result = _empty_workspace_gc_result(
+        work_dir,
+        workspace_id=ws_id,
+        preserved=[
+            WorkspaceGCPreserved(
+                workspace_id=ws_id,
+                status=WorkspaceStatus.completed.value,
+                updated_at=now,
+                age_hours=1,
+                reason_code="COMPLETED_PR_NOT_MERGED",
+            )
+        ],
+        compose_teardown=teardown,
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+    )
+    runner = SimpleNamespace(_work_dir=work_dir, _deps=SimpleNamespace(session_factory=factory))
+
+    with (
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=AsyncMock(return_value=fake_result),
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="proj",
+            compose_file=work_dir / "compose" / ws_id / "compose.yml",
+        )
+
+    failed = [
+        record for record in captured if record.get("event") == "monitor.filesystem_gc_failed"
+    ]
+    assert failed
+    assert failed[0].get("compose_teardowns") == {ws_id: teardown.to_dict()}
+    assert not any(record.get("event") == "monitor.filesystem_gc_deferred" for record in captured)
+
+
+@pytest.mark.unit
+async def test_completed_monitor_missing_workspace_compose_teardown_failure_logs_gc_failed_cause(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-missing-compose-failed"
+    teardown = WorkspaceGCComposeTeardownResult(
+        status="failed",
+        reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+        error="volume still in use",
+    )
+    fake_result = _empty_workspace_gc_result(
+        work_dir,
+        workspace_id=ws_id,
+        include_statuses=(),
+        compose_teardown=teardown,
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+    )
+    runner = SimpleNamespace(_work_dir=work_dir, _deps=SimpleNamespace(session_factory=factory))
+
+    with (
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=AsyncMock(return_value=fake_result),
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="proj",
+            compose_file=work_dir / "compose" / ws_id / "compose.yml",
+        )
+
+    failed = [
+        record for record in captured if record.get("event") == "monitor.filesystem_gc_failed"
+    ]
+    assert failed
+    assert failed[0].get("delete_errors") == []
+    assert failed[0].get("compose_teardowns") == {ws_id: teardown.to_dict()}
+
+
+@pytest.mark.unit
+async def test_completed_monitor_preserved_success_still_logs_filesystem_gc_deferred(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-preserved-success"
+    now = datetime.now(UTC)
+    fake_result = _empty_workspace_gc_result(
+        work_dir,
+        preserved=[
+            WorkspaceGCPreserved(
+                workspace_id=ws_id,
+                status=WorkspaceStatus.completed.value,
+                updated_at=now,
+                age_hours=1,
+                reason_code="COMPLETED_PR_NOT_MERGED",
+            )
+        ],
+    )
+    runner = SimpleNamespace(_work_dir=work_dir, _deps=SimpleNamespace(session_factory=factory))
+
+    with (
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=AsyncMock(return_value=fake_result),
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(runner, ws_id)
+
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_deferred"
+        and record.get("workspace_id") == ws_id
+        and record.get("reason_code") == "COMPLETED_PR_NOT_MERGED"
+        for record in captured
+    )
+    assert not any(record.get("event") == "monitor.filesystem_gc_failed" for record in captured)
 
 
 async def _seed_old_completed_pr_workspace(

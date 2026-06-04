@@ -748,6 +748,14 @@ def _log_completed_workspace_compose_teardown_result(
     _log.warning("monitor.compose_teardown_failed", **log_fields)
 
 
+def _failed_compose_teardowns_for_gc_log(result: WorkspaceGCResult) -> dict[str, dict[str, object]]:
+    return {
+        workspace_id: teardown.to_dict()
+        for workspace_id, teardown in result.compose_teardowns.items()
+        if not teardown.ok
+    }
+
+
 async def _gc_completed_workspace_filesystem(
     self: Any,
     workspace_id: str,
@@ -807,6 +815,18 @@ async def _gc_completed_workspace_filesystem(
             await asyncio.to_thread(
                 _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
             )
+    if result.status == "partial":
+        log_fields: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "deleted_path_count": len(result.deleted_paths),
+            "delete_errors": [error.to_dict() for error in result.delete_errors],
+            "reservation_releases": result.reservation_releases,
+        }
+        failed_compose_teardowns = _failed_compose_teardowns_for_gc_log(result)
+        if failed_compose_teardowns:
+            log_fields["compose_teardowns"] = failed_compose_teardowns
+        _log.warning("monitor.filesystem_gc_failed", **log_fields)
+        return
     if not result.plan.candidates and result.plan.preserved:
         preserved = result.plan.preserved[0]
         _log.info(
@@ -815,15 +835,6 @@ async def _gc_completed_workspace_filesystem(
             reason_code=preserved.reason_code,
             age_hours=preserved.age_hours,
             retention_hours=result.plan.min_age_hours,
-        )
-        return
-    if result.status == "partial":
-        _log.warning(
-            "monitor.filesystem_gc_failed",
-            workspace_id=workspace_id,
-            deleted_path_count=len(result.deleted_paths),
-            delete_errors=[error.to_dict() for error in result.delete_errors],
-            reservation_releases=result.reservation_releases,
         )
         return
     _log.info(
