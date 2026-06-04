@@ -1109,6 +1109,7 @@ class TestMcpOperatorSurfaceParityPart002:
         assert "agent_readiness" in mcp_payload
         for check_name in (
             "db",
+            "worker",
             "docker_cli",
             "docker_daemon",
             "docker_compose",
