@@ -19,6 +19,7 @@ pytestmark = pytest.mark.unit
 
 
 def _closed_connection_error() -> InterfaceError:
+    """Build the transient DB error shape handled by the worker sweep loop."""
     return InterfaceError(
         "SELECT 1",
         {},
@@ -28,6 +29,7 @@ def _closed_connection_error() -> InterfaceError:
 
 
 def _reap_result() -> OrphanReapResult:
+    """Build a successful classified-orphan reaper result for worker tests."""
     return OrphanReapResult(
         enabled=True,
         status="ok",
@@ -41,6 +43,7 @@ def _make_worker(
     auto_cleanup_orphans: bool,
     interval: float = 300.0,
 ) -> ControlWorker:
+    """Create a minimally wired worker with the classified reaper dependency."""
     return ControlWorker(
         session_factory=SimpleNamespace(),  # type: ignore[arg-type]
         provisioner=SimpleNamespace(),  # type: ignore[arg-type]
@@ -55,6 +58,7 @@ def _make_worker(
 
 
 async def test_no_op_when_reaper_is_none() -> None:
+    """The classified-orphan loop is inert when no reaper callback is wired."""
     worker = _make_worker(None, auto_cleanup_orphans=True)
     worker._next_classified_orphan_reap_scan_at = 0.0  # noqa: SLF001
 
@@ -64,9 +68,11 @@ async def test_no_op_when_reaper_is_none() -> None:
 
 
 async def test_classified_orphan_reaper_does_not_fire_when_auto_cleanup_off() -> None:
+    """Disabling orphan cleanup prevents the classified reaper from running."""
     calls = 0
 
     async def _reap() -> OrphanReapResult:
+        """Fail the test if the disabled cleanup gate invokes the reaper."""
         nonlocal calls
         calls += 1
         raise AssertionError("reaper must not fire while cleanup is disabled")
@@ -85,11 +91,13 @@ async def test_classified_orphan_reaper_does_not_fire_when_auto_cleanup_off() ->
 async def test_classified_orphan_reaper_fires_and_reschedules_when_auto_cleanup_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An eligible classified reaper run executes once and advances its cursor."""
     current_time = 1_000.0
     monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: current_time)
     calls = 0
 
     async def _reap() -> OrphanReapResult:
+        """Record successful reaper invocations."""
         nonlocal calls
         calls += 1
         return _reap_result()
@@ -108,6 +116,7 @@ async def test_classified_orphan_reaper_fires_and_reschedules_when_auto_cleanup_
 async def test_classified_orphan_reaper_transient_db_error_warns_and_reschedules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Transient DB disconnects are warned and do not stall future scans."""
     current_time = 2_000.0
     monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: current_time)
     logged: list[tuple[str, dict[str, object]]] = []
@@ -117,6 +126,7 @@ async def test_classified_orphan_reaper_transient_db_error_warns_and_reschedules
     )
 
     async def _reap() -> OrphanReapResult:
+        """Raise the transient connection error under test."""
         raise _closed_connection_error()
 
     worker = _make_worker(_reap, auto_cleanup_orphans=True, interval=120.0)
@@ -132,6 +142,7 @@ async def test_classified_orphan_reaper_transient_db_error_warns_and_reschedules
 async def test_classified_orphan_reaper_fatal_error_is_logged_swallowed_and_reschedules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Unexpected reaper failures are logged and rescheduled without crashing."""
     current_time = 3_000.0
     monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: current_time)
     logged: list[tuple[str, dict[str, object]]] = []
@@ -141,6 +152,7 @@ async def test_classified_orphan_reaper_fatal_error_is_logged_swallowed_and_resc
     )
 
     async def _reap() -> OrphanReapResult:
+        """Raise the fatal reaper failure under test."""
         raise RuntimeError("docker inventory failed")
 
     worker = _make_worker(_reap, auto_cleanup_orphans=True, interval=60.0)
@@ -154,9 +166,11 @@ async def test_classified_orphan_reaper_fatal_error_is_logged_swallowed_and_resc
 
 
 async def test_run_once_invokes_classified_orphan_reaper_loop() -> None:
+    """The worker run-once path includes the classified-orphan reaper loop."""
     calls = 0
 
     async def _reap() -> OrphanReapResult:
+        """Record run-once reaper invocation."""
         nonlocal calls
         calls += 1
         return _reap_result()

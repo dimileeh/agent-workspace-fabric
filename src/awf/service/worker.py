@@ -255,6 +255,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         )
 
     async def _reap_classified_orphans() -> OrphanReapResult:
+        """Sweep classified orphan resources using the worker runtime dependencies."""
         return await sweep_classified_orphans(
             session_factory,
             work_dir=work_dir,

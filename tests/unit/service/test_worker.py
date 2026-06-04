@@ -777,6 +777,7 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     monkeypatch.setattr(worker_mod, "reconcile_orphaned_workspace_dirs", _fake_reconcile)
 
     async def _fake_sweep_classified_orphans(*args: object, **kwargs: object) -> object:
+        """Capture classified-orphan sweep wiring from the worker runtime."""
         created["classified_sweep_args"] = args
         created["classified_sweep_kwargs"] = kwargs
         return object()
