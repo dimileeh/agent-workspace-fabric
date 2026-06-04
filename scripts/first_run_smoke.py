@@ -647,8 +647,9 @@ def _parse_args(argv: Sequence[str] | None) -> SmokeConfig:
     parser.add_argument("--python", default=DEFAULT_PYTHON)
     parser.add_argument("--keep-temp", action="store_true")
     args = parser.parse_args(argv)
+    lanes = tuple(dict.fromkeys(Lane(raw) for raw in (args.lane or DEFAULT_LANES)))
     return SmokeConfig(
-        lanes=tuple(Lane(raw) for raw in (args.lane or DEFAULT_LANES)),
+        lanes=lanes,
         methods=tuple(args.method or ("uv",)),
         checkout_root=args.checkout_root.resolve(),
         installer=args.installer.resolve(),

@@ -157,6 +157,23 @@ def test_tool_install_command_pins_requested_python(
 
 
 @pytest.mark.unit
+def test_parse_args_deduplicates_repeat_lanes_in_order() -> None:
+    """Duplicate lane args are idempotent while preserving first-seen order."""
+    config = smoke._parse_args(
+        [
+            "--lane",
+            "source-uv-run",
+            "--lane",
+            "installer-fixture",
+            "--lane",
+            "source-uv-run",
+        ]
+    )
+
+    assert config.lanes == (smoke.Lane.SOURCE_UV_RUN, smoke.Lane.INSTALLER_FIXTURE)
+
+
+@pytest.mark.unit
 def test_tool_install_lane_stops_after_first_post_install_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

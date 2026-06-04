@@ -36,6 +36,36 @@ Plan reference: `plans/T14_E2E_SMOKE_HARNESS_PLAN.md`
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
 
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HCWUe
+
+### Requirement Status
+
+- Complete: Added focused regression coverage in
+  `tests/unit/scripts/test_first_run_smoke.py` for duplicate `--lane`
+  arguments.
+- Complete: `scripts/first_run_smoke.py::_parse_args` now deduplicates parsed
+  lanes while preserving first-seen order.
+- Complete: `--lane` remains repeatable for selecting multiple different lanes.
+- Complete: Broad AWF/GitHub validation was not run in the agent phase.
+
+### Evidence
+
+- Confirmed pre-fix focused regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_parse_args_deduplicates_repeat_lanes_in_order -q`
+  failed because the parsed lane tuple retained the duplicate source lane.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_parse_args_deduplicates_repeat_lanes_in_order tests/unit/scripts/test_first_run_smoke.py::test_copy_source_checkout_preserves_markers_and_excludes_dev_state -q`
+  passed with `2 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+- File-scoped format check:
+  `uv run --python 3.12 --extra dev ruff format --check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.
+
 ## Review Repair Iteration: issue 4620148180
 
 ### Requirement Status

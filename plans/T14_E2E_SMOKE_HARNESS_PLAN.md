@@ -155,3 +155,40 @@ source-checkout validation failures continue to fail.
   must pass.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HCWUe
+
+### Problem Statement And Scope
+
+Inline review thread `PRRT_kwDOSJAM6s6HCWUe` reports that passing the same
+source lane more than once on the CLI can derive the same lane root twice. The
+first source checkout copy succeeds, while the second hits `FileExistsError` and
+crashes the harness. The fix is scoped to preserving repeatable lane selection
+while making duplicate lane arguments idempotent before execution.
+
+### Requirements Checklist
+
+- Add focused regression coverage for duplicate `--lane` arguments.
+- Deduplicate parsed lanes while preserving the caller's first-seen order.
+- Keep `--lane` repeatable for selecting multiple different lanes.
+- Avoid broad validation in the agent phase; AWF owns full validation after
+  completion.
+
+### Implementation Steps
+
+1. Add a unit test for `_parse_args` showing duplicate lane arguments collapse
+   to one lane in first-seen order.
+2. Run the focused test and confirm it fails before implementation.
+3. Deduplicate parsed lanes in `scripts/first_run_smoke.py::_parse_args`.
+4. Re-run the focused new test and a small smoke-harness unit subset.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_parse_args_deduplicates_repeat_lanes_in_order -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_parse_args_deduplicates_repeat_lanes_in_order tests/unit/scripts/test_first_run_smoke.py::test_copy_source_checkout_preserves_markers_and_excludes_dev_state -q`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.
