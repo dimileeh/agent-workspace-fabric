@@ -260,6 +260,12 @@ def _reap_one_base(signature_dir: Path, *, base_root: Path) -> dict[str, str] | 
         }
     try:
         shutil.rmtree(signature_dir)
+    except FileNotFoundError:
+        # The base was deleted concurrently (another GC pass or an operator) between
+        # the scan and this ``rmtree``. The desired end-state — the superseded base is
+        # gone — already holds, so treat it as a success rather than a partial failure
+        # that would raise a false-positive alert.
+        return None
     except PermissionError as exc:
         # The most common real failure: a root-owned base under a uid-1000 caller.
         # Python maps ``EACCES``/``EPERM`` to ``PermissionError``, so this catches the

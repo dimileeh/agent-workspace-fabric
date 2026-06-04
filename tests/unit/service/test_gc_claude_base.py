@@ -303,6 +303,36 @@ def test_non_permission_oserror_reap_is_partial(
 
 
 @pytest.mark.unit
+def test_concurrent_deletion_reap_is_success_not_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A base deleted concurrently (another GC pass or an operator) between the scan and
+    # the ``rmtree`` surfaces as ``FileNotFoundError`` — a subclass of ``OSError``. The
+    # desired end-state (the superseded base is gone) already holds, so it must count as
+    # a reaped success, not a partial failure that would raise a false-positive alert.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    _make_base(work_dir, "sigsuper0000000")
+
+    def _vanished(path: object, *args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("No such file or directory")
+
+    monkeypatch.setattr(gc_claude_base_mod.shutil, "rmtree", _vanished)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=True,
+    )
+
+    assert report["status"] == "ok"
+    assert report["reason_code"] == CLAUDE_BASE_SUPERSEDED_REAPED
+    assert report["reaped"] == ["sigsuper0000000"]
+    assert report["errors"] == []
+
+
+@pytest.mark.unit
 def test_pinned_marker_unreadable_or_empty_is_ignored(tmp_path: Path) -> None:
     # A workspace whose ``base.signature`` is empty (or missing) contributes no pin,
     # so an otherwise-superseded base is still reaped. The ``_shared`` tree is never
