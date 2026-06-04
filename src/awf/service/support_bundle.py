@@ -227,6 +227,16 @@ def _setup_state(
         if exc.details:
             payload["details"] = _redact_value(exc.details, secrets)
         return payload
+    except Exception as exc:
+        unexpected_payload: dict[str, object] = {
+            "status": "failed",
+            "reason_code": str(getattr(exc, "reason_code", "HOST_SETUP_CONFIG_READ_FAILED")),
+            "message": _redact_text(str(exc), secrets),
+        }
+        details = getattr(exc, "details", None)
+        if details is not None:
+            unexpected_payload["details"] = _redact_value(details, secrets)
+        return unexpected_payload
 
     return {
         "status": "loaded",

@@ -83,6 +83,35 @@ uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/me
 # Success: no issues found in 2 source files
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HABmr` Iteration
+
+Additional files changed:
+
+- `src/awf/service/support_bundle.py`
+- `tests/unit/service/test_support_bundle.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_unexpected_config_reader_errors
+# failed: ConfigReaderError escaped _setup_state and aborted collect_support_bundle
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k 'setup_state_degrades_unexpected_config_reader_errors or setup_state_redacts_config_load_errors'
+# 2 passed, 16 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py tests/unit/service/test_support_bundle.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.

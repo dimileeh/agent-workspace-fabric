@@ -622,6 +622,62 @@ def test_support_bundle_setup_state_redacts_config_load_errors(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_support_bundle_setup_state_degrades_unexpected_config_reader_errors(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+
+    class ConfigReaderError(RuntimeError):
+        reason_code = "CONFIG_READER_FAILED"
+
+        def __init__(self) -> None:
+            super().__init__(f"reader failed for {plain_ref}")
+            self.details = {"credential_ref": plain_ref}
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    def _config_reader() -> HostSetupConfig:
+        raise ConfigReaderError()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=_config_reader,
+        )
+    )
+
+    setup_state = bundle["setup_state"]
+    assert isinstance(setup_state, dict)
+    assert setup_state["status"] == "failed"
+    assert setup_state["reason_code"] == "CONFIG_READER_FAILED"
+    assert setup_state["message"] == "reader failed for <redacted>"
+    assert setup_state["details"] == {"credential_ref": "<redacted>"}
+    assert bundle["service_status"] == _green_status()
+    recent_failure_summary = bundle["recent_failure_summary"]
+    assert isinstance(recent_failure_summary, dict)
+    assert recent_failure_summary["since_hours"] == 24
+    assert recent_failure_summary["total_failed_workspaces"] == 0
+    assert recent_failure_summary["failure_groups"] == []
+    serialized = json.dumps(bundle, sort_keys=True)
+    assert plain_ref not in serialized
+    assert "/home/user/.awf/secrets/github.default" not in serialized
+
+
+@pytest.mark.unit
 def test_support_bundle_omits_raw_prompts_and_outputs(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 

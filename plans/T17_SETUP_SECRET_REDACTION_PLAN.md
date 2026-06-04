@@ -21,6 +21,12 @@ credential entry, or unrelated refactors are included.
   file.
 - This repair remains inside the existing T17 redaction scope and only changes
   MCP log-read redaction plus focused regressions.
+- Review thread `PRRT_kwDOSJAM6s6HABmr` identified that unexpected
+  setup-config reader exceptions still abort support-bundle collection instead
+  of returning a redacted failed setup-state payload.
+- This repair remains inside the existing T17 support-bundle setup-state scope
+  and only changes unexpected reader exception handling plus a focused
+  regression.
 
 ## Requirements Checklist
 
@@ -54,6 +60,9 @@ credential entry, or unrelated refactors are included.
 7. Add a focused regression for a raw MCP log whose requested slice starts
    inside a configured secret, confirm it fails, then redact an expanded log
    window before returning the requested slice.
+8. Add a focused regression for an unexpected setup-config reader exception,
+   confirm it fails, then return a redacted failed setup-state payload while the
+   rest of support-bundle collection succeeds.
 
 ## Verification Commands
 
@@ -70,6 +79,14 @@ Review-thread repair checks:
 uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
 uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HABmr` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k 'setup_state_degrades_unexpected_config_reader_errors or setup_state_redacts_config_load_errors'
+uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py tests/unit/service/test_support_bundle.py
+uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
 ```
 
 Focused lint/type checks, adjusted to touched files:
