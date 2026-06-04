@@ -30,6 +30,10 @@ DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS = 168
 # Mirrors ``awf.service.gc.DEFAULT_MIN_AGE_HOURS`` (kept local so the foundation
 # config layer does not import the service layer).
 DEFAULT_ORPHAN_RECONCILE_MIN_AGE_HOURS = 168.0
+DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS = 3600.0
+# Mirrors ``awf.service.gc_reconcile.DEFAULT_ORPHAN_RECONCILE_LIMIT`` (kept local
+# so the foundation config layer does not import the service layer).
+DEFAULT_ORPHAN_RECONCILE_LIMIT = 50
 DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
 DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
 _MIN_PRODUCTION_API_TOKEN_LENGTH = 24
@@ -415,12 +419,12 @@ class Settings(BaseSettings):
         ),
     )
     orphan_reconcile_scan_interval_seconds: float = Field(
-        default=3600.0,
+        default=DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
         gt=0,
         description="Interval between worker orphan-directory reconcile sweeps.",
     )
     orphan_reconcile_max_per_scan: int = Field(
-        default=50,
+        default=DEFAULT_ORPHAN_RECONCILE_LIMIT,
         gt=0,
         description="Maximum orphan directories reaped in one reconcile sweep (bounded batch).",
     )

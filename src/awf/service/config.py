@@ -16,6 +16,9 @@ from awf.common.config import (
     DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS,
     DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_MIN_FREE_DISK_BYTES,
+    DEFAULT_ORPHAN_RECONCILE_LIMIT,
+    DEFAULT_ORPHAN_RECONCILE_MIN_AGE_HOURS,
+    DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
     DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT,
     DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS,
     Settings,
@@ -99,9 +102,9 @@ class ServiceSettings:
     workspace_cleanup_scan_interval_seconds: float = DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS
     workspace_cleanup_batch_limit: int = DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT
     auto_cleanup_orphans: bool = False
-    orphan_reconcile_scan_interval_seconds: float = 3600.0
-    orphan_reconcile_max_per_scan: int = 50
-    orphan_reconcile_min_age_hours: float = 168.0
+    orphan_reconcile_scan_interval_seconds: float = DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS
+    orphan_reconcile_max_per_scan: int = DEFAULT_ORPHAN_RECONCILE_LIMIT
+    orphan_reconcile_min_age_hours: float = DEFAULT_ORPHAN_RECONCILE_MIN_AGE_HOURS
     network_posture_open_legacy_cutoff: datetime | None = None
     local_capacity_cpu_cores: float | None = None
     local_capacity_memory_gb: float | None = None
