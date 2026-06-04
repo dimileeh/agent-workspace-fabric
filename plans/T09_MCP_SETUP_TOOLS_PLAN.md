@@ -84,6 +84,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: Setup Tools Test File Line Limit
+
+### Problem Statement And Scope
+
+CI fails the maintainability guard
+`test_first_party_code_files_stay_under_line_limit` because
+`tests/unit/mcp/test_setup_tools.py` grew to 1,721 lines, above the 1,500-line
+first-party file limit.
+
+Scope is limited to decomposing the oversized setup-tools test module while
+preserving existing MCP setup-tool behavior and assertions.
+
+### Requirements Checklist
+
+- Keep every setup-tools test behavior and assertion intact.
+- Split `tests/unit/mcp/test_setup_tools.py` so no first-party file exceeds
+  the 1,500-line maintainability limit.
+- Keep the existing coverage-registry node ID for the representative
+  client-integration smoke test stable.
+- Avoid weakening, skipping, or disabling the maintainability guard.
+- Keep verification focused; broad AWF/GitHub validation remains managed after
+  the agent phase.
+
+### Implementation Steps
+
+1. Move shared setup-tools test helpers into a small helper module.
+2. Move client-integration instruction tests into a dedicated test module while
+   leaving the registered smoke-test node in the original file.
+3. Run the focused line-limit repro, affected MCP setup-tools tests, and the
+   registry reference smoke test.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/setup_tools_test_helpers.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HH2Ia
 
 ### Problem Statement And Scope

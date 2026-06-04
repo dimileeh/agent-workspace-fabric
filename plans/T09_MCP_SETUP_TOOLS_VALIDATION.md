@@ -53,6 +53,57 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: Setup Tools Test File Line Limit
+
+Plan reference: `T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Keep every setup-tools test behavior and assertion intact: Complete.
+- Split `tests/unit/mcp/test_setup_tools.py` so no first-party file exceeds
+  the 1,500-line maintainability limit: Complete.
+- Keep the existing coverage-registry node ID for the representative
+  client-integration smoke test stable: Complete.
+- Avoid weakening, skipping, or disabling the maintainability guard: Complete.
+- Keep verification focused; broad AWF/GitHub validation remains managed after
+  the agent phase: Complete.
+
+### Evidence
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `tests/unit/mcp/setup_tools_test_helpers.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/setup_tools_test_helpers.py
+```
+
+Latest results:
+
+- Focused line-limit repro before the split failed with
+  `tests/unit/mcp/test_setup_tools.py: 1721`.
+- Focused line-limit guard after the split: 1 passed.
+- Affected setup-tools test modules after the split: 38 passed.
+- Registry reference smoke test after preserving the original client smoke node:
+  1 passed.
+- Focused ruff: passed.
+- Current line counts: `test_setup_tools.py` 1,423 lines,
+  `test_setup_tools_client_integration.py` 283 lines,
+  `setup_tools_test_helpers.py` 37 lines.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Next-Step Command Rewriting
 
 ### Requirement Status
