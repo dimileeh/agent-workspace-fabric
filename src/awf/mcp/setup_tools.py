@@ -256,14 +256,19 @@ def _get_setup_status_result(
 
     rendered = render_first_run_json(readiness)
     details = _mapping(rendered.get("details"))
+    selected_providers = _list_of_strings(details.get("selected_providers"))
     payload = {
         "status": rendered.get("status", "unknown"),
-        "command": rendered.get("command", "awf setup"),
+        "command": _setup_status_command(
+            rendered.get("command"),
+            selected_providers=selected_providers,
+            source_checkout=source_path,
+        ),
         "summary": rendered.get("summary", ""),
         "reason_code": rendered.get("reason_code"),
         "setup": {
             "dry_run": True,
-            "selected_providers": _list_of_strings(details.get("selected_providers")),
+            "selected_providers": selected_providers,
             "checks": _safe_setup_checks(details.get("checks")),
             "plain_file_consent": config.consent.plain_file_secrets,
             "source_checkout_assets_consent": config.consent.source_checkout_assets,
@@ -278,7 +283,11 @@ def _get_setup_status_result(
             prefer_probed=source_path is not None,
         ),
         "issues": _setup_status_issues(rendered.get("issues")),
-        "next_steps": _list_of_strings(rendered.get("next_steps")),
+        "next_steps": _setup_status_next_steps(
+            rendered.get("next_steps"),
+            selected_providers=selected_providers,
+            source_checkout=source_path,
+        ),
     }
     return safe_result(payload, is_error=payload["status"] in ("blocked", "failed"))
 
@@ -653,6 +662,57 @@ def _setup_status_issues(value: Any) -> list[dict[str, Any]]:
             rendered["check"] = check
         issues.append(rendered)
     return issues
+
+
+def _setup_status_command(
+    value: Any,
+    *,
+    selected_providers: list[str],
+    source_checkout: Path | None,
+) -> str:
+    if source_checkout is None:
+        return value if isinstance(value, str) else "awf setup"
+    return _setup_status_dry_run_command(
+        selected_providers=selected_providers,
+        source_checkout=source_checkout,
+    )
+
+
+def _setup_status_next_steps(
+    value: Any,
+    *,
+    selected_providers: list[str],
+    source_checkout: Path | None,
+) -> list[str]:
+    next_steps = _list_of_strings(value)
+    if source_checkout is None:
+        return next_steps
+
+    setup_command = _setup_status_dry_run_command(
+        selected_providers=selected_providers,
+        source_checkout=source_checkout,
+    )
+    start_command = _start_source_checkout_command(source_checkout)
+    return [
+        step.replace("awf setup --dry-run", setup_command).replace("awf start", start_command)
+        for step in next_steps
+    ]
+
+
+def _setup_status_dry_run_command(
+    *,
+    selected_providers: list[str],
+    source_checkout: Path,
+) -> str:
+    command = ["awf", "setup", "--dry-run"]
+    for provider in selected_providers:
+        command.extend(["--provider", provider])
+    command.extend(["--source-checkout", str(source_checkout)])
+    return shlex.join(command)
+
+
+def _start_source_checkout_command(source_checkout: Path) -> str:
+    return shlex.join(["awf", "start", "--source-checkout", str(source_checkout)])
 
 
 def _client_instruction_payload(

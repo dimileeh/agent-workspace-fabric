@@ -357,6 +357,8 @@ async def test_get_setup_status_returns_only_status_and_safe_refs(
         }
     ]
     assert payload["status"] == "success"
+    assert payload["command"] == "awf setup"
+    assert payload["next_steps"] == ["Run awf start."]
     assert payload["setup"]["checks"] == [{"name": "docker", "level": "ok"}]
     assert payload["providers"]["github"] == {
         "status": "ready",
@@ -536,7 +538,7 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
 ) -> None:
     from awf.mcp import setup_tools
 
-    checkout = tmp_path / "awf"
+    checkout = tmp_path / "source checkout"
     verified_at = datetime(2026, 2, 3, tzinfo=UTC).isoformat()
     readiness = first_run_success_payload(
         command="awf setup",
@@ -546,7 +548,7 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
             "checks": [{"name": "docker", "level": "ok"}],
             "source_checkout": {"root": str(checkout), "verified_at": verified_at},
         },
-        next_steps=("Run awf start.",),
+        next_steps=("Run awf start to start local AWF Core.",),
     )
     config = HostSetupConfig(
         providers={
@@ -590,6 +592,8 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
         {"providers": ["github"], "source_checkout": str(checkout)},
     )
     payload = _payload(result)
+    expected_setup_command = f"awf setup --dry-run --provider github --source-checkout '{checkout}'"
+    expected_start_command = f"awf start --source-checkout '{checkout}'"
 
     assert result.isError is False
     assert read_calls == [True]
@@ -603,6 +607,10 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
         }
     ]
     assert payload["status"] == "success"
+    assert payload["command"] == expected_setup_command
+    assert payload["next_steps"] == [
+        f"Run {expected_start_command} to start local AWF Core.",
+    ]
     assert payload["setup"]["plain_file_consent"] is True
     assert payload["setup"]["source_checkout_assets_consent"] is True
     assert payload["providers"]["github"] == {
@@ -621,6 +629,42 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
         "verified_at": verified_at,
         "marker_count": None,
     }
+
+
+@pytest.mark.unit
+async def test_get_setup_status_source_checkout_blocked_next_steps_preserve_explicit_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    readiness = first_run_failure_payload(
+        command="awf setup",
+        reason_code=SETUP_READINESS_FAILED,
+        status="blocked",
+        summary="source checkout blocked",
+        details={"check": "docker"},
+        next_steps=("Fix the reported blockers above, then re-run awf setup --dry-run.",),
+    )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", HostSetupConfig)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+    expected_setup_command = f"awf setup --dry-run --source-checkout '{checkout}'"
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["command"] == expected_setup_command
+    assert payload["next_steps"] == [
+        f"Fix the reported blockers above, then re-run {expected_setup_command}.",
+    ]
 
 
 @pytest.mark.unit

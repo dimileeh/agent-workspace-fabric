@@ -84,6 +84,53 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HHUuk
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` validates an explicit
+`source_checkout` with `_run_setup(..., dry_run=True)` but returns the generic
+first-run command and next-step guidance. Those strings can point the operator
+at `awf start` or `awf setup --dry-run` without `--source-checkout`, so following
+the MCP response may inspect or start persisted/default assets instead of the
+explicit checkout that was just probed.
+
+Scope is limited to setup-status response guidance for calls that include an
+explicit `source_checkout`.
+
+### Requirements Checklist
+
+- Preserve existing setup-status command and next-step output when
+  `source_checkout` is not supplied.
+- For explicit `source_checkout` status calls, render a setup command containing
+  the resolved checkout path.
+- For successful explicit-checkout status calls, render next-step guidance that
+  starts local service with the same resolved checkout path.
+- For blocked explicit-checkout status calls, render next-step guidance that
+  re-runs setup dry-run with the same resolved checkout path.
+- Add focused regressions proving the returned guidance preserves the resolved
+  explicit checkout path.
+
+### Implementation Steps
+
+1. Add focused failing setup-status regressions for success and blocked
+   explicit-checkout next steps.
+2. Add a small helper to render source-checkout-aware setup/status/start
+   commands and use it only when `source_checkout` is supplied.
+3. Run the targeted regressions and focused setup-tools checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_reads_host_config_status tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_blocked_next_steps_preserve_explicit_checkout -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue_4620143523
 
 ### Problem Statement And Scope
