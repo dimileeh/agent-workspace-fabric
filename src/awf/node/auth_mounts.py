@@ -830,6 +830,25 @@ def _reconcile_fallback_edits_into_upper(*, legacy: Path, upper: Path, base: Pat
     read as "newer than base" and be copied. There is still no data loss (an
     equal/newer ``upper`` always wins, and the copy is bounded to the differing
     set); the mtime comparison is intentionally conservative toward preserving edits.
+
+    Known limitation (deletions are not forwarded): ``os.walk`` only yields files
+    that *exist* in the legacy copy, so a file (or directory) the agent deleted
+    during the fallback session is invisible here. No overlayfs whiteout / opaque
+    marker is created in ``upper`` for it, so after the overlay remounts that path
+    reappears from ``base``. Only writes are forwarded; fallback-era removals are
+    silently lost. Tracking them would require diffing legacy against base and
+    synthesizing whiteouts, which the mtime-only (no content-hash) design omits.
+
+    Known limitation (a newer host write can un-delete an overlay deletion): an
+    overlay-era deletion is recorded in ``upper`` as a whiteout character device,
+    and ``_safe_mtime_ns`` returns that whiteout's *creation* mtime (when the agent
+    deleted the file). The "upper wins ties" rule only guards equal mtimes, so if
+    the host updates the same path *after* teardown and bumps the legacy copy's
+    mtime strictly past the whiteout's creation mtime, ``legacy_mtime_ns >
+    upper_mtime_ns`` holds and ``copy2`` replaces the whiteout with a regular file —
+    silently restoring what the agent had intentionally removed. This is an inherent
+    edge of the mtime-only approach (whiteouts carry no "deleted at" semantics stat
+    can read) and is accepted as best-effort.
     """
 
     for root, _dirs, files in os.walk(legacy):
