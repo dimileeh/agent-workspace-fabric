@@ -330,6 +330,9 @@ class WorkspaceGCResult:
                 "deleted_paths": [str(path) for path in self.deleted_paths],
                 "deleted_path_count": len(self.deleted_paths),
                 "delete_errors": [error.to_dict() for error in self.delete_errors],
+                "compose_teardowns": {
+                    ws_id: result.to_dict() for ws_id, result in self.compose_teardowns.items()
+                },
                 "secret_leases": self.secret_lease_revocations,
                 "worktree_removes": {
                     ws_id: result.to_dict() for ws_id, result in self.worktree_removes.items()

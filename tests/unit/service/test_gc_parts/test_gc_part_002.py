@@ -449,6 +449,13 @@ async def test_single_workspace_gc_reports_failed_missing_workspace_compose_tear
         "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
         "error": "volume still in use",
     }
+    assert result.to_dict()["compose_teardowns"] == {
+        workspace_id: {
+            "status": "failed",
+            "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
+            "error": "volume still in use",
+        }
+    }
     assert calls == [
         (
             workspace_id,
