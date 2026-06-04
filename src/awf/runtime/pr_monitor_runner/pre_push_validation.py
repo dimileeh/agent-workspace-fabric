@@ -515,6 +515,32 @@ async def _pre_push_validation_worktree_check(
     )
 
 
+async def _head_descends_from(
+    self: Any,
+    *,
+    worktree_path: Path,
+    ancestor: str,
+    descendant: str,
+) -> bool:
+    """Return True when ``descendant`` is a descendant of ``ancestor``.
+
+    Uses ``git merge-base --is-ancestor`` which exits 0 when the first ref is an
+    ancestor of the second and non-zero otherwise. Callers only invoke this with
+    distinct SHAs, so a 0 exit means the fix-pass agent advanced HEAD on top of
+    the pre-fix commit rather than moving it sideways or backward.
+    """
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        )
+    )
+    return bool(result.ok)
+
+
 async def _pre_push_validation_cleanup(
     self: Any,
     *,
@@ -738,14 +764,27 @@ async def _run_pre_push_validation_fix_pass(
         return False, None
     if not committed:
         current_head = await self._rev_parse_head(worktree_path)
-        if current_head is not None and current_head != fix_start_head:
-            # The fix-pass agent self-committed a valid repair: HEAD advanced and
-            # the worktree is clean, so ``_commit_dirty_worktree`` had nothing to
-            # commit and returned False. Treat this as a committed repair — clean
-            # validation side effects against the new head and let the caller
-            # rerun pre-push validation on the advanced head. Rolling back here
-            # would orphan the agent's commit and re-validate the stale failing
-            # head forever (issue #406).
+        if (
+            current_head is not None
+            and current_head != fix_start_head
+            and await _head_descends_from(
+                self,
+                worktree_path=worktree_path,
+                ancestor=fix_start_head,
+                descendant=current_head,
+            )
+        ):
+            # The fix-pass agent self-committed a valid repair: HEAD advanced on
+            # top of ``fix_start_head`` and the worktree is clean, so
+            # ``_commit_dirty_worktree`` had nothing to commit and returned False.
+            # Treat this as a committed repair — clean validation side effects
+            # against the new head and let the caller rerun pre-push validation on
+            # the advanced head. Rolling back here would orphan the agent's commit
+            # and re-validate the stale failing head forever (issue #406). We only
+            # accept the new head when it strictly descends from ``fix_start_head``;
+            # a sideways/backward move (e.g. ``git reset --hard HEAD~1``) must fall
+            # through to the rollback below so we restore the pre-fix-pass state
+            # instead of pushing the wrong revision.
             _log.info(
                 "monitor.pre_push_validation_fix_self_commit_detected",
                 workspace_id=workspace_id,
@@ -761,6 +800,17 @@ async def _run_pre_push_validation_fix_pass(
                 pass_number=pass_number,
             )
             return True, cleanup_failure_reason
+        if current_head is not None and current_head != fix_start_head:
+            # HEAD moved but does not descend from ``fix_start_head``: the fix-pass
+            # agent reset or checked out a non-descendant revision. Roll back to the
+            # pre-fix-pass head rather than accepting the divergent revision.
+            _log.warning(
+                "monitor.pre_push_validation_fix_head_not_descendant",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                fix_start_head=fix_start_head,
+                current_head=current_head,
+            )
         rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
