@@ -1896,6 +1896,56 @@ uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
 # Success: no issues found in 1 source file
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HM_Mt` Private-Key Env Redaction Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `is_secret_env_key` now returns true for exact `PRIVATE_KEY`
+  names.
+- Complete: `is_secret_env_key` now returns true for suffix forms such as
+  `SSH_PRIVATE_KEY` and hyphen-normalized equivalents.
+- Complete: shared assignment-style redaction masks `PRIVATE_KEY=value` and
+  `SSH_PRIVATE_KEY=value` text.
+- Complete: existing public-key classifier exclusions remain covered by the
+  focused classifier regression.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/provider_readiness.py`
+- `src/awf/common/token_patterns.py`
+- `tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py`
+- `tests/unit/runtime/test_log_redaction.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values -q --tb=short -ra
+# failed: PRIVATE_KEY was not classified as secret and PRIVATE_KEY/SSH_PRIVATE_KEY assignments were not redacted
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values -q --tb=short -ra
+# 16 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/common/test_token_patterns.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier -q --tb=short -ra
+# 44 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/provider_readiness.py src/awf/common/token_patterns.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/runtime/test_log_redaction.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/awf/common/token_patterns.py
+# Success: no issues found in 2 source files
+```
+
 ## Gaps
 
 None found.

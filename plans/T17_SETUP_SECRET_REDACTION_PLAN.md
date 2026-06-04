@@ -1510,3 +1510,50 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.p
 uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py tests/unit/service/test_support_bundle.py
 uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HM_Mt` Private-Key Env Redaction Plan
+
+### Problem Statement And Scope
+
+The inline review reports that secret env-key classification omits conventional
+private-key names such as `PRIVATE_KEY` and `SSH_PRIVATE_KEY`. Service-log and
+MCP exact-secret collection use that classifier, so a private-key value from the
+selected env sources can be missed when it appears as a bare log/artifact body.
+The shared token-assignment regex also omits `PRIVATE_KEY`, so inline
+`PRIVATE_KEY=value` text is not redacted like token/password assignments.
+
+This repair is limited to private-key env-name classification and shared
+assignment-style redaction. It does not change provider readiness probes,
+service-log streaming mechanics, MCP log offset handling, or broad validation
+ownership.
+
+### Requirements Checklist
+
+- `is_secret_env_key` returns true for exact `PRIVATE_KEY` names.
+- `is_secret_env_key` returns true for suffix forms such as `SSH_PRIVATE_KEY`
+  and hyphen-normalized equivalents.
+- Shared assignment-style redaction masks `PRIVATE_KEY=value` and
+  `SSH_PRIVATE_KEY=value` text.
+- Existing non-secret classifier exclusions such as `PUBLIC_URL` and
+  `TOKEN_BUCKET_SIZE` remain unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused failing regressions for private-key env classification and
+   private-key assignment redaction.
+2. Add `_PRIVATE_KEY` to the secret env-key suffix set so exact and suffixed
+   names are classified consistently.
+3. Add `PRIVATE[_-]?KEY` to the shared token-assignment key alternatives.
+4. Run the targeted regressions, adjacent focused redaction checks, and narrow
+   ruff/mypy checks for touched files. Broad AWF/GitHub validation remains
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/provider_readiness.py src/awf/common/token_patterns.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/runtime/test_log_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/awf/common/token_patterns.py
+```

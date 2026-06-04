@@ -23,7 +23,7 @@ KNOWN_TOKEN_PATTERN: Final = (
 TOKEN_ASSIGNMENT_PATTERN: Final = (
     r"\b(?P<key>"
     r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
-    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY)"
+    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)"
     r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
     r"|PASSWORD|PASSWD|SECRET"
     r")\b"

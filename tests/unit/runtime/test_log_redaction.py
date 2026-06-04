@@ -236,6 +236,8 @@ def test_redact_secrets_byte_slice_masks_overlapping_exact_secret_self_match() -
         ("PASSWORD='database-password-123456'", "PASSWORD='<redacted>'"),
         ("PASSWD=database-passwd-value-123456", "PASSWD=<redacted>"),
         ("SECRET=shared-secret-value-123456", "SECRET=<redacted>"),
+        ("PRIVATE_KEY=private-key-value-123456", "PRIVATE_KEY=<redacted>"),
+        ("SSH_PRIVATE_KEY='ssh-private-key-value-123456'", "SSH_PRIVATE_KEY='<redacted>'"),
         ("PROJECT_API_KEY: project-api-key-123456", "PROJECT_API_KEY: <redacted>"),
         ("ACCESS_KEY=access-key-value-123456", "ACCESS_KEY=<redacted>"),
         ("curl -H 'Authorization: Bearer bearerToken123456'", "Authorization: Bearer <redacted>"),

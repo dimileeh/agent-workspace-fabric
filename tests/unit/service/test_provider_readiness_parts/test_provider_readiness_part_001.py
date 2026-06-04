@@ -88,6 +88,9 @@ def test_provider_readiness_public_secret_env_key_classifier() -> None:
     assert provider_readiness.is_secret_env_key("custom-token")
     assert provider_readiness.is_secret_env_key("PASSWORD")
     assert provider_readiness.is_secret_env_key("workspace_client_secret")
+    assert provider_readiness.is_secret_env_key("PRIVATE_KEY")
+    assert provider_readiness.is_secret_env_key("SSH_PRIVATE_KEY")
+    assert provider_readiness.is_secret_env_key("custom-private-key")
     assert not provider_readiness.is_secret_env_key("PUBLIC_URL")
     assert not provider_readiness.is_secret_env_key("TOKEN_BUCKET_SIZE")
 
