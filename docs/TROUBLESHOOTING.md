@@ -71,7 +71,7 @@ remove only that stack before rerunning `awf service bootstrap`:
 ```bash
 # If you are running from an AWF source checkout:
 export AWF_LOCAL_SERVICE_PROJECT="awf-local-service"
-docker compose -p "${AWF_LOCAL_SERVICE_PROJECT}" -f docker/compose/local-service.yml down --remove-orphans
+docker compose -p "${AWF_LOCAL_SERVICE_PROJECT}" down --remove-orphans
 
 # If you are using an installed `awf` package outside the source tree:
 export AWF_LOCAL_SERVICE_PROJECT="awf-local-service"

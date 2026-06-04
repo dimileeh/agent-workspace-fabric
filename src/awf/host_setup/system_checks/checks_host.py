@@ -136,7 +136,7 @@ def _resolve_work_dir(
     finally Compose's built-in ``${HOME}/.awf/service`` default when no override
     is set. Honoring the env override keeps ``awf setup`` from reporting disk
     readiness for the wrong directory when an operator points the stack at a
-    custom host work dir via the shell or ``docker/compose/.env``.
+    custom host work dir via the shell or root ``.env``.
 
     The persisted ``config.work_dir`` is deliberately *not* consulted here.
     ``awf start`` bind-mounts ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` from
@@ -634,16 +634,11 @@ def check_host_home(*, environ: Mapping[str, str] | None = None) -> SetupCheckRe
     )
 
 
-# The local-service Compose stack hard-requires two variables through Compose's
-# mandatory-substitution form ``${VAR:?message}``: ``AWF_API_TOKEN`` (the api /
-# worker auth token) and ``AWF_POSTGRES_PASSWORD`` (the Postgres password, reused
-# verbatim inside ``AWF_DATABASE_URL``) -- see docker/compose/local-service.yml.
-# When either is unset or empty, ``docker compose`` aborts *before* it starts any
-# service, so a clean first run that never set them clears every other probe yet
-# fails the instant the operator runs ``awf start`` (the documented bootstrap
-# copies .env.example, which ships AWF_API_TOKEN empty). Validate their presence
-# here so readiness cannot declare the machine ready -- and tell the operator to
-# run awf start -- for a start Compose will reject.
+# The local-service Compose stack supplies loopback-only local defaults for
+# ``AWF_API_TOKEN`` and ``AWF_POSTGRES_PASSWORD`` so a fresh source checkout can
+# start with ``docker compose up --build``. This check still reports whether the
+# resolved service environment carries explicit values or uses those defaults,
+# without logging either value.
 REQUIRED_LOCAL_SERVICE_ENV_VARS: tuple[str, ...] = (
     "AWF_API_TOKEN",
     "AWF_POSTGRES_PASSWORD",
@@ -651,53 +646,36 @@ REQUIRED_LOCAL_SERVICE_ENV_VARS: tuple[str, ...] = (
 
 
 def check_required_service_env(*, environ: Mapping[str, str] | None = None) -> SetupCheckResult:
-    """Check the mandatory local-service Compose variables are set (non-secret).
-
-    ``docker/compose/local-service.yml`` interpolates ``AWF_API_TOKEN`` and
-    ``AWF_POSTGRES_PASSWORD`` with Compose's ``${VAR:?...}`` mandatory form, so an
-    unset or empty value makes ``docker compose`` abort before Core starts. The
-    probe reads the same resolved service env every other readiness check consults
-    (falling back to the process env only when ``environ`` is ``None``) and stays a
-    non-secret presence test: it never reads, stores, or logs the secret values --
-    only whether each is non-empty -- and records the variable *names* plus the
-    missing list, never the values themselves.
-    """
+    """Check local-service auth/database env without leaking secret values."""
     env = os.environ if environ is None else environ
-    # Match Compose's ``${VAR:?...}`` semantics exactly: look up the *exact*
-    # uppercase key (env var names are case-sensitive on Unix, and the Compose
-    # file requires the literal ${AWF_API_TOKEN}/${AWF_POSTGRES_PASSWORD}) and
-    # treat empty as unset. A case-insensitive helper would pass on a resolved
-    # env that only carried lowercase awf_api_token/awf_postgres_password, yet
-    # docker compose -- which reads only the exact uppercase name -- would still
-    # abort awf start, so this gate must not over-match the case.
-    missing = [name for name in REQUIRED_LOCAL_SERVICE_ENV_VARS if not env.get(name)]
-    if not missing:
+    defaults_applied = [name for name in REQUIRED_LOCAL_SERVICE_ENV_VARS if not env.get(name)]
+    if not defaults_applied:
         return SetupCheckResult(
             name="required_service_env",
             level=SetupCheckLevel.OK,
-            summary="Required local-service Compose variables are set.",
+            summary="Local-service auth/database variables are set.",
             detail=(
                 "AWF_API_TOKEN and AWF_POSTGRES_PASSWORD are present and non-empty in the "
-                "resolved service env, so docker compose can interpolate the local-service "
-                "stack's mandatory ${VAR:?...} variables when awf start runs."
+                "resolved service env. Values are not read or logged."
             ),
-            data={"required": list(REQUIRED_LOCAL_SERVICE_ENV_VARS), "missing": []},
+            data={
+                "checked": list(REQUIRED_LOCAL_SERVICE_ENV_VARS),
+                "defaults_applied": [],
+            },
         )
-    joined = ", ".join(missing)
     return SetupCheckResult(
         name="required_service_env",
-        level=SetupCheckLevel.BLOCKED,
-        summary=f"Required local-service Compose variable(s) unset or empty: {joined}.",
+        level=SetupCheckLevel.OK,
+        summary="Local-service Compose will use safe loopback-only defaults.",
         detail=(
-            f"The local-service Compose stack requires {joined} via mandatory ${{VAR:?...}} "
-            "substitution (docker/compose/local-service.yml), so docker compose aborts before "
-            "starting Core when they are unset or empty. Without this gate readiness would "
-            "report ready and tell you to run awf start, which would then fail. Only the "
-            "variable names are checked -- their values are never read or logged."
+            "Missing or empty AWF_API_TOKEN / AWF_POSTGRES_PASSWORD values are valid for the "
+            "local root Compose cold-start path because the Compose stack defaults them to a "
+            "local bearer token and development Postgres password while binding services to "
+            "127.0.0.1. Set explicit values in root .env when you want a non-default local token "
+            "or password. Values are not read or logged."
         ),
-        fix=(
-            f"Set {joined} in docker/compose/.env (copied from .env.example, which ships "
-            "AWF_API_TOKEN empty) or export them before running awf start."
-        ),
-        data={"required": list(REQUIRED_LOCAL_SERVICE_ENV_VARS), "missing": missing},
+        data={
+            "checked": list(REQUIRED_LOCAL_SERVICE_ENV_VARS),
+            "defaults_applied": defaults_applied,
+        },
     )

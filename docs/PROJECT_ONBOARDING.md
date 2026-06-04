@@ -11,8 +11,11 @@ Use the current runnable first-run commands in order. Export the required local
 service values before starting Core so Compose can interpolate the API, worker,
 and Postgres service environment:
 
-- `awf setup` — run host readiness checks without starting Core.
-- `awf start` — start local AWF Core and print local API/console URLs.
+- `cp .env.example .env` — create the root local runtime env file.
+- `awf setup` — verify host readiness and configure local operator surfaces.
+- `awf start` — start local AWF Core.
+- `awf service status --format pretty` — confirm API, database, Docker, image,
+  disk, provider, and cleanup health.
 - `awf init <path>` — the project-onboarding pass described on this page. It
   inspects a checked-out repository, runs local readiness checks without
   calling the AWF API, and creates or previews `.awf/workspace.yml`. Interactive
@@ -20,19 +23,18 @@ and Postgres service environment:
   `--write-profile --yes` to write detected defaults.
 
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_GITHUB_TOKEN="$(gh auth token)"
+cp .env.example .env
 awf setup
 awf start
+awf service status --format pretty
 awf init .                        # guided project onboarding for ./.
 awf init . --write-profile --yes  # silent profile write with detected defaults
 awf init . --include-smoke-request
 ```
 
-For persistent values across shells in source checkouts, copy `.env.example` to
-`docker/compose/.env` and set `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and
-`AWF_GITHUB_TOKEN` there before running `awf setup` and `awf start`.
+The root `.env` is the single local runtime env file for source checkouts and
+package installs. Existing legacy `docker/compose/.env` files are migration
+sources only.
 
 ## One-message prompt
 

@@ -269,8 +269,8 @@ def test_check_required_service_env_ok_when_both_present_without_leaking_values(
     assert result.name == "required_service_env"
     assert result.level is SetupCheckLevel.OK
     assert result.data == {
-        "required": ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"],
-        "missing": [],
+        "checked": ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"],
+        "defaults_applied": [],
     }
     rendered = " ".join(
         [result.summary, result.detail, result.fix or "", json.dumps(dict(result.data))]
@@ -280,43 +280,27 @@ def test_check_required_service_env_ok_when_both_present_without_leaking_values(
 
 
 @pytest.mark.unit
-def test_check_required_service_env_blocks_when_unset() -> None:
-    """Unset mandatory Compose vars block and name both missing variables.
-
-    A clean first run (the documented ``cp .env.example docker/compose/.env`` ships
-    AWF_API_TOKEN empty) would otherwise pass every probe yet make ``docker compose``
-    abort, so this surfaces as a BLOCKED readiness issue naming both variables.
-    """
+def test_check_required_service_env_ok_when_unset_uses_local_defaults() -> None:
+    """Unset local Compose vars use safe loopback-only defaults."""
     result = system_checks.check_required_service_env(environ={})
 
     assert result.name == "required_service_env"
-    assert result.level is SetupCheckLevel.BLOCKED
-    assert result.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
-    assert "AWF_API_TOKEN" in result.summary
-    assert "AWF_POSTGRES_PASSWORD" in result.summary
-    assert result.fix is not None
-    assert "docker/compose/.env" in result.fix
+    assert result.level is SetupCheckLevel.OK
+    assert result.data["defaults_applied"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+    assert "loopback-only defaults" in result.summary
+    assert result.fix is None
 
 
 @pytest.mark.unit
-def test_check_required_service_env_treats_empty_value_as_unset() -> None:
-    """An empty string is unset for Compose ``${VAR:?...}`` substitution.
-
-    Compose aborts on an empty value exactly as it does on a missing one (the
-    documented ``.env.example`` ships ``AWF_API_TOKEN=``), so the probe must treat
-    ``AWF_API_TOKEN=""`` as missing rather than report ready. A non-empty value
-    Compose would accept -- even an unusual whitespace one -- is left untouched so
-    the gate cannot diverge from Compose's own ``${VAR:?}`` semantics.
-    """
+def test_check_required_service_env_treats_empty_value_as_defaulted() -> None:
+    """Empty values are defaulted by the local root Compose stack."""
     result = system_checks.check_required_service_env(
         environ={"AWF_API_TOKEN": "", "AWF_POSTGRES_PASSWORD": ""}
     )
 
-    assert result.level is SetupCheckLevel.BLOCKED
-    assert result.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+    assert result.level is SetupCheckLevel.OK
+    assert result.data["defaults_applied"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
 
-    # A non-empty (even whitespace-only) value satisfies Compose's ``${VAR:?}``
-    # guard, so the probe reports it set rather than over-reaching past Compose.
     whitespace_ok = system_checks.check_required_service_env(
         environ={"AWF_API_TOKEN": " ", "AWF_POSTGRES_PASSWORD": "pw"}
     )
@@ -324,34 +308,25 @@ def test_check_required_service_env_treats_empty_value_as_unset() -> None:
 
 
 @pytest.mark.unit
-def test_check_required_service_env_blocks_single_missing_without_leaking_present() -> None:
-    """One missing var blocks listing only it, never echoing the present secret."""
+def test_check_required_service_env_defaults_single_missing_without_leaking_present() -> None:
+    """One missing var uses the default and never echoes the present secret."""
     pg_password = "present-pg-password-value"
     result = system_checks.check_required_service_env(
         environ={"AWF_POSTGRES_PASSWORD": pg_password}
     )
 
-    assert result.level is SetupCheckLevel.BLOCKED
-    assert result.data["missing"] == ["AWF_API_TOKEN"]
-    assert "AWF_API_TOKEN" in result.summary
-    assert "AWF_POSTGRES_PASSWORD" not in result.summary
+    assert result.level is SetupCheckLevel.OK
+    assert result.data["defaults_applied"] == ["AWF_API_TOKEN"]
     rendered = " ".join(
         [result.summary, result.detail, result.fix or "", json.dumps(dict(result.data))]
     )
+    assert "AWF_API_TOKEN" in rendered
     assert pg_password not in rendered
 
 
 @pytest.mark.unit
-def test_check_required_service_env_blocks_on_wrong_case_keys() -> None:
-    """Differently-cased keys block: Compose ``${VAR:?...}`` is case-sensitive.
-
-    ``docker/compose/local-service.yml`` interpolates the exact uppercase
-    ``${AWF_API_TOKEN:?...}`` / ``${AWF_POSTGRES_PASSWORD:?...}``; on Unix env var
-    names are case-sensitive, so a resolved env that only carries lowercase
-    ``awf_api_token``/``awf_postgres_password`` makes ``docker compose`` abort. The
-    probe must check the exact keys (not a case-insensitive lookup) so it cannot
-    report readiness for an ``awf start`` Compose will reject.
-    """
+def test_check_required_service_env_defaults_wrong_case_keys() -> None:
+    """Differently-cased keys do not satisfy Compose, so defaults apply."""
     result = system_checks.check_required_service_env(
         environ={
             "awf_api_token": "lower-case-api-token",
@@ -359,20 +334,15 @@ def test_check_required_service_env_blocks_on_wrong_case_keys() -> None:
         }
     )
 
-    assert result.level is SetupCheckLevel.BLOCKED
-    assert result.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+    assert result.level is SetupCheckLevel.OK
+    assert result.data["defaults_applied"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
 
 
 @pytest.mark.unit
-def test_run_system_checks_blocks_on_missing_required_service_env(
+def test_run_system_checks_allows_missing_required_service_env_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Aggregation surfaces the unset Compose vars as a blocker against the resolved env.
-
-    The setup CLI feeds ``run_system_checks`` the resolved service env; when that env
-    lacks the mandatory tokens the readiness payload must block instead of telling the
-    operator to run a ``awf start`` Compose will reject.
-    """
+    """Aggregation treats local Compose defaults as startable."""
 
     def fake_ok(name: str) -> SetupCheckResult:
         return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
@@ -401,14 +371,14 @@ def test_run_system_checks_blocks_on_missing_required_service_env(
     )
 
     required = next(r for r in results if r.name == "required_service_env")
-    assert required.level is SetupCheckLevel.BLOCKED
-    assert required.data["missing"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
+    assert required.level is SetupCheckLevel.OK
+    assert required.data["defaults_applied"] == ["AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"]
 
     payload = build_setup_readiness_payload(results)
-    assert payload.status == "blocked"
+    assert payload.status == "success"
     rendered = json.dumps(render_first_run_json(payload))
     assert "required_service_env" in rendered
-    assert "Run awf start" not in rendered
+    assert "Run awf start" in rendered
 
 
 # --- ${HOME} fallback validation (no AWF_HOST_* override set) --------------

@@ -66,6 +66,7 @@ class _StartBootstrapInputs:
     asset_root: Path | None
     service_env: dict[str, str]
     settings: ServiceSettings
+    env_migration: object | None = None
 
 
 def start_command(
@@ -144,10 +145,22 @@ def start_command(
     except KeyboardInterrupt:
         raise typer.Exit(code=130) from None
     except ServiceBootstrapError as exc:
-        _render_start_payload(_start_failure_payload(exc), fmt, success=False)
+        _render_start_payload(
+            _start_failure_payload(exc, env_migration=inputs.env_migration),
+            fmt,
+            success=False,
+        )
         raise typer.Exit(code=1) from None
 
-    _render_start_payload(_start_success_payload(inputs.settings, result), fmt, success=True)
+    _render_start_payload(
+        _start_success_payload(
+            inputs.settings,
+            result,
+            env_migration=inputs.env_migration,
+        ),
+        fmt,
+        success=True,
+    )
 
 
 def _resolve_start_source_checkout(source_checkout: Path | None) -> VerifiedSourceCheckout | None:
@@ -186,28 +199,26 @@ def _resolve_start_bootstrap_inputs(
     from awf.service.config import local_service_environ, resolve_service_settings
 
     if verified is not None:
-        from awf.cli.init_ops import _resolve_existing_service_env_file
+        from awf.cli.init_ops import _migrate_legacy_service_env_file
 
         compose_file = verified.compose_file
         asset_root: Path | None = verified.root
-        compose_env_candidate = verified.root / "docker" / "compose" / ".env"
-        compose_env_file: Path | None = (
-            compose_env_candidate if compose_env_candidate.exists() else None
+        env_migration = _migrate_legacy_service_env_file(
+            verified.root / ".env",
+            verified.root / ".env.example",
         )
-        # Before the compose .env is seeded the checkout root .env carries tokens
-        # and DB settings, so read it as a fallback exactly like
-        # `awf service bootstrap` does via `_resolve_existing_service_env_file`.
-        # The compose --env-file (compose_env_file) stays pinned to the compose
-        # .env, so the root .env is used for reads only, never forwarded to Docker.
-        resolved_read_env = _resolve_existing_service_env_file(compose_env_candidate)
-        read_env_file = resolved_read_env if resolved_read_env.exists() else None
+        root_env = verified.root / ".env"
+        read_env_file = root_env if root_env.exists() else None
+        compose_env_file = read_env_file
     else:
         from awf.cli.init_ops import (
+            _migrate_legacy_service_env_file,
             _resolve_service_compose_paths,
             _resolve_service_runtime_env_files,
         )
 
-        compose_file, raw_env_file, _ = _resolve_service_compose_paths()
+        compose_file, raw_env_file, env_example = _resolve_service_compose_paths()
+        env_migration = _migrate_legacy_service_env_file(raw_env_file, env_example)
         read_env_file, compose_env_file = _resolve_service_runtime_env_files(
             compose_file,
             raw_env_file,
@@ -226,6 +237,7 @@ def _resolve_start_bootstrap_inputs(
         asset_root=asset_root,
         service_env=service_env,
         settings=settings,
+        env_migration=env_migration,
     )
 
 
@@ -240,6 +252,8 @@ def _render_start_payload(payload: FirstRunPayload, fmt: OutputFormat, *, succes
 def _start_success_payload(
     settings: ServiceSettings,
     result: ServiceBootstrapResult,
+    *,
+    env_migration: object | None = None,
 ) -> FirstRunPayload:
     """Build the operator success panel from resolved settings and bootstrap result."""
     from awf.service.smoke import DEFAULT_LOCAL_CONSOLE_URL
@@ -256,6 +270,8 @@ def _start_success_payload(
         "providers": _providers_summary(service_status.get("agent_readiness")),
         "health": service_status.get("status", "unknown"),
     }
+    if (migration_details := _env_migration_details(env_migration)) is not None:
+        details["env_migration"] = migration_details
     next_steps = (
         # Lead with the provider-free local health proof: a skeptic can verify
         # local Core health without handing AWF GitHub/PR authority or a token.
@@ -273,7 +289,11 @@ def _start_success_payload(
     )
 
 
-def _start_failure_payload(exc: ServiceBootstrapError) -> FirstRunPayload:
+def _start_failure_payload(
+    exc: ServiceBootstrapError,
+    *,
+    env_migration: object | None = None,
+) -> FirstRunPayload:
     """Translate a structured bootstrap failure into a first-run failure payload.
 
     The full ``exc.to_dict()`` diagnostic is always embedded under
@@ -282,6 +302,8 @@ def _start_failure_payload(exc: ServiceBootstrapError) -> FirstRunPayload:
     """
     diagnostic = exc.to_dict()
     details: dict[str, Any] = {"bootstrap": diagnostic}
+    if (migration_details := _env_migration_details(env_migration)) is not None:
+        details["env_migration"] = migration_details
     reason_code = _classify_start_failure(exc)
     if reason_code is None:
         return _unclassified_start_failure_payload(exc, details)
@@ -299,6 +321,17 @@ def _start_failure_payload(exc: ServiceBootstrapError) -> FirstRunPayload:
         summary=_START_FAILURE_SUMMARIES[reason_code],
         details=details,
     )
+
+
+def _env_migration_details(env_migration: object | None) -> dict[str, object] | None:
+    """Return secret-free env migration metadata for first-run payloads."""
+    if env_migration is None:
+        return None
+    to_dict = getattr(env_migration, "to_dict", None)
+    if not callable(to_dict):
+        return None
+    details = to_dict()
+    return details if isinstance(details, dict) else None
 
 
 _START_FAILURE_SUMMARIES = {

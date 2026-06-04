@@ -8,8 +8,8 @@ Use the source checkout lanes when you want to inspect AWF before running it.
 Use the `uv tool` / `pipx` lane when you want the published package. The hosted curl
 installer lane is intentionally omitted until its public installer, manifest,
 checksums, and distribution artifacts are published and verified.
-In source checkout lanes, `awf setup` checks and `awf start` uses
-`docker/compose/.env` for Compose-interpolated local service values.
+All lanes use root `.env` for local runtime values. Existing legacy
+`docker/compose/.env` files are migration sources only.
 
 ## Prerequisites
 
@@ -23,6 +23,25 @@ The mocked smoke command below does not require live GitHub or provider access.
 Local first-run URLs use the smoke defaults: API checks use
 `http://localhost:8000` by default, and the console is
 `http://localhost:3000` when the console is running.
+
+For source checkouts or raw Docker installs, root Compose can bring up the full
+local stack with safe loopback-only defaults:
+
+```bash
+docker compose up --build
+```
+
+Open <http://localhost:3000> for the console, or call the API at
+<http://localhost:8000>. Protected local API calls use
+`Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
+
+If you set or refresh the GitHub token after starting Core, rerun the service
+start command so Compose recreates the service containers with the updated
+environment:
+
+```bash
+awf start
+```
 
 ## Lane 1: uv tool or pipx
 
@@ -74,6 +93,7 @@ mv "$awf_env_tmp" .env
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup
 awf start
+awf service status --format pretty
 
 mkdir -p "$HOME/awf-eval-project"
 awf init "$HOME/awf-eval-project"
@@ -140,47 +160,20 @@ This lane uses inspectable source and then installs `awf` as a global tool from
 that checkout. It is useful when you want to inspect or patch AWF but still want
 the normal `awf` executable on `PATH`.
 
-Persist the generated local service values into the checkout's Compose env file
-before setup/start so a later upgrade can restore them and host-side database
-checks use the same password. The snippet replaces these AWF-managed keys in
-place and leaves unrelated Compose env entries intact, falling back to the
-checkout-root `.env` when the Compose env file does not exist yet.
+Keep local runtime values in the checkout-root `.env` so a later upgrade can
+restore the same running Core token and password, and so host-side database
+checks use that same password.
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
 uv tool install . --force
-
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-awf_env_tmp="$(mktemp)"
-awf_env_source=""
-if [ -f docker/compose/.env ]; then
-  awf_env_source="docker/compose/.env"
-elif [ -f .env ]; then
-  awf_env_source=".env"
-fi
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  if [ -n "$awf_env_source" ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      "$awf_env_source"
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" docker/compose/.env
+cp .env.example .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
+awf service status --format pretty
 
 mkdir -p ../awf-eval-project
 awf init ../awf-eval-project
@@ -199,7 +192,7 @@ still holds them.
 
 ```bash
 AWF_PERSISTED_API_TOKEN=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -211,11 +204,11 @@ done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before upgrading}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -227,14 +220,10 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before upgrading}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
-if [ -f docker/compose/.env ]; then
-  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
-else
-  docker compose -f docker/compose/local-service.yml stop
-fi
+docker compose --env-file .env -f docker/compose/local-service.yml stop
 git pull
 uv tool install . --force
 awf setup --source-checkout "$PWD"
@@ -254,7 +243,7 @@ path:
 
 ```bash
 AWF_PERSISTED_API_TOKEN=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -266,11 +255,11 @@ done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -282,14 +271,10 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
-if [ -f docker/compose/.env ]; then
-  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
-else
-  docker compose -f docker/compose/local-service.yml stop
-fi
+docker compose --env-file .env -f docker/compose/local-service.yml stop
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 
@@ -315,47 +300,21 @@ This lane uses inspectable source and no global install. It does not place an
 `awf` executable on the global `PATH`; every AWF command runs through `uv run`
 from the checkout.
 
-Persist the generated local service values into the checkout's Compose env file
-before setup/start so a later upgrade can restore them and host-side database
-checks use the same password. The snippet replaces these AWF-managed keys in
-place and leaves unrelated Compose env entries intact, falling back to the
-checkout-root `.env` when the Compose env file does not exist yet.
+Keep local runtime values in the checkout-root `.env` so a later upgrade can
+restore the same running Core token and password, and so host-side database
+checks use that same password.
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
 uv sync --extra dev
 
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-awf_env_tmp="$(mktemp)"
-awf_env_source=""
-if [ -f docker/compose/.env ]; then
-  awf_env_source="docker/compose/.env"
-elif [ -f .env ]; then
-  awf_env_source=".env"
-fi
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  if [ -n "$awf_env_source" ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      "$awf_env_source"
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" docker/compose/.env
+cp .env.example .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf service status --format pretty
 
 mkdir -p ../awf-eval-project
 uv run --python 3.12 --extra dev awf init ../awf-eval-project
@@ -374,7 +333,7 @@ still holds them.
 
 ```bash
 AWF_PERSISTED_API_TOKEN=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -386,11 +345,11 @@ done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before upgrading}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -402,14 +361,10 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before upgrading}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
-if [ -f docker/compose/.env ]; then
-  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
-else
-  docker compose -f docker/compose/local-service.yml stop
-fi
+docker compose --env-file .env -f docker/compose/local-service.yml stop
 git pull
 uv sync --extra dev
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
@@ -428,7 +383,7 @@ option. To refresh the persisted path:
 
 ```bash
 AWF_PERSISTED_API_TOKEN=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -440,11 +395,11 @@ done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -456,14 +411,10 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
-if [ -f docker/compose/.env ]; then
-  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
-else
-  docker compose -f docker/compose/local-service.yml stop
-fi
+docker compose --env-file .env -f docker/compose/local-service.yml stop
 uv run --python 3.12 --extra dev awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 

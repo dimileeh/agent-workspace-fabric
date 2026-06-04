@@ -275,9 +275,8 @@ def _probe_port_bind(port: int, host: str) -> PortProbeResult:
     """Classify whether ``port`` can be bound on ``host``, by ``errno``.
 
     Binding the same address Docker will publish is what makes the readiness
-    result match what ``awf start`` reserves — the all-interface wildcard
-    (``0.0.0.0``) for the API port, loopback (``127.0.0.1``) for the Postgres
-    port — so the host is a parameter rather than hard-coded here.
+    result match what ``awf start`` reserves. The host is a parameter because the
+    API, Postgres, and optional bridge checks may publish different addresses.
 
     A bind failure is classified by ``errno`` so the readiness check reports the
     real cause rather than mislabelling everything as occupancy: ``EADDRINUSE``
@@ -302,16 +301,15 @@ def _probe_port_bind(port: int, host: str) -> PortProbeResult:
 
 
 def _default_port_probe(port: int) -> PortProbeResult:
-    """Classify whether the AWF API host port can be bound on all interfaces.
+    """Classify whether the AWF API host port can be bound on loopback.
 
-    The probe binds the IPv4 wildcard address (``0.0.0.0``) rather than just
-    loopback because the local-service Compose file publishes the API port
-    without a host IP (``${AWF_API_HOST_PORT:-8000}:8000``), so Docker reserves
-    it on every host interface. A loopback-only probe would report the port free
-    even when something is listening on another interface, only for ``awf start``
-    to fail later when Docker tries to publish the all-interface bind.
+    The local-service Compose file publishes the API as
+    ``127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000`` so raw Docker cold starts do
+    not expose the API on every host interface. Probe the same loopback address
+    Docker will reserve; otherwise setup could report a false conflict from a
+    non-loopback listener that does not block the actual Compose bind.
     """
-    return _probe_port_bind(port, "0.0.0.0")
+    return _probe_port_bind(port, "127.0.0.1")
 
 
 def _loopback_port_probe(port: int) -> PortProbeResult:
@@ -334,7 +332,7 @@ def _safe_expanduser(path: str | Path) -> Path:
 
     ``Path.expanduser`` raises ``RuntimeError`` when a ``~user`` component names a
     user the host cannot resolve (e.g. a stale
-    ``AWF_HOST_WORK_DIR=~olduser/.awf/service`` in ``docker/compose/.env``). The
+    ``AWF_HOST_WORK_DIR=~olduser/.awf/service`` in root ``.env``). The
     host checks are advisory and must still emit a structured readiness payload,
     so fall back to the unexpanded path instead of letting the traceback escape
     the reason-coded setup flow.

@@ -526,12 +526,12 @@ def test_setup_config_error_pretty_includes_path(
 @pytest.mark.unit
 def test_resolve_client_env_file_require_existing_raises_when_absent(tmp_path: Path) -> None:
     """Regression for PRRT_kwDOSJAM6s6G4DGD: a fresh, valid source checkout (only
-    ``.env.example`` present) resolves a ``docker/compose/.env`` that does not
+    ``.env.example`` present) resolves root ``.env`` that does not
     exist. A non-dry-run apply (``require_existing``) must raise rather than pin an
     MCP ``--env-file`` ``awf mcp serve`` would reject with "env file does not
     exist"."""
     root = _make_source_checkout(tmp_path / "awf")
-    compose_env = validate_source_checkout(root).root / "docker" / "compose" / ".env"
+    compose_env = validate_source_checkout(root).root / ".env"
     assert not compose_env.exists()
 
     with pytest.raises(setup_commands.ClientEnvFileMissingError) as excinfo:
@@ -557,9 +557,9 @@ def test_resolve_client_env_file_require_existing_returns_when_present(tmp_path:
 @pytest.mark.unit
 def test_resolve_client_env_file_dry_run_keeps_absent_path(tmp_path: Path) -> None:
     """Verify a dry-run resolution (``require_existing`` unset) keeps resolving the
-    absent compose ``.env`` path, since the diff never starts the MCP server."""
+    absent root ``.env`` path, since the diff never starts the MCP server."""
     root = _make_source_checkout(tmp_path / "awf")
-    compose_env = validate_source_checkout(root).root / "docker" / "compose" / ".env"
+    compose_env = validate_source_checkout(root).root / ".env"
 
     resolved = setup_commands._resolve_client_env_file(root, False)
 
@@ -584,4 +584,4 @@ def test_run_client_setup_blocks_apply_when_env_file_absent(tmp_path: Path) -> N
     assert payload.reason_code == START_COMPOSE_ASSETS_MISSING
     detail = payload.issues[0].details
     assert detail["check"] == "client_env_file"
-    assert detail["env_file"].endswith("docker/compose/.env")
+    assert detail["env_file"].endswith("/.env")

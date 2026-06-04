@@ -7,34 +7,21 @@ shelling out to `awf` or `curl`.
 ## Prerequisites
 
 Install AWF and start the local Core service first. Persist the required local
-service values before setup/start so Compose and the MCP server read the same
-API, worker, and Postgres service environment:
+service values in root `.env` so Compose and the MCP server read the same API,
+worker, and Postgres service environment.
+
+For package installs, create that file explicitly because `.env.example` stays
+inside the installed AWF package assets:
 
 ```bash
 uv tool install agent-workspace-fabric
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_GITHUB_TOKEN="$(gh auth token)"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-awf_env_tmp="$(mktemp)"
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
-  if [ -f .env ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \
-      .env
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" .env
+cat > .env <<'EOF'
+AWF_API_TOKEN=local-dev-token
+AWF_POSTGRES_PASSWORD=awf_dev
+AWF_API_HOST_PORT=8000
+AWF_POSTGRES_HOST_PORT=5433
+AWF_CONSOLE_HOST_PORT=3000
+EOF
 awf setup
 awf start
 awf service status --format pretty
@@ -46,47 +33,15 @@ For contributor checkouts, install from source instead:
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
 uv tool install . --force
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_GITHUB_TOKEN="$(gh auth token)"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-mkdir -p docker/compose
-awf_env_tmp="$(mktemp)"
-awf_env_source=""
-if [ -f docker/compose/.env ]; then
-  awf_env_source="docker/compose/.env"
-elif [ -f .env ]; then
-  awf_env_source=".env"
-fi
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
-  if [ -n "$awf_env_source" ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \
-      "$awf_env_source"
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" docker/compose/.env
-awf setup --source-checkout "$PWD"
-awf start --source-checkout "$PWD"
+cp .env.example .env
+awf setup
+awf start
 awf service status --format pretty
 ```
 
-`awf setup` checks the host and selected environment; `awf start` starts local
-Core. Source checkouts use `docker/compose/.env` as the local service
-environment; pass `--source-checkout "$PWD"` from the checkout you just cloned
-so setup/start refresh and use that checkout even if older source-checkout
-metadata exists. Package installs use `.env` near the working directory instead.
-Pass the env file explicitly when configuring MCP; `awf mcp serve --env-file`
+`awf start` is the friendly local Core startup path. Source checkouts and
+package installs both use root `.env` as the local service environment. Pass
+that env file explicitly when configuring MCP; `awf mcp serve --env-file`
 requires the file to exist so the MCP process sees the same database and token
 settings as the local service.
 
@@ -100,11 +55,10 @@ Register AWF as a local stdio MCP server:
 
 ```bash
 claude mcp add --transport stdio --scope user awf -- \
-  awf mcp serve --env-file /absolute/path/to/docker/compose/.env
+  awf mcp serve --env-file /absolute/path/to/.env
 ```
 
-For package installs that use a project-local `.env`, point `--env-file` at
-that file instead.
+Use an absolute path to the same root `.env` you use to start AWF.
 
 ## Codex
 
@@ -113,7 +67,7 @@ Add AWF to the Codex MCP server configuration:
 ```toml
 [mcp_servers.awf]
 command = "awf"
-args = ["mcp", "serve", "--env-file", "/absolute/path/to/docker/compose/.env"]
+args = ["mcp", "serve", "--env-file", "/absolute/path/to/.env"]
 startup_timeout_sec = 20
 tool_timeout_sec = 120
 ```

@@ -393,213 +393,42 @@ def test_quickstart_package_first_run_strips_exported_awf_env_entries(
 
 
 @pytest.mark.parametrize(
-    ("heading", "setup_command"),
+    ("heading", "setup_command", "status_command"),
     (
         (
             "## Lane 2: Source Checkout With Global Tool Install",
             'awf setup --source-checkout "$PWD"',
+            "awf service status --format pretty",
         ),
         (
             "## Lane 3: Source Checkout With No Global Install",
             'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+            "uv run --python 3.12 --extra dev awf service status --format pretty",
         ),
     ),
 )
-def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
+def test_quickstart_source_checkout_first_run_uses_root_env(
     heading: str,
     setup_command: str,
+    status_command: str,
 ) -> None:
-    """Assert source-checkout first-run secrets remain available to later upgrades."""
+    """Assert source-checkout first-run commands use root `.env` before startup."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     lane_section = _markdown_section(quickstart_text, heading)
     first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
-    api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
-    password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
-    host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
-    database_url_export = (
-        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}'
-        '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
-    )
-    api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
-    password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
-    host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
-    database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
-    env_tmp = 'awf_env_tmp="$(mktemp)"'
-    source_fallback = "\n".join(
-        (
-            'awf_env_source=""',
-            "if [ -f docker/compose/.env ]; then",
-            '  awf_env_source="docker/compose/.env"',
-            "elif [ -f .env ]; then",
-            '  awf_env_source=".env"',
-            "fi",
-        )
-    )
-    preserve_existing_env = "\n".join(
-        (
-            "    sed \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
-            '      "$awf_env_source"',
-        )
-    )
-    gnu_only_sed_alternation = (
-        "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
-        "\\|AWF_DATABASE_URL\\)=/d' docker/compose/.env"
-    )
-    persist_target = 'mv "$awf_env_tmp" docker/compose/.env'
-    unsafe_persist_target = "} > docker/compose/.env"
-
-    assert "persist" in first_run_section.lower()
-    assert api_export in first_run_section
-    assert password_export in first_run_section
-    assert host_port_export in first_run_section
-    assert database_url_export in first_run_section
-    assert env_tmp in first_run_section
-    assert source_fallback in first_run_section
-    assert api_persist in first_run_section
-    assert password_persist in first_run_section
-    assert host_port_persist in first_run_section
-    assert database_url_persist in first_run_section
-    assert preserve_existing_env in first_run_section
-    assert gnu_only_sed_alternation not in first_run_section
-    assert persist_target in first_run_section
-    assert unsafe_persist_target not in first_run_section
+    assert "Keep local runtime values in the checkout-root `.env`" in first_run_section
+    assert "cp .env.example .env" in first_run_section
+    assert "docker/compose/.env" not in first_run_section
+    assert 'awf_env_tmp="$(mktemp)"' not in first_run_section
+    assert "awf service bootstrap" not in first_run_section
     assert f"\n{setup_command}\n" in first_run_section
-    assert (
-        first_run_section.index(api_export)
-        < first_run_section.index(password_export)
-        < first_run_section.index(host_port_export)
-        < first_run_section.index(database_url_export)
-        < first_run_section.index(env_tmp)
-        < first_run_section.index(source_fallback)
-        < first_run_section.index(api_persist)
-        < first_run_section.index(password_persist)
-        < first_run_section.index(host_port_persist)
-        < first_run_section.index(database_url_persist)
-        < first_run_section.index(preserve_existing_env)
-        < first_run_section.index(persist_target)
-        < first_run_section.index(f"\n{setup_command}\n")
+    assert status_command in first_run_section
+    assert first_run_section.index("cp .env.example .env") < first_run_section.index(
+        f"\n{setup_command}\n",
     )
-
-
-@pytest.mark.parametrize(
-    "heading",
-    (
-        "## Lane 2: Source Checkout With Global Tool Install",
-        "## Lane 3: Source Checkout With No Global Install",
-    ),
-)
-def test_quickstart_source_checkout_first_run_strips_exported_awf_compose_env_entries(
-    heading: str,
-    tmp_path: Path,
-) -> None:
-    """Assert Quickstart source lanes preserve non-service Compose env entries."""
-    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
-    lane_section = _markdown_section(quickstart_text, heading)
-    first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
-    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", first_run_section, re.MULTILINE)
-    assert len(sed_expressions) == 4
-
-    compose_env = tmp_path / "compose.env"
-    compose_env.write_text(
-        "\n".join(
-            (
-                "export AWF_API_TOKEN=old-token",
-                " export AWF_POSTGRES_PASSWORD=old-password",
-                "\tAWF_POSTGRES_HOST_PORT = 15432",
-                "export AWF_DATABASE_URL = old-url",
-                "AWF_GITHUB_TOKEN=keep",
-                "AWF_API_HOST_PORT=8001",
-                "AWF_HOST_WORK_DIR=/tmp/awf-workspaces",
-                "PROVIDER_TOKEN=keep",
-                "AWF_API_TOKEN_BACKUP=keep",
-            )
-        )
-        + "\n",
-        encoding="utf-8",
+    assert first_run_section.index(f"\n{setup_command}\n") < first_run_section.index(
+        status_command,
     )
-    command = ["sed"]
-    for expression in sed_expressions:
-        command.extend(("-e", expression))
-    command.append(str(compose_env))
-
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-
-    assert result.stdout.splitlines() == [
-        "AWF_GITHUB_TOKEN=keep",
-        "AWF_API_HOST_PORT=8001",
-        "AWF_HOST_WORK_DIR=/tmp/awf-workspaces",
-        "PROVIDER_TOKEN=keep",
-        "AWF_API_TOKEN_BACKUP=keep",
-    ]
-
-
-@pytest.mark.parametrize(
-    "heading",
-    (
-        "## Lane 2: Source Checkout With Global Tool Install",
-        "## Lane 3: Source Checkout With No Global Install",
-    ),
-)
-def test_quickstart_source_checkout_first_run_uses_root_env_fallback(
-    heading: str,
-    tmp_path: Path,
-) -> None:
-    """Assert source-checkout first run preserves root .env before compose .env exists."""
-    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
-    lane_section = _markdown_section(quickstart_text, heading)
-    first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
-    source_fallback = "\n".join(
-        (
-            'awf_env_source=""',
-            "if [ -f docker/compose/.env ]; then",
-            '  awf_env_source="docker/compose/.env"',
-            "elif [ -f .env ]; then",
-            '  awf_env_source=".env"',
-            "fi",
-        )
-    )
-    preserve_root_input = 'if [ -n "$awf_env_source" ]; then'
-
-    assert source_fallback in first_run_section
-    assert preserve_root_input in first_run_section
-    assert first_run_section.index(source_fallback) < first_run_section.index(
-        preserve_root_input,
-    )
-
-    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", first_run_section, re.MULTILINE)
-    assert len(sed_expressions) == 4
-
-    root_env = tmp_path / ".env"
-    root_env.write_text(
-        "\n".join(
-            (
-                "AWF_API_TOKEN=old-token",
-                "export AWF_POSTGRES_PASSWORD=old-password",
-                "AWF_DATABASE_URL=old-url",
-                "AWF_GITHUB_TOKEN=keep",
-                "CUSTOM_AWF_SETTING=keep",
-                "PROVIDER_TOKEN=keep",
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    command = ["sed"]
-    for expression in sed_expressions:
-        command.extend(("-e", expression))
-    command.append(str(root_env))
-
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-
-    assert result.stdout.splitlines() == [
-        "AWF_GITHUB_TOKEN=keep",
-        "CUSTOM_AWF_SETTING=keep",
-        "PROVIDER_TOKEN=keep",
-    ]
 
 
 def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
@@ -656,12 +485,7 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
         "Core stack still holds them"
     )
     no_stop_guidance = "Editing `~/.awf/config.yml` remains the no-stop option"
-    stop_guard_line = "if [ -f docker/compose/.env ]; then"
-    stop_env_file_line = (
-        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
-    )
-    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
-    stop_guard_end_line = "\nfi\n"
+    stop_line = "docker compose --env-file .env -f docker/compose/local-service.yml stop"
     source_lane_headings = (
         "## Lane 2: Source Checkout With Global Tool Install",
         "## Lane 3: Source Checkout With No Global Install",
@@ -696,25 +520,15 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
                 "refreshing source-checkout metadata",
             )
         )
-        assert stop_guard_line in uninstall_section
-        assert stop_env_file_line in uninstall_section
-        assert stop_fallback_line in uninstall_section
-        assert stop_guard_end_line in uninstall_section
+        assert stop_line in uninstall_section
+        assert "docker compose --env-file docker/compose/.env" not in uninstall_section
         assert "rm -rf aira-agent-workspace-fabric" in uninstall_section
-        stop_fallback_index = uninstall_section.index(stop_fallback_line)
+        stop_index = uninstall_section.index(stop_line)
         assert section_words.index(core_stop_guidance) < section_words.index(port_block_guidance)
         assert (
             env_restore_start_index
             < env_restore_end_index
-            < uninstall_section.index(stop_guard_line)
-            < uninstall_section.index(stop_env_file_line)
-            < stop_fallback_index
-            < _required_index(
-                uninstall_section,
-                stop_guard_end_line,
-                f"{heading} uninstall",
-                start=stop_fallback_index,
-            )
+            < stop_index
             < uninstall_section.index(replacement_setup)
         )
         assert uninstall_section.index("~/.awf/config.yml") < uninstall_section.index(
@@ -738,6 +552,7 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
+    root_stop_line = "docker compose --env-file .env -f docker/compose/local-service.yml stop"
     cases = (
         (
             "Quickstart Lane 2",
@@ -791,21 +606,27 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
                 "upgrading",
             )
         )
-        assert stop_guard_line in section, f"{label} must guard optional compose env file"
-        assert stop_env_file_line in section, f"{label} must reuse compose env file if present"
-        assert stop_fallback_line in section, f"{label} must stop Core without compose env file"
-        assert stop_guard_end_line in section, f"{label} must close compose env guard"
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
-        stop_fallback_index = section.index(stop_fallback_line)
+        if root_stop_line in section:
+            stop_end_index = section.index(root_stop_line)
+        else:
+            assert stop_guard_line in section, f"{label} must guard optional compose env file"
+            assert stop_env_file_line in section, f"{label} must reuse compose env file if present"
+            assert stop_fallback_line in section, f"{label} must stop Core without compose env file"
+            assert stop_guard_end_line in section, f"{label} must close compose env guard"
+            stop_fallback_index = section.index(stop_fallback_line)
+            stop_end_index = _required_index(
+                section,
+                stop_guard_end_line,
+                label,
+                start=stop_fallback_index,
+            )
         checkout_refresh_index = section.index(checkout_refresh_line)
         assert (
             env_restore_start_index
             < env_restore_end_index
-            < section.index(stop_guard_line)
-            < section.index(stop_env_file_line)
-            < stop_fallback_index
-            < _required_index(section, stop_guard_end_line, label, start=stop_fallback_index)
+            < stop_end_index
             < checkout_refresh_index
             < section.index(refresh_prereq)
             < section.index(setup_line)
@@ -1201,6 +1022,53 @@ def test_quickstart_upgrade_section_requires_uninstall_after_upgrade() -> None:
         _quickstart_upgrade_section(text, "## Lane")
 
 
+def test_quickstart_uses_runnable_startup_path() -> None:
+    """Assert Quickstart lanes use setup/start/status before project init."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+
+    assert "All lanes use root `.env` for local runtime values" in quickstart_text
+    assert "AWF_SETUP_PLACEHOLDER" not in quickstart_text
+    assert "AWF_START_PLACEHOLDER" not in quickstart_text
+
+    for heading in (
+        "## Lane 1: uv tool or pipx",
+        "## Lane 2: Source Checkout With Global Tool Install",
+        "## Lane 3: Source Checkout With No Global Install",
+    ):
+        first_run_section = _markdown_section(quickstart_text, heading).split(
+            "\nUpgrade:\n",
+            maxsplit=1,
+        )[0]
+        assert "awf setup" in first_run_section
+        assert "awf start" in first_run_section
+        assert "awf service status --format pretty" in first_run_section
+        assert "awf init" in first_run_section
+        assert "awf smoke run" in first_run_section
+
+    assert "docker/compose/.env" in quickstart_text
+    assert "migration sources only" in quickstart_text
+
+
+def test_raw_docker_compose_source_path_is_single_command() -> None:
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+
+    for doc_name, text in (
+        ("QUICKSTART.md", quickstart_text),
+        ("GETTING_STARTED.md", getting_started_text),
+    ):
+        section = text.split(
+            "For source checkouts or raw Docker installs",
+            maxsplit=1,
+        )[1].split("If ", maxsplit=1)[0]
+        assert "docker compose up --build" in section, doc_name
+        assert "cp .env.example .env" not in section, doc_name
+        assert "docker build -t awf-agent-runtime:latest" not in section, doc_name
+        assert "localhost:3000" in section, doc_name
+        assert "localhost:8000" in section, doc_name
+        assert "local-dev-token" in section, doc_name
+
+
 def test_getting_started_uses_runnable_startup_path() -> None:
     """Assert Getting Started uses setup/start before project initialization."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
@@ -1250,13 +1118,15 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     assert "AWF_SETUP_PLACEHOLDER" not in startup_section
     assert "AWF_START_PLACEHOLDER" not in startup_section
     assert not re.search(r"(?m)^awf service bootstrap\s*$", startup_section)
-    assert re.search(r"`awf start`\s+uses", configure_section)
-    assert "`awf service bootstrap` uses" not in configure_section
-    assert "run `awf start`" in configure_section
+    assert "Root `.env` is the single local runtime env file" in configure_section
+    assert "`awf start`, `awf service bootstrap`, and raw root `docker compose`" in (
+        configure_section
+    )
+    assert "migration source" in configure_section
 
 
 def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
-    """Assert Getting Started first-run secrets remain available to later upgrades."""
+    """Assert Getting Started first-run commands create root `.env` before startup."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
@@ -1271,58 +1141,6 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     source_no_global_heading = (
         "For a source checkout with no global install, run from the checkout:"
     )
-    api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
-    password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
-    host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
-    database_url_export = (
-        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
-        '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
-    )
-    api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
-    password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
-    host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
-    database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
-    env_tmp = 'awf_env_tmp="$(mktemp)"'
-    preserve_existing_env = "\n".join(
-        (
-            "    sed \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
-            "      .env",
-        )
-    )
-    source_fallback = "\n".join(
-        (
-            'awf_env_source=""',
-            "if [ -f docker/compose/.env ]; then",
-            '  awf_env_source="docker/compose/.env"',
-            "elif [ -f .env ]; then",
-            '  awf_env_source=".env"',
-            "fi",
-        )
-    )
-    source_preserve_existing_env = "\n".join(
-        (
-            "    sed \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
-            '      "$awf_env_source"',
-        )
-    )
-    gnu_only_sed_alternation = (
-        "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
-        "\\|AWF_DATABASE_URL\\)=/d' .env"
-    )
-    gnu_only_source_sed_alternation = (
-        "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
-        "\\|AWF_DATABASE_URL\\)=/d' docker/compose/.env"
-    )
-    unsafe_package_persist_target = "} > .env"
-    unsafe_source_persist_target = "} > docker/compose/.env"
 
     assert package_heading in startup_section
     assert source_global_heading in startup_section
@@ -1334,11 +1152,6 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
                 source_global_heading,
                 maxsplit=1,
             )[0],
-            'mv "$awf_env_tmp" .env',
-            preserve_existing_env,
-            None,
-            unsafe_package_persist_target,
-            gnu_only_sed_alternation,
             "\nawf setup\n",
         ),
         (
@@ -1347,91 +1160,29 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
                 source_no_global_heading,
                 maxsplit=1,
             )[0],
-            'mv "$awf_env_tmp" docker/compose/.env',
-            source_preserve_existing_env,
-            source_fallback,
-            unsafe_source_persist_target,
-            gnu_only_source_sed_alternation,
             '\nawf setup --source-checkout "$PWD"\n',
         ),
         (
             "source checkout with no global install",
-            startup_section.split(source_no_global_heading, maxsplit=1)[1],
-            'mv "$awf_env_tmp" docker/compose/.env',
-            source_preserve_existing_env,
-            source_fallback,
-            unsafe_source_persist_target,
-            gnu_only_source_sed_alternation,
+            startup_section.split(source_no_global_heading, maxsplit=1)[1].split(
+                "\n\nThe `setup` command",
+                maxsplit=1,
+            )[0],
             '\nuv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"\n',
         ),
     )
 
-    for (
-        label,
-        section,
-        persist_target,
-        preserve_block,
-        source_input_block,
-        unsafe_persist_target,
-        forbidden_sed,
-        setup_command,
-    ) in cases:
-        assert "persist" in section.lower(), f"{label} should explain env persistence"
-        assert api_export in section, f"{label} is missing AWF_API_TOKEN generation"
-        assert password_export in section, f"{label} is missing AWF_POSTGRES_PASSWORD generation"
-        assert host_port_export in section, f"{label} is missing AWF_POSTGRES_HOST_PORT default"
-        assert database_url_export in section, (
-            f"{label} must derive AWF_DATABASE_URL from AWF_POSTGRES_PASSWORD"
+    for label, section, setup_command in cases:
+        assert "cp .env.example .env" in section, f"{label} must create root .env"
+        assert "awf_env_tmp" not in section, f"{label} should not use legacy env rewrite"
+        assert "docker/compose/.env" not in section, f"{label} should not write compose env"
+        assert section.index("cp .env.example .env") < section.index(setup_command), (
+            f"{label} must create root .env before setup"
         )
-        assert api_persist in section, f"{label} must persist AWF_API_TOKEN"
-        assert password_persist in section, f"{label} must persist AWF_POSTGRES_PASSWORD"
-        assert host_port_persist in section, f"{label} must persist AWF_POSTGRES_HOST_PORT"
-        assert database_url_persist in section, f"{label} must persist AWF_DATABASE_URL"
-        assert env_tmp in section, f"{label} must write through a temporary file"
-        if source_input_block is not None:
-            assert source_input_block in section, (
-                f"{label} must preserve docker/compose/.env or fall back to .env"
-            )
-        assert preserve_block in section, f"{label} must preserve existing env entries"
-        assert forbidden_sed not in section, f"{label} must not use GNU-only sed alternation"
-        assert unsafe_persist_target not in section, (
-            f"{label} must not truncate existing env entries"
-        )
-        if source_input_block is None:
-            assert (
-                section.index(database_url_export)
-                < section.index(env_tmp)
-                < section.index(api_persist)
-                < section.index(preserve_block)
-            ), f"{label} must prepare the temp file before preserving .env entries"
-        else:
-            assert (
-                section.index(database_url_export)
-                < section.index(env_tmp)
-                < section.index(source_input_block)
-                < section.index(api_persist)
-                < section.index(preserve_block)
-            ), f"{label} must choose existing env input before preserving entries"
-        assert persist_target in section, f"{label} must write the expected env file"
-        assert (
-            section.index(api_export)
-            < section.index(password_export)
-            < section.index(host_port_export)
-            < section.index(database_url_export)
-            < section.index(api_persist)
-            < section.index(password_persist)
-            < section.index(host_port_persist)
-            < section.index(database_url_persist)
-            < section.index(preserve_block)
-            < section.index(persist_target)
-            < section.index(setup_command)
-        ), f"{label} must persist service env before setup"
 
 
-def test_getting_started_package_first_run_strips_exported_awf_env_entries(
-    tmp_path: Path,
-) -> None:
-    """Assert Getting Started replaces exported or whitespace-padded AWF env entries."""
+def test_getting_started_package_first_run_uses_root_env_template() -> None:
+    """Assert Getting Started package first run uses the root `.env` template."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
@@ -1446,35 +1197,11 @@ def test_getting_started_package_first_run_strips_exported_awf_env_entries(
         "For a source checkout with a global `awf` executable, run from the checkout:",
         maxsplit=1,
     )[0]
-    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", package_section, re.MULTILINE)
-    assert len(sed_expressions) == 4
 
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            (
-                "export AWF_API_TOKEN=old-token",
-                " export AWF_POSTGRES_PASSWORD=old-password",
-                "\tAWF_POSTGRES_HOST_PORT = 15432",
-                "export AWF_DATABASE_URL = old-url",
-                "PROVIDER_TOKEN=keep",
-                "AWF_API_TOKEN_BACKUP=keep",
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    command = ["sed"]
-    for expression in sed_expressions:
-        command.extend(("-e", expression))
-    command.append(str(env_file))
-
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-
-    assert result.stdout.splitlines() == [
-        "PROVIDER_TOKEN=keep",
-        "AWF_API_TOKEN_BACKUP=keep",
-    ]
+    assert "cp .env.example .env" in package_section
+    assert "awf_env_tmp" not in package_section
+    assert "docker/compose/.env" not in package_section
+    assert package_section.index("cp .env.example .env") < package_section.index("\nawf setup\n")
 
 
 def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
@@ -1500,71 +1227,26 @@ def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
     )
 
 
-def test_getting_started_configure_environment_preserves_compose_env(
-    tmp_path: Path,
-) -> None:
-    """Assert source-checkout configuration does not truncate Compose env files."""
+def test_getting_started_configure_environment_uses_root_env() -> None:
+    """Assert source-checkout configuration writes root `.env`."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
     configure_section = getting_started_text.split(
         "### Configure Environment",
         maxsplit=1,
     )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
-    source_selection = "\n".join(
-        (
-            'awf_env_source=""',
-            "if [ -f docker/compose/.env ]; then",
-            '  awf_env_source="docker/compose/.env"',
-            "elif [ -f .env ]; then",
-            '  awf_env_source=".env"',
-            "else",
-            '  awf_env_source="docker/compose/.env.example"',
-        )
+    root_env_snippet_start = configure_section.index(
+        "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example",
     )
-
-    assert source_selection in configure_section
-    assert 'awf_env_tmp="$(mktemp)"' in configure_section
-    assert 'mv "$awf_env_tmp" docker/compose/.env' in configure_section
-    assert "} > docker/compose/.env" not in configure_section
-    assert (
-        configure_section.index(source_selection)
-        < configure_section.index('awf_env_tmp="$(mktemp)"')
-        < configure_section.index('mv "$awf_env_tmp" docker/compose/.env')
-        < configure_section.index(
-            'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
-        )
+    root_env_snippet_end = configure_section.index(
+        "uv run --python 3.12 --extra dev awf service bootstrap",
     )
+    root_env_snippet = configure_section[root_env_snippet_start:root_env_snippet_end]
 
-    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", configure_section, re.MULTILINE)
-    assert len(sed_expressions) == 4
-
-    env_file = tmp_path / "compose.env"
-    env_file.write_text(
-        "\n".join(
-            (
-                "export AWF_API_TOKEN=old-token",
-                "AWF_GITHUB_TOKEN=old-github-token",
-                "\tAWF_POSTGRES_HOST_PORT = 15432",
-                " export AWF_API_HOST_PORT = 9001",
-                "AWF_POSTGRES_PASSWORD=keep-password",
-                "AWF_HOST_WORK_DIR=/tmp/awf",
-                "PROVIDER_TOKEN=keep",
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    command = ["sed"]
-    for expression in sed_expressions:
-        command.extend(("-e", expression))
-    command.append(str(env_file))
-
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-
-    assert result.stdout.splitlines() == [
-        "AWF_POSTGRES_PASSWORD=keep-password",
-        "AWF_HOST_WORK_DIR=/tmp/awf",
-        "PROVIDER_TOKEN=keep",
-    ]
+    assert "Root `.env` is the single local runtime env file" in configure_section
+    assert "migration source" in configure_section
+    assert "} > .env" in root_env_snippet
+    assert "} > docker/compose/.env" not in root_env_snippet
+    assert "awf_env_tmp" not in root_env_snippet
 
 
 def test_getting_started_cli_host_port_derivation_matches_cli_default() -> None:
@@ -1584,6 +1266,9 @@ def test_getting_started_cli_host_port_derivation_matches_cli_default() -> None:
         "`AWF_API_HOST_PORT` is present, the CLI derives `http://127.0.0.1:<port>`"
         not in configure_section
     )
+    assert "root `.env` is the single local runtime env file" in configure_section.lower()
+    assert "docker/compose/.env" in configure_section
+    assert "migration source" in configure_section
 
 
 def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
@@ -1593,101 +1278,17 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         "## Claude Code",
         maxsplit=1,
     )[0]
-    database_url_export = (
-        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
-        '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
-    )
-    package_preserve_existing_env = "\n".join(
-        (
-            "    sed \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \\",
-            "      .env",
-        )
-    )
-    source_fallback = "\n".join(
-        (
-            'awf_env_source=""',
-            "if [ -f docker/compose/.env ]; then",
-            '  awf_env_source="docker/compose/.env"',
-            "elif [ -f .env ]; then",
-            '  awf_env_source=".env"',
-            "fi",
-        )
-    )
-    source_preserve_existing_env = "\n".join(
-        (
-            "    sed \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
-            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \\",
-            '      "$awf_env_source"',
-        )
-    )
 
-    assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 1
-    assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 1
-    assert (
-        len(
-            re.findall(
-                r'(?m)^awf setup --source-checkout "\$PWD"\s*$',
-                prerequisites_section,
-            )
-        )
-        == 1
-    )
-    assert (
-        len(
-            re.findall(
-                r'(?m)^awf start --source-checkout "\$PWD"\s*$',
-                prerequisites_section,
-            )
-        )
-        == 1
-    )
+    assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 2
+    assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 2
     assert (
         len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
     )
-    assert 'awf_env_tmp="$(mktemp)"' in prerequisites_section
-    assert package_preserve_existing_env in prerequisites_section
-    assert source_fallback in prerequisites_section
-    assert source_preserve_existing_env in prerequisites_section
-    assert not re.search(
-        r"(?m)^} > \.env\s*\nawf setup\nawf start\nawf service status --format pretty$",
-        prerequisites_section,
-    )
-    assert "} > docker/compose/.env" not in prerequisites_section
-    assert re.search(
-        (
-            r'(?m)^} > "\$awf_env_tmp"\s*\nmv "\$awf_env_tmp" \.env\n'
-            r"awf setup\nawf start\nawf service status --format pretty$"
-        ),
-        prerequisites_section,
-    )
-    assert re.search(
-        (
-            r'(?m)^} > "\$awf_env_tmp"\s*\nmv "\$awf_env_tmp" docker/compose/\.env\n'
-            r'awf setup --source-checkout "\$PWD"\n'
-            r'awf start --source-checkout "\$PWD"\nawf service status --format pretty$'
-        ),
-        prerequisites_section,
-    )
-    assert (
-        prerequisites_section.index(source_fallback)
-        < prerequisites_section.index(source_preserve_existing_env)
-        < prerequisites_section.index('mv "$awf_env_tmp" docker/compose/.env')
-        < prerequisites_section.index('awf setup --source-checkout "$PWD"')
-    )
-    assert prerequisites_section.count(database_url_export) == 2, (
-        "MCP setup package and source-checkout snippets must match first-run docs"
-    )
-    assert "@127.0.0.1:${AWF_POSTGRES_HOST_PORT}/awf" not in prerequisites_section
-    assert not re.search(r"(?m)^awf service bootstrap\s*$", prerequisites_section)
+    assert len(re.findall(r"(?m)^cp \.env\.example \.env$", prerequisites_section)) == 1
+    assert "cat > .env <<'EOF'" in prerequisites_section
+    assert "AWF_API_TOKEN=local-dev-token" in prerequisites_section
+    assert "AWF_POSTGRES_PASSWORD=awf_dev" in prerequisites_section
+    assert "docker/compose/.env" not in prerequisites_section
 
 
 def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
@@ -1698,14 +1299,11 @@ def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
         maxsplit=1,
     )[1].split("## One-message prompt", maxsplit=1)[0]
 
-    assert (
-        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
-        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
-        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
-        "awf setup\n"
-        "awf start\n"
-        "awf init ."
-    ) in first_run_section
+    assert "cp .env.example .env" in first_run_section
+    assert re.search(r"(?m)^awf setup\s*$", first_run_section)
+    assert re.search(r"(?m)^awf start\s*$", first_run_section)
+    assert "awf service status --format pretty" in first_run_section
+    assert "awf init ." in first_run_section
     assert not re.search(r"(?m)^awf service bootstrap\s*$", first_run_section)
     assert "AWF_SETUP_PLACEHOLDER" not in first_run_section
     assert "AWF_START_PLACEHOLDER" not in first_run_section
@@ -2442,7 +2040,11 @@ def _assert_source_checkout_api_token_restore(
         "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
     )
     token_init_line = 'AWF_PERSISTED_API_TOKEN=""'
-    token_loop_line = "for env_file in docker/compose/.env .env; do"
+    legacy_token_loop_line = "for env_file in docker/compose/.env .env; do"
+    root_token_loop_line = "for env_file in .env; do"
+    token_loop_line = (
+        legacy_token_loop_line if legacy_token_loop_line in section else root_token_loop_line
+    )
     token_file_guard_line = '  [ -f "$env_file" ] || continue'
     token_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_API_TOKEN"]
     token_quote_strip_lines = SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"]
@@ -2451,9 +2053,18 @@ def _assert_source_checkout_api_token_restore(
     token_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
     token_persisted_export_line = '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"'
     token_else_line = "else"
-    token_require_line = (
+    legacy_token_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
         "or persist it in docker/compose/.env or .env before " + lifecycle + '}"'
+    )
+    root_token_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        "or persist it in .env before " + lifecycle + '}"'
+    )
+    token_require_line = (
+        legacy_token_require_line
+        if legacy_token_require_line in section
+        else root_token_require_line
     )
     token_shell_export_line = "  export AWF_API_TOKEN"
 
@@ -2568,7 +2179,13 @@ def _assert_source_checkout_postgres_password_restore(
     """Assert source-checkout snippets preserve persisted Postgres passwords."""
     unsafe_default_line = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     password_init_line = 'AWF_PERSISTED_POSTGRES_PASSWORD=""'
-    password_loop_line = "for env_file in docker/compose/.env .env; do"
+    legacy_password_loop_line = "for env_file in docker/compose/.env .env; do"
+    root_password_loop_line = "for env_file in .env; do"
+    password_loop_line = (
+        legacy_password_loop_line
+        if legacy_password_loop_line in section
+        else root_password_loop_line
+    )
     password_file_guard_line = '  [ -f "$env_file" ] || continue'
     password_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"]
     password_quote_strip_lines = SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_PASSWORD"]
@@ -2579,11 +2196,20 @@ def _assert_source_checkout_postgres_password_restore(
         '  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"'
     )
     password_else_line = "else"
-    password_require_line = (
+    legacy_password_require_line = (
         '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
         "the running local Core or persist it in docker/compose/.env or .env before "
         + lifecycle
         + '}"'
+    )
+    root_password_require_line = (
+        '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
+        "the running local Core or persist it in .env before " + lifecycle + '}"'
+    )
+    password_require_line = (
+        legacy_password_require_line
+        if legacy_password_require_line in section
+        else root_password_require_line
     )
     password_shell_export_line = "  export AWF_POSTGRES_PASSWORD"
 
@@ -2700,6 +2326,7 @@ def _assert_source_checkout_service_env_restore_before_stop(
 ) -> tuple[int, int]:
     """Assert source-checkout snippets restore service secrets before stopping Core."""
     stop_guard_line = "if [ -f docker/compose/.env ]; then"
+    root_stop_line = "docker compose --env-file .env -f docker/compose/local-service.yml stop"
 
     api_restore_start_index, api_restore_end_index = _assert_source_checkout_api_token_restore(
         label,
@@ -2713,16 +2340,17 @@ def _assert_source_checkout_service_env_restore_before_stop(
             lifecycle,
         )
     )
-    stop_guard_index = _shell_line_index(
-        section, stop_guard_line, label, password_restore_end_index
-    )
+    if root_stop_line in section:
+        stop_index = _shell_line_index(section, root_stop_line, label, password_restore_end_index)
+    else:
+        stop_index = _shell_line_index(section, stop_guard_line, label, password_restore_end_index)
 
     assert (
         api_restore_start_index
         < api_restore_end_index
         < password_restore_start_index
         < password_restore_end_index
-        < stop_guard_index
+        < stop_index
     ), f"{label} must restore service secrets before stopping Core"
     return api_restore_start_index, password_restore_end_index
 

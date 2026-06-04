@@ -162,6 +162,10 @@ def test_service_doctor_bundle_resolves_existing_root_env(
     compose = workspace_root / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (workspace_root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     root_env = workspace_root / ".env"
     database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
@@ -219,8 +223,8 @@ def test_service_doctor_bundle_resolves_existing_root_env(
     assert provider_environ["AWF_DOCKER_HOST"] == docker_host
     assert provider_environ["AWF_API_BASE_URL"] == api_base_url
     assert captured["environ"] is provider_environ
-    assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
-    assert captured["compose_env_file"] is None
+    assert captured["compose_file"] == workspace_root / "compose.yaml"
+    assert captured["compose_env_file"] == root_env
 
 
 @pytest.mark.unit

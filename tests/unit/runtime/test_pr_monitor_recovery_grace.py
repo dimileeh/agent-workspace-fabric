@@ -66,6 +66,19 @@ def _green_pr_status() -> PRStatus:
     )
 
 
+def _elapsed_initial_review_grace_state(
+    *,
+    pr_number: int = 42,
+    grace_seconds: float = 900.0,
+) -> MonitorState:
+    """Return monitor state whose one-time review grace has definitely elapsed."""
+
+    started_at = time.monotonic() - grace_seconds - 1.0
+    state = MonitorState(started_at=started_at)
+    state.mark_addressed(_initial_review_grace_started_key(pr_number), f"{started_at:.6f}")
+    return state
+
+
 async def _mark_refactor_task(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -220,11 +233,7 @@ async def test_grace_elapsed_then_stale_recovery_dispatches_with_event(
     )
 
     # Pre-mark grace as already elapsed.
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -462,11 +471,7 @@ async def test_remonitor_after_failed_rebase_allows_fresh_recovery_dispatch(
         initial_review_grace_period_seconds=900,
     )
 
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,
@@ -535,11 +540,7 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
     )
 
     # Pre-mark grace as elapsed so the dispatch block runs.
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,
@@ -611,8 +612,7 @@ async def test_monitor_recovery_operation_includes_monitor_log_ref_when_availabl
     )
 
     monitor_log = await runner._open_monitor_log(workspace_id)
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(_initial_review_grace_started_key(42), f"{0.0:.6f}")
+    state = _elapsed_initial_review_grace_state()
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,
@@ -695,11 +695,7 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
     )
 
     # Pre-mark grace as elapsed so the dispatch block runs.
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -881,11 +877,7 @@ async def test_recovery_dispatch_does_not_requeue_already_succeeded_snapshot(
         worktrees_root=tmp_path / "worktrees",
         initial_review_grace_period_seconds=900,
     )
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -984,11 +976,7 @@ async def test_recovery_dispatch_retries_cancelled_idempotent_snapshot(
         worktrees_root=tmp_path / "worktrees",
         initial_review_grace_period_seconds=900,
     )
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -1097,11 +1085,7 @@ async def test_recovery_dispatch_waits_when_idempotent_create_loses_race_to_acti
         worktrees_root=tmp_path / "worktrees",
         initial_review_grace_period_seconds=900,
     )
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -1222,11 +1206,7 @@ async def test_recovery_dispatch_retries_when_idempotent_create_loses_race_to_te
         worktrees_root=tmp_path / "worktrees",
         initial_review_grace_period_seconds=900,
     )
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -1345,11 +1325,7 @@ async def test_recovery_dispatch_rechecks_workspace_before_retrying_idempotency_
         worktrees_root=tmp_path / "worktrees",
         initial_review_grace_period_seconds=900,
     )
-    state = MonitorState(started_at=0.0)
-    state.mark_addressed(
-        _initial_review_grace_started_key(42),
-        f"{0.0:.6f}",
-    )
+    state = _elapsed_initial_review_grace_state()
 
     terminal = await runner._execute(
         action=Merge(),

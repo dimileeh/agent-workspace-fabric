@@ -86,43 +86,16 @@ passing formula audit; it is not a supported install channel yet.
 
 ### Recommended First-Run Sequence
 
-The runnable first-run sequence is setup, start, project onboarding, then mocked
-smoke. Export the required local service values before starting Core so Compose
-can interpolate the API, worker, and Postgres service environment. The mocked
-smoke proof does not require GitHub CLI auth; add a GitHub token later when you
-create or monitor PRs.
+Once AWF is installed, the runnable first-run sequence is setup, start, health
+check, project onboarding, then mocked smoke. Keep local runtime values in the
+root `.env` so the CLI, worker, MCP server, and raw Docker Compose lane all read
+the same configuration. The mocked smoke proof does not require GitHub CLI auth;
+add a GitHub token later when you create or monitor PRs.
 
 For package-manager or virtualenv installs:
 
-Persist the generated local service values in the current first-run directory's
-`.env` before setup/start so later upgrades can restore the same running Core
-token and password, and so host-side database checks use that same password.
-The snippet replaces these AWF-managed keys in place and leaves unrelated
-`.env` entries intact.
-
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-awf_env_tmp="$(mktemp)"
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  if [ -f .env ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      .env
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" .env
-# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
-# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
+cp .env.example .env
 awf setup
 awf start
 awf service status --format pretty
@@ -132,39 +105,8 @@ awf smoke run --project <path> --mocked-local --format pretty
 
 For a source checkout with a global `awf` executable, run from the checkout:
 
-Persist the generated local service values into the checkout's Compose env file
-before setup/start so later upgrades can restore them and host-side database
-checks use the same password. The snippet replaces these AWF-managed keys in
-place and leaves unrelated Compose env entries intact, falling back to the
-checkout-root `.env` when the Compose env file does not exist yet.
-
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-awf_env_tmp="$(mktemp)"
-awf_env_source=""
-if [ -f docker/compose/.env ]; then
-  awf_env_source="docker/compose/.env"
-elif [ -f .env ]; then
-  awf_env_source=".env"
-fi
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  if [ -n "$awf_env_source" ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      "$awf_env_source"
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" docker/compose/.env
+cp .env.example .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup --source-checkout "$PWD"
@@ -176,39 +118,8 @@ awf smoke run --project <path> --mocked-local --format pretty
 
 For a source checkout with no global install, run from the checkout:
 
-Persist the generated local service values into the checkout's Compose env file
-before setup/start so later upgrades can restore them and host-side database
-checks use the same password. The snippet replaces these AWF-managed keys in
-place and leaves unrelated Compose env entries intact, falling back to the
-checkout-root `.env` when the Compose env file does not exist yet.
-
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-awf_env_tmp="$(mktemp)"
-awf_env_source=""
-if [ -f docker/compose/.env ]; then
-  awf_env_source="docker/compose/.env"
-elif [ -f .env ]; then
-  awf_env_source=".env"
-fi
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  if [ -n "$awf_env_source" ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      "$awf_env_source"
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" docker/compose/.env
+cp .env.example .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
@@ -222,10 +133,27 @@ The `setup` command runs bounded host readiness checks without starting Core.
 The `start` command starts local AWF Core and reports the local API and console
 URLs. Source-checkout startup commands pass `--source-checkout "$PWD"` so setup
 and start use the checkout's Compose assets instead of packaged/default assets
-or stale persisted metadata. For first-run probes, Quickstart keeps those URLs
-aligned with the current smoke defaults.
+or stale persisted metadata. All three first-run lanes use root `.env`; existing
+legacy `docker/compose/.env` values are imported into root `.env` by setup/start.
+For first-run probes, Quickstart keeps those URLs aligned with the current smoke
+defaults.
+
+`awf setup` checks host readiness, imports any legacy `docker/compose/.env`
+values into root `.env`, and configures supported clients such as MCP when
+requested. `awf start` starts the local AWF Core stack, and
 `awf service status --format pretty` confirms API, database, Docker, image,
 disk, provider, and cleanup health.
+
+For source checkouts or raw Docker installs, root Compose can bring up the full
+local stack with safe loopback-only defaults:
+
+```bash
+docker compose up --build
+```
+
+Open <http://localhost:3000> for the console, or call the API at
+<http://localhost:8000>. Protected local API calls use
+`Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
 
 If setup, startup, or first-run health checks fail, use the
 [First run troubleshooting guide](TROUBLESHOOTING.md#first-run-troubleshooting)
@@ -253,17 +181,13 @@ monitor policy, idempotency, console inspection, and mocked-local validation.
 
 ### Configure Environment
 
-In source checkouts that include local Compose assets, `awf setup` checks and
-`awf start` uses `docker/compose/.env` for Compose-interpolated service values.
-The repo-root `.env` is still useful for Python `awf` commands in package or
-non-source contexts.
-
-Transition note: `awf service status`, `awf service doctor`, and the lower-level
-service bootstrap command still resolve `docker/compose/.env` from verified AWF
-source checkouts with local service Compose assets. In package installs, AWF
-uses the bundled Compose assets and reads `.env` from the working directory;
-copy any existing `docker/compose/.env` values to `.env` or run `awf start` from
-the directory where you want local service settings to live.
+Root `.env` is the single local runtime env file for source checkouts and
+package installs when you want to override local defaults. `awf setup`,
+`awf start`, `awf service bootstrap`, and raw root `docker compose` all use that
+file. Existing legacy
+`docker/compose/.env` files are treated only as a migration source; setup/start
+bootstrap imports missing keys into root `.env`, backs up the legacy file, and
+reports only key names.
 
 Local service development should use Postgres via the Compose stack. The
 service worker needs a GitHub token for PR creation, review-thread inspection,
@@ -275,38 +199,14 @@ export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 export AWF_POSTGRES_HOST_PORT=${AWF_POSTGRES_HOST_PORT:-5433}
 export AWF_API_HOST_PORT=${AWF_API_HOST_PORT:-8000}
-# Persist Compose-interpolated values into docker/compose/.env.
-awf_env_source=""
-if [ -f docker/compose/.env ]; then
-  awf_env_source="docker/compose/.env"
-elif [ -f .env ]; then
-  awf_env_source=".env"
-else
-  awf_env_source="docker/compose/.env.example"
-  if [ ! -f "$awf_env_source" ]; then
-    awf_env_source=".env.example"
-  fi
-fi
-if [ ! -f "$awf_env_source" ]; then
-  echo "Missing env template: docker/compose/.env.example or .env.example" >&2
-  exit 1
-fi
-awf_env_tmp="$(mktemp)"
 {
+  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_API_HOST_PORT=%s\n' "$AWF_API_HOST_PORT"
-  sed \
-    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \
-    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-    -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_HOST_PORT[[:space:]]*=/d' \
-    "$awf_env_source"
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" docker/compose/.env
-uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
-uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+} > .env
+uv run --python 3.12 --extra dev awf service bootstrap
 ```
 
 For API-only throwaway development, use the local PostgreSQL control-plane DB:
