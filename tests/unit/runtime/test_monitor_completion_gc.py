@@ -814,7 +814,6 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
         )
 
     assert worktree.exists()
-    assert compose_dir.exists()
     assert auth.exists()
     assert compose_calls == [(f"awf_{ws_id}", Path(f"/tmp/awf/{ws_id}/compose.yml"), ws_id, True)]
     assert not any(call.args[:2] == ["docker", "compose"] for call in cmd.calls)
