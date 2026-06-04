@@ -480,12 +480,13 @@ def _make_overlay_scratch(
 ) -> Path:
     """Create a workspace overlay scratch (``claude/upper``) for ``ws``.
 
-    By default the ``upper`` carries an entry — the writable layer of a genuinely
-    mounted overlay, the case the unverifiable-live-overlay guard must protect.
-    ``empty_upper=True`` leaves it empty to model a failed first mount that fell
-    back to the legacy full copy (no live overlay lower; ``_overlay_upper_has_data``
-    ignores it). Optionally writes a ``base.signature`` pin and/or the
-    ``.overlay-unmounted`` teardown marker so tests can exercise the guard.
+    By default the ``upper`` carries an entry — the writable layer of an overlay the
+    agent has written through. ``empty_upper=True`` leaves it empty to model either a
+    failed first mount that fell back to the legacy full copy *or* a live overlay that
+    was mounted but not yet written (the pin is recorded only after a successful
+    mount); the incapable-process guard cannot tell them apart, so it protects both.
+    Optionally writes a ``base.signature`` pin and/or the ``.overlay-unmounted``
+    teardown marker so tests can exercise the guard.
     """
 
     claude_root = work_dir / "auth" / ws / "claude"
@@ -533,12 +534,16 @@ def test_declines_to_reap_when_live_mount_unverifiable(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_empty_upper_does_not_trip_unverifiable_guard(tmp_path: Path) -> None:
-    # A ``claude/upper`` left empty by a failed first overlay mount is *not* a live
-    # overlay — provisioning fell back to the legacy full copy and ignores such an
-    # empty ``upper`` via ``_overlay_upper_has_data``. So even for an incapable
-    # process with no pin, an empty ``upper`` must not masquerade as a possibly-live
-    # overlay and indefinitely block GC-B from reaping superseded bases.
+def test_empty_unpinned_upper_trips_unverifiable_guard(tmp_path: Path) -> None:
+    # An *empty* ``claude/upper`` with no pin and no teardown marker must be treated as
+    # possibly-live by an incapable process. Provisioning creates an empty ``upper``
+    # before it mounts the overlay and records the ``base.signature`` pin only after a
+    # successful mount, so a live overlay that was killed/in-flight before its pin write
+    # (or whose agent has simply not written yet) presents exactly this state — and from
+    # the capability-less API container it is indistinguishable from a failed-mount
+    # legacy-fallback leftover. Reaping a base that is still a worker's invisible
+    # ``lowerdir`` is irreversible data loss, so the guard must conservatively protect
+    # every candidate, mirroring teardown's ``upper.exists()`` incapable branch.
     work_dir = tmp_path / "work"
     host_home = tmp_path / "host-home"
     _seed_host_claude(host_home)
@@ -552,9 +557,12 @@ def test_empty_upper_does_not_trip_unverifiable_guard(tmp_path: Path) -> None:
         capability_probe=lambda: False,
     )
 
-    assert report["reaped"] == ["sigsuper0000000"]
-    assert report["unverifiable"] == []
-    assert not base_super.parent.exists()
+    assert report["reaped"] == []
+    assert report["unverifiable"] == ["sigsuper0000000"]
+    assert "sigsuper0000000" in report["protected"]
+    assert report["reason_code"] == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+    # The possibly-live base was not reclaimed.
+    assert base_super.is_dir()
 
 
 @pytest.mark.unit
