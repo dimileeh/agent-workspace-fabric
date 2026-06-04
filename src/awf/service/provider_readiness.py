@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from awf.db.enums import AgentRuntime
-from awf.node.auth_mounts import claude_auth_isolation_label
+from awf.node.auth_mounts import (
+    _force_copy_isolation_requested,
+    claude_auth_isolation_label,
+)
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
 
@@ -914,7 +917,16 @@ def _check_claude(
     # (the resolver never overlays it), so the overlay posture applies only to
     # the directory source — labelling the file source with the overlay label
     # would overstate its isolation/disk posture on ``.claude.json``-only hosts.
-    directory_isolation = claude_auth_isolation_label()
+    #
+    # The force-copy probe reads the *passed* ``environ``, not ``os.environ``:
+    # ``awf service bootstrap`` on a non-propagating host folds
+    # ``AWF_CLAUDE_AUTH_FORCE_COPY=true`` into the readiness ``environ`` dict (the
+    # worker provisions with the copy fallback) rather than the CLI process
+    # environment, so a default probe over ``os.environ`` would miss it and report
+    # ``per_workspace_overlay`` while the worker actually uses per-workspace copies.
+    directory_isolation = claude_auth_isolation_label(
+        force_copy_requested=lambda: _force_copy_isolation_requested(environ),
+    )
     file_sources: list[dict[str, str]] = []
     if (host_home / ".claude").exists():
         file_sources.append(
