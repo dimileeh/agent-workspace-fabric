@@ -51,6 +51,12 @@ credential entry, or unrelated refactors are included.
   expanded result.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes requested-window offset projection plus a focused regression.
+- Review thread `PRRT_kwDOSJAM6s6HBsS0` identified that if the assignment
+  lookback read cannot cover the requested window, MCP workspace log reads fall
+  back to the narrower projection and may expose the raw tail of a pattern-only
+  `TOKEN=` value.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes failed-lookback leading-fragment masking plus a focused regression.
 
 ## Requirements Checklist
 
@@ -72,6 +78,8 @@ credential entry, or unrelated refactors are included.
 - MCP workspace log reads do not skip data if the expanded log read is short
   without EOF; `next_offset` advances only through the actually covered caller
   window.
+- MCP workspace log reads mask an unknown leading value fragment when
+  assignment lookback cannot read enough context to prove the fragment safe.
 - Support-bundle setup-state collection returns a redacted failed setup-state
   payload if loaded config summarization raises after the config reader
   succeeds.
@@ -114,6 +122,9 @@ credential entry, or unrelated refactors are included.
 13. Add a focused regression for a short non-EOF expanded MCP log read, confirm
     it fails, then project the returned `next_offset` to the actual caller-window
     bytes covered by the expanded result.
+14. Add a focused regression for failed assignment lookback, confirm it fails,
+    then mask the unknown leading fragment rather than returning the narrower
+    raw projection.
 
 ## Verification Commands
 
@@ -168,6 +179,15 @@ Review-level comment `issue:4620175517` short-read repair checks:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k short_non_eof_expanded_read
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HBsS0` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k assignment_lookback_failure
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'assignment_lookback_failure or pattern_only_secret_assignment or preserves_long_benign_token_without_assignment_context'
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```

@@ -29,7 +29,7 @@ from awf.api.schemas import (
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.common.redaction import redact_secrets_byte_slice
+from awf.common.redaction import REDACTION_MARKER, redact_secrets_byte_slice
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -240,24 +240,24 @@ async def _workspace_log_assignment_lookback_projection(
     result: dict[str, Any],
     result_text: str,
     projection_offset: int,
-) -> tuple[str, int]:
-    """Return a wider projection when needed to prove assignment-style redaction."""
+) -> tuple[str, int, bool]:
+    """Return a projection plus whether a failed lookback left a fragment untrusted."""
     slice_start = requested_offset - projection_offset
     if not _workspace_log_slice_starts_in_unknown_leading_fragment(
         result_text,
         slice_start,
         result_offset=projection_offset,
     ):
-        return result_text, projection_offset
+        return result_text, projection_offset, False
 
     result_offset = int(result["offset"])
     if result_offset <= 0:
-        return result_text, projection_offset
+        return result_text, projection_offset, False
 
     lookback_offset = max(0, result_offset - _LOG_REDACTION_ASSIGNMENT_LOOKBACK_BYTES)
     read_limit = int(result["next_offset"]) - lookback_offset
     if read_limit <= 0:
-        return result_text, projection_offset
+        return result_text, projection_offset, True
 
     lookback_result = await service.read_log(
         workspace_id,
@@ -271,12 +271,13 @@ async def _workspace_log_assignment_lookback_projection(
         int(result["next_offset"]),
     )
     if lookback_result is None or int(lookback_result["next_offset"]) < required_next_offset:
-        return result_text, projection_offset
+        return result_text, projection_offset, True
 
-    return _workspace_log_projection_text(
+    lookback_text, lookback_projection_offset = _workspace_log_projection_text(
         lookback_result,
         result_offset=int(lookback_result["offset"]),
     )
+    return lookback_text, lookback_projection_offset, False
 
 
 def _redact_workspace_log_byte_slice(
@@ -285,8 +286,21 @@ def _redact_workspace_log_byte_slice(
     end: int,
     *,
     extra_secrets: tuple[str, ...],
+    redact_unknown_leading_fragment: bool = False,
+    result_offset: int = 0,
 ) -> str:
     """Redact a requested log byte slice using visible redaction context."""
+    if redact_unknown_leading_fragment:
+        fragment_end = _unknown_leading_log_value_fragment_end(text, result_offset=result_offset)
+        if start < fragment_end:
+            if end <= fragment_end:
+                return REDACTION_MARKER
+            return REDACTION_MARKER + redact_secrets_byte_slice(
+                text,
+                fragment_end,
+                end,
+                extra_secrets=extra_secrets,
+            )
     return redact_secrets_byte_slice(text, start, end, extra_secrets=extra_secrets)
 
 
@@ -519,7 +533,11 @@ def register_metrics_tools(
             result,
             result_offset=result_offset,
         )
-        result_text, projection_offset = await _workspace_log_assignment_lookback_projection(
+        (
+            result_text,
+            projection_offset,
+            redact_unknown_leading_fragment,
+        ) = await _workspace_log_assignment_lookback_projection(
             service,
             workspace_id,
             stream_id,
@@ -534,6 +552,8 @@ def register_metrics_tools(
             offset - projection_offset,
             offset - projection_offset + limit_bytes,
             extra_secrets=extra_secrets,
+            redact_unknown_leading_fragment=redact_unknown_leading_fragment,
+            result_offset=projection_offset,
         )
         return WorkspaceLogReadResponse(
             stream_id=str(result["stream_id"]),
