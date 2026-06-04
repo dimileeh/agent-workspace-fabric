@@ -1296,6 +1296,7 @@ def _quickstart_upgrade_section(text: str, heading: str) -> str:
 
 
 def _shell_closing_fi_index(section: str, start: int, label: str) -> int:
+    """Return the closing fi index after a shell guard line."""
     closing_match = re.search(r"(?m)^fi$", section[start:])
     assert closing_match is not None, f"{label} is missing closing shell fi"
     return start + closing_match.start()

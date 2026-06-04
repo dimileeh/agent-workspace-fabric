@@ -46,6 +46,15 @@ behavior-neutral helper docstring, re-run the diff-scoped AST audit, run focused
 Ruff/pytest checks for the touched docs test file, and update the validation
 record.
 
+## Latest follow-up iteration for current HEAD
+
+A final re-audit after later review repairs found one new PR-touched helper
+without a docstring: `_shell_closing_fi_index` in
+`tests/unit/docs/test_public_docs_status.py`. This iteration will add a concise
+behavior-neutral helper docstring, re-run the diff-scoped AST audit, run focused
+Ruff/pytest checks for the touched docs test file, and update the validation
+record.
+
 ## Verification commands and pass criteria
 
 - Diff-scoped AST audit over `origin/development...HEAD` reports
