@@ -1321,6 +1321,17 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
         '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
     )
+    preserve_existing_env = "\n".join(
+        (
+            "    sed \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \\",
+            "      .env",
+        )
+    )
 
     assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 1
     assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 1
@@ -1345,8 +1356,17 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
     assert (
         len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
     )
-    assert re.search(
+    assert 'awf_env_tmp="$(mktemp)"' in prerequisites_section
+    assert preserve_existing_env in prerequisites_section
+    assert not re.search(
         r"(?m)^} > \.env\s*\nawf setup\nawf start\nawf service status --format pretty$",
+        prerequisites_section,
+    )
+    assert re.search(
+        (
+            r'(?m)^} > "\$awf_env_tmp"\s*\nmv "\$awf_env_tmp" \.env\n'
+            r"awf setup\nawf start\nawf service status --format pretty$"
+        ),
         prerequisites_section,
     )
     assert re.search(
