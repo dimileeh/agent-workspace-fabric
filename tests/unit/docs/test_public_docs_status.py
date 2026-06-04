@@ -1295,11 +1295,36 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
             "      .env",
         )
     )
+    source_fallback = "\n".join(
+        (
+            'awf_env_source=""',
+            "if [ -f docker/compose/.env ]; then",
+            '  awf_env_source="docker/compose/.env"',
+            "elif [ -f .env ]; then",
+            '  awf_env_source=".env"',
+            "fi",
+        )
+    )
+    source_preserve_existing_env = "\n".join(
+        (
+            "    sed \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
+            '      "$awf_env_source"',
+        )
+    )
     gnu_only_sed_alternation = (
         "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
         "\\|AWF_DATABASE_URL\\)=/d' .env"
     )
+    gnu_only_source_sed_alternation = (
+        "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
+        "\\|AWF_DATABASE_URL\\)=/d' docker/compose/.env"
+    )
     unsafe_package_persist_target = "} > .env"
+    unsafe_source_persist_target = "} > docker/compose/.env"
 
     assert package_heading in startup_section
     assert source_global_heading in startup_section
@@ -1312,6 +1337,10 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
                 maxsplit=1,
             )[0],
             'mv "$awf_env_tmp" .env',
+            preserve_existing_env,
+            None,
+            unsafe_package_persist_target,
+            gnu_only_sed_alternation,
             "\nawf setup\n",
         ),
         (
@@ -1320,18 +1349,35 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
                 source_no_global_heading,
                 maxsplit=1,
             )[0],
-            "} > docker/compose/.env",
+            'mv "$awf_env_tmp" docker/compose/.env',
+            source_preserve_existing_env,
+            source_fallback,
+            unsafe_source_persist_target,
+            gnu_only_source_sed_alternation,
             '\nawf setup --source-checkout "$PWD"\n',
         ),
         (
             "source checkout with no global install",
             startup_section.split(source_no_global_heading, maxsplit=1)[1],
-            "} > docker/compose/.env",
+            'mv "$awf_env_tmp" docker/compose/.env',
+            source_preserve_existing_env,
+            source_fallback,
+            unsafe_source_persist_target,
+            gnu_only_source_sed_alternation,
             '\nuv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"\n',
         ),
     )
 
-    for label, section, persist_target, setup_command in cases:
+    for (
+        label,
+        section,
+        persist_target,
+        preserve_block,
+        source_input_block,
+        unsafe_persist_target,
+        forbidden_sed,
+        setup_command,
+    ) in cases:
         assert "persist" in section.lower(), f"{label} should explain env persistence"
         assert api_export in section, f"{label} is missing AWF_API_TOKEN generation"
         assert password_export in section, f"{label} is missing AWF_POSTGRES_PASSWORD generation"
@@ -1343,21 +1389,31 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         assert password_persist in section, f"{label} must persist AWF_POSTGRES_PASSWORD"
         assert host_port_persist in section, f"{label} must persist AWF_POSTGRES_HOST_PORT"
         assert database_url_persist in section, f"{label} must persist AWF_DATABASE_URL"
-        if label == "package-manager or virtualenv installs":
-            assert env_tmp in section, f"{label} must write through a temporary file"
-            assert preserve_existing_env in section, f"{label} must preserve existing .env entries"
-            assert gnu_only_sed_alternation not in section, (
-                f"{label} must not use GNU-only sed alternation"
+        assert env_tmp in section, f"{label} must write through a temporary file"
+        if source_input_block is not None:
+            assert source_input_block in section, (
+                f"{label} must preserve docker/compose/.env or fall back to .env"
             )
-            assert unsafe_package_persist_target not in section, (
-                f"{label} must not truncate existing .env entries"
-            )
+        assert preserve_block in section, f"{label} must preserve existing env entries"
+        assert forbidden_sed not in section, f"{label} must not use GNU-only sed alternation"
+        assert unsafe_persist_target not in section, (
+            f"{label} must not truncate existing env entries"
+        )
+        if source_input_block is None:
             assert (
                 section.index(database_url_export)
                 < section.index(env_tmp)
                 < section.index(api_persist)
-                < section.index(preserve_existing_env)
+                < section.index(preserve_block)
             ), f"{label} must prepare the temp file before preserving .env entries"
+        else:
+            assert (
+                section.index(database_url_export)
+                < section.index(env_tmp)
+                < section.index(source_input_block)
+                < section.index(api_persist)
+                < section.index(preserve_block)
+            ), f"{label} must choose existing env input before preserving entries"
         assert persist_target in section, f"{label} must write the expected env file"
         assert (
             section.index(api_export)
@@ -1368,6 +1424,7 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
             < section.index(password_persist)
             < section.index(host_port_persist)
             < section.index(database_url_persist)
+            < section.index(preserve_block)
             < section.index(persist_target)
             < section.index(setup_command)
         ), f"{label} must persist service env before setup"

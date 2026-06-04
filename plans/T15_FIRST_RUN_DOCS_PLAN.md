@@ -259,6 +259,14 @@ installs should write `.env`; source-checkout snippets should write
 `docker/compose/.env`, matching the later upgrade guide's fresh-shell restore
 requirements.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HM6pL`: Getting Started's
+source-checkout first-run blocks must preserve existing `docker/compose/.env`
+entries when persisting AWF-managed local service values. Replace only
+`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and
+`AWF_DATABASE_URL`; leave provider credentials, custom Compose settings, host
+work directories, and other checkout-specific env intact before
+`awf setup --source-checkout` / `awf start --source-checkout`.
+
 Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKQiy`: Quickstart
 first-run snippets must persist an `AWF_DATABASE_URL` derived from the same
 `AWF_POSTGRES_PASSWORD` that Compose uses to initialize local Postgres. Persist

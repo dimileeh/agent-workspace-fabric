@@ -2013,6 +2013,44 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HM6pL`:
+
+- `docs/GETTING_STARTED.md` source-checkout first-run snippets now write
+  `docker/compose/.env` through a temporary file, replacing only
+  `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and
+  `AWF_DATABASE_URL`.
+- Existing unrelated Compose env entries such as provider tokens, custom ports,
+  host work directories, and other checkout-specific settings are preserved
+  before `awf setup --source-checkout` / `awf start --source-checkout`.
+- The snippets select an existing `docker/compose/.env` first, then
+  checkout-root `.env` as the fallback input, matching the Quickstart source
+  lane.
+- `tests/unit/docs/test_public_docs_status.py` now rejects direct
+  `} > docker/compose/.env` truncation in the Getting Started source-checkout
+  first-run lanes.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade -q
+```
+
+Red-phase result after tightening the focused regression: failed with the
+expected assertion because the source-checkout/global executable snippet omitted
+`awf_env_tmp="$(mktemp)"` and still redirected directly to
+`docker/compose/.env`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `2 passed in 0.80s`; `All checks passed!`;
+`1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
