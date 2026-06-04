@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from mcp.types import CallToolResult
@@ -30,6 +31,7 @@ from awf.db.session import make_session_factory
 from awf.mcp import metrics_tools as metrics_tools_mod
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from tests.postgres import postgres_test_engine
@@ -770,6 +772,88 @@ class TestGlobalEvents:
         string_schema = next(s for s in props["event_type"]["anyOf"] if s.get("type") == "string")
         assert string_schema["minLength"] == 1
         assert string_schema["maxLength"] == 64
+
+
+class TestWorkspaceLogs:
+    """Coverage for MCP workspace log listing and chunk reads."""
+
+    @pytest.mark.unit
+    async def test_lists_and_reads_indexed_log_streams(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """List an indexed stream and read a requested byte window from it."""
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(service=service)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+            source="agent",
+            name="Agent stdout",
+            kind="stdout",
+        )
+        await sink.write("alpha\nbeta\n")
+        await sink.close()
+
+        listed = await _call(
+            mcp,
+            "awf_list_workspace_logs",
+            {"workspace_id": workspace.id},
+        )
+        assert isinstance(listed, dict)
+        assert [stream["stream_id"] for stream in listed["items"]] == ["agent.stdout"]
+        assert listed["items"][0]["byte_count"] == len("alpha\nbeta\n")
+        assert listed["items"][0]["line_count"] == 2
+        assert listed["limit"] == 1
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": 6,
+                "limit_bytes": 4,
+            },
+        )
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": 6,
+            "next_offset": 10,
+            "eof": False,
+            "data": "beta",
+        }
+
+        eof = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": len("alpha\nbeta\n"),
+                "limit_bytes": 16,
+            },
+        )
+        assert eof == {
+            "stream_id": "agent.stdout",
+            "offset": len("alpha\nbeta\n"),
+            "next_offset": len("alpha\nbeta\n"),
+            "eof": True,
+            "data": "",
+        }
 
 
 class TestWorkspaceRuntime:

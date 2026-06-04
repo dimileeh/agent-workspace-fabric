@@ -1350,6 +1350,55 @@ uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 # Success: no issues found in 1 source file
 ```
 
+## CI Repair: Durable Log Coverage Reference Anchor
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: the failing focused repro was reproduced before implementation.
+  Pytest could not collect
+  `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams`.
+- Complete: the durable workspace-log coverage anchor now exists again at the
+  registry-referenced part 003 node and still asserts indexed stream listing,
+  byte-window reads, and EOF reads through the MCP tool surface.
+- Complete: the duplicate copy was removed from part 005, leaving the remaining
+  workspace-log edge-case tests there.
+- Complete: the touched MCP server part files remain below the 1,500-line
+  first-party guard: part 003 is 1,118 lines and part 005 is 1,147 lines.
+- Complete: focused verification passed. Broad AWF/GitHub full coverage and CI
+  validation were not run locally; AWF owns those gates after agent completion.
+
+Additional files changed:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+# ERROR: not found: /workspace/tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams
+```
+
+Focused verification after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+# 2 passed in 1.73s
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q --tb=short -ra
+# 42 passed in 38.55s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py -q -k line_limit
+# 1 passed, 8 deselected in 0.51s
+```
+
 ## Gaps
 
 None found.

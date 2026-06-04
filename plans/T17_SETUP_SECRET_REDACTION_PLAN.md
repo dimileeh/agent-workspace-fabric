@@ -958,3 +958,50 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
+
+## CI Repair: Durable Log Coverage Reference Anchor
+
+### Problem Statement And Scope
+
+GitHub Actions run `26967929636` failed the full-coverage job at
+`tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference`.
+The registry still references
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams`,
+but the prior line-limit repair moved all `TestWorkspaceLogs` tests into
+part 005. The stale node breaks the executable coverage-reference contract.
+
+This repair is limited to owned MCP test files and this plan/validation pair.
+It will not weaken the registry smoke test, alter coverage-gate behavior, or
+touch unowned protected quality-gate files.
+
+### Requirements Checklist
+
+- Restore the exact durable workspace-log pytest node referenced by the
+  registry smoke contract.
+- Preserve the behavior assertion for listing an indexed log stream and
+  reading byte windows from it.
+- Avoid duplicate copies of the same durable-log coverage test across MCP
+  server part files.
+- Keep touched MCP test files under the first-party line-limit guard.
+- Record focused verification evidence and leave broad AWF/GitHub validation to
+  AWF after agent completion.
+
+### Implementation Steps
+
+1. Move only `TestWorkspaceLogs.test_lists_and_reads_indexed_log_streams` from
+   `test_mcp_server_part_005.py` back into
+   `test_mcp_server_part_003.py`.
+2. Add the minimal imports needed by that restored test in part 003 and remove
+   any now-unused imports from part 005.
+3. Run the focused failing pytest node, the registry smoke contract test, and
+   focused lint for the touched MCP test files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with requirement
+   status and evidence.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+```
