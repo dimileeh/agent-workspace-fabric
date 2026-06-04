@@ -546,6 +546,7 @@ def _setup_status_source_checkout(
         "present": True,
         "root": root,
         "verified_at": verified_at,
+        "marker_count": None,
     }
     return payload
 

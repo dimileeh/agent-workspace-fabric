@@ -418,6 +418,7 @@ async def test_get_setup_status_source_checkout_skips_host_config_read(
         "present": True,
         "root": str(checkout),
         "verified_at": verified_at,
+        "marker_count": None,
     }
 
 

@@ -41,6 +41,42 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/ser
 Full AWF/GitHub validation and coverage gates are intentionally left to AWF
 after the agent phase.
 
+## Review Repair: issue:4620143523 Marker Count Schema
+
+### Problem Statement And Scope
+
+The review reports that `_setup_status_source_checkout` returns
+`marker_count` when source-checkout metadata comes from persisted host config,
+but omits that key when the same top-level status is populated from the
+explicit-checkout readiness probe.
+
+Scope is limited to keeping the `source_checkout` response shape stable for the
+probed explicit-checkout path.
+
+### Requirements Checklist
+
+- Preserve persisted-config `source_checkout.marker_count` behavior.
+- Add `marker_count` to the probed explicit-checkout status payload.
+- Add a focused regression expectation for the explicit-checkout payload shape.
+
+### Implementation Steps
+
+1. Update the explicit-checkout setup-status regression to expect
+   `marker_count`.
+2. Add the stable `marker_count` field to the probed fallback payload.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_skips_host_config_read -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HAbmv
 
 ### Problem Statement And Scope
