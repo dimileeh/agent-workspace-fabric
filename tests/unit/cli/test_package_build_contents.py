@@ -11,6 +11,7 @@ exercises them fully.
 from __future__ import annotations
 
 import email
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -44,7 +45,6 @@ _CONSOLE_BUILD_ASSETS = (
     "next.config.ts",
     "postcss.config.mjs",
     "tsconfig.json",
-    "next-env.d.ts",
     "app",
     "components",
     "lib",
@@ -53,6 +53,7 @@ _CONSOLE_BUILD_ASSETS = (
 _EXCLUDED_CONSOLE_ARTIFACTS = (
     "apps/console/.env.local",
     "apps/console/.next",
+    "apps/console/next-env.d.ts",
     "apps/console/node_modules",
     "apps/console/playwright-report",
     "apps/console/test-results",
@@ -97,6 +98,25 @@ def _control_plane_copy_sources() -> list[str]:
         # Drop the destination (last token) and any option flags (--from=, --chown=, …).
         sources.extend(t for t in tokens[:-1] if not t.startswith("--"))
     return sources
+
+
+def _tracked_console_sources() -> set[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "apps/console"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return set(result.stdout.splitlines())
+
+
+def test_console_build_asset_sources_are_tracked() -> None:
+    """Console package inputs must survive a clean GitHub Actions checkout."""
+    tracked = _tracked_console_sources()
+    for relative in _CONSOLE_BUILD_ASSETS:
+        source = f"apps/console/{relative}"
+        assert source in tracked or any(name.startswith(f"{source}/") for name in tracked), source
 
 
 # --------------------------------------------------------------------------- #

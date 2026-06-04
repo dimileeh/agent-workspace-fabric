@@ -84,7 +84,6 @@ exclude = [
 "apps/console/app" = "awf/bootstrap_assets/apps/console/app"
 "apps/console/components" = "awf/bootstrap_assets/apps/console/components"
 "apps/console/lib" = "awf/bootstrap_assets/apps/console/lib"
-"apps/console/next-env.d.ts" = "awf/bootstrap_assets/apps/console/next-env.d.ts"
 "apps/console/next.config.ts" = "awf/bootstrap_assets/apps/console/next.config.ts"
 "apps/console/package-lock.json" = "awf/bootstrap_assets/apps/console/package-lock.json"
 "apps/console/package.json" = "awf/bootstrap_assets/apps/console/package.json"
@@ -113,7 +112,6 @@ include = [
     "/apps/console/app",
     "/apps/console/components",
     "/apps/console/lib",
-    "/apps/console/next-env.d.ts",
     "/apps/console/next.config.ts",
     "/apps/console/package-lock.json",
     "/apps/console/package.json",
@@ -138,6 +136,7 @@ exclude = [
     "**/*.pyc",
     "/apps/console/.env.local",
     "/apps/console/.next",
+    "/apps/console/next-env.d.ts",
     "/apps/console/node_modules",
     "/apps/console/playwright-report",
     "/apps/console/test-results",
