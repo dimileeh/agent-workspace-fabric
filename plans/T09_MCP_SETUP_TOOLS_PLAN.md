@@ -84,6 +84,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: Coverage Shard 8 Maintainability Guard
+
+### Problem Statement And Scope
+
+GitHub Actions run `26985743806` failed in `python-coverage-shards (8)` on
+`tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit`.
+The guard reported `tests/unit/mcp/test_setup_tools.py` at 1525 lines, above
+the 1500-line first-party file limit.
+
+Scope is limited to restructuring the owned MCP setup tests so every first-party
+test file stays below the existing maintainability limit. The guard itself is
+not changed, skipped, or weakened.
+
+### Requirements Checklist
+
+- Keep all existing MCP setup/start/init/client behavior assertions intact.
+- Move a coherent group of tests from `tests/unit/mcp/test_setup_tools.py` into
+  an owned sibling test module.
+- Keep each touched first-party test file below 1500 lines.
+- Reproduce and then pass the focused maintainability guard locally.
+- Run focused MCP setup test coverage for the touched test modules only.
+
+### Implementation Steps
+
+1. Reproduce the maintainability failure with the single guard test.
+2. Move project-profile initialization MCP tests into a new
+   `tests/unit/mcp/test_setup_tools_project_profile.py` module with only the
+   imports those tests need.
+3. Re-run the focused maintainability guard and the touched MCP setup test
+   modules.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HOFU3
 
 ### Problem Statement And Scope

@@ -53,6 +53,55 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: Coverage Shard 8 Maintainability Guard
+
+### Requirement Status
+
+- Keep all existing MCP setup/start/init/client behavior assertions intact:
+  Complete. Project-profile assertions were moved without changing expected
+  payloads, error codes, or log assertions.
+- Move a coherent group of tests from `tests/unit/mcp/test_setup_tools.py` into
+  an owned sibling test module: Complete. Project-profile initialization tests
+  now live in `tests/unit/mcp/test_setup_tools_project_profile.py`.
+- Keep each touched first-party test file below 1500 lines: Complete.
+  `test_setup_tools.py` is 1180 lines and
+  `test_setup_tools_project_profile.py` is 358 lines.
+- Reproduce and then pass the focused maintainability guard locally: Complete.
+- Run focused MCP setup test coverage for the touched test modules only:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_project_profile.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+wc -l tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+```
+
+Latest results:
+
+- Focused maintainability guard initially reproduced the CI failure with
+  `tests/unit/mcp/test_setup_tools.py` at 1525 lines.
+- Focused maintainability guard after the split: 1 passed.
+- Touched MCP setup test modules: 32 passed.
+- Focused ruff: passed.
+- Line counts: `test_setup_tools.py` 1180,
+  `test_setup_tools_project_profile.py` 358.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HOFU3
 
 ### Requirement Status
