@@ -229,10 +229,12 @@ def test_reaper_skips_when_scanner_unavailable_with_partial_orphans(tmp_path: Pa
 
     When the container list succeeds but the network/volume scan fails,
     ``scan_docker_resources`` returns ``ok=False`` while still carrying the
-    listed containers. Those containers classify as orphans, so the summary
-    takes the orphan-present (``blocked``) branch rather than the
-    scanner-``unknown`` branch -- but the inventory is incomplete, so the reaper
-    must still skip rather than tear down stacks on guesswork.
+    listed containers. Those containers would classify as orphans, but the
+    inventory is incomplete, so the summary reports the degraded scan as
+    ``unavailable``/report-only (the scanner-unavailable branch runs before the
+    orphan-present branch) instead of advertising reaping for an inventory the
+    reaper will not act on. The reaper then skips on the same incomplete
+    inventory rather than tearing down stacks on guesswork.
     """
     from awf.service.orphan_resources import reap_classified_orphans
 
@@ -260,8 +262,13 @@ def test_reaper_skips_when_scanner_unavailable_with_partial_orphans(tmp_path: Pa
         workspace_view=_ok_view(),  # no rows -> the listed container is a "missing" orphan
         auto_cleanup_orphans=True,
     )
-    assert summary.orphan_count >= 1
-    assert summary.cleanup_readiness.status == "blocked"
+    # The degraded scan is reported as report-only/unknown -- not blocked with
+    # reaping advertised -- so operators are never told deletion is enabled for
+    # an incomplete inventory.
+    assert summary.status == "unavailable"
+    assert summary.orphan_count == 0
+    assert summary.cleanup_readiness.status == "unknown"
+    assert summary.cleanup_readiness.dry_run_only is True
 
     teardown = _RecordingComposeTeardown()
     result = asyncio.run(

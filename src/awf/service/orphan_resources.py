@@ -541,46 +541,17 @@ def build_orphan_resource_summary(
         "worktrees": worktree_scan.to_dict(),
     }
 
-    if orphan_records:
-        examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
-        action = (
-            (
-                "Reaping is enabled (auto_cleanup_orphans): the worker will tear down "
-                "the listed AWF stacks and remove their orphaned worktrees."
-            )
-            if auto_cleanup_orphans
-            else (
-                "Review the listed AWF resources and run a non-destructive cleanup plan; "
-                "this check does not remove containers, networks, volumes, or worktrees."
-            )
-        )
-        readiness = CleanupReadiness(
-            ready=False,
-            status="blocked",
-            reason="ORPHAN_RESOURCES_PRESENT",
-            action=action,
-            dry_run_only=not auto_cleanup_orphans,
-        )
-        return OrphanResourceSummary(
-            ok=False,
-            status="fail",
-            reason="ORPHAN_RESOURCES_PRESENT",
-            detail="Orphan AWF resources remain on this node.",
-            resource_count=len(records),
-            expected_count=len(expected_records),
-            orphan_count=len(orphan_records),
-            unknown_count=len(unknown_records),
-            counts_by_kind=counts_by_kind,
-            orphan_counts_by_kind=orphan_counts_by_kind,
-            expected_counts_by_kind=expected_counts_by_kind,
-            unknown_counts_by_kind=unknown_counts_by_kind,
-            orphan_classification_counts=orphan_classification_counts,
-            cleanup_readiness=readiness,
-            scanners=scanners,
-            examples=examples,
-            records=records,
-        )
-
+    # Unreliable-inventory branches run *before* the orphan-present branch.
+    # A scanner that failed mid-scan (``ok=False``) can still surface partial
+    # resources -- e.g. ``docker ps`` lists containers but the network/volume
+    # list errored -- and those partial records can classify as orphans. If the
+    # orphan-present branch ran first it would advertise reaping
+    # (``dry_run_only=False``, "the worker will tear down the listed stacks")
+    # for an incomplete inventory, yet ``reap_classified_orphans`` explicitly
+    # skips when any scanner is unavailable. Reporting the degraded scan as
+    # unknown/report-only here keeps the summary honest with the reaper so
+    # health/metrics/MCP clients are never told deletion is enabled for an
+    # inventory the worker will not act on.
     if not workspace_view.available:
         examples = tuple(record.to_dict() for record in unknown_records[:example_limit])
         readiness = CleanupReadiness(
@@ -633,6 +604,46 @@ def build_orphan_resource_summary(
             orphan_classification_counts=orphan_classification_counts,
             cleanup_readiness=readiness,
             scanners=scanners,
+            records=records,
+        )
+
+    if orphan_records:
+        examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
+        action = (
+            (
+                "Reaping is enabled (auto_cleanup_orphans): the worker will tear down "
+                "the listed AWF stacks and remove their orphaned worktrees."
+            )
+            if auto_cleanup_orphans
+            else (
+                "Review the listed AWF resources and run a non-destructive cleanup plan; "
+                "this check does not remove containers, networks, volumes, or worktrees."
+            )
+        )
+        readiness = CleanupReadiness(
+            ready=False,
+            status="blocked",
+            reason="ORPHAN_RESOURCES_PRESENT",
+            action=action,
+            dry_run_only=not auto_cleanup_orphans,
+        )
+        return OrphanResourceSummary(
+            ok=False,
+            status="fail",
+            reason="ORPHAN_RESOURCES_PRESENT",
+            detail="Orphan AWF resources remain on this node.",
+            resource_count=len(records),
+            expected_count=len(expected_records),
+            orphan_count=len(orphan_records),
+            unknown_count=len(unknown_records),
+            counts_by_kind=counts_by_kind,
+            orphan_counts_by_kind=orphan_counts_by_kind,
+            expected_counts_by_kind=expected_counts_by_kind,
+            unknown_counts_by_kind=unknown_counts_by_kind,
+            orphan_classification_counts=orphan_classification_counts,
+            cleanup_readiness=readiness,
+            scanners=scanners,
+            examples=examples,
             records=records,
         )
 
