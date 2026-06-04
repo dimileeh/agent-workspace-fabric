@@ -108,6 +108,12 @@ COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
 
+_PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES = frozenset(
+    {
+        COMPLETED_PR_NOT_MERGED,
+    }
+)
+
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
 CLEANUP_EXECUTION_PARTIAL = "CLEANUP_EXECUTION_PARTIAL"
@@ -830,7 +836,7 @@ async def run_workspace_filesystem_gc(
                 work_dir=normalized_work_dir,
                 now=current_time,
             )
-        elif preserved:
+        elif preserved and _preserved_workspace_allows_compose_teardown_fallback(preserved[0]):
             fallback_compose_teardown_candidate = _candidate_for_workspace(
                 workspace,
                 work_dir=normalized_work_dir,
@@ -1121,6 +1127,12 @@ def _missing_workspace_compose_teardown_candidate(
         compose=_gc_path("compose", work_dir / "compose" / workspace_id),
         auth=_gc_path("auth", work_dir / "auth" / workspace_id),
     )
+
+
+def _preserved_workspace_allows_compose_teardown_fallback(
+    preserved: WorkspaceGCPreserved,
+) -> bool:
+    return preserved.reason_code in _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES
 
 
 def _worktree_remove_delete_errors(

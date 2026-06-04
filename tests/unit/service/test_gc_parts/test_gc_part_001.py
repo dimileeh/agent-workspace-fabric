@@ -1328,6 +1328,101 @@ async def test_single_workspace_gc_tears_down_compose_for_preserved_workspace(
 
 
 @pytest.mark.unit
+async def test_single_workspace_gc_cleanup_disabled_skips_fallback_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    await _issue_gc_secret_lease(session_factory, workspace_id, now=now)
+    calls: list[str] = []
+
+    async def _compose_teardown(
+        candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(candidate.reason_code)
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        cleanup_enabled=False,
+        compose_teardown=_compose_teardown,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        "WORKSPACE_CLEANUP_DISABLED",
+    ]
+    assert calls == []
+    assert result.compose_teardowns == {}
+    assert result.secret_lease_revocations == {}
+    async with session_factory() as session:
+        leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
+    assert leases[0].status == "issued"
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_triage_preserved_skips_fallback_compose_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    await _issue_gc_secret_lease(session_factory, workspace_id, now=now)
+    calls: list[str] = []
+
+    async def _compose_teardown(
+        candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(candidate.reason_code)
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        compose_teardown=_compose_teardown,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        FAILED_WORKSPACE_TRIAGE_PRESERVED,
+    ]
+    assert calls == []
+    assert result.compose_teardowns == {}
+    assert result.secret_lease_revocations == {}
+    async with session_factory() as session:
+        leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
+    assert leases[0].status == "issued"
+
+
+@pytest.mark.unit
 async def test_single_workspace_fallback_compose_teardown_releases_runtime_side_effects(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
