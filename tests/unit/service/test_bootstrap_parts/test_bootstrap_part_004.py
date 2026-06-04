@@ -50,6 +50,10 @@ def _write_source_checkout(root: Path) -> Path:
     (root / "docker" / "compose" / "local-service.yml").write_text(
         "services: {}\n", encoding="utf-8"
     )
+    (root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     (root / "src" / "awf").mkdir(parents=True)
     (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")

@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
-from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
 from awf.common.config import (
@@ -25,6 +24,7 @@ from awf.common.config import (
     settings_constructor_fields,
     validate_production_settings,
 )
+from awf.service.environment import compose_env_file_values
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
 DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].default)
@@ -163,11 +163,7 @@ class _ProjectDotenvLookup:
         cache_key = env_file.resolve()
         values = self._values_by_file.get(cache_key)
         if values is None:
-            values = {
-                env_key: env_value
-                for env_key, env_value in dotenv_values(env_file, interpolate=False).items()
-                if env_value is not None
-            }
+            values = compose_env_file_values(env_file)
             self._values_by_file[cache_key] = values
         return values
 
@@ -307,13 +303,8 @@ def local_service_environ(
         env_file is not None
         and (resolved_env_file := resolve_local_service_compose_env_file(env_file)) is not None
     ):
-        merged.update(
-            {
-                key: value
-                for key, value in dotenv_values(resolved_env_file, interpolate=False).items()
-                if value is not None
-            }
-        )
+        caller_environ = os.environ if environ is None else environ
+        merged.update(compose_env_file_values(resolved_env_file, environ=caller_environ))
     merged.update(os.environ if environ is None else dict(environ))
     _populate_compose_postgres_password(merged)
     _populate_local_compose_defaults(merged)

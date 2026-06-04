@@ -635,15 +635,17 @@ def test_project_dotenv_value_continues_past_env_without_requested_key(
     (nested / ".env").write_text("AWF_API_TOKEN=local-token\n", encoding="utf-8")
     monkeypatch.chdir(nested)
     read_env_files: list[Path] = []
-    real_dotenv_values = service_config.dotenv_values
+    real_compose_env_file_values = service_config.compose_env_file_values
 
-    def recording_dotenv_values(
-        env_file: Path, *, interpolate: bool = True
-    ) -> dict[str, str | None]:
+    def recording_compose_env_file_values(env_file: Path, **kwargs: object) -> dict[str, str]:
         read_env_files.append(env_file)
-        return real_dotenv_values(env_file, interpolate=interpolate)
+        return real_compose_env_file_values(env_file, **kwargs)
 
-    monkeypatch.setattr(service_config, "dotenv_values", recording_dotenv_values)
+    monkeypatch.setattr(
+        service_config,
+        "compose_env_file_values",
+        recording_compose_env_file_values,
+    )
 
     assert (
         service_config._project_dotenv_value("AWF_DATABASE_URL")  # noqa: SLF001

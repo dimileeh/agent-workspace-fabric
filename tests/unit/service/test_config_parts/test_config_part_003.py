@@ -242,6 +242,35 @@ def test_local_service_work_dir_resolves_from_root_env_file(
 
 
 @pytest.mark.unit
+def test_local_service_settings_expand_compose_env_file_references(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    (checkout / ".env").write_text(
+        "\n".join(
+            [
+                "PORT=9100",
+                "AWF_API_HOST_PORT=${PORT:-8000}",
+                "AWF_HOST_WORK_DIR=${HOME}/.awf/service",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.api_base_url == "http://localhost:9100"
+    assert settings.work_dir == str(tmp_path / "home" / ".awf" / "service")
+
+
+@pytest.mark.unit
 def test_project_default_awf_work_dir_does_not_hide_root_host_work_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

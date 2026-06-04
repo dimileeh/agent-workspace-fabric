@@ -103,6 +103,38 @@ def test_local_service_environ_preserves_raw_dollar_values_from_env_file(
 
 
 @pytest.mark.unit
+def test_local_service_environ_expands_compose_env_references(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host-side readiness should see the same local values Compose sees."""
+    from awf.service.config import local_service_environ
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "PORT=9100",
+                "AWF_API_HOST_PORT=${PORT:-8000}",
+                "AWF_HOST_WORK_DIR=${HOME}/.awf/service",
+                'AWF_API_BASE_URL="http://127.0.0.1:${AWF_API_HOST_PORT}"',
+                "AWF_API_TOKEN='secret-${TOKEN_SUFFIX}'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TOKEN_SUFFIX", raising=False)
+
+    environ = local_service_environ({"HOME": "/home/operator"}, env_file=env_file)
+
+    assert environ["AWF_API_HOST_PORT"] == "9100"
+    assert environ["AWF_HOST_WORK_DIR"] == "/home/operator/.awf/service"
+    assert environ["AWF_API_BASE_URL"] == "http://127.0.0.1:9100"
+    assert environ["AWF_API_TOKEN"] == "secret-${TOKEN_SUFFIX}"
+
+
+@pytest.mark.unit
 def test_compose_env_file_values_preserves_raw_dollar_values(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -114,6 +146,40 @@ def test_compose_env_file_values_preserves_raw_dollar_values(
     monkeypatch.delenv("TOKEN_SUFFIX", raising=False)
 
     assert compose_env_file_values(env_file)["AWF_API_TOKEN"] == "secret-${TOKEN_SUFFIX}"
+
+
+@pytest.mark.unit
+def test_compose_env_file_values_expands_unquoted_and_double_quoted_references(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service.environment import compose_env_file_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "PORT=9123",
+                "AWF_API_HOST_PORT=${PORT:-8000}",
+                "AWF_HOST_WORK_DIR=${HOME}/.awf/service",
+                'AWF_API_BASE_URL="http://127.0.0.1:${AWF_API_HOST_PORT}"',
+                "FALLBACK=${MISSING:-fallback-value}",
+                "LITERAL='secret-${TOKEN_SUFFIX}'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MISSING", raising=False)
+    monkeypatch.delenv("TOKEN_SUFFIX", raising=False)
+
+    values = compose_env_file_values(env_file, environ={"HOME": "/home/operator"})
+
+    assert values["AWF_API_HOST_PORT"] == "9123"
+    assert values["AWF_HOST_WORK_DIR"] == "/home/operator/.awf/service"
+    assert values["AWF_API_BASE_URL"] == "http://127.0.0.1:9123"
+    assert values["FALLBACK"] == "fallback-value"
+    assert values["LITERAL"] == "secret-${TOKEN_SUFFIX}"
 
 
 @pytest.mark.unit

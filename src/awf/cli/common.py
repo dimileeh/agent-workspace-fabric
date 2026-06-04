@@ -16,6 +16,7 @@ import typer.rich_utils as typer_rich_utils
 
 from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.node.companion_images import run_companion_image_prune
+from awf.service.config import local_service_environ
 
 # Re-exported for callers/tests that still drive the companion-image prune via
 # the CLI helper namespace; the implementation lives in ``node.companion_images``
@@ -115,10 +116,21 @@ def _emit_deprecated_cli_base_url_notice() -> None:
 
 def _api_token_headers(override: str | None) -> dict[str, str]:
     """Get API token headers."""
-    token = override if override is not None else os.environ.get("AWF_API_TOKEN")
+    token = _resolve_api_token(override)
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
+
+
+def _resolve_api_token(override: str | None) -> str | None:
+    """Return the CLI API token, including local Compose defaults."""
+
+    if override is not None:
+        return override or None
+    shell_token = os.environ.get("AWF_API_TOKEN")
+    if shell_token:
+        return shell_token
+    return local_service_environ(os.environ).get("AWF_API_TOKEN")
 
 
 def _api_token_option() -> Any:

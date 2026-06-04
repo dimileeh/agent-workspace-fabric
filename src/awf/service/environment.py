@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import NoReturn, cast
 
 import yaml
-from dotenv import dotenv_values
 
 _COMPOSE_CLI_ENV_KEYS = ("COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME")
 _DOCKER_CLI_CLIENT_ENV_KEYS = (
@@ -27,6 +26,14 @@ _COMPOSE_INTERPOLATION_PATTERN = re.compile(
     r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?=[}:?+\-])[^}]*\}|"
     r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
 )
+_COMPOSE_ENV_LINE_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*(?P<value>.*))?$"
+)
+_COMPOSE_ENV_EXPANSION_PATTERN = re.compile(
+    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:-|-|:\+|\+|:\?|\?)(?P<word>[^}]*))?\}|"
+    r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
+)
+_COMPOSE_ESCAPED_DOLLAR = "\0AWF_ESCAPED_DOLLAR\0"
 _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32
 _COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING = object()
 
@@ -153,16 +160,168 @@ def compose_interpolation_environ(
     return resolved
 
 
-def compose_env_file_values(compose_env_file: Path | None) -> dict[str, str]:
-    """Return parsed Compose env-file values, omitting unset entries."""
+def compose_env_file_values(
+    compose_env_file: Path | None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return parsed Compose env-file values, omitting unset entries.
+
+    Docker Compose interpolates unquoted and double-quoted env-file values, but
+    leaves single-quoted values literal. ``python-dotenv`` cannot represent that
+    distinction after parsing, so this tiny parser preserves the Compose
+    behavior host-side while still allowing single-quoted secrets such as
+    ``'secret-${suffix}'`` to remain untouched.
+    """
 
     if compose_env_file is None or not compose_env_file.exists():
         return {}
-    return {
-        key: value
-        for key, value in dotenv_values(compose_env_file, interpolate=False).items()
-        if value is not None
+    caller_environ = os.environ if environ is None else environ
+    values: dict[str, str] = {}
+    for line in compose_env_file.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_compose_env_line(line)
+        if parsed is None:
+            continue
+        key, value, quote = parsed
+        if quote != "single":
+            value = _compose_expand_env_value(value, caller_environ=caller_environ, values=values)
+        values[key] = value
+    return values
+
+
+def _parse_compose_env_line(line: str) -> tuple[str, str, str | None] | None:
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    match = _COMPOSE_ENV_LINE_PATTERN.match(line)
+    if match is None or match.group("value") is None:
+        return None
+    key = match.group("key")
+    raw_value = match.group("value").rstrip()
+    if not raw_value:
+        return key, "", None
+
+    leading = raw_value.lstrip()
+    if leading.startswith("'"):
+        return key, _consume_compose_quoted_value(leading, "'"), "single"
+    if leading.startswith('"'):
+        return (
+            key,
+            _decode_compose_double_quoted_value(_consume_compose_quoted_value(leading, '"')),
+            "double",
+        )
+    return key, _strip_compose_inline_comment(leading).strip(), None
+
+
+def _consume_compose_quoted_value(raw_value: str, quote: str) -> str:
+    chars: list[str] = []
+    escaped = False
+    for char in raw_value[1:]:
+        if escaped:
+            chars.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == quote:
+            return "".join(chars)
+        chars.append(char)
+    return "".join(chars)
+
+
+def _decode_compose_double_quoted_value(value: str) -> str:
+    replacements = {
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "\\": "\\",
+        '"': '"',
+        "$": "$",
     }
+    decoded: list[str] = []
+    escaped = False
+    for char in value:
+        if escaped:
+            decoded.append(replacements.get(char, char))
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        decoded.append(char)
+    if escaped:
+        decoded.append("\\")
+    return "".join(decoded)
+
+
+def _strip_compose_inline_comment(raw_value: str) -> str:
+    for index, char in enumerate(raw_value):
+        if char == "#" and (index == 0 or raw_value[index - 1].isspace()):
+            return raw_value[:index].rstrip()
+    return raw_value
+
+
+def _compose_expand_env_value(
+    value: str,
+    *,
+    caller_environ: Mapping[str, str],
+    values: Mapping[str, str],
+) -> str:
+    interpolation_context = {**caller_environ, **values}
+    escaped_value = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+
+    def _replace(match: re.Match[str]) -> str:
+        plain_name = match.group("plain")
+        if plain_name:
+            return _compose_env_lookup(interpolation_context, plain_name) or ""
+        name = match.group("braced")
+        operator = match.group("operator")
+        word = match.group("word") or ""
+        resolved = _compose_env_lookup(interpolation_context, name)
+        is_set = resolved is not None
+        is_non_empty = bool(resolved)
+        if operator is None:
+            return resolved or ""
+        if operator == ":-":
+            return (
+                resolved or ""
+                if is_non_empty
+                else _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+            )
+        if operator == "-":
+            return (
+                resolved or ""
+                if is_set
+                else _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+            )
+        if operator == ":+":
+            return (
+                _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+                if is_non_empty
+                else ""
+            )
+        if operator == "+":
+            return (
+                _compose_expand_env_value(word, caller_environ=caller_environ, values=values)
+                if is_set
+                else ""
+            )
+        if operator == ":?":
+            return (resolved or "") if is_non_empty else ""
+        if operator == "?":
+            return (resolved or "") if is_set else ""
+        return resolved or ""
+
+    return _COMPOSE_ENV_EXPANSION_PATTERN.sub(_replace, escaped_value).replace(
+        _COMPOSE_ESCAPED_DOLLAR,
+        "$",
+    )
+
+
+def _compose_env_lookup(environ: Mapping[str, str], key: str) -> str | None:
+    found, value = env_lookup(environ, key)
+    return value if found else None
 
 
 def compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
