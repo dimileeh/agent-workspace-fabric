@@ -1208,3 +1208,52 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HLcza` MCP Artifact Overlapping Secret Bytes Plan
+
+### Problem Statement And Scope
+
+The review thread reports that MCP text-artifact exact-secret byte redaction
+uses `bytes.replace()` before Latin-1 text redaction. `bytes.replace()` masks
+only non-overlapping occurrences, so a configured exact secret that overlaps
+with itself in artifact content, such as secret `abcabc` in `abcabcabc`, can
+leave the tail of another complete occurrence visible in the returned base64
+payload.
+
+This repair is limited to exact configured-secret byte redaction in MCP
+artifacts, a focused MCP artifact regression, and validation evidence. It does
+not change binary artifact blocking policy, Compose env loading, MIME
+detection, or broad AWF/GitHub validation ownership.
+
+### Requirements Checklist
+
+- Likely-text MCP artifacts redact overlapping configured exact-secret byte
+  occurrences before base64 content is returned.
+- Adjacent repeated exact-secret occurrences remain independently redacted so
+  existing redaction-size and oversize behavior is preserved.
+- Existing ASCII and non-ASCII exact-secret artifact redaction behavior remains
+  unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP artifact regression using secret `abcabc` in
+   artifact content `abcabcabc`.
+2. Compute exact-secret byte spans on the original artifact bytes, merge true
+   overlaps, and render the redacted byte content without relying on
+   non-overlapping `bytes.replace()`.
+3. Run the targeted regression, adjacent MCP artifact redaction checks, and
+   narrow ruff/mypy checks for touched files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k overlapping_exact_secret_bytes --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k 'overlapping_exact_secret_bytes or redaction_expansion_triggers_oversized or unicode_compose_env_secret or octet_stream_without_null_bytes' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```

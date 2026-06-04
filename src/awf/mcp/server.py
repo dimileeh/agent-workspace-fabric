@@ -653,7 +653,7 @@ def _redact_exact_secret_bytes(
 ) -> bytes:
     """Redact exact configured secret byte sequences before text decoding."""
     secrets = {
-        secret
+        secret.encode("utf-8")
         for secret in (
             settings.api_token,
             settings.github_token,
@@ -662,11 +662,36 @@ def _redact_exact_secret_bytes(
         )
         if secret and len(secret) >= 4
     }
-    redacted = content
+    spans: list[tuple[int, int]] = []
+    for secret in secrets:
+        cursor = 0
+        while True:
+            start = content.find(secret, cursor)
+            if start == -1:
+                break
+            spans.append((start, start + len(secret)))
+            cursor = start + 1
+    if not spans:
+        return content
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if not merged or start >= merged[-1][1]:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+
     marker = REDACTION_MARKER.encode("ascii")
-    for secret in sorted(secrets, key=len, reverse=True):
-        redacted = redacted.replace(secret.encode("utf-8"), marker)
-    return redacted
+    pieces: list[bytes] = []
+    cursor = 0
+    for start, end in merged:
+        if cursor < start:
+            pieces.append(content[cursor:start])
+        pieces.append(marker)
+        cursor = end
+    if cursor < len(content):
+        pieces.append(content[cursor:])
+    return b"".join(pieces)
 
 
 def _check_and_redact_artifact_content(

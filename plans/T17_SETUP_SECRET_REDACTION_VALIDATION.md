@@ -1600,6 +1600,52 @@ uv run --python 3.12 --extra dev mypy src/awf/runtime/logs.py src/awf/service/pr
 # Success: no issues found in 5 source files
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HLcza` MCP Artifact Overlapping Secret Bytes Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: likely-text MCP artifacts now redact overlapping configured
+  exact-secret byte occurrences before returning base64 content.
+- Complete: adjacent repeated exact-secret occurrences remain independently
+  redacted, preserving the existing redaction expansion and oversize behavior.
+- Complete: existing ASCII and non-ASCII exact-secret artifact redaction remains
+  covered by adjacent focused checks.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k overlapping_exact_secret_bytes --tb=short -ra
+# failed: returned b"<redacted>abc" for artifact content b"abcabcabc"
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k overlapping_exact_secret_bytes --tb=short -ra
+# 1 passed, 34 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k 'overlapping_exact_secret_bytes or redaction_expansion_triggers_oversized or unicode_compose_env_secret or octet_stream_without_null_bytes' --tb=short -ra
+# 4 passed, 31 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.

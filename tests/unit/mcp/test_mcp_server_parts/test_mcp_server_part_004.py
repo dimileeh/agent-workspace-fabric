@@ -753,6 +753,47 @@ class TestReadWorkspaceArtifact:
         assert secret.encode("utf-8") not in decoded
 
     @pytest.mark.unit
+    async def test_read_workspace_artifact_redacts_overlapping_exact_secret_bytes(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Redact self-overlapping exact secrets before returning text artifacts."""
+        secret = "abcabc"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact overlapping exact secret redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "overlap.txt").write_bytes(b"abcabcabc")
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "overlap.txt",
+                "limit_bytes": 1024,
+            },
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"<redacted>"
+        assert secret.encode() not in decoded
+        assert b"abc" not in decoded
+
+    @pytest.mark.unit
     async def test_read_workspace_artifact_does_not_redact_base64_content(
         self,
         factory: async_sessionmaker[AsyncSession],
