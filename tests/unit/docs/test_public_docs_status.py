@@ -519,9 +519,10 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
 
 
 def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
-    """Assert source-checkout upgrades refresh persisted asset metadata."""
+    """Assert source-checkout upgrades stop Core before refreshing source files."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    checkout_refresh_line = "git pull"
     stop_guard_line = "if [ -f docker/compose/.env ]; then"
     stop_env_file_line = (
         "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
@@ -572,6 +573,7 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     )
 
     for label, section, refresh_prereq, setup_line, start_line in cases:
+        assert checkout_refresh_line in section, f"{label} is missing checkout refresh"
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
         env_restore_start_index, env_restore_end_index = (
             _assert_source_checkout_service_env_restore_before_stop(
@@ -587,17 +589,19 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
         stop_fallback_index = section.index(stop_fallback_line)
+        checkout_refresh_index = section.index(checkout_refresh_line)
         assert (
-            section.index(refresh_prereq)
-            < env_restore_start_index
+            env_restore_start_index
             < env_restore_end_index
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
             < stop_fallback_index
             < _required_index(section, stop_guard_end_line, label, start=stop_fallback_index)
+            < checkout_refresh_index
+            < section.index(refresh_prereq)
             < section.index(setup_line)
             < section.index(start_line)
-        ), f"{label} must guard env-file stop, refresh metadata, then start"
+        ), f"{label} must stop Core before refreshing source files"
 
 
 def test_package_upgrade_docs_restore_service_env_before_start() -> None:

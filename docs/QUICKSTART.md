@@ -175,12 +175,11 @@ Upgrade:
 
 Run this from the existing `aira-agent-workspace-fabric` checkout. If your shell
 is elsewhere, first `cd /path/to/aira-agent-workspace-fabric`. Stop local Core
-before refreshing source-checkout metadata; `awf setup` checks the API and
-Postgres host ports and blocks while the previous Core stack still holds them.
+before pulling new source files or refreshing source-checkout metadata; setup
+checks the API and Postgres host ports and blocks while the previous Core stack
+still holds them.
 
 ```bash
-git pull
-uv tool install . --force
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
@@ -210,6 +209,8 @@ if [ -f docker/compose/.env ]; then
 else
   docker compose -f docker/compose/local-service.yml stop
 fi
+git pull
+uv tool install . --force
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf smoke run --project ../awf-eval-project --mocked-local --format pretty
@@ -315,12 +316,11 @@ Upgrade:
 
 Run this from the existing `aira-agent-workspace-fabric` checkout. If your shell
 is elsewhere, first `cd /path/to/aira-agent-workspace-fabric`. Stop local Core
-before refreshing source-checkout metadata; `awf setup` checks the API and
-Postgres host ports and blocks while the previous Core stack still holds them.
+before pulling new source files or refreshing source-checkout metadata; setup
+checks the API and Postgres host ports and blocks while the previous Core stack
+still holds them.
 
 ```bash
-git pull
-uv sync --extra dev
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
@@ -350,6 +350,8 @@ if [ -f docker/compose/.env ]; then
 else
   docker compose -f docker/compose/local-service.yml stop
 fi
+git pull
+uv sync --extra dev
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf smoke run --project ../awf-eval-project --mocked-local --format pretty

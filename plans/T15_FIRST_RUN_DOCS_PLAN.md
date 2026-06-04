@@ -428,6 +428,18 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HLHOk`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_strips_exported_awf_env_entries tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HLWjk`: source-checkout
+upgrade snippets must stop the currently running Core Compose stack before
+pulling source changes or reinstalling/syncing the checkout, so `docker compose
+... stop` parses the Compose file from the running checkout rather than a newly
+pulled file that may require additional environment variables.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HLWjk`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

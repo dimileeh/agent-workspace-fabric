@@ -1856,6 +1856,42 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HLWjk`:
+
+- `docs/UPGRADE.md` source-checkout upgrade snippets now restore the persisted
+  service env and stop the currently running Core Compose stack before
+  `git pull` and before the lane-specific reinstall/sync command.
+- `docs/QUICKSTART.md` applies the same source-checkout upgrade ordering, so
+  the first-run upgrade lanes do not parse a newly pulled Compose file before
+  stopping the old Core stack.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  upgrade snippets that pull source changes before the guarded Compose stop.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+```
+
+Red-phase result after tightening the focused regression: failed because the
+source-checkout upgrade snippets still placed `git pull` before the guarded
+Compose stop block.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+```
+
+Final focused repair result: `1 passed in 0.67s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 passed in 0.79s`; `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

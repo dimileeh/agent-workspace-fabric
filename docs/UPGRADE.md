@@ -82,14 +82,12 @@ awf smoke run --project <path> --mocked-local --format pretty
 ## Source Checkout With Global Tool Install
 
 This lane uses an inspectable source checkout and a global tool installed from
-that checkout. Stop local Core before refreshing source-checkout metadata;
-`awf setup` checks the API and Postgres host ports and blocks while the previous
-Core stack still holds them:
+that checkout. Stop local Core before pulling new source files or refreshing
+source-checkout metadata; `awf setup` checks the API and Postgres host ports and
+blocks while the previous Core stack still holds them:
 
 ```bash
 cd /path/to/aira-agent-workspace-fabric
-git pull
-uv tool install . --force
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
@@ -119,6 +117,8 @@ if [ -f docker/compose/.env ]; then
 else
   docker compose -f docker/compose/local-service.yml stop
 fi
+git pull
+uv tool install . --force
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf service status --format pretty
@@ -128,14 +128,13 @@ awf smoke run --project <path> --mocked-local --format pretty
 ## Source Checkout With No Global Install
 
 This lane uses an inspectable source checkout and no global install. Keep
-running AWF through `uv run` from the checkout. Stop local Core before
-refreshing source-checkout metadata; `awf setup` checks the API and Postgres
-host ports and blocks while the previous Core stack still holds them:
+running AWF through `uv run` from the checkout. Stop local Core before pulling
+new source files or refreshing source-checkout metadata; `awf setup` checks the
+API and Postgres host ports and blocks while the previous Core stack still holds
+them:
 
 ```bash
 cd /path/to/aira-agent-workspace-fabric
-git pull
-uv sync --extra dev
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
@@ -165,6 +164,8 @@ if [ -f docker/compose/.env ]; then
 else
   docker compose -f docker/compose/local-service.yml stop
 fi
+git pull
+uv sync --extra dev
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf service status --format pretty
