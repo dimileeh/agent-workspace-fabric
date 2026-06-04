@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
 from awf.db.models import WorkerHeartbeat
@@ -106,3 +107,71 @@ async def test_record_heartbeat_handles_concurrent_first_writes(
     assert heartbeat.node_id in {"node-a", "node-b"}
     assert heartbeat.last_heartbeat_at in {first_heartbeat_at, second_heartbeat_at}
     assert heartbeat.poll_interval_seconds in {5.0, 6.0}
+
+
+@pytest.mark.unit
+async def test_prune_stale_deletes_bounded_old_rows_and_preserves_fresh() -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        cutoff = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+
+        async with factory() as session, session.begin():
+            repo = WorkerHeartbeatRepository(session)
+            await repo.record_heartbeat(
+                worker_id="worker-stale-a",
+                node_id="node-a",
+                started_at=cutoff - timedelta(days=3),
+                last_heartbeat_at=cutoff - timedelta(days=2),
+                poll_interval_seconds=5.0,
+            )
+            await repo.record_heartbeat(
+                worker_id="worker-stale-b",
+                node_id="node-a",
+                started_at=cutoff - timedelta(days=2),
+                last_heartbeat_at=cutoff - timedelta(days=1, seconds=1),
+                poll_interval_seconds=5.0,
+            )
+            await repo.record_heartbeat(
+                worker_id="worker-fresh",
+                node_id="node-a",
+                started_at=cutoff - timedelta(minutes=5),
+                last_heartbeat_at=cutoff,
+                poll_interval_seconds=5.0,
+            )
+
+        async with factory() as session, session.begin():
+            first_pruned = await WorkerHeartbeatRepository(session).prune_stale(
+                before=cutoff,
+                limit=1,
+            )
+
+        async with factory() as session:
+            worker_ids_after_first_prune = {
+                row[0]
+                for row in (
+                    await session.execute(
+                        select(WorkerHeartbeat.worker_id).order_by(WorkerHeartbeat.worker_id)
+                    )
+                ).all()
+            }
+
+        async with factory() as session, session.begin():
+            second_pruned = await WorkerHeartbeatRepository(session).prune_stale(
+                before=cutoff,
+                limit=100,
+            )
+
+        async with factory() as session:
+            remaining_worker_ids = {
+                row[0]
+                for row in (
+                    await session.execute(
+                        select(WorkerHeartbeat.worker_id).order_by(WorkerHeartbeat.worker_id)
+                    )
+                ).all()
+            }
+
+    assert first_pruned == 1
+    assert worker_ids_after_first_prune == {"worker-fresh", "worker-stale-b"}
+    assert second_pruned == 1
+    assert remaining_worker_ids == {"worker-fresh"}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import awf.control.worker.manager as worker_manager
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.models import WorkerHeartbeat
+from awf.db.repositories import WorkerHeartbeatRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 
@@ -44,6 +46,36 @@ async def test_run_forever_exits_when_stop_requested(
 
 
 @pytest.mark.unit
+async def test_run_forever_shutdown_ignores_failed_heartbeat_task(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=0),
+    )
+    run_once = AsyncMock(return_value=0)
+    monkeypatch.setattr(worker, "run_once", run_once)
+
+    async def _failed_heartbeat_loop() -> None:
+        raise AssertionError("unreachable DB retry state")
+
+    monkeypatch.setattr(worker, "_heartbeat_loop", _failed_heartbeat_loop)
+
+    async def _stop_after_tick() -> None:
+        await asyncio.sleep(0.03)
+        worker.request_stop()
+
+    await asyncio.wait_for(
+        asyncio.gather(worker.run_forever(), _stop_after_tick()),
+        timeout=1.0,
+    )
+
+    assert run_once.await_count >= 1
+
+
+@pytest.mark.unit
 async def test_run_once_records_worker_heartbeat(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -71,6 +103,49 @@ async def test_run_once_records_worker_heartbeat(
     assert heartbeat.node_id == "node-a"
     assert heartbeat.poll_interval_seconds == 0.01
     assert heartbeat.started_at <= heartbeat.last_heartbeat_at
+
+
+@pytest.mark.unit
+async def test_run_once_prunes_stale_worker_heartbeats(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    stale_at = datetime.now(UTC) - timedelta(days=2)
+    fresh_at = datetime.now(UTC)
+    async with factory() as session, session.begin():
+        repo = WorkerHeartbeatRepository(session)
+        await repo.record_heartbeat(
+            worker_id="old-worker-process",
+            node_id="local",
+            started_at=stale_at - timedelta(minutes=1),
+            last_heartbeat_at=stale_at,
+            poll_interval_seconds=5.0,
+        )
+        await repo.record_heartbeat(
+            worker_id="fresh-worker-process",
+            node_id="local",
+            started_at=fresh_at - timedelta(minutes=1),
+            last_heartbeat_at=fresh_at,
+            poll_interval_seconds=5.0,
+        )
+
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=0),
+    )
+
+    dispatched = await worker.run_once()
+
+    async with factory() as session:
+        repo = WorkerHeartbeatRepository(session)
+        stale_heartbeat = await repo.get(worker_id="old-worker-process")
+        fresh_heartbeat = await repo.get(worker_id="fresh-worker-process")
+        current_heartbeat = await repo.get(worker_id=worker._worker_id)  # noqa: SLF001
+
+    assert dispatched == 0
+    assert stale_heartbeat is None
+    assert fresh_heartbeat is not None
+    assert current_heartbeat is not None
 
 
 @pytest.mark.unit

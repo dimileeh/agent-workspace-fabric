@@ -72,6 +72,11 @@ if TYPE_CHECKING:
     from awf.service.gc_reconcile import OrphanDirReconcileResult
 
 
+_WORKER_HEARTBEAT_RETENTION = timedelta(days=1)
+_WORKER_HEARTBEAT_PRUNE_BATCH_LIMIT = 500
+_WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS = 60 * 60
+
+
 class ControlWorker(WorkerDelegatesMixin):
     """Reads pending work from the DB and dispatches it to runtime handlers."""
 
@@ -116,6 +121,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._requested_capacity_resume_provider_suppression_expires_at: datetime | None = None
         self._worker_started_at = datetime.now(UTC)
         self._last_heartbeat_written_at: float | None = None
+        self._last_heartbeat_pruned_at: float | None = None
 
     def request_stop(self: Any) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -154,6 +160,7 @@ class ControlWorker(WorkerDelegatesMixin):
         and should immediately loop again.
         """
         await self._record_heartbeat_safely()
+        await self._prune_stale_heartbeats_safely()
 
         dispatched_ids: set[str] = set()
         execution_dispatched_ids: set[str] = set()
@@ -329,8 +336,19 @@ class ControlWorker(WorkerDelegatesMixin):
                         )
         finally:
             heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                _log.warning(
+                    "worker.heartbeat_task_failed",
+                    reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                    worker_id=self._worker_id,
+                    node_id=effective_worker_config_node_id(self._config),
+                    error_type=type(exc).__name__,
+                    error=redact_audit_text(str(exc))[:240],
+                )
 
     async def _heartbeat_loop(self: Any) -> None:
         interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)
@@ -340,6 +358,7 @@ class ControlWorker(WorkerDelegatesMixin):
             if self._stopped.is_set():
                 break
             await self._record_heartbeat_safely()
+            await self._prune_stale_heartbeats_safely()
 
     async def _record_heartbeat_safely(self: Any) -> None:
         now = monotonic()
@@ -369,6 +388,44 @@ class ControlWorker(WorkerDelegatesMixin):
                 started_at=self._worker_started_at,
                 last_heartbeat_at=now,
                 poll_interval_seconds=self._config.poll_interval_seconds,
+            )
+
+        await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
+
+    async def _prune_stale_heartbeats_safely(self: Any) -> None:
+        now = monotonic()
+        last_pruned_at = self._last_heartbeat_pruned_at
+        if (
+            last_pruned_at is not None
+            and now - last_pruned_at < _WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS
+        ):
+            return
+        try:
+            await self._prune_stale_heartbeats()
+        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError) as exc:
+            _log.warning(
+                "worker.heartbeat_prune_failed",
+                reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                error_type=type(exc).__name__,
+                error=redact_audit_text(str(exc))[:240],
+            )
+        finally:
+            self._last_heartbeat_pruned_at = now
+
+    async def _prune_stale_heartbeats(self: Any) -> None:
+        async def _operation(session: AsyncSession) -> None:
+            cutoff = datetime.now(UTC) - _WORKER_HEARTBEAT_RETENTION
+            await WorkerHeartbeatRepository(session).prune_stale(
+                before=cutoff,
+                limit=_WORKER_HEARTBEAT_PRUNE_BATCH_LIMIT,
             )
 
         await run_db_operation_with_retry(

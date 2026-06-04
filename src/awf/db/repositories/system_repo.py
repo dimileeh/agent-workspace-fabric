@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_value
@@ -173,6 +173,26 @@ class WorkerHeartbeatRepository:
             .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def prune_stale(self, *, before: datetime, limit: int) -> int:
+        if limit <= 0:
+            return 0
+        stale_worker_ids = (
+            select(WorkerHeartbeat.worker_id)
+            .where(WorkerHeartbeat.last_heartbeat_at < before)
+            .order_by(WorkerHeartbeat.last_heartbeat_at.asc(), WorkerHeartbeat.worker_id.asc())
+            .limit(limit)
+            .subquery()
+        )
+        stmt = delete(WorkerHeartbeat).where(
+            WorkerHeartbeat.worker_id.in_(select(stale_worker_ids.c.worker_id))
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        rowcount = getattr(result, "rowcount", 0)
+        if rowcount is None or rowcount < 0:
+            return 0
+        return int(rowcount)
 
 
 class ProviderModelCircuitBreakerRepository:
