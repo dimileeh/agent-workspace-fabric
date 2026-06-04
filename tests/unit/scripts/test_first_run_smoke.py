@@ -196,6 +196,32 @@ def test_source_uv_run_commands_use_project_and_outside_cwd(tmp_path: Path) -> N
         assert "PYTHONPATH" not in command.env
 
 
+@pytest.mark.unit
+def test_run_command_reports_timeout_as_failed_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Timeouts are reported as smoke command failures instead of crashing."""
+
+    def timeout_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd=("awf", "--help"),
+            timeout=2.5,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+
+    monkeypatch.setattr(smoke.subprocess, "run", timeout_run)
+    command = smoke.CommandSpec(argv=("awf", "--help"), env={}, cwd=tmp_path)
+
+    completed = smoke.run_command(command, timeout_seconds=2.5)
+
+    assert completed.args == command.argv
+    assert completed.returncode == 124
+    assert completed.stdout == "partial stdout"
+    assert completed.stderr == "command timed out after 2.5 seconds\npartial stderr"
+
+
 def _record_run(
     calls: list[smoke.CommandSpec],
     command: smoke.CommandSpec,

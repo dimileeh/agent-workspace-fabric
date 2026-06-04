@@ -522,15 +522,26 @@ def run_command(command: CommandSpec, timeout_seconds: float) -> subprocess.Comp
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     env.update(command.env)
-    return subprocess.run(
-        command.argv,
-        check=False,
-        capture_output=True,
-        text=True,
-        cwd=str(command.cwd) if command.cwd is not None else None,
-        env=env,
-        timeout=timeout_seconds,
-    )
+    try:
+        return subprocess.run(
+            command.argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=str(command.cwd) if command.cwd is not None else None,
+            env=env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_output_text(exc.stdout)
+        stderr = _timeout_output_text(exc.stderr)
+        message = f"command timed out after {timeout_seconds:g} seconds"
+        return subprocess.CompletedProcess(
+            args=command.argv,
+            returncode=124,
+            stdout=stdout,
+            stderr=f"{message}\n{stderr}" if stderr else message,
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -851,6 +862,14 @@ def _tool_install_argv(method: str, wheel: Path, *, python: str) -> tuple[str, .
     if method == "pipx":
         return ("pipx", "install", "--force", str(wheel))
     raise ValueError(f"unsupported tool install method: {method}")
+
+
+def _timeout_output_text(output: str | bytes | None) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output
 
 
 def _is_setup_dry_run_json(command: CommandSpec) -> bool:
