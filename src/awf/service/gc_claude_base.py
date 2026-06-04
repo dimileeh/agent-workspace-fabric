@@ -58,8 +58,6 @@ CLAUDE_BASE_GC_NOOP = "CLAUDE_BASE_GC_NOOP"
 # Marker file each overlay-backed workspace writes recording which shared base its
 # ``upper`` belongs to (see ``auth_mounts._record_overlay_base_pin``).
 _BASE_SIGNATURE_MARKER = "base.signature"
-# In-progress staging prefix owned by #379's staging reaper; never reaped here.
-_STAGING_PREFIX = ".claude-base-"
 
 
 def _claude_base_root(work_dir: Path) -> Path:
@@ -190,14 +188,14 @@ def reap_superseded_claude_bases(
     errors: list[dict[str, str]] = []
 
     for signature_dir in signature_dirs:
-        if signature_dir.name.startswith(_STAGING_PREFIX):
-            # An in-progress / orphaned ``.claude-base-*`` staging dir: #379's
-            # staging reaper owns its lifecycle (it keys off a build lock, not
-            # supersession). Never touch it here.
-            continue
+        # Staging dirs (``.claude-base-*``) are created inside ``<sig>/`` dirs (see
+        # ``_reap_stale_claude_base_staging``'s ``*/.claude-base-*`` glob), never as
+        # direct children of base_root, so they are invisible to the shallow
+        # ``iterdir()`` above — #379's staging reaper owns their lifecycle. Skip any
+        # ``<sig>/`` dir that has no completed ``.claude`` base yet: a mid-build
+        # partial tree, or a legacy dir with unrelated content — not a superseded
+        # base to reclaim.
         if not (signature_dir / ".claude").is_dir():
-            # No completed base yet (a signature dir holding only mid-build staging,
-            # or a partial tree). Not a superseded base to reclaim.
             continue
         scanned.append(signature_dir.name)
         if signature_dir in protected_dirs:

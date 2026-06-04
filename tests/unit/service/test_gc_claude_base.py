@@ -149,16 +149,19 @@ def test_protects_live_and_pinned_when_host_home_has_no_claude(tmp_path: Path) -
 
 
 @pytest.mark.unit
-def test_skips_inprogress_staging_dirs(tmp_path: Path) -> None:
-    # An in-progress ``.claude-base-*`` staging dir is #379's domain; GC-B must never
-    # touch it even though it sits under the base root.
+def test_skips_signature_dir_with_only_inprogress_staging(tmp_path: Path) -> None:
+    # A ``<sig>/`` dir holding only a mid-build ``.claude-base-*`` staging tree (no
+    # completed ``.claude`` base yet) is #379's domain; GC-B must never touch it.
+    # Staging dirs live at ``<sig>/.claude-base-*`` (see the staging reaper's
+    # ``*/.claude-base-*`` glob), never as direct children of base_root, so the
+    # shallow ``iterdir()`` scan yields the ``<sig>/`` dir and skips it because it has
+    # no ``.claude`` child — the protection is structural, not a name check.
     work_dir = tmp_path / "work"
     host_home = tmp_path / "host-home"
     _seed_host_claude(host_home)
 
     base_root = work_dir / "auth" / "_shared" / "claude-base"
-    base_root.mkdir(parents=True)
-    staging = base_root / ".claude-base-inprogress"
+    staging = base_root / "sigbuilding00000" / ".claude-base-inprogress"
     (staging / ".claude").mkdir(parents=True)
     base_super = _make_base(work_dir, "sigsuper0000000")
 
@@ -169,7 +172,8 @@ def test_skips_inprogress_staging_dirs(tmp_path: Path) -> None:
     )
 
     assert "sigsuper0000000" in report["reaped"]
-    assert staging.is_dir()  # the staging dir is untouched
+    assert "sigbuilding00000" not in report["reaped"]
+    assert staging.is_dir()  # the mid-build staging tree is untouched
     assert not base_super.parent.exists()
 
 
