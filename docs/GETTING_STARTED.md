@@ -99,7 +99,7 @@ awf setup
 awf start
 awf service status --format pretty
 awf init <path> --write-profile --yes
-awf smoke run --mocked-local --format pretty
+awf smoke run --project <path> --mocked-local --format pretty
 ```
 
 `awf setup` runs bounded host readiness checks without starting Core.
@@ -119,8 +119,9 @@ per-provider copy-paste prompts).
 - `awf init <path>` — run local project onboarding. Interactive terminals get
   a short guided profile setup; automation can use
   `awf init <path> --write-profile --yes` to write detected defaults.
-- `awf smoke run --mocked-local --format pretty` — prove the local operator path
-  without requiring live GitHub or provider credentials.
+- `awf smoke run --project <path> --mocked-local --format pretty` — prove the
+  local operator path for the initialized project without requiring live GitHub
+  or provider credentials.
 
 Subsequent sections describe the contributor/development setup; a fresh
 machine only needs the steps above plus a coding-agent credential.

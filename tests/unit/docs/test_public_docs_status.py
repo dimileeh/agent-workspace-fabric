@@ -181,7 +181,7 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     assert "awf setup" in startup_section
     assert "awf start" in startup_section
     assert "awf init <path> --write-profile --yes" in startup_section
-    assert "awf smoke run --mocked-local --format pretty" in startup_section
+    assert "awf smoke run --project <path> --mocked-local --format pretty" in startup_section
     assert "AWF_SETUP_PLACEHOLDER" not in startup_section
     assert "AWF_START_PLACEHOLDER" not in startup_section
     assert not re.search(r"(?m)^awf service bootstrap\s*$", startup_section)
