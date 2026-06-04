@@ -1010,16 +1010,16 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     stop_fallback_index = no_global_section.index(stop_fallback_line)
     assert (
         no_global_section.index("uv sync --extra dev")
-        < no_global_section.index(stop_guard_line)
-        < no_global_section.index(stop_env_file_line)
-        < stop_fallback_index
-        < no_global_section.index(stop_guard_end_line, stop_fallback_index)
         < api_guard_index
         < api_require_index
         < api_export_index
         < api_guard_end_index
         < password_restore_start_index
         < password_restore_end_index
+        < no_global_section.index(stop_guard_line)
+        < no_global_section.index(stop_env_file_line)
+        < stop_fallback_index
+        < no_global_section.index(stop_guard_end_line, stop_fallback_index)
         < no_global_section.index(setup_line)
     )
     for command in no_global_commands:
@@ -1088,16 +1088,16 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     stop_fallback_index = global_section.index(stop_fallback_line)
     assert (
         global_section.index("uv tool install . --force")
-        < global_section.index(stop_guard_line)
-        < global_section.index(stop_env_file_line)
-        < stop_fallback_index
-        < global_section.index(stop_guard_end_line, stop_fallback_index)
         < api_guard_index
         < api_require_index
         < api_export_index
         < api_guard_end_index
         < password_restore_start_index
         < password_restore_end_index
+        < global_section.index(stop_guard_line)
+        < global_section.index(stop_env_file_line)
+        < stop_fallback_index
+        < global_section.index(stop_guard_end_line, stop_fallback_index)
         < global_section.index(setup_line)
         < global_section.index(start_line)
     )

@@ -182,11 +182,6 @@ checkout and refresh persisted source-checkout metadata before starting:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 uv tool install . --force
-if [ -f docker/compose/.env ]; then
-  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
-else
-  docker compose -f docker/compose/local-service.yml stop
-fi
 if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before rollback}"
   export AWF_API_TOKEN
@@ -202,6 +197,11 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before rollback}"
   export AWF_POSTGRES_PASSWORD
+fi
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
 fi
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
@@ -214,11 +214,6 @@ For the source checkout with no global install lane, run AWF from the checkout:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 uv sync --extra dev
-if [ -f docker/compose/.env ]; then
-  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
-else
-  docker compose -f docker/compose/local-service.yml stop
-fi
 if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env before rollback}"
   export AWF_API_TOKEN
@@ -234,6 +229,11 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before rollback}"
   export AWF_POSTGRES_PASSWORD
+fi
+if [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
 fi
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
