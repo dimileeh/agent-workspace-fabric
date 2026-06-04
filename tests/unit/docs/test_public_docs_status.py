@@ -896,9 +896,9 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     no_global_heading = "For the source checkout with no global install lane"
     stop_guard_line = "if [ -f docker/compose/.env ]; then"
     stop_env_file_line = (
-        "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
     )
-    stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
+    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
     api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     postgres_password_export_line = (
@@ -946,9 +946,9 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     no_global_heading = "For the source checkout with no global install lane"
     stop_guard_line = "if [ -f docker/compose/.env ]; then"
     stop_env_file_line = (
-        "docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
     )
-    stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
+    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
     api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     postgres_password_export_line = (
