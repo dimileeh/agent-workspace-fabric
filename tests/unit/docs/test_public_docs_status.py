@@ -331,7 +331,13 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
-    api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
+    api_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        'or persist it in docker/compose/.env before upgrading}"'
+    )
+    api_export_line = "  export AWF_API_TOKEN"
+    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     postgres_password_export_line = (
         'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     )
@@ -380,7 +386,12 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
 
     for label, section, refresh_prereq, setup_line, start_line in cases:
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
-        assert api_token_export_line in section, f"{label} must restore AWF_API_TOKEN"
+        assert api_guard_line in section, f"{label} must prefer persisted AWF_API_TOKEN"
+        assert api_require_line in section, f"{label} must require the existing AWF_API_TOKEN"
+        assert api_export_line in section, f"{label} must export restored AWF_API_TOKEN"
+        assert unsafe_api_generation_line not in section, (
+            f"{label} must not regenerate AWF_API_TOKEN"
+        )
         assert postgres_password_export_line in section, (
             f"{label} must restore AWF_POSTGRES_PASSWORD"
         )
@@ -390,10 +401,17 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         assert stop_guard_end_line in section, f"{label} must close compose env guard"
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
+        api_guard_index = section.index(api_guard_line)
+        api_require_index = section.index(api_require_line)
+        api_export_index = section.index(api_export_line)
+        api_guard_end_index = _shell_closing_fi_index(section, api_export_index, label)
         stop_fallback_index = section.index(stop_fallback_line)
         assert (
             section.index(refresh_prereq)
-            < section.index(api_token_export_line)
+            < api_guard_index
+            < api_require_index
+            < api_export_index
+            < api_guard_end_index
             < section.index(postgres_password_export_line)
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
@@ -918,7 +936,13 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
-    api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
+    api_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        'or persist it in docker/compose/.env before rollback}"'
+    )
+    api_export_line = "  export AWF_API_TOKEN"
+    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     postgres_password_export_line = (
         'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     )
@@ -939,8 +963,19 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     assert stop_env_file_line in no_global_section
     assert stop_fallback_line in no_global_section
     assert stop_guard_end_line in no_global_section
-    assert api_token_export_line in no_global_section
+    assert api_guard_line in no_global_section
+    assert api_require_line in no_global_section
+    assert api_export_line in no_global_section
+    assert unsafe_api_generation_line not in no_global_section
     assert postgres_password_export_line in no_global_section
+    api_guard_index = no_global_section.index(api_guard_line)
+    api_require_index = no_global_section.index(api_require_line)
+    api_export_index = no_global_section.index(api_export_line)
+    api_guard_end_index = _shell_closing_fi_index(
+        no_global_section,
+        api_export_index,
+        "no-global source-checkout rollback",
+    )
     stop_fallback_index = no_global_section.index(stop_fallback_line)
     assert (
         no_global_section.index("uv sync --extra dev")
@@ -948,7 +983,10 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
         < no_global_section.index(stop_env_file_line)
         < stop_fallback_index
         < no_global_section.index(stop_guard_end_line, stop_fallback_index)
-        < no_global_section.index(api_token_export_line)
+        < api_guard_index
+        < api_require_index
+        < api_export_index
+        < api_guard_end_index
         < no_global_section.index(postgres_password_export_line)
         < no_global_section.index(setup_line)
     )
@@ -968,7 +1006,13 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
-    api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    api_guard_line = "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
+    api_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        'or persist it in docker/compose/.env before rollback}"'
+    )
+    api_export_line = "  export AWF_API_TOKEN"
+    unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     postgres_password_export_line = (
         'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     )
@@ -992,8 +1036,19 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     assert stop_env_file_line in global_section
     assert stop_fallback_line in global_section
     assert stop_guard_end_line in global_section
-    assert api_token_export_line in global_section
+    assert api_guard_line in global_section
+    assert api_require_line in global_section
+    assert api_export_line in global_section
+    assert unsafe_api_generation_line not in global_section
     assert postgres_password_export_line in global_section
+    api_guard_index = global_section.index(api_guard_line)
+    api_require_index = global_section.index(api_require_line)
+    api_export_index = global_section.index(api_export_line)
+    api_guard_end_index = _shell_closing_fi_index(
+        global_section,
+        api_export_index,
+        "global source-checkout rollback",
+    )
     stop_fallback_index = global_section.index(stop_fallback_line)
     assert (
         global_section.index("uv tool install . --force")
@@ -1001,7 +1056,10 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
         < global_section.index(stop_env_file_line)
         < stop_fallback_index
         < global_section.index(stop_guard_end_line, stop_fallback_index)
-        < global_section.index(api_token_export_line)
+        < api_guard_index
+        < api_require_index
+        < api_export_index
+        < api_guard_end_index
         < global_section.index(postgres_password_export_line)
         < global_section.index(setup_line)
     )

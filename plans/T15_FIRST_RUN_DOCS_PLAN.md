@@ -163,6 +163,13 @@ Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HHpsS`:
 `--source-checkout "$PWD"` to both `awf setup` and `awf start` so a newly cloned
 checkout is selected even when stale source-checkout metadata already exists.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HH2Fh`: source-checkout
+upgrade and rollback snippets in `docs/QUICKSTART.md` and `docs/UPGRADE.md`
+must not generate a replacement `AWF_API_TOKEN` when the shell variable is
+unset. Reuse a token already persisted in `docker/compose/.env` or `.env`; only
+require operators to export the running local Core token when neither file
+contains it.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

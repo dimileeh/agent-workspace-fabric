@@ -59,6 +59,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address review-level comment `issue:4620140358` by adding guarded
   Core stop commands before every `docs/UNINSTALL.md` source-checkout metadata
   refresh example.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HH2Fh` by preventing
+  source-checkout upgrade and rollback snippets from generating a replacement
+  `AWF_API_TOKEN` when `docker/compose/.env` or `.env` already carries the
+  running local Core token.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -885,6 +889,49 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `47 passed in 1.49s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HH2Fh`:
+
+- `docs/QUICKSTART.md` source-checkout upgrade snippets now check
+  `docker/compose/.env` and `.env` before requiring `AWF_API_TOKEN` from the
+  shell, and no longer generate a replacement token during upgrade.
+- `docs/UPGRADE.md` now documents the source-checkout env-file token reuse rule
+  and applies it to both source-checkout upgrade and rollback snippets.
+- `tests/unit/docs/test_public_docs_status.py` now rejects source-checkout
+  upgrade and rollback snippets that fall back to
+  `openssl rand -hex 32` for `AWF_API_TOKEN`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata -q
+```
+
+Red-phase result after updating the focused assertions: failed because
+`docs/QUICKSTART.md` and `docs/UPGRADE.md` still generated a fallback
+`AWF_API_TOKEN` in source-checkout upgrade and rollback snippets.
+
+Final focused repair result: `3 passed in 0.69s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `47 passed in 1.42s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
