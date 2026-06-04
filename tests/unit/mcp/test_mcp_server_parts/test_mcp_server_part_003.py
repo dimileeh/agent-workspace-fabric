@@ -1397,3 +1397,56 @@ class TestWorkspaceLogs:
         assert chunk["eof"] is False
         assert chunk["data"] == REDACTION_MARKER
         assert fragment not in str(chunk["data"])
+
+    @pytest.mark.unit
+    async def test_read_workspace_log_preserves_long_benign_token_without_assignment_context(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Preserve ordinary long tokens when no secret assignment prefix is found."""
+        log_root = tmp_path / "logs"
+        service = WorkspaceService(factory, log_root=log_root)
+        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe readable logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            raw_log = log_root / workspace.id / "agent.stdout.log"
+            raw_log.parent.mkdir(parents=True)
+            fragment = "ordinary-fragment"
+            raw_text = f"{'a' * 4_500}{fragment} done\n"
+            raw_log.write_text(raw_text, encoding="utf-8")
+            await WorkspaceLogStreamRepository(session).create_or_get(
+                workspace_id=workspace.id,
+                stream_id="agent.stdout",
+                source="agent",
+                name="Agent stdout",
+                kind="stdout",
+                path=str(raw_log),
+            )
+            await session.commit()
+
+        offset = raw_text.index(fragment)
+        limit_bytes = len(fragment)
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": offset,
+                "limit_bytes": limit_bytes,
+            },
+        )
+
+        assert isinstance(chunk, dict)
+        assert chunk["offset"] == offset
+        assert chunk["next_offset"] == offset + limit_bytes
+        assert chunk["eof"] is False
+        assert chunk["data"] == fragment
