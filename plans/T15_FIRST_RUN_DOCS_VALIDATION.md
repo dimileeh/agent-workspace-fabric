@@ -63,6 +63,11 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   source-checkout upgrade and rollback snippets from generating a replacement
   `AWF_API_TOKEN` when `docker/compose/.env` or `.env` already carries the
   running local Core token.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HIPd1` by making
+  source-checkout upgrade and rollback snippets preserve a non-default
+  persisted `AWF_POSTGRES_PASSWORD` from `docker/compose/.env` or `.env`, and
+  require the running local Core password from the shell when no persisted value
+  exists.
 - Complete: Address review-level comment `issue:4620140358` by guarding the
   reviewer-cited docs ordering assertions with explicit presence checks, while
   leaving the already-correct source-checkout token restoration docs unchanged.
@@ -974,6 +979,50 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 ```
 
 Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HIPd1`:
+
+- `docs/QUICKSTART.md` source-checkout upgrade snippets now read
+  `AWF_POSTGRES_PASSWORD` from `docker/compose/.env` first, then `.env`, before
+  exporting it for `awf start --source-checkout "$PWD"`.
+- `docs/UPGRADE.md` applies the same persisted-password preservation to both
+  source-checkout upgrade and rollback snippets, and its source-checkout
+  overview now covers both service secrets.
+- `tests/unit/docs/test_public_docs_status.py` now rejects the old
+  source-checkout `AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"`
+  fallback and requires the persisted-password restore block.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata -q
+```
+
+Red-phase result after updating the focused assertions: failed because
+`docs/QUICKSTART.md` and `docs/UPGRADE.md` still defaulted source-checkout
+upgrade and rollback snippets to `awf_dev`.
+
+Final focused repair result: `3 passed in 0.67s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `47 passed in 1.42s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

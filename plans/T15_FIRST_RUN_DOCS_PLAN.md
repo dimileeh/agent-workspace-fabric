@@ -178,6 +178,14 @@ The same comment's source-checkout token-regeneration concern is already
 addressed by the current `docs/UPGRADE.md` `AWF_API_TOKEN` guards and
 regression assertions, so avoid unrelated docs churn there.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HIPd1`: source-checkout
+upgrade and rollback snippets in `docs/QUICKSTART.md` and `docs/UPGRADE.md`
+must preserve a non-default persisted `AWF_POSTGRES_PASSWORD` from
+`docker/compose/.env` or the checkout root `.env` before `awf start` overlays
+the process environment. If neither persisted file carries the password, the
+snippets must require the operator to restore the running local Core password in
+the shell instead of defaulting to `awf_dev`.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -199,6 +207,12 @@ Focused test command:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_troubleshooting_guide.py tests/unit/cli/test_init_parts/test_init_part_004.py -q
+```
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HIPd1`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata -q
 ```
 
 Focused lint command:

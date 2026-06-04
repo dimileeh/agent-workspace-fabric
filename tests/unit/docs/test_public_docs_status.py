@@ -340,9 +340,6 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     )
     api_export_line = "  export AWF_API_TOKEN"
     unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
-    postgres_password_export_line = (
-        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
-    )
     cases = (
         (
             "Quickstart Lane 2",
@@ -394,8 +391,8 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         assert unsafe_api_generation_line not in section, (
             f"{label} must not regenerate AWF_API_TOKEN"
         )
-        assert postgres_password_export_line in section, (
-            f"{label} must restore AWF_POSTGRES_PASSWORD"
+        password_restore_start_index, password_restore_end_index = (
+            _assert_source_checkout_postgres_password_restore(label, section, "upgrading")
         )
         assert stop_guard_line in section, f"{label} must guard optional compose env file"
         assert stop_env_file_line in section, f"{label} must reuse compose env file if present"
@@ -414,7 +411,8 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
             < api_require_index
             < api_export_index
             < api_guard_end_index
-            < section.index(postgres_password_export_line)
+            < password_restore_start_index
+            < password_restore_end_index
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
             < stop_fallback_index
@@ -945,9 +943,6 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     )
     api_export_line = "  export AWF_API_TOKEN"
     unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
-    postgres_password_export_line = (
-        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
-    )
     setup_line = 'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"'
     no_global_commands = (
         setup_line,
@@ -969,7 +964,13 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     assert api_require_line in no_global_section
     assert api_export_line in no_global_section
     assert unsafe_api_generation_line not in no_global_section
-    assert postgres_password_export_line in no_global_section
+    password_restore_start_index, password_restore_end_index = (
+        _assert_source_checkout_postgres_password_restore(
+            "no-global source-checkout rollback",
+            no_global_section,
+            "rollback",
+        )
+    )
     api_guard_index = no_global_section.index(api_guard_line)
     api_require_index = no_global_section.index(api_require_line)
     api_export_index = no_global_section.index(api_export_line)
@@ -989,7 +990,8 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
         < api_require_index
         < api_export_index
         < api_guard_end_index
-        < no_global_section.index(postgres_password_export_line)
+        < password_restore_start_index
+        < password_restore_end_index
         < no_global_section.index(setup_line)
     )
     for command in no_global_commands:
@@ -1015,9 +1017,6 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     )
     api_export_line = "  export AWF_API_TOKEN"
     unsafe_api_generation_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
-    postgres_password_export_line = (
-        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
-    )
     setup_line = 'awf setup --source-checkout "$PWD"'
     global_commands = (
         setup_line,
@@ -1042,7 +1041,13 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     assert api_require_line in global_section
     assert api_export_line in global_section
     assert unsafe_api_generation_line not in global_section
-    assert postgres_password_export_line in global_section
+    password_restore_start_index, password_restore_end_index = (
+        _assert_source_checkout_postgres_password_restore(
+            "global source-checkout rollback",
+            global_section,
+            "rollback",
+        )
+    )
     api_guard_index = global_section.index(api_guard_line)
     api_require_index = global_section.index(api_require_line)
     api_export_index = global_section.index(api_export_line)
@@ -1062,7 +1067,8 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
         < api_require_index
         < api_export_index
         < api_guard_end_index
-        < global_section.index(postgres_password_export_line)
+        < password_restore_start_index
+        < password_restore_end_index
         < global_section.index(setup_line)
     )
     for command in global_commands:
@@ -1381,6 +1387,90 @@ def _shell_closing_fi_index(section: str, start: int, label: str) -> int:
     closing_match = re.search(r"(?m)^fi$", section[start:])
     assert closing_match is not None, f"{label} is missing closing shell fi"
     return start + closing_match.start()
+
+
+def _assert_source_checkout_postgres_password_restore(
+    label: str,
+    section: str,
+    lifecycle: str,
+) -> tuple[int, int]:
+    """Assert source-checkout snippets preserve persisted Postgres passwords."""
+    unsafe_default_line = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    password_init_line = 'AWF_PERSISTED_POSTGRES_PASSWORD=""'
+    password_loop_line = "for env_file in docker/compose/.env .env; do"
+    password_file_guard_line = '  [ -f "$env_file" ] || continue'
+    password_read_line = (
+        '  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n '
+        "'s/^AWF_POSTGRES_PASSWORD=//p' "
+        '"$env_file" | head -n 1)"'
+    )
+    password_break_line = '  [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break'
+    password_loop_end_line = "done"
+    password_guard_line = 'if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then'
+    password_persisted_export_line = (
+        '  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"'
+    )
+    password_else_line = "else"
+    password_require_line = (
+        '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
+        "the running local Core or persist it in docker/compose/.env or .env before "
+        + lifecycle
+        + '}"'
+    )
+    password_shell_export_line = "  export AWF_POSTGRES_PASSWORD"
+
+    assert unsafe_default_line not in section, f"{label} must not default to awf_dev"
+    assert password_init_line in section, f"{label} must initialize persisted password lookup"
+    assert password_loop_line in section, f"{label} must inspect source checkout env files"
+    assert password_file_guard_line in section, f"{label} must skip absent env files"
+    assert password_read_line in section, f"{label} must read persisted AWF_POSTGRES_PASSWORD"
+    assert password_break_line in section, f"{label} must prefer the first persisted password"
+    assert password_guard_line in section, f"{label} must branch on persisted password"
+    assert password_persisted_export_line in section, (
+        f"{label} must export the persisted AWF_POSTGRES_PASSWORD"
+    )
+    assert password_require_line in section, (
+        f"{label} must require AWF_POSTGRES_PASSWORD when no persisted value exists"
+    )
+    assert password_shell_export_line in section, (
+        f"{label} must export restored shell AWF_POSTGRES_PASSWORD"
+    )
+
+    password_init_index = section.index(password_init_line)
+    password_loop_index = section.index(password_loop_line, password_init_index)
+    password_file_guard_index = section.index(password_file_guard_line, password_loop_index)
+    password_read_index = section.index(password_read_line, password_file_guard_index)
+    password_break_index = section.index(password_break_line, password_read_index)
+    password_loop_end_index = section.index(password_loop_end_line, password_break_index)
+    password_guard_index = section.index(password_guard_line, password_loop_end_index)
+    password_persisted_export_index = section.index(
+        password_persisted_export_line,
+        password_guard_index,
+    )
+    password_else_index = section.index(password_else_line, password_persisted_export_index)
+    password_require_index = section.index(password_require_line, password_else_index)
+    password_shell_export_index = section.index(password_shell_export_line, password_require_index)
+    password_guard_end_index = _shell_closing_fi_index(
+        section,
+        password_shell_export_index,
+        label,
+    )
+
+    assert (
+        password_init_index
+        < password_loop_index
+        < password_file_guard_index
+        < password_read_index
+        < password_break_index
+        < password_loop_end_index
+        < password_guard_index
+        < password_persisted_export_index
+        < password_else_index
+        < password_require_index
+        < password_shell_export_index
+        < password_guard_end_index
+    ), f"{label} must restore persisted Postgres password before continuing"
+    return password_init_index, password_guard_end_index
 
 
 def _assert_package_upgrade_restores_service_env(
