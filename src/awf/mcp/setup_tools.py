@@ -328,7 +328,7 @@ def _initialize_project_profile_result(
     template: str,
     force: bool,
 ) -> CallToolResult:
-    repository = Path(project_path).expanduser().resolve()
+    repository = _resolve_project_init_path(project_path)
     if not repository.exists():
         return _project_init_path_error(
             safe_result,
@@ -677,11 +677,19 @@ def _client_apply_command(client: str, *, source_checkout: Path | None) -> str:
     return shlex.join(command)
 
 
+def _resolve_project_init_path(project_path: str) -> Path:
+    return _resolve_user_supplied_path(project_path)
+
+
 def _resolve_client_source_checkout_path(source_checkout: str | None) -> Path | None:
     if source_checkout is None:
         return None
 
-    candidate = Path(source_checkout)
+    return _resolve_user_supplied_path(source_checkout)
+
+
+def _resolve_user_supplied_path(raw_path: str) -> Path:
+    candidate = Path(raw_path)
     try:
         expanded = candidate.expanduser()
     except (OSError, RuntimeError):

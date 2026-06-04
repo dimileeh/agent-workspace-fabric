@@ -84,6 +84,45 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HDb5N
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_initialize_project_profile` resolves
+`project_path` with a direct `Path(...).expanduser().resolve()` before the
+structured project-init validation path. If user expansion or path resolution
+raises, the MCP tool can surface an unhandled tool error instead of a structured
+project-init response.
+
+Scope is limited to guarding MCP project-init path resolution with the same
+fallback behavior used for explicit setup-tool checkout paths.
+
+### Requirements Checklist
+
+- Preserve existing project-path existence and directory validation behavior.
+- Convert `expanduser()` and `resolve()` failures during project-path
+  resolution into structured project-init responses.
+- Do not surface raw path-resolution exception text in MCP response content.
+- Add focused regressions for guarded project-init path resolution.
+
+### Implementation Steps
+
+1. Add focused failing MCP regressions where `project_path` expansion or
+   resolution raises.
+2. Route project-init path resolution through a guarded path resolver.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_path_expanduser_failure_returns_structured_error tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_path_resolve_failure_returns_structured_error -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Profile Probe And Marker Count Contract
 
 ### Problem Statement And Scope

@@ -916,6 +916,76 @@ async def test_initialize_project_profile_file_exists_is_structured_mcp_error(
 
 
 @pytest.mark.unit
+async def test_initialize_project_profile_path_expanduser_failure_returns_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project_path = "missing project"
+    expected_project_path = tmp_path / project_path
+    leaked_detail = "home directory unavailable"
+    original_expanduser = setup_tools.Path.expanduser
+
+    def fail_expanduser(path: Path) -> Path:
+        if str(path) == project_path:
+            raise RuntimeError(leaked_detail)
+        return original_expanduser(path)
+
+    monkeypatch.chdir(tmp_path)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+    monkeypatch.setattr(setup_tools.Path, "expanduser", fail_expanduser)
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": project_path, "template": "generic"},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_INVALID_PATH"
+    assert payload["message"] == "project path does not exist"
+    assert payload["detail"] == {"project_path": str(expected_project_path)}
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
+async def test_initialize_project_profile_path_resolve_failure_returns_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project_path = "missing project"
+    expected_project_path = tmp_path / project_path
+    leaked_detail = "path resolution unavailable"
+    original_resolve = setup_tools.Path.resolve
+
+    def fail_resolve(path: Path, *args: Any, **kwargs: Any) -> Path:
+        if str(path) == project_path:
+            raise OSError(leaked_detail)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.chdir(tmp_path)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+    monkeypatch.setattr(setup_tools.Path, "resolve", fail_resolve)
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": project_path, "template": "generic"},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_INVALID_PATH"
+    assert payload["message"] == "project path does not exist"
+    assert payload["detail"] == {"project_path": str(expected_project_path)}
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
 async def test_initialize_project_profile_preview_failure_does_not_surface_exception_text(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
