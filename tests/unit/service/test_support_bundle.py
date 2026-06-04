@@ -760,6 +760,28 @@ def test_support_bundle_setup_state_degrades_unexpected_config_reader_errors(
 
 
 @pytest.mark.unit
+def test_support_bundle_setup_state_degrades_unexpected_config_reader_errors_without_reason_code() -> (
+    None
+):
+    """Use the shared generic reader reason when unexpected errors lack one."""
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+
+    def _config_reader() -> HostSetupConfig:
+        raise RuntimeError(f"reader failed for {plain_ref}")
+
+    setup_state = support_bundle_mod._setup_state(
+        _config_reader,
+        secrets=frozenset({plain_ref}),
+    )
+
+    assert setup_state["status"] == "failed"
+    assert (
+        setup_state["reason_code"] == support_bundle_mod._HOST_SETUP_CONFIG_READ_FAILED_REASON_CODE
+    )
+    assert setup_state["message"] == "reader failed for <redacted>"
+
+
+@pytest.mark.unit
 def test_support_bundle_setup_state_degrades_loaded_config_summary_errors(
     tmp_path: Path,
 ) -> None:

@@ -21,6 +21,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log reads do not expose pattern-only secret
   assignment values when the assignment key prefix is outside the fixed context
   window.
+- Complete: MCP workspace log assignment-context early-break logic compares
+  byte offsets to byte offsets when multibyte text appears before an
+  assignment.
 - Complete: MCP workspace log reads do not skip data when the expanded log read
   is short without EOF; `next_offset` advances only through bytes actually
   covered by the expanded result.
@@ -29,6 +32,10 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: Support-bundle setup-state collection returns a redacted failed
   setup-state payload if loaded config summarization raises after the config
   reader succeeds.
+- Complete: Support-bundle setup-state generic fallback reason codes are
+  centralized.
+- Complete: Followed service-log streaming documents that the current per-line
+  redaction boundary depends on single-line secret/provider-ref patterns.
 - Complete: MCP binary secret detection documents why service-side token/URL
   regexes are retained after the shared redaction guard.
 - Complete: Existing first-run rendering behavior was left unchanged.
@@ -658,6 +665,66 @@ uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py tests/un
 
 uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
 # Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
+## Review-Level Comment `issue:4620175517` Byte-Break/Streaming-Boundary/Reason-Code Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `_workspace_log_assignment_value_covers_byte()` now computes the
+  assignment value byte start before applying the early-break optimization, so
+  multibyte text before an assignment cannot mix character and byte indexes.
+- Complete: followed service-log streaming keeps line-by-line redaction and
+  documents that future multiline secret patterns would need carry-over
+  context.
+- Complete: setup-state generic read and summary fallback reason codes are
+  shared constants, with the no-`reason_code` reader fallback covered.
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `src/awf/service/logs.py`
+- `src/awf/service/support_bundle.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `tests/unit/service/test_support_bundle.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing checks before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k assignment_value_covers_byte_breaks_using_byte_offsets
+# failed: byte/character early-break mismatch continued to a later synthetic match
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_unexpected_config_reader_errors_without_reason_code
+# failed: shared reader fallback reason constant did not exist yet
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k assignment_value_covers_byte_breaks_using_byte_offsets
+# 1 passed, 37 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_unexpected_config_reader_errors_without_reason_code
+# 1 passed, 20 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state
+# 6 passed, 15 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'assignment_value_covers_byte or visible_assignment_context or read_workspace_log_skips_lookback_when_visible_assignment_context'
+# 3 passed, 35 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py src/awf/service/logs.py src/awf/service/support_bundle.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/service/test_support_bundle.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py src/awf/service/logs.py src/awf/service/support_bundle.py
+# Success: no issues found in 3 source files
 ```
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds

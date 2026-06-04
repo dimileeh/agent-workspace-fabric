@@ -70,6 +70,13 @@ credential entry, or unrelated refactors are included.
   flag without proving the assignment key or a safe token boundary is visible.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes lookback projection trust checks plus a focused regression.
+- Review-level comment `issue:4620175517` identified three final review
+  follow-ups: compare MCP assignment early-break bounds in bytes rather than
+  character indexes, document that followed service-log redaction is currently
+  line-scoped, and centralize support-bundle setup-state fallback reason codes.
+- This repair remains inside the existing T17 redaction/support-bundle scope and
+  only changes the targeted helper, explanatory service-log comment,
+  setup-state constants, focused regressions, and this plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -98,6 +105,11 @@ credential entry, or unrelated refactors are included.
 - MCP workspace log reads do not clear unknown-leading-fragment masking merely
   because assignment lookback covers the requested byte window; the widened
   projection must either show assignment context or a safe token boundary.
+- MCP workspace log assignment-context early-break logic compares byte offsets
+  to byte offsets when multibyte text appears before an assignment.
+- Followed service-log streaming documents that the current per-line redaction
+  boundary depends on single-line secret/provider-ref patterns.
+- Support-bundle setup-state generic fallback reason codes are centralized.
 - Support-bundle setup-state collection returns a redacted failed setup-state
   payload if loaded config summarization raises after the config reader
   succeeds.
@@ -151,6 +163,15 @@ credential entry, or unrelated refactors are included.
     starts mid-token, confirm it fails, then keep unknown-leading-fragment
     masking unless the widened projection proves assignment context or a safe
     boundary.
+17. Add a focused regression proving `_workspace_log_assignment_value_covers_byte`
+    breaks before later matches using byte offsets when multibyte text precedes
+    an assignment.
+18. Change the helper to compute the assignment value byte start before the
+    early-break comparison.
+19. Add a concise comment to followed service-log streaming documenting the
+    line-scoped redaction boundary.
+20. Replace setup-state generic fallback reason string literals with shared
+    constants and cover the no-`reason_code` reader fallback.
 
 ## Verification Commands
 
@@ -216,6 +237,15 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'assignment_lookback_failure or pattern_only_secret_assignment or preserves_long_benign_token_without_assignment_context'
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```
+
+Review-level comment `issue:4620175517` byte-break/comment/constants checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k assignment_value_covers_byte_breaks_using_byte_offsets
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_unexpected_config_reader_errors_without_reason_code
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py src/awf/service/logs.py src/awf/service/support_bundle.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py tests/unit/service/test_support_bundle.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py src/awf/service/logs.py src/awf/service/support_bundle.py
 ```
 
 Review-thread `PRRT_kwDOSJAM6s6HCoIm` repair checks:

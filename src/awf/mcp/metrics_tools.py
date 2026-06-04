@@ -236,9 +236,9 @@ def _workspace_log_assignment_value_covers_byte(text: str, start: int) -> bool:
     if start < 0:
         return False
     for match in _LOG_TOKEN_ASSIGNMENT_RE.finditer(text):
-        if match.start("value") > start:
-            break
         value_start = len(text[: match.start("value")].encode("utf-8", errors="surrogateescape"))
+        if value_start > start:
+            break
         value_end = value_start + len(
             match.group("value").encode("utf-8", errors="surrogateescape")
         )

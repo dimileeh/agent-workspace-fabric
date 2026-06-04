@@ -33,6 +33,8 @@ from awf.service.status import collect_service_status
 
 BUNDLE_FILENAME_PREFIX = "awf-support-bundle"
 ISSUE_TEMPLATE_PATH = ".github/ISSUE_TEMPLATE/bug_report.yml"
+_HOST_SETUP_CONFIG_READ_FAILED_REASON_CODE = "HOST_SETUP_CONFIG_READ_FAILED"
+_HOST_SETUP_CONFIG_SUMMARY_FAILED_REASON_CODE = "HOST_SETUP_CONFIG_SUMMARY_FAILED"
 
 _SAFE_EXAMPLE_KEYS = frozenset(
     {"workspace_id", "failure_reason", "reason_code", "status", "updated_at", "count"}
@@ -232,7 +234,9 @@ def _setup_state(
     except Exception as exc:
         unexpected_payload: dict[str, object] = {
             "status": "failed",
-            "reason_code": str(getattr(exc, "reason_code", "HOST_SETUP_CONFIG_READ_FAILED")),
+            "reason_code": str(
+                getattr(exc, "reason_code", _HOST_SETUP_CONFIG_READ_FAILED_REASON_CODE)
+            ),
             "message": _redact_text(str(exc), secrets),
         }
         details = getattr(exc, "details", None)
@@ -260,7 +264,9 @@ def _setup_state(
     except Exception as exc:
         summary_payload: dict[str, object] = {
             "status": "failed",
-            "reason_code": str(getattr(exc, "reason_code", "HOST_SETUP_CONFIG_SUMMARY_FAILED")),
+            "reason_code": str(
+                getattr(exc, "reason_code", _HOST_SETUP_CONFIG_SUMMARY_FAILED_REASON_CODE)
+            ),
             "message": _redact_text(str(exc), secrets),
         }
         details = getattr(exc, "details", None)

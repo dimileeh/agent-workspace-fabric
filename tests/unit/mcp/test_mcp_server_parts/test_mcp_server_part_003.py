@@ -165,6 +165,43 @@ def test_workspace_log_assignment_value_covers_byte_ignores_out_of_range_context
     )
 
 
+@pytest.mark.unit
+def test_workspace_log_assignment_value_covers_byte_breaks_using_byte_offsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop before later assignments when byte offsets prove the value is after start."""
+    text = "é SERVICE_TOKEN=value OTHER_TOKEN=secret"
+    value_start_chars = text.index("value")
+    value_start_bytes = len(text[:value_start_chars].encode())
+    requested_byte = value_start_bytes - 1
+
+    class _FakeMatch:
+        def __init__(self, value_start: int, value: str) -> None:
+            self._value_start = value_start
+            self._value = value
+
+        def start(self, group: str) -> int:
+            assert group == "value"
+            return self._value_start
+
+        def group(self, group: str) -> str:
+            assert group == "value"
+            return self._value
+
+    class _FakeTokenAssignmentRe:
+        def finditer(self, candidate: str):  # type: ignore[no-untyped-def]
+            assert candidate == text
+            yield _FakeMatch(value_start_chars, "value")
+            raise AssertionError("byte-aware early break should skip later matches")
+
+    monkeypatch.setattr(metrics_tools_mod, "_LOG_TOKEN_ASSIGNMENT_RE", _FakeTokenAssignmentRe())
+
+    assert not metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        text,
+        requested_byte,
+    )
+
+
 async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     """Unwrap FastMCP's call_tool payload.
 

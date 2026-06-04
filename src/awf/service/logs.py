@@ -269,6 +269,8 @@ def _stream_redacted_pipe(source: IO[str] | None, sink: IO[str]) -> None:
     if source is None:
         return
     for line in source:
+        # Current token/provider-ref patterns are single-line; multiline
+        # patterns will need carry-over context instead of per-line redaction.
         sink.write(redact_secrets(line))
         sink.flush()
 
