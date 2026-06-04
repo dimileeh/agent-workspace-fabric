@@ -227,20 +227,22 @@ def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
 def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -> None:
     """Assert Quickstart does not leave source-checkout metadata stale."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
-    source_no_global_section = _markdown_section(
-        quickstart_text,
+    source_lane_headings = (
+        "## Lane 2: Source Checkout With Global Tool Install",
         "## Lane 3: Source Checkout With No Global Install",
     )
 
-    assert "~/.awf/config.yml" in source_no_global_section
-    assert "remove only the top-level `source_checkout:` block" in source_no_global_section
-    assert (
-        "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
-        in source_no_global_section
-    )
-    assert source_no_global_section.index("~/.awf/config.yml") < source_no_global_section.index(
-        "rm -rf aira-agent-workspace-fabric"
-    )
+    for heading in source_lane_headings:
+        source_section = _markdown_section(quickstart_text, heading)
+        assert "~/.awf/config.yml" in source_section
+        assert "remove only the top-level `source_checkout:` block" in source_section
+        assert (
+            "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+            in source_section
+        )
+        assert source_section.index("~/.awf/config.yml") < source_section.index(
+            "rm -rf aira-agent-workspace-fabric"
+        )
 
 
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:

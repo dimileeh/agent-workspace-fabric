@@ -37,6 +37,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   self-contained Quickstart source-checkout/no-global-install uninstall lane
   clear or refresh persisted `source_checkout` metadata before deleting the
   recorded checkout.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HCmnm` by making the Quickstart
+  source-checkout/global-tool uninstall lane clear or refresh persisted
+  `source_checkout` metadata before deleting the recorded checkout.
 - Complete: Address review-level comment `issue:4620140358` by removing the
   Getting Started `127.0.0.1` first-run URL contradiction and making the
   Quickstart optional GitHub token assertion self-calibrate from lane headings.
@@ -364,6 +367,31 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `34 passed in 0.98s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HCmnm`:
+
+- `docs/QUICKSTART.md` Lane 2 now tells operators to refresh the persisted
+  `source_checkout` path or remove only the top-level `source_checkout:` block
+  from `~/.awf/config.yml` before deleting the recorded checkout.
+- `tests/unit/docs/test_public_docs_status.py` now rejects either
+  source-checkout Quickstart uninstall lane when checkout deletion appears
+  without prior persisted source-checkout metadata cleanup guidance.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+```
+
+Red-phase result after extending the focused assertion: failed because
+`docs/QUICKSTART.md` Lane 2 did not mention `~/.awf/config.yml` before checkout
+deletion guidance.
+
+Final repair result: `1 passed in 0.57s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
