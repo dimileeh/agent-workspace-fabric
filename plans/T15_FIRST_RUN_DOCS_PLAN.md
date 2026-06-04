@@ -77,6 +77,10 @@ uninstall guidance must not tell operators to delete a checkout while
 the persisted checkout path or remove only the persisted `source_checkout`
 metadata before deleting that checkout.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HCN6b`: the self-contained
+Quickstart source-checkout/no-global-install uninstall lane must clear or refresh
+persisted `source_checkout` metadata before deleting the recorded checkout.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

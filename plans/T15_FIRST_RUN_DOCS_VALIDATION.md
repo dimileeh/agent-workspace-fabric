@@ -33,6 +33,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address PR thread `PRRT_kwDOSJAM6s6HB-xB` by preventing source
   checkout uninstall guidance from deleting a checkout while persisted
   `source_checkout` metadata still points at it.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HCN6b` by making the
+  self-contained Quickstart source-checkout/no-global-install uninstall lane
+  clear or refresh persisted `source_checkout` metadata before deleting the
+  recorded checkout.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -292,6 +296,37 @@ Red-phase result after adding the focused assertion: failed because
 deletion command.
 
 Final repair result: `1 passed in 0.57s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HCN6b`:
+
+- `docs/QUICKSTART.md` Lane 3 now tells operators to refresh the persisted
+  `source_checkout` path or remove only the top-level `source_checkout:` block
+  from `~/.awf/config.yml` before deleting the recorded checkout.
+- `tests/unit/docs/test_public_docs_status.py` now rejects the Quickstart Lane 3
+  uninstall lane when checkout deletion appears without prior persisted
+  source-checkout metadata cleanup guidance.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/QUICKSTART.md` did not mention `~/.awf/config.yml` before the checkout
+deletion command.
+
+Final repair result: `1 passed in 0.58s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+```
+
+Result: `34 passed in 1.00s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
