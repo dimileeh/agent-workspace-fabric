@@ -831,11 +831,12 @@ async def run_workspace_filesystem_gc(
     fallback_compose_teardown_candidate: WorkspaceGCCandidate | None = None
     if not candidates:
         if workspace is None:
-            fallback_compose_teardown_candidate = _missing_workspace_compose_teardown_candidate(
-                workspace_id=workspace_id,
-                work_dir=normalized_work_dir,
-                now=current_time,
-            )
+            if cleanup_enabled:
+                fallback_compose_teardown_candidate = _missing_workspace_compose_teardown_candidate(
+                    workspace_id=workspace_id,
+                    work_dir=normalized_work_dir,
+                    now=current_time,
+                )
         elif preserved and _preserved_workspace_allows_compose_teardown_fallback(preserved[0]):
             fallback_compose_teardown_candidate = _candidate_for_workspace(
                 workspace,
