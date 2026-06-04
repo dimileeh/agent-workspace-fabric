@@ -36,6 +36,42 @@ Plan reference: `plans/T14_E2E_SMOKE_HARNESS_PLAN.md`
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
 
+## Review-Level Repair Iteration: issue 4620148180 Command Spawn Errors
+
+### Requirement Status
+
+- Complete: Added focused regression coverage in
+  `tests/unit/scripts/test_first_run_smoke.py` for `run_command` receiving a
+  `FileNotFoundError` from `subprocess.run`.
+- Complete: `scripts/first_run_smoke.py::run_command` now catches `OSError`
+  after `TimeoutExpired` and returns a failed `CompletedProcess` with return
+  code `127` and a command-not-found/not-executable diagnostic.
+- Complete: Existing timeout handling remains covered by the prior focused
+  regression.
+- Verified false positive: The review note claiming `_print_results(results)`
+  can raise `NameError` after `run_harness` raises inside
+  `TemporaryDirectory` does not match Python control flow; the original
+  exception propagates out of `main()` before `_print_results` is reached, so
+  no `main()` change was made for that subpoint.
+
+### Evidence
+
+- Confirmed pre-fix focused regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_run_command_reports_oserror_as_failed_process -q`
+  failed with an uncaught `FileNotFoundError`.
+- Post-fix review-specific tests:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_run_command_reports_oserror_as_failed_process tests/unit/scripts/test_first_run_smoke.py::test_run_command_reports_timeout_as_failed_process -q`
+  passed with `2 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+- File-scoped format check:
+  `uv run --python 3.12 --extra dev ruff format --check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.
+
 ## Review Repair Iteration: PRRT_kwDOSJAM6s6HONFQ
 
 ### Requirement Status

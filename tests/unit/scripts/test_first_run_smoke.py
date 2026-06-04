@@ -559,6 +559,27 @@ def test_run_command_reports_timeout_as_failed_process(
 
 
 @pytest.mark.unit
+def test_run_command_reports_oserror_as_failed_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Command spawn failures are reported instead of crashing the harness."""
+
+    def missing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("missing executable")
+
+    monkeypatch.setattr(smoke.subprocess, "run", missing_run)
+    command = smoke.CommandSpec(argv=("/tmp/awf-smoke/bin/awf", "--help"), env={}, cwd=tmp_path)
+
+    completed = smoke.run_command(command, timeout_seconds=5)
+
+    assert completed.args == command.argv
+    assert completed.returncode == 127
+    assert completed.stdout == ""
+    assert completed.stderr == "command not found or not executable: missing executable"
+
+
+@pytest.mark.unit
 def test_source_setup_result_exposes_full_stdout_source_checkout(tmp_path: Path) -> None:
     """Setup metadata is parsed from full stdout even when stdout_tail is truncated."""
     checkout = tmp_path / "checkout"

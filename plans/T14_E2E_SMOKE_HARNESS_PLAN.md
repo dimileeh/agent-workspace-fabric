@@ -359,3 +359,52 @@ mask genuine source-checkout failures.
   must pass.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## Review-Level Repair Iteration: issue 4620148180 Command Spawn Errors
+
+### Problem Statement And Scope
+
+Review-level comment `issue:4620148180` flags that
+`scripts/first_run_smoke.py::run_command` catches timeouts but lets
+`OSError` subclasses such as `FileNotFoundError` escape from `subprocess.run`.
+The valid fix is scoped to converting command spawn failures into ordinary
+failed smoke command results so the harness prints diagnostics instead of a
+traceback. The comment also claims `main()` can raise `NameError` for
+`results` after `run_harness` raises inside `TemporaryDirectory`; that subpoint
+is a false positive because the original exception propagates before
+`_print_results(results)` is reached.
+
+### Requirements Checklist
+
+- Add focused regression coverage for `run_command` when `subprocess.run`
+  raises `OSError`.
+- Return a `subprocess.CompletedProcess[str]` with a command-not-found style
+  non-zero status and stderr diagnostic for command spawn failures.
+- Preserve existing timeout handling and normal command execution behavior.
+- Do not change `main()` for the false-positive unbound-results claim.
+- Avoid broad AWF/GitHub validation in the agent phase; AWF owns full
+  validation after completion.
+
+### Implementation Steps
+
+1. Add a unit test in `tests/unit/scripts/test_first_run_smoke.py` that
+   monkeypatches `subprocess.run` to raise `FileNotFoundError`.
+2. Run the focused new test and confirm it fails before implementation.
+3. Catch `OSError` after `TimeoutExpired` in
+   `scripts/first_run_smoke.py::run_command` and convert it to a
+   `CompletedProcess` with return code `127`.
+4. Re-run the focused new test plus the existing timeout regression and
+   file-scoped lint.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_run_command_reports_oserror_as_failed_process -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_run_command_reports_oserror_as_failed_process tests/unit/scripts/test_first_run_smoke.py::test_run_command_reports_timeout_as_failed_process -q`
+  must pass.
+- `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.

@@ -567,6 +567,13 @@ def run_command(command: CommandSpec, timeout_seconds: float) -> subprocess.Comp
             stdout=stdout,
             stderr=f"{message}\n{stderr}" if stderr else message,
         )
+    except OSError as exc:
+        return subprocess.CompletedProcess(
+            args=command.argv,
+            returncode=127,
+            stdout="",
+            stderr=f"command not found or not executable: {exc}",
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
