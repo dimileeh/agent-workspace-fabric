@@ -48,6 +48,11 @@ CLAUDE_BASE_SUPERSEDED_REAPED = "CLAUDE_BASE_SUPERSEDED_REAPED"
 # (e.g. a root-owned base under a uid-1000 caller). Surfaced per-error so the step
 # is a loud ``partial`` rather than reporting success while disk stays leaked.
 CLAUDE_BASE_REAP_PERMISSION_DENIED = "CLAUDE_BASE_REAP_PERMISSION_DENIED"
+# A reap candidate resolved outside the shared base root and was refused before any
+# ``rmtree`` (a structural/path-safety failure, not a filesystem permission error).
+# Kept distinct from ``CLAUDE_BASE_REAP_PERMISSION_DENIED`` so alerting keyed on
+# uid-1000-vs-root permission denials is not conflated with this defensive guard.
+CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT = "CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT"
 # At least one base could not be reaped (permission or other OSError): the whole
 # step is ``partial``.
 CLAUDE_BASE_REAP_PARTIAL = "CLAUDE_BASE_REAP_PARTIAL"
@@ -271,7 +276,7 @@ def _reap_one_base(signature_dir: Path, *, base_root: Path) -> dict[str, str] | 
         # cannot trigger in practice, but refuse to ``rmtree`` anything outside the
         # base root rather than trust the caller.
         return {
-            "reason_code": CLAUDE_BASE_REAP_PERMISSION_DENIED,
+            "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
             "error": "refused to reap a base outside the shared base root",
         }
     try:

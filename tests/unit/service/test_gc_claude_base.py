@@ -21,6 +21,7 @@ from awf.service import gc_claude_base as gc_claude_base_mod
 from awf.service.gc_claude_base import (
     CLAUDE_BASE_GC_NOOP,
     CLAUDE_BASE_REAP_PARTIAL,
+    CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
     CLAUDE_BASE_REAP_PERMISSION_DENIED,
     CLAUDE_BASE_SUPERSEDED_REAPED,
     _pinned_base_dirs,
@@ -400,7 +401,9 @@ def test_reap_one_base_refuses_path_outside_base_root(tmp_path: Path) -> None:
     error = _reap_one_base(stray, base_root=base_root)
 
     assert error is not None
-    assert error["reason_code"] == CLAUDE_BASE_REAP_PERMISSION_DENIED
+    # A dedicated structural reason code, distinct from a real filesystem permission
+    # error, so alerting keyed on the two never conflates them.
+    assert error["reason_code"] == CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT
     assert stray.is_dir()  # nothing was removed
 
 
