@@ -51,6 +51,11 @@ SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE = (
 AWF_WORK_DIR_BIND_PROPAGATION_ENV = "AWF_WORK_DIR_BIND_PROPAGATION"
 AWF_CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
 
+# Compose binds ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` (see
+# docker/compose/local-service.yml), so this is the deterministic default host
+# work dir the preflight must inspect when the operator pins nothing.
+DEFAULT_HOST_WORK_DIR_SUBPATH = ".awf/service"
+
 # Filesystems where a worker-mounted overlay never propagates into the sibling
 # agent container even when the bind is flagged ``:rshared`` (Docker Desktop's
 # gRPC/virtio bridges, Plan 9). On these the copy fallback is the only correct
@@ -451,17 +456,24 @@ def ensure_work_dir_mount_propagation(
 
 
 def _resolve_bootstrap_host_work_dir(environ: Mapping[str, str]) -> str | None:
-    """Return the explicitly configured host work dir to preflight, or ``None``.
+    """Return the host work dir to preflight, or ``None`` when unknowable.
 
-    Derived only from ``AWF_HOST_WORK_DIR`` / ``AWF_WORK_DIR`` so the preflight is
-    a no-op (leaving today's compose ``:rshared`` default) when the operator has
-    not pinned a host work dir — the case where the path is unknowable here.
+    Prefers an explicitly pinned ``AWF_HOST_WORK_DIR`` / ``AWF_WORK_DIR``. When
+    neither is set, falls back to compose's deterministic default
+    ``${HOME}/.awf/service`` so the propagation preflight still runs on the common
+    bootstrap path — exactly the Docker Desktop/virtiofs case this change must
+    detect, where the compose ``:rshared`` default would otherwise stand and leave
+    the worker provisioning an empty overlay. Returns ``None`` only when ``HOME``
+    is also absent, leaving today's compose defaults untouched.
     """
 
     for key in ("AWF_HOST_WORK_DIR", "AWF_WORK_DIR"):
         value = environ.get(key)
         if value and value.strip():
             return value.strip()
+    home = environ.get("HOME")
+    if home and home.strip():
+        return str(Path(home.strip()) / DEFAULT_HOST_WORK_DIR_SUBPATH)
     return None
 
 
@@ -525,11 +537,13 @@ async def run_service_bootstrap(
 
     subprocess_env = _docker_cli_environ({**os.environ, **raw_service_env})
 
-    # Work-dir mount-propagation preflight (#376/#388). Only when a host work dir
-    # is explicitly configured: detect whether it propagates so the worker's
+    # Work-dir mount-propagation preflight (#376/#388). Runs for the explicitly
+    # configured host work dir, and otherwise for compose's deterministic default
+    # ``${HOME}/.awf/service``: detect whether it propagates so the worker's
     # ``:rshared`` bind is gated and the overlay/copy posture is chosen before the
-    # api/worker containers start. Skipped otherwise to leave today's compose
-    # defaults (``:rshared`` / overlay) untouched. Best effort: never fatal.
+    # api/worker containers start. Skipped only when even ``HOME`` is unknowable,
+    # leaving today's compose defaults (``:rshared`` / overlay) untouched. Best
+    # effort: never fatal.
     host_work_dir = _resolve_bootstrap_host_work_dir(subprocess_env)
     if host_work_dir is not None:
         propagation = await asyncio.to_thread(

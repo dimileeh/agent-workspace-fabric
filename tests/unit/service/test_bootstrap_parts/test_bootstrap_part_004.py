@@ -268,8 +268,14 @@ def test_preflight_non_linux_host_forces_copy_fallback(
 
 
 @pytest.mark.unit
-def test_bootstrap_skips_preflight_without_host_work_dir(tmp_path: Path) -> None:
-    """No configured host work dir → no preflight stage, no propagation env."""
+def test_bootstrap_skips_preflight_without_host_work_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No host work dir and no ``HOME`` → no preflight stage, no propagation env."""
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
     root = _write_source_checkout(tmp_path / "checkout")
     captured_env: list[dict[str, str] | None] = []
 
@@ -351,6 +357,50 @@ def test_bootstrap_records_preflight_stage_and_injects_env(
     assert worker_env is not None
     assert worker_env["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
     assert worker_env["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+
+@pytest.mark.unit
+def test_bootstrap_preflights_default_work_dir_when_unpinned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no host work dir pinned, the preflight runs on compose's default
+    ``${HOME}/.awf/service`` path so Docker Desktop/virtiofs hosts are detected."""
+    root = _write_source_checkout(tmp_path / "checkout")
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
+    monkeypatch.setenv("HOME", "/home/op")
+
+    seen_paths: list[str] = []
+
+    def _preflight(host_work_dir: str, **_kwargs: object) -> WorkDirPropagationResult:
+        seen_paths.append(host_work_dir)
+        return WorkDirPropagationResult(
+            propagation="rprivate",
+            force_copy=True,
+            reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+            detail="docker desktop bridge",
+        )
+
+    monkeypatch.setattr(bootstrap, "ensure_work_dir_mount_propagation", _preflight)
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+            asset_root=root,
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert seen_paths == ["/home/op/.awf/service"]
+    assert "work_dir_propagation" in {stage.stage for stage in result.stages}
 
 
 @pytest.mark.unit
@@ -453,4 +503,9 @@ def test_resolve_bootstrap_host_work_dir_prefers_host_then_work_dir() -> None:
     assert resolve({"AWF_WORK_DIR": "/b"}) == "/b"
     # Blank AWF_HOST_WORK_DIR falls through to AWF_WORK_DIR.
     assert resolve({"AWF_HOST_WORK_DIR": "   ", "AWF_WORK_DIR": "/b"}) == "/b"
+    # With nothing pinned, fall back to compose's deterministic default so the
+    # preflight still runs on the common bootstrap path (#397 review).
+    assert resolve({"HOME": "/home/op"}) == "/home/op/.awf/service"
+    # A blank HOME falls through to the explicit-pins-only behavior.
+    assert resolve({"HOME": "   "}) is None
     assert resolve({}) is None
