@@ -24,6 +24,7 @@ from datetime import (
     datetime,
     timedelta,
 )
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -114,6 +115,7 @@ class ControlWorker(WorkerDelegatesMixin):
         )
         self._requested_capacity_resume_provider_suppression_expires_at: datetime | None = None
         self._worker_started_at = datetime.now(UTC)
+        self._last_heartbeat_written_at: float | None = None
 
     def request_stop(self: Any) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -325,8 +327,14 @@ class ControlWorker(WorkerDelegatesMixin):
                 await asyncio.wait_for(self._stopped.wait(), timeout=interval)
 
     async def _record_heartbeat_safely(self: Any) -> None:
+        now = monotonic()
+        last_written_at = self._last_heartbeat_written_at
+        interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)
+        if last_written_at is not None and now - last_written_at < interval:
+            return
         try:
             await self._record_heartbeat()
+            self._last_heartbeat_written_at = now
         except (SQLAlchemyError, RuntimeError, TimeoutError, OSError) as exc:
             _log.warning(
                 "worker.heartbeat_write_failed",

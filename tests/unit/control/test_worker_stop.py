@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.control.worker.manager as worker_manager
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.models import WorkerHeartbeat
 from awf.db.session import make_session_factory
@@ -84,6 +85,32 @@ async def test_heartbeat_write_failure_does_not_kill_worker() -> None:
     )
 
     await worker._record_heartbeat_safely()  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_record_heartbeat_safely_throttles_repeated_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    current_time = 100.0
+    monkeypatch.setattr(worker_manager, "monotonic", lambda: current_time, raising=False)
+    record_heartbeat = AsyncMock()
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        config=WorkerConfig(poll_interval_seconds=1.0, max_concurrent_provisions=0),
+    )
+    monkeypatch.setattr(worker, "_record_heartbeat", record_heartbeat)
+
+    await worker._record_heartbeat_safely()  # noqa: SLF001
+    await worker._record_heartbeat_safely()  # noqa: SLF001
+
+    assert record_heartbeat.call_count == 1
+
+    current_time += 1.01
+    await worker._record_heartbeat_safely()  # noqa: SLF001
+
+    assert record_heartbeat.call_count == 2
 
 
 @pytest.mark.unit
