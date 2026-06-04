@@ -687,6 +687,52 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     assert "does not delete local AWF service state" in uninstall_text
 
 
+def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None:
+    """Assert uninstall refresh docs do not leave Core holding checked ports."""
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+    intro_section = uninstall_text.split("## uv tool", maxsplit=1)[0]
+    core_stop_guidance = "Stop local Core before refreshing source-checkout metadata"
+    port_block_guidance = (
+        "`awf setup` checks the API and Postgres host ports and blocks while the previous "
+        "Core stack still holds them"
+    )
+    no_stop_guidance = "Editing `~/.awf/config.yml` remains the no-stop option"
+    source_cases = (
+        (
+            "global tool install",
+            _markdown_section(
+                uninstall_text,
+                "## Source Checkout With Global Tool Install",
+            ),
+            "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric",
+        ),
+        (
+            "no global install",
+            _markdown_section(
+                uninstall_text,
+                "## Source Checkout With No Global Install",
+            ),
+            (
+                "uv run --python 3.12 --extra dev awf setup "
+                "--source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+            ),
+        ),
+    )
+
+    intro_words = " ".join(intro_section.split())
+    assert core_stop_guidance in intro_words
+    assert port_block_guidance in intro_words
+    assert no_stop_guidance in intro_words
+    assert intro_words.index(core_stop_guidance) < intro_words.index(
+        "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+    )
+    for label, section, setup_line in source_cases:
+        section_words = " ".join(section.split())
+        assert core_stop_guidance in section_words, f"{label} must tell users to stop Core"
+        assert port_block_guidance in section_words, f"{label} must explain setup port blockers"
+        assert section_words.index(core_stop_guidance) < section_words.index(setup_line)
+
+
 def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     """Assert no-global checkout rollback does not require a global awf executable."""
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")

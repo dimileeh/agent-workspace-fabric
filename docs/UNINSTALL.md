@@ -13,7 +13,11 @@ local state.
 If you ran `awf setup --source-checkout`, AWF records that checkout in
 `~/.awf/config.yml` under `source_checkout`. Later `awf start` without an
 explicit `--source-checkout` revalidates that path and fails if the directory is
-gone. Before deleting a recorded checkout, either refresh the persisted path:
+gone. Refreshing through `awf setup --source-checkout ...` is not metadata-only.
+Stop local Core before refreshing source-checkout metadata; `awf setup` checks
+the API and Postgres host ports and blocks while the previous Core stack still
+holds them. Editing `~/.awf/config.yml` remains the no-stop option. Before
+deleting a recorded checkout, either refresh the persisted path:
 
 ```bash
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
@@ -61,8 +65,11 @@ longer need it.
 ## Source Checkout With Global Tool Install
 
 This lane uses inspectable source plus a global tool installed from that source
-checkout. If `~/.awf/config.yml` still points at this checkout, refresh the
-persisted path while the global `awf` executable is still available:
+checkout. If `~/.awf/config.yml` still points at this checkout, prepare to
+refresh the persisted path while the global `awf` executable is still available.
+Stop local Core before refreshing source-checkout metadata; `awf setup` checks
+the API and Postgres host ports and blocks while the previous Core stack still
+holds them. Then run:
 
 ```bash
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
@@ -88,8 +95,10 @@ This lane uses inspectable source with no global install, so there is no global
 `awf` executable to uninstall. After the persisted `source_checkout` metadata no
 longer points at this checkout, remove the checkout only if you no longer need
 the inspected source tree. To refresh the persisted path without a global `awf`
-executable, run the setup command through `uv run` from the current checkout
-before deleting it:
+executable, use `uv run` from the current checkout before deleting it. Stop
+local Core before refreshing source-checkout metadata; `awf setup` checks the
+API and Postgres host ports and blocks while the previous Core stack still holds
+them. Then run:
 
 ```bash
 uv run --python 3.12 --extra dev awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
