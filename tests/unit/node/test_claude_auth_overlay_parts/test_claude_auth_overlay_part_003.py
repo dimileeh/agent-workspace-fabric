@@ -270,8 +270,8 @@ def test_reconcile_preserves_destination_when_source_vanishes_after_stat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Regression for the ``_safe_overlay_copy`` ftruncate-ordering fix: if the legacy
-    # source disappears in the window after ``src.stat()`` succeeds but before
-    # ``src.open("rb")`` acquires a read fd, the pre-existing destination (the agent's
+    # source disappears in the window after the atomic source ``os.open`` would have run
+    # but before its read fd is acquired, the pre-existing destination (the agent's
     # overlay-era edit, visible through the live ``merged`` mount) must be left intact,
     # never zeroed by an early ``ftruncate``.
     legacy = tmp_path / "legacy"
@@ -288,15 +288,17 @@ def test_reconcile_preserves_destination_when_source_vanishes_after_stat(
     legacy_mtime_ns = (legacy / "f").stat().st_mtime_ns
     os.utime(upper / "f", ns=(legacy_mtime_ns - 1_000_000, legacy_mtime_ns - 1_000_000))
 
-    real_open = Path.open
+    real_os_open = os.open
 
-    def _open_vanished(self: Path, *args: object, **kwargs: object) -> object:
-        # Simulate the source being removed in the sub-µs window after its ``stat``.
-        if os.fspath(self) == os.fspath(legacy / "f") and args and args[0] == "rb":
+    def _os_open_source_vanished(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        # Simulate the source being removed in the window before its read fd is held.
+        # The source is the only non-directory ``os.open`` of ``legacy/f`` (the dir
+        # descent uses ``O_DIRECTORY``); the destination open targets ``merged``.
+        if os.fspath(path) == os.fspath(legacy / "f") and not (flags & os.O_DIRECTORY):
             raise OSError("source vanished")
-        return real_open(self, *args, **kwargs)  # type: ignore[arg-type]
+        return real_os_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "open", _open_vanished)
+    monkeypatch.setattr(auth_mounts_mod.os, "open", _os_open_source_vanished)
 
     _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
 
@@ -550,3 +552,52 @@ def test_reconcile_forwards_into_a_preexisting_merged_parent_dir(tmp_path: Path)
     _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
 
     assert (merged / "nested" / "f").read_text() == "fallback edit\n"
+
+
+@pytest.mark.unit
+def test_safe_overlay_copy_refuses_source_symlink_swapped_after_caller_checks(
+    tmp_path: Path,
+) -> None:
+    # Source-side TOCTOU guard: the caller's ``is_symlink()``/``is_file()`` checks in
+    # ``_reconcile_fallback_edits_into_upper`` are not atomic with the source open inside
+    # ``_safe_overlay_copy``, and the legacy copy is ``rw`` for the agent — so it can swap
+    # a checked-clean regular file for a symlink before the open. Calling
+    # ``_safe_overlay_copy`` directly with a symlink source models that post-check swap:
+    # the atomic ``O_NOFOLLOW`` source open must refuse it (``ELOOP``) so the root worker
+    # never follows the link to read an arbitrary host path into the agent-visible tree.
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "root-only-secret"
+    secret.write_text("root-only contents\n")
+    src_link = tmp_path / "src"
+    src_link.symlink_to(secret)
+
+    auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_link)
+
+    # The link target's contents are never read into the destination tree (the leaf may
+    # exist as an empty file from the dest ``O_CREAT`` before the source open failed —
+    # never any content), and the out-of-tree secret is untouched.
+    assert (merged / "f").read_text() == ""
+    assert secret.read_text() == "root-only contents\n"
+
+
+@pytest.mark.unit
+def test_safe_overlay_copy_refuses_source_fifo_swapped_after_caller_checks(
+    tmp_path: Path,
+) -> None:
+    # Source-side TOCTOU guard (FIFO variant): a ``mkfifo`` planted after the caller's
+    # ``is_file()`` check must not block the root worker. The atomic source open uses
+    # ``O_NONBLOCK`` and the ``S_ISREG`` ``fstat`` guard refuses the FIFO before any read.
+    # (If this regressed, the test itself would hang — there is no peer writer.)
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    src_fifo = tmp_path / "pipe"
+    os.mkfifo(src_fifo)
+
+    auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_fifo)
+
+    # Nothing was read from the FIFO; an empty dest leaf at most, never blocking.
+    assert (merged / "f").read_text() == ""
+    assert stat.S_ISFIFO(os.lstat(src_fifo).st_mode)

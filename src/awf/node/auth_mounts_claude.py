@@ -527,6 +527,14 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
       the root worker forever; the ``S_ISREG`` ``fstat`` guard rejects any other special
       file (e.g. a FIFO with a live reader) before a byte is written.
 
+    The *source* (``src``) gets the symmetric treatment: the caller's
+    ``is_symlink()``/``is_file()`` pre-checks are not atomic with this read, and the
+    legacy copy is ``rw`` for the agent, so ``src`` is opened with ``O_RDONLY |
+    O_NOFOLLOW | O_NONBLOCK`` and an ``S_ISREG`` ``fstat`` guard rather than a
+    symlink-following ``src.open("rb")``. This closes the mirror-image escape — an
+    agent-planted symlink would otherwise let the root worker read an arbitrary host
+    path into the agent-visible overlay, and a FIFO would block it indefinitely.
+
     Best-effort: any structural conflict or ``OSError`` skips just this file and never
     raises, so reconciliation never blocks provisioning. Mode and mtime are preserved
     (matching ``copy2``) so the "upper wins ties" generation rule downstream still sees
@@ -556,12 +564,29 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
             # A non-regular leaf the agent planted that still opened (e.g. a FIFO with a
             # live reader): never write to it — refuse the structural conflict.
             return
-        src_st = src.stat()
-        # Open the source before truncating ``dst``: if the legacy file is removed in
-        # the window after ``src.stat()`` succeeds, ``src.open`` raises and the existing
-        # ``upper`` entry (the agent's overlay-era edit) is left intact rather than
-        # silently zeroed. ``ftruncate`` only runs once a read fd on the content holds.
-        with src.open("rb") as src_file:
+        # Open the *source* with the same atomicity as the destination above. The
+        # caller's ``is_symlink()``/``is_file()`` guards in
+        # :func:`_reconcile_fallback_edits_into_upper` are *not* atomic with this open,
+        # and the legacy copy is mounted ``rw`` for the (untrusted) agent: it can swap
+        # the checked-clean regular file for a symlink or FIFO in that window. A bare
+        # ``src.stat()`` + ``src.open("rb")`` follows symlinks and blocks on FIFOs, so it
+        # would let the root worker (a) read an arbitrary host path through an
+        # agent-planted ``ln -sf /etc/shadow src`` and surface it in the agent-visible
+        # overlay, or (b) hang forever on a reader-less ``mkfifo src``. ``O_NOFOLLOW``
+        # rejects a planted symlink leaf (``ELOOP``); ``O_NONBLOCK`` makes a reader-less
+        # FIFO fail (``ENXIO``) instead of blocking; and the ``S_ISREG`` ``fstat`` guard
+        # refuses any other non-regular leaf (e.g. a FIFO with a live reader) before a
+        # byte is read — mirroring the destination protections.
+        src_fd = os.open(os.fspath(src), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fds.append(src_fd)
+        src_st = os.fstat(src_fd)
+        if not stat.S_ISREG(src_st.st_mode):
+            return
+        # The read fd on the source content is already held, so ``ftruncate`` (below)
+        # only runs once that fd is open: if the legacy file is unlinked in this window
+        # the existing ``upper`` entry (the agent's overlay-era edit) is left intact
+        # rather than silently zeroed.
+        with os.fdopen(src_fd, "rb", closefd=False) as src_file:
             os.ftruncate(dst_fd, 0)
             with os.fdopen(dst_fd, "wb", closefd=False) as dst_file:
                 shutil.copyfileobj(src_file, dst_file)
