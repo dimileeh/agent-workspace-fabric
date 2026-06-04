@@ -217,6 +217,9 @@ async def test_bounded_and_logged_cap(
     assert result.dropped_count == 3
     assert result.reaped_count == 2
     assert result.orphan_count == 5
+    # A capped-but-error-free sweep is its own status, not "ok": a single-field
+    # consumer must not read it as "all orphans reaped" while 3 were dropped.
+    assert result.status == "capped"
     assert result.reason_code == ORPHAN_DIR_REAP_CAP_HIT
     cap_log = next(
         event for event in captured if event.get("event") == "gc.orphan_dir_reconcile.capped"

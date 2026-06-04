@@ -157,7 +157,7 @@ class OrphanDirReapOutcome:
 class OrphanDirReconcileResult:
     """Inspectable result of one reconcile sweep."""
 
-    status: Literal["ok", "partial", "dry_run"]
+    status: Literal["ok", "partial", "capped", "dry_run"]
     reason_code: str
     scanned_count: int
     orphan_count: int
@@ -400,7 +400,13 @@ async def reconcile_orphaned_workspace_dirs(
             errors.append(outcome)
             _log.error("gc.orphan_dir_reconcile.reap_failed", **outcome.to_dict())
 
-    status: Literal["ok", "partial"] = "partial" if errors else "ok"
+    # ``status`` mirrors ``reason_code``: a capped-but-error-free sweep is a
+    # distinct ``"capped"`` status (not ``"ok"``) so a single-field consumer
+    # never reads ``status == "ok"`` as "all orphans reaped" while
+    # ``dropped_count`` directories were skipped by the per-sweep cap.
+    status: Literal["ok", "partial", "capped"] = (
+        "partial" if errors else ("capped" if capped else "ok")
+    )
     reason_code = (
         ORPHAN_DIR_REAP_PARTIAL
         if errors
