@@ -124,9 +124,11 @@ def test_preflight_private_mount_made_rshared_via_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(
-        "23 28 0:21 / /host/work rw,relatime - ext4 /dev/sda rw\n",
+        "23 28 0:21 / / rw,relatime - ext4 /dev/sda rw\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
@@ -139,7 +141,7 @@ def test_preflight_private_mount_made_rshared_via_runner(
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     result = ensure_work_dir_mount_propagation(
-        "/host/work",
+        str(work_dir),
         run_subprocess=_run,
         environ={"PATH": "/usr/bin"},
         mountinfo_path=mountinfo,
@@ -149,9 +151,92 @@ def test_preflight_private_mount_made_rshared_via_runner(
     assert result.force_copy is False
     assert result.reason_code == "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED"
     assert calls == [
-        ["mount", "--bind", "/host/work", "/host/work"],
-        ["mount", "--make-rshared", "/host/work"],
+        ["mount", "--bind", str(work_dir), str(work_dir)],
+        ["mount", "--make-rshared", str(work_dir)],
     ]
+
+
+@pytest.mark.unit
+def test_preflight_creates_missing_work_dir_before_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # First bootstrap: the host work dir does not exist yet and the backing fs
+    # is a private Linux mount. ``mount --bind <target> <target>`` requires the
+    # target directory to exist, so the preflight must create it first;
+    # otherwise the bind fails and forces the copy fallback even on a host where
+    # ``--make-rshared`` would have enabled the overlay path (#397).
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "23 28 0:21 / / rw,relatime - ext4 /dev/sda rw\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "_mount_binary_available", lambda: True)
+
+    work_dir = tmp_path / "work" / "service"
+    assert not work_dir.exists()
+
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        # Mirror real ``mount --bind``: a missing target makes it fail.
+        if args[:2] == ["mount", "--bind"] and not Path(args[2]).is_dir():
+            return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = ensure_work_dir_mount_propagation(
+        str(work_dir),
+        run_subprocess=_run,
+        environ={"PATH": "/usr/bin"},
+        mountinfo_path=mountinfo,
+    )
+
+    assert work_dir.is_dir()
+    assert result.propagation == "rshared"
+    assert result.force_copy is False
+    assert result.reason_code == "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED"
+    assert calls == [
+        ["mount", "--bind", str(work_dir), str(work_dir)],
+        ["mount", "--make-rshared", str(work_dir)],
+    ]
+
+
+@pytest.mark.unit
+def test_preflight_work_dir_creation_failure_is_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # If the bind source cannot be created (here the parent is a regular file,
+    # so ``mkdir`` raises ``OSError``), the preflight must not crash — it just
+    # proceeds and lets the bind decide the posture (#397).
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    work_dir = blocker / "service"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "23 28 0:21 / / rw,relatime - ext4 /dev/sda rw\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "_mount_binary_available", lambda: True)
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        # Cannot create the bind source → real ``mount --bind`` would fail.
+        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="")
+
+    result = ensure_work_dir_mount_propagation(
+        str(work_dir),
+        run_subprocess=_run,
+        environ={"PATH": "/usr/bin"},
+        mountinfo_path=mountinfo,
+    )
+
+    assert not work_dir.exists()
+    assert result.propagation == "rprivate"
+    assert result.force_copy is True
+    assert result.reason_code == "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE"
 
 
 @pytest.mark.unit
@@ -217,9 +302,11 @@ def test_preflight_make_rshared_failure_forces_copy_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(
-        "23 28 0:21 / /host/work rw,relatime - ext4 /dev/sda rw\n",
+        "23 28 0:21 / / rw,relatime - ext4 /dev/sda rw\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
@@ -230,7 +317,7 @@ def test_preflight_make_rshared_failure_forces_copy_fallback(
         return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="not permitted")
 
     result = ensure_work_dir_mount_propagation(
-        "/host/work",
+        str(work_dir),
         run_subprocess=_run,
         environ={},
         mountinfo_path=mountinfo,
@@ -246,9 +333,11 @@ def test_preflight_make_rshared_failure_unwinds_leaked_bind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(
-        "23 28 0:21 / /host/work rw,relatime - ext4 /dev/sda rw\n",
+        "23 28 0:21 / / rw,relatime - ext4 /dev/sda rw\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
@@ -263,7 +352,7 @@ def test_preflight_make_rshared_failure_unwinds_leaked_bind(
         return subprocess.CompletedProcess(args, returncode=returncode, stdout="", stderr="")
 
     result = ensure_work_dir_mount_propagation(
-        "/host/work",
+        str(work_dir),
         run_subprocess=_run,
         environ={},
         mountinfo_path=mountinfo,
@@ -274,9 +363,9 @@ def test_preflight_make_rshared_failure_unwinds_leaked_bind(
     assert result.reason_code == "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE"
     # The successful bind must be unwound so the host mount table does not leak.
     assert calls == [
-        ["mount", "--bind", "/host/work", "/host/work"],
-        ["mount", "--make-rshared", "/host/work"],
-        ["umount", "/host/work"],
+        ["mount", "--bind", str(work_dir), str(work_dir)],
+        ["mount", "--make-rshared", str(work_dir)],
+        ["umount", str(work_dir)],
     ]
 
 
@@ -285,9 +374,11 @@ def test_preflight_make_rshared_oserror_forces_copy_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(
-        "23 28 0:21 / /host/work rw,relatime - ext4 /dev/sda rw\n",
+        "23 28 0:21 / / rw,relatime - ext4 /dev/sda rw\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
@@ -297,7 +388,7 @@ def test_preflight_make_rshared_oserror_forces_copy_fallback(
         raise FileNotFoundError("mount missing")
 
     result = ensure_work_dir_mount_propagation(
-        "/host/work",
+        str(work_dir),
         run_subprocess=_run,
         environ={},
         mountinfo_path=mountinfo,
@@ -534,9 +625,11 @@ def test_preflight_make_rshared_with_default_environ(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Default ``environ=None`` exercises the no-env branch of the mount runner.
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(
-        "23 28 0:21 / /host/work rw,relatime - ext4 /dev/sda rw\n",
+        "23 28 0:21 / / rw,relatime - ext4 /dev/sda rw\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
@@ -549,7 +642,7 @@ def test_preflight_make_rshared_with_default_environ(
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     result = ensure_work_dir_mount_propagation(
-        "/host/work",
+        str(work_dir),
         run_subprocess=_run,
         mountinfo_path=mountinfo,
     )

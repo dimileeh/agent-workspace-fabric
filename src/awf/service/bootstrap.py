@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import shutil
@@ -361,9 +362,22 @@ def _try_make_work_dir_rshared(
     unwound with ``umount`` before returning ``False`` — otherwise repeated
     bootstrap runs that hit this edge would accumulate one stale entry per
     attempt in the host mount table. The unwind is itself best-effort.
+
+    ``mount --bind`` requires the target directory to exist. On a first
+    bootstrap the host work dir (``${HOME}/.awf/service`` by default) has not
+    been created yet — Compose would auto-create the bind source, but this
+    preflight runs before any Compose stage. The directory is therefore created
+    (best effort) before the bind so the bind is not spuriously denied on a host
+    where ``--make-rshared`` would otherwise succeed; a failed creation just
+    leaves the bind to fail and the caller falls back to the copy posture.
     """
 
     env = dict(environ) if environ is not None else None
+
+    # Best effort: if the bind source cannot be created, the bind below fails
+    # and the caller falls back to the per-workspace copy posture.
+    with contextlib.suppress(OSError):
+        target.mkdir(parents=True, exist_ok=True)
 
     def _run(command: list[str]) -> bool:
         try:
@@ -408,9 +422,9 @@ def ensure_work_dir_mount_propagation(
       non-propagating fs (Docker Desktop / virtiofs / grpcfuse / Plan 9) forces
       the copy fallback even when flagged shared, since the overlay never reaches
       the sibling regardless of propagation mode.
-    - Private but Linux with ``mount(8)`` available → attempt
-      ``mount --bind`` + ``mount --make-rshared`` (idempotent), then report
-      ``rshared`` on success.
+    - Private but Linux with ``mount(8)`` available → create the work dir if it
+      does not yet exist (the bind source), then attempt ``mount --bind`` +
+      ``mount --make-rshared`` (idempotent), then report ``rshared`` on success.
     - Non-propagating (Docker Desktop / virtiofs / grpcfuse / Plan 9), non-Linux,
       no ``mount(8)``, an unreadable mountinfo, or a failed ``--make-rshared`` →
       ``rprivate`` + ``force_copy=True`` so the worker uses the per-workspace copy
