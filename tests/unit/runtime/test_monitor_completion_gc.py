@@ -262,6 +262,48 @@ async def test_completed_workspace_gc_tears_down_compose_when_plan_is_empty(
     )
 
 
+@pytest.mark.unit
+async def test_completed_workspace_gc_unmounts_auth_overlay_when_plan_is_empty(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-empty-plan-auth"
+    compose_file = work_dir / "compose" / ws_id / "compose.yml"
+    runner = SimpleNamespace(
+        _work_dir=work_dir,
+        _deps=SimpleNamespace(session_factory=factory),
+    )
+    compose_patch, compose_calls = mock_completed_compose_manager(
+        ComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    )
+    teardown_calls: list[tuple[Path, str, list[tuple[str, Path, str, bool]]]] = []
+
+    def _record_teardown(*, work_dir: Path, workspace_id: str) -> None:
+        teardown_calls.append((work_dir, workspace_id, list(compose_calls)))
+
+    with (
+        compose_patch,
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.teardown_workspace_auth_overlay",
+            new=_record_teardown,
+        ),
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="proj_from_monitor",
+            compose_file=compose_file,
+        )
+
+    expected_compose_calls = [("proj_from_monitor", compose_file, ws_id, True)]
+    assert compose_calls == expected_compose_calls
+    assert teardown_calls == [(work_dir, ws_id, expected_compose_calls)]
+
+
 async def _seed_old_completed_pr_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,

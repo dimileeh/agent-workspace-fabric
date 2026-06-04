@@ -797,6 +797,16 @@ async def _gc_completed_workspace_filesystem(
         workspace_id=workspace_id,
         compose_project=compose_project,
     )
+    # Empty/no-delete plans never enter GC's candidate deletion loop, so GC has
+    # no chance to perform its normal post-compose auth overlay unmount.
+    if compose_teardown is not None and not any(
+        candidate.workspace_id == workspace_id for candidate in result.plan.candidates
+    ):
+        teardown = result.compose_teardowns.get(workspace_id)
+        if teardown is not None and teardown.ok:
+            await asyncio.to_thread(
+                _teardown_completed_workspace_auth_overlay, self._work_dir, workspace_id
+            )
     if not result.plan.candidates and result.plan.preserved:
         preserved = result.plan.preserved[0]
         _log.info(
