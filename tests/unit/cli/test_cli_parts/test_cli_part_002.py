@@ -590,11 +590,16 @@ class TestWorkspaceObservability:
         }
 
     @pytest.mark.unit
-    def test_runtime_fetches_without_token_header_when_unset(
+    def test_runtime_uses_local_compose_token_for_default_local_target(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        monkeypatch.setattr(
+            cli_common,
+            "local_service_environ",
+            lambda _environ: {"AWF_API_TOKEN": "local-dev-token"},
+        )
         response = _mock_response(
             status_code=200,
             payload={"workspace_id": "ws_obs", "stack_state": "running", "services": []},
@@ -604,6 +609,38 @@ class TestWorkspaceObservability:
 
         assert result.exit_code == 0
         assert "running" in result.stdout
+        headers = mock.call_args.kwargs.get("headers", {})
+        assert headers["Authorization"] == "Bearer local-dev-token"
+
+    @pytest.mark.unit
+    def test_runtime_does_not_send_local_compose_token_to_explicit_remote_target(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        monkeypatch.setattr(
+            cli_common,
+            "local_service_environ",
+            lambda _environ: {"AWF_API_TOKEN": "local-dev-token"},
+        )
+        response = _mock_response(
+            status_code=200,
+            payload={"workspace_id": "ws_obs", "stack_state": "running", "services": []},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "runtime",
+                    "ws_obs",
+                    "--base-url",
+                    "https://awf.example.test",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args[0][1] == "https://awf.example.test/v1/workspaces/ws_obs/runtime"
         headers = mock.call_args.kwargs.get("headers", {})
         assert "Authorization" not in headers
 

@@ -7,6 +7,7 @@ import os
 import shutil
 from collections.abc import Mapping
 from enum import StrEnum
+from ipaddress import ip_address
 from typing import Any, NoReturn, cast
 from uuid import uuid4
 
@@ -123,6 +124,34 @@ def _api_token_headers(override: str | None) -> dict[str, str]:
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
+
+
+def _local_compose_api_token_headers(
+    headers: Mapping[str, str] | None,
+    *,
+    base_url: str,
+) -> dict[str, str] | None:
+    """Add the local Compose token for loopback API targets when absent."""
+    resolved_headers = dict(headers) if headers is not None else {}
+    if any(key.lower() == "authorization" for key in resolved_headers):
+        return resolved_headers
+    if not _is_loopback_url(base_url):
+        return resolved_headers if headers is not None else None
+    token = local_service_environ(os.environ).get("AWF_API_TOKEN")
+    if not token:
+        return resolved_headers if headers is not None else None
+    resolved_headers["Authorization"] = f"Bearer {token}"
+    return resolved_headers
+
+
+def _is_loopback_url(url: str) -> bool:
+    host = httpx.URL(url).host
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _api_token_option() -> Any:
@@ -505,6 +534,12 @@ def _call(
     while the API is still working.
     """
 
+    headers = _local_compose_api_token_headers(
+        cast(Mapping[str, str] | None, kwargs.get("headers")),
+        base_url=base_url,
+    )
+    if headers is not None:
+        kwargs["headers"] = headers
     url = normalize_api_url(base_url, path)
     try:
         return httpx.request(method, url, timeout=timeout, **kwargs)
