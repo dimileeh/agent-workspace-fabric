@@ -56,7 +56,35 @@ def test_source_tool_install_lane_installs_isolated_awf(tmp_path: Path) -> None:
     assert source_checkout.get("root") == str((tmp_path / "source-checkout").resolve())
 
 
+def test_environmental_skip_helper_fails_when_later_result_failed() -> None:
+    """An early environmental skip must not mask the source-checkout proof failure."""
+    results = (
+        smoke.SmokeResult(
+            lane=smoke.Lane.SOURCE_UV_RUN,
+            status="skipped",
+            command=("uv", "run", "awf", "--help"),
+            reason="smoke command could not resolve dependencies in this environment",
+        ),
+        smoke.SmokeResult(
+            lane=smoke.Lane.SOURCE_UV_RUN,
+            status="failed",
+            command=("uv", "run", "awf", "setup", "--dry-run"),
+            reason="source checkout failed validation: SOURCE_CHECKOUT_INVALID",
+        ),
+    )
+
+    # Catch skip too so this regression reports a test failure, not a skipped test.
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as exc_info:
+        _assert_no_environmental_skip(results)
+
+    assert isinstance(exc_info.value, pytest.fail.Exception)
+    assert "SOURCE_CHECKOUT_INVALID" in str(exc_info.value)
+
+
 def _assert_no_environmental_skip(results: tuple[smoke.SmokeResult, ...]) -> None:
+    failed = [result for result in results if result.status == "failed"]
+    if failed:
+        pytest.fail("; ".join(result.reason for result in failed))
     skipped = [result for result in results if result.status == "skipped"]
     if skipped:  # pragma: no cover - environment dependent
         pytest.skip("; ".join(result.reason for result in skipped))

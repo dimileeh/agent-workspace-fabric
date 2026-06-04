@@ -36,6 +36,38 @@ Plan reference: `plans/T14_E2E_SMOKE_HARNESS_PLAN.md`
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
 
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HONFQ
+
+### Requirement Status
+
+- Complete: Added focused regression coverage in
+  `tests/integration/test_first_run_smoke.py` for mixed skipped/failed source
+  smoke results.
+- Complete: `_assert_no_environmental_skip` now fails on hard smoke failures
+  before considering environmental skips.
+- Complete: Preserved the existing environmental skip behavior when no hard
+  failure is present.
+- Complete: Broad AWF/GitHub validation was not run in the agent phase.
+
+### Evidence
+
+- Confirmed pre-fix focused regression:
+  `uv run --python 3.12 --extra dev pytest tests/integration/test_first_run_smoke.py::test_environmental_skip_helper_fails_when_later_result_failed -q`
+  failed because the helper raised `pytest.skip` before exposing the later
+  `SOURCE_CHECKOUT_INVALID` failure.
+- Post-fix focused regression:
+  `uv run --python 3.12 --extra dev pytest tests/integration/test_first_run_smoke.py::test_environmental_skip_helper_fails_when_later_result_failed -q`
+  passed with `1 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check tests/integration/test_first_run_smoke.py`
+  passed.
+- File-scoped format check:
+  `uv run --python 3.12 --extra dev ruff format --check tests/integration/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.
+
 ## CI Repair Iteration: PR #394 Python Full Coverage
 
 ### Requirement Status

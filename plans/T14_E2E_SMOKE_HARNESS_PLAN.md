@@ -317,3 +317,45 @@ scoped to isolating this idempotency unit test from real host disk pressure.
   must pass after implementation.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HONFQ
+
+### Problem Statement And Scope
+
+Inline review thread `PRRT_kwDOSJAM6s6HONFQ` reports that
+`tests/integration/test_first_run_smoke.py::_assert_no_environmental_skip`
+skips an integration case whenever any source smoke result is environmental,
+even if a later setup dry-run result failed the source-checkout proof. The fix
+is scoped to the integration assertion helper so environmental skips do not
+mask genuine source-checkout failures.
+
+### Requirements Checklist
+
+- Add focused regression coverage for mixed skipped/failed source smoke
+  results.
+- Make the integration helper fail on any hard smoke failure before considering
+  environmental skips.
+- Preserve the existing behavior that all-skip environmental results skip the
+  integration case.
+- Avoid broad AWF/GitHub validation in the agent phase; AWF owns full
+  validation after completion.
+
+### Implementation Steps
+
+1. Add a regression test in `tests/integration/test_first_run_smoke.py` that
+   passes one skipped and one failed `SmokeResult` to the helper.
+2. Run the focused regression and confirm it fails before implementation.
+3. Update `_assert_no_environmental_skip` to report failed results before
+   calling `pytest.skip`.
+4. Re-run the focused regression and file-scoped lint.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regression:
+  `uv run --python 3.12 --extra dev pytest tests/integration/test_first_run_smoke.py::test_environmental_skip_helper_fails_when_later_result_failed -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/integration/test_first_run_smoke.py::test_environmental_skip_helper_fails_when_later_result_failed -q`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.
