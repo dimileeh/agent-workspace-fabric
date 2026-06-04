@@ -431,6 +431,25 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     assert "run `awf start`" in configure_section
 
 
+def test_getting_started_cli_host_port_derivation_matches_cli_default() -> None:
+    """Assert Getting Started documents the CLI's localhost host-port derivation."""
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+    configure_section = getting_started_text.split(
+        "### Configure Environment",
+        maxsplit=1,
+    )[1].split("### Run Locally", maxsplit=1)[0]
+
+    assert (
+        "`AWF_API_HOST_PORT` is present, the CLI derives `http://localhost:<port>`"
+        in configure_section
+    )
+    assert 'export AWF_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"' in configure_section
+    assert (
+        "`AWF_API_HOST_PORT` is present, the CLI derives `http://127.0.0.1:<port>`"
+        not in configure_section
+    )
+
+
 def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
     """Assert MCP setup prerequisites use the canonical local startup flow."""
     mcp_setup_text = (REPO_ROOT / "docs" / "MCP_SETUP.md").read_text(encoding="utf-8")

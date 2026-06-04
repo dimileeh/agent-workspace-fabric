@@ -217,7 +217,7 @@ non-default value, update its loopback port to match.
 
 For host-side `awf` workspace commands and manual HTTP checks, `AWF_BASE_URL`
 is the operator-facing API knob. Usually you do not need to set it: when
-`AWF_API_HOST_PORT` is present, the CLI derives `http://127.0.0.1:<port>`
+`AWF_API_HOST_PORT` is present, the CLI derives `http://localhost:<port>`
 automatically. Set `AWF_BASE_URL` only when running host-side CLI or HTTP checks
 from a different shell that does not carry `AWF_API_HOST_PORT`, or when
 targeting a reverse proxy or other non-derived API root. `AWF_CLI_BASE_URL`
@@ -225,7 +225,7 @@ still works for compatibility, but is deprecated.
 
 ```bash
 export AWF_API_HOST_PORT=9001
-export AWF_BASE_URL="http://127.0.0.1:${AWF_API_HOST_PORT}"
+export AWF_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
 awf workspace list --format pretty
 curl "${AWF_BASE_URL}/readyz?provider=github"
 ```
