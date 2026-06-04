@@ -17,6 +17,9 @@ from structlog.testing import capture_logs
 
 from awf.node import auth_mounts as auth_mounts_mod
 from awf.node.auth_mounts import (
+    _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
+    _OVERLAY_UNMOUNTED_MARKER,
+    OverlayUnmountUnverifiableError,
     _has_cap_sys_admin,
     _host_claude_signature,
     _overlay_filesystem_available,
@@ -283,6 +286,139 @@ def test_teardown_with_default_mounter_is_noop_when_path_absent(tmp_path: Path) 
     # No injected mounter exercises ``default_overlay_mounter`` + the real
     # ``os.path.ismount`` on a path that is not a mountpoint.
     teardown_workspace_auth_overlay(work_dir=tmp_path / "work", workspace_id="ws_absent")
+
+
+@pytest.mark.unit
+def test_teardown_records_marker_after_unmount(tmp_path: Path) -> None:
+    # A capable unmount records the ``.overlay-unmounted`` marker so a later
+    # capability-less GC can tell the overlay was released here.
+    work_dir = tmp_path / "work"
+    claude_root = work_dir / "auth" / "ws_marker" / "claude"
+    (claude_root / "merged").mkdir(parents=True)
+    mounter = FakeOverlayMounter(supported=True)
+    mounter.mounted.add(claude_root / "merged")
+
+    teardown_workspace_auth_overlay(
+        work_dir=work_dir, workspace_id="ws_marker", overlay_mounter=mounter
+    )
+
+    assert mounter.unmounts == [claude_root / "merged"]
+    assert (claude_root / _OVERLAY_UNMOUNTED_MARKER).is_file()
+
+
+@pytest.mark.unit
+def test_teardown_incapable_with_upper_and_no_marker_raises(tmp_path: Path) -> None:
+    # CLI/API context (no CAP_SYS_ADMIN) cannot see the worker's mount. A
+    # surviving overlay ``upper`` with no teardown marker means the worker may
+    # still hold the mount, so removing the auth dir would strand it: fail loudly.
+    work_dir = tmp_path / "work"
+    claude_root = work_dir / "auth" / "ws_incapable" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    mounter = FakeOverlayMounter(supported=True)  # not mounted in this namespace
+
+    with pytest.raises(OverlayUnmountUnverifiableError) as excinfo:
+        teardown_workspace_auth_overlay(
+            work_dir=work_dir,
+            workspace_id="ws_incapable",
+            overlay_mounter=mounter,
+            capability_probe=lambda: False,
+        )
+
+    assert excinfo.value.reason_code == _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE
+    assert mounter.unmounts == []
+
+
+@pytest.mark.unit
+def test_teardown_incapable_with_marker_is_noop(tmp_path: Path) -> None:
+    # The worker already recorded a teardown marker, so a capability-less GC can
+    # safely treat this as released and remove the dir.
+    work_dir = tmp_path / "work"
+    claude_root = work_dir / "auth" / "ws_released" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    (claude_root / _OVERLAY_UNMOUNTED_MARKER).write_text("")
+    mounter = FakeOverlayMounter(supported=True)
+
+    teardown_workspace_auth_overlay(
+        work_dir=work_dir,
+        workspace_id="ws_released",
+        overlay_mounter=mounter,
+        capability_probe=lambda: False,
+    )
+
+    assert mounter.unmounts == []
+
+
+@pytest.mark.unit
+def test_teardown_incapable_legacy_copy_without_upper_is_noop(tmp_path: Path) -> None:
+    # A legacy full-copy workspace has no overlay ``upper``; there is no mount to
+    # strand, so a capability-less teardown is a clean no-op.
+    work_dir = tmp_path / "work"
+    claude_root = work_dir / "auth" / "ws_legacy" / "claude"
+    (claude_root / ".claude").mkdir(parents=True)
+    mounter = FakeOverlayMounter(supported=True)
+
+    teardown_workspace_auth_overlay(
+        work_dir=work_dir,
+        workspace_id="ws_legacy",
+        overlay_mounter=mounter,
+        capability_probe=lambda: False,
+    )
+
+    assert mounter.unmounts == []
+    assert not (claude_root / _OVERLAY_UNMOUNTED_MARKER).exists()
+
+
+@pytest.mark.unit
+def test_teardown_capable_not_mounted_writes_marker(tmp_path: Path) -> None:
+    # The worker (capable) sees the real namespace: nothing mounted means
+    # teardown is verified, and it records the marker for the GC path.
+    work_dir = tmp_path / "work"
+    claude_root = work_dir / "auth" / "ws_capable" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    mounter = FakeOverlayMounter(supported=True)
+
+    teardown_workspace_auth_overlay(
+        work_dir=work_dir,
+        workspace_id="ws_capable",
+        overlay_mounter=mounter,
+        capability_probe=lambda: True,
+    )
+
+    assert mounter.unmounts == []
+    assert (claude_root / _OVERLAY_UNMOUNTED_MARKER).is_file()
+
+
+@pytest.mark.unit
+def test_default_overlay_mounter_supported_false_under_force_copy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Even with overlayfs + CAP_SYS_ADMIN both present, the force-copy request
+    # (set by the bootstrap propagation preflight on non-propagating hosts) flips
+    # the posture to the copy fallback so the agent never gets an empty overlay.
+    monkeypatch.setattr(auth_mounts_mod, "_overlay_filesystem_available", lambda: True)
+    monkeypatch.setattr(auth_mounts_mod, "_has_cap_sys_admin", lambda: True)
+    assert default_overlay_mounter().supported() is True
+
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", "1")
+    assert default_overlay_mounter().supported() is False
+
+
+@pytest.mark.unit
+def test_teardown_capable_not_mounted_without_auth_dir_skips_marker(tmp_path: Path) -> None:
+    # A capable teardown for a workspace that was never provisioned (no auth dir)
+    # must not materialize an empty tree just to drop a marker.
+    work_dir = tmp_path / "work"
+    mounter = FakeOverlayMounter(supported=True)
+
+    teardown_workspace_auth_overlay(
+        work_dir=work_dir,
+        workspace_id="ws_missing",
+        overlay_mounter=mounter,
+        capability_probe=lambda: True,
+    )
+
+    assert mounter.unmounts == []
+    assert not (work_dir / "auth" / "ws_missing").exists()
 
 
 @pytest.mark.unit

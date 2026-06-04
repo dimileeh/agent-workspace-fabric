@@ -880,23 +880,40 @@ def _unmount_candidate_auth_overlay(
     candidate: WorkspaceGCCandidate,
     *,
     work_dir: Path,
-) -> None:
+) -> tuple[str, str] | None:
     """Unmount a GC candidate's Claude auth overlay before its dir is removed.
 
     Unmount-before-remove: a live overlay mount at ``auth/<id>/claude/merged``
     makes the subsequent ``rmtree`` of ``auth/<id>`` fail with ``EBUSY`` and
     strands both the mount and the auth dir. The PR monitor unmounts before its
     own filesystem GC, but ``POST /v1/service/gc`` funnels through here too, so
-    doing it centrally covers both entrypoints. Best-effort and idempotent: a
-    no-op when nothing is mounted, and a genuine umount failure is logged and
-    swallowed so the per-path delete still records any residual ``EBUSY`` rather
-    than aborting the whole run.
+    doing it centrally covers both entrypoints.
+
+    Returns ``None`` when the overlay was unmounted (or there is nothing to
+    release in this namespace). Returns ``(reason_code, message)`` when the
+    unmount could not be performed or verified — either this process lacks
+    ``CAP_SYS_ADMIN`` and cannot see the worker's mount
+    (``OverlayUnmountUnverifiableError``), or ``umount`` failed outright. The
+    caller skips removing the auth dir and records the failure so GC reports a
+    loud ``partial`` instead of stranding a possibly-live mount while reporting
+    success — consistent with running GC as root in the API container (#372).
     """
 
-    from awf.node.auth_mounts import teardown_workspace_auth_overlay
+    from awf.node.auth_mounts import (
+        OverlayUnmountUnverifiableError,
+        teardown_workspace_auth_overlay,
+    )
 
     try:
         teardown_workspace_auth_overlay(work_dir=work_dir, workspace_id=candidate.workspace_id)
+    except OverlayUnmountUnverifiableError as exc:
+        _log.warning(
+            "gc.auth_overlay_unmount_incapable",
+            reason_code=exc.reason_code,
+            workspace_id=candidate.workspace_id,
+            error=str(exc)[:400],
+        )
+        return exc.reason_code, str(exc)[:400]
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning(
             "gc.auth_overlay_unmount_failed",
@@ -907,6 +924,43 @@ def _unmount_candidate_auth_overlay(
             # "target is busy"); forward it so the EBUSY root cause is greppable.
             stderr=getattr(exc, "stderr", None),
         )
+        return "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED", repr(exc)[:400]
+    return None
+
+
+def _auth_overlay_unmount_skips_target(
+    auth_unmount_failure: tuple[str, str] | None,
+    target: WorkspaceGCPath,
+) -> bool:
+    """Return whether the auth dir delete must be skipped after an unmount failure."""
+
+    return auth_unmount_failure is not None and target.kind == "auth"
+
+
+def _auth_unmount_skipped_outcome(
+    candidate: WorkspaceGCCandidate,
+    target: WorkspaceGCPath,
+    auth_unmount_failure: tuple[str, str] | None,
+) -> WorkspaceGCPathOutcome:
+    """Record the auth dir as ``skipped`` (not deleted) after an unmount failure.
+
+    Removing it would ``rmtree`` over a mount the worker may still hold, leaking
+    the overlay and its ``upper`` inodes. The matching ``delete_errors`` entry
+    already drives the run to ``partial``; the skipped outcome makes the per-path
+    reason visible in the GC payload.
+    """
+
+    assert auth_unmount_failure is not None  # guarded by _auth_overlay_unmount_skips_target
+    reason_code, message = auth_unmount_failure
+    return WorkspaceGCPathOutcome(
+        workspace_id=candidate.workspace_id,
+        kind=target.kind,
+        path=target.path,
+        status="skipped",
+        reason_code=reason_code,
+        error=message,
+        estimated_bytes=target.estimated_bytes,
+    )
 
 
 async def _delete_gc_plan_paths(
@@ -962,7 +1016,25 @@ async def _delete_gc_plan_paths(
         # auth dir can be removed. When teardown failed above we ``continue`` without
         # reaching here — the stack is still up and no paths are deleted, so there is
         # nothing to strand.
-        await asyncio.to_thread(_unmount_candidate_auth_overlay, candidate, work_dir=plan.work_dir)
+        auth_unmount_failure = await asyncio.to_thread(
+            _unmount_candidate_auth_overlay, candidate, work_dir=plan.work_dir
+        )
+        if auth_unmount_failure is not None:
+            # The overlay could not be unmounted/verified in this process (no
+            # CAP_SYS_ADMIN, or a genuine umount failure). Record a loud delete
+            # error and skip removing the auth dir below so we never ``rmtree``
+            # over a possibly-live mount and its ``upper`` inodes. Worktree and
+            # compose paths still proceed — only the auth dir is at risk.
+            auth_reason_code, auth_message = auth_unmount_failure
+            delete_errors.append(
+                WorkspaceGCDeleteError(
+                    workspace_id=candidate.workspace_id,
+                    kind="auth_overlay_unmount",
+                    path=candidate.auth.path,
+                    error=auth_message,
+                    reason_code=auth_reason_code,
+                )
+            )
         wt_remove = await _run_worktree_remove(candidate, worktree_remover)
         if wt_remove is not None:
             worktree_removes[candidate.workspace_id] = wt_remove
@@ -999,6 +1071,11 @@ async def _delete_gc_plan_paths(
                 for target in candidate.paths():
                     if target.path in blocked_worktree_paths:
                         continue
+                    if _auth_overlay_unmount_skips_target(auth_unmount_failure, target):
+                        path_outcomes.append(
+                            _auth_unmount_skipped_outcome(candidate, target, auth_unmount_failure)
+                        )
+                        continue
                     outcome = await asyncio.to_thread(
                         _delete_gc_path_outcome,
                         candidate,
@@ -1020,6 +1097,11 @@ async def _delete_gc_plan_paths(
                         )
                 continue
         for target in candidate.paths():
+            if _auth_overlay_unmount_skips_target(auth_unmount_failure, target):
+                path_outcomes.append(
+                    _auth_unmount_skipped_outcome(candidate, target, auth_unmount_failure)
+                )
+                continue
             outcome = await asyncio.to_thread(
                 _delete_gc_path_outcome,
                 candidate,

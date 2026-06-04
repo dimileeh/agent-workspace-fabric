@@ -62,6 +62,8 @@ from awf.runtime.inspection import RuntimeInspector
 from awf.service.scheduler import SchedulerOrderCursor
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from awf.service.gc_reconcile import OrphanDirReconcileResult
 
 
@@ -78,6 +80,7 @@ class ControlWorker(WorkerDelegatesMixin):
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
         open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
         orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
+        auth_overlay_work_dir: Path | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
@@ -87,6 +90,10 @@ class ControlWorker(WorkerDelegatesMixin):
         self._runtime_cleaner = runtime_cleaner
         self._open_pr_resolver = open_pr_resolver
         self._orphan_dir_reconciler = orphan_dir_reconciler
+        # The host work dir that backs ``auth/<id>/claude/...`` overlays. When set,
+        # the terminal-runtime-release sweep unmounts a reaped workspace's overlay
+        # in the worker's (CAP_SYS_ADMIN) mount namespace before GC removes the dir.
+        self._auth_overlay_work_dir = auth_overlay_work_dir
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}

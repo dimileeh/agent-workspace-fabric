@@ -207,6 +207,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             runtime_cleaner: object,
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
+            auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
@@ -215,6 +216,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["worker_runtime_cleaner"] = runtime_cleaner
             created["worker_open_pr_resolver"] = open_pr_resolver
             created["worker_orphan_dir_reconciler"] = orphan_dir_reconciler
+            created["worker_auth_overlay_work_dir"] = auth_overlay_work_dir
             created["worker_config"] = config
 
     engine = _Engine()
@@ -310,6 +312,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].max_concurrent_executions == 4
     assert created["worker_config"].node_id == "node-1"
     assert callable(created["worker_orphan_dir_reconciler"])
+    # The worker is wired with the work dir so it can unmount terminal overlays
+    # in its CAP_SYS_ADMIN namespace before GC removes the auth dir (#374/#380).
+    assert created["worker_auth_overlay_work_dir"] == work_dir
     assert created["worker_config"].auto_cleanup_orphans is False
     assert created["worker_config"].orphan_reconcile_max_per_scan == 50
     # Issue #299: the provisioner receives the ComposeManager as its
@@ -819,6 +824,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             runtime_cleaner: object,
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
+            auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -906,6 +912,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             runtime_cleaner: object,
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
+            auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config

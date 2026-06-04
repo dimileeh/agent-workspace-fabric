@@ -255,6 +255,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         runtime_cleaner=runtime_cleaner,
         open_pr_resolver=open_pr_resolver,
         orphan_dir_reconciler=_reconcile_orphan_dirs,
+        # The work dir backs ``auth/<id>/claude`` overlays; the worker (alone
+        # holding CAP_SYS_ADMIN + the agent's mount namespace) unmounts a reaped
+        # workspace's overlay on terminal-runtime-release before GC removes the dir.
+        auth_overlay_work_dir=work_dir,
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,

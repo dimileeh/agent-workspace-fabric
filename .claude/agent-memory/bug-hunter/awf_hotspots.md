@@ -18,6 +18,8 @@ Recurring bug patterns seen in AWF scans:
 
 6. **`_parse_verdict` returns "defer" on empty stdout** — If the CLI writes only to stderr (or a signal-killed CLI dumps nothing), we force a "defer". Rare, but a bot-reviewed PR with no stdout activity will spuriously collect human-defer markers that block merge.
 
+7. **Auth-overlay teardown exception-class mismatch** (`src/awf/node/auth_mounts.py` + `src/awf/control/worker/cleanup.py`, #361 follow-up) — `teardown_workspace_auth_overlay` can raise `OverlayUnmountUnverifiableError` (a `RuntimeError`, NOT OSError/SubprocessError) when the caller lacks CAP_SYS_ADMIN, an overlay `upper` survives, and no `.overlay-unmounted` marker exists. The worker's `_teardown_terminal_auth_overlay` only catches `(OSError, subprocess.SubprocessError)`, and GC's `_unmount_candidate_auth_overlay` catches it explicitly — so any NEW caller, or the worker running WITHOUT SYS_ADMIN (a documented-supported copy-fallback config per local-service.yml), lets the unverifiable error escape and crash the terminal-runtime-release sweep (skips `_record_terminal_runtime_released`, re-raises the whole sweep). When scanning overlay teardown callers, confirm BOTH exception families are handled.
+
 **Why:** Each of these has bitten a real PR review. Future scans should confirm they haven't regressed AND check neighbouring files for the same pattern.
 
 **How to apply:** When scanning AWF, grep for: `GitManager(`, `_ROOT / ".venv"`, `signal.signal(`, `threads_to_resolve.append`, `_run_sync_base`. These are the first five places to check.

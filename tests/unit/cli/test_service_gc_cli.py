@@ -197,6 +197,50 @@ def test_service_gc_partial_status_exits_nonzero() -> None:
 
 
 @pytest.mark.unit
+def test_service_gc_overlay_unmount_failure_warns_and_exits_nonzero() -> None:
+    # A partial GC carrying an overlay-unmount reason code exits non-zero AND
+    # prints the actionable stderr hint about the worker-routed teardown.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "delete_errors": [
+                {
+                    "kind": "auth_overlay_unmount",
+                    "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                }
+            ],
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    combined = _combined_output(result)
+    assert "could not be unmounted" in combined
+    assert "CAP_SYS_ADMIN" in combined
+
+
+@pytest.mark.unit
+def test_service_gc_partial_without_overlay_failure_omits_warning() -> None:
+    # An unrelated partial (permission denied) must not print the overlay hint.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "delete_errors": [{"reason_code": "PATH_DELETE_PERMISSION_DENIED"}],
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    assert "could not be unmounted" not in _combined_output(result)
+
+
+@pytest.mark.unit
 def test_service_gc_http_error_exits_nonzero() -> None:
     response = _mock_response(
         status_code=401,
