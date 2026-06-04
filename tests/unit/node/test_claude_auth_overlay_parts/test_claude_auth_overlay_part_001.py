@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from awf.node import auth_mounts as auth_mounts_mod
+# The overlay primitives and Claude auth subsystem live in ``auth_mounts_claude``;
+# ``auth_mounts`` re-exports them. Patch the module that *defines* the helpers so
+# the consumers (which resolve them in that namespace) observe the override.
+from awf.node import auth_mounts_claude as auth_mounts_mod
 from awf.node.auth_mounts import (
     _host_claude_signature,
     _shared_claude_base_dir,

@@ -375,12 +375,14 @@ def test_provider_readiness_claude_honors_preflighted_force_copy_env(
     overlayfs is advertised as available, so the label only flips to copy when the
     passed env requests it.
     """
-    import awf.node.auth_mounts as auth_mounts
+    # ``claude_auth_isolation_label`` resolves ``_overlay_filesystem_available`` in
+    # the ``auth_mounts_claude`` namespace that defines it, so patch it there.
+    import awf.node.auth_mounts_claude as auth_mounts_claude
 
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
-    monkeypatch.setattr(auth_mounts, "_overlay_filesystem_available", lambda: True)
+    monkeypatch.setattr(auth_mounts_claude, "_overlay_filesystem_available", lambda: True)
     # The process environment must NOT carry the request; only the passed env does.
     monkeypatch.delenv("AWF_CLAUDE_AUTH_FORCE_COPY", raising=False)
 

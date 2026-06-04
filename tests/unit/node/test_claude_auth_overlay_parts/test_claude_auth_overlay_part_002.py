@@ -16,7 +16,8 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from awf.node import auth_mounts as auth_mounts_mod
+# Patch the module that defines the overlay/Claude helpers (see part_001 header).
+from awf.node import auth_mounts_claude as auth_mounts_mod
 from awf.node.auth_mounts import (
     _CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED,
     _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
