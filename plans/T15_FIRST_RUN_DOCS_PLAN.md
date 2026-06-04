@@ -245,6 +245,13 @@ package lane must persist the first-run `AWF_API_TOKEN` and
 `AWF_POSTGRES_PASSWORD` to `.env` before `awf setup` / `awf start`, so a later
 fresh-shell upgrade can restore the same running local Core service values.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HJ8Ps`: the Quickstart
+source-checkout lanes must persist the first-run `AWF_API_TOKEN` and
+`AWF_POSTGRES_PASSWORD` to `docker/compose/.env` before
+`awf setup --source-checkout` / `awf start --source-checkout`, so later
+fresh-shell upgrade, rollback, and uninstall paths can restore the same running
+local Core service values.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -297,6 +304,12 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HJDHP`:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_release_installed_rollback_restores_service_env_before_start -q
+```
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HJ8Ps`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade -q
 ```
 
 Focused lint command:

@@ -86,6 +86,11 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   package-lane first-run `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` values to
   `.env` before `awf setup` / `awf start`, so later fresh-shell upgrades can
   restore the same running local Core service values.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HJ8Ps` by persisting Quickstart
+  source-checkout first-run `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` values
+  to `docker/compose/.env` before source-checkout setup/start commands, so later
+  fresh-shell upgrade, rollback, and uninstall paths can restore the same
+  running local Core service values.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -1406,6 +1411,52 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 ```
 
 Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HJ8Ps`:
+
+- `docs/QUICKSTART.md` now writes generated source-checkout first-run
+  `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` values to
+  `docker/compose/.env` before both source-checkout setup/start snippets.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Quickstart
+  source-checkout first-run snippets that export service values without
+  persisting them into the checkout Compose env file before startup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade -q
+```
+
+Red-phase result after adding the focused assertion: failed because both
+source-checkout lanes still omitted `docker/compose/.env` persistence before
+startup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade -q
+```
+
+Final focused repair result: `2 passed in 0.76s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_is_canonical_and_not_a_stub tests/unit/docs/test_public_docs_status.py::test_quickstart_presents_available_complete_first_run_lanes tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_upgrades_reuse_existing_checkout tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+```
+
+Related Quickstart result: `4 passed in 0.82s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Shell syntax result: `1 passed in 0.83s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

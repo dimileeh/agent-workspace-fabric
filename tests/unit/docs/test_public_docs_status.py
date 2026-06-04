@@ -255,6 +255,49 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("heading", "setup_command"),
+    (
+        (
+            "## Lane 2: Source Checkout With Global Tool Install",
+            'awf setup --source-checkout "$PWD"',
+        ),
+        (
+            "## Lane 3: Source Checkout With No Global Install",
+            'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+        ),
+    ),
+)
+def test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade(
+    heading: str,
+    setup_command: str,
+) -> None:
+    """Assert source-checkout first-run secrets remain available to later upgrades."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lane_section = _markdown_section(quickstart_text, heading)
+    first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
+    api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
+    password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
+    password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
+    persist_target = "} > docker/compose/.env"
+
+    assert "persist" in first_run_section.lower()
+    assert api_export in first_run_section
+    assert password_export in first_run_section
+    assert api_persist in first_run_section
+    assert password_persist in first_run_section
+    assert persist_target in first_run_section
+    assert (
+        first_run_section.index(api_export)
+        < first_run_section.index(password_export)
+        < first_run_section.index(api_persist)
+        < first_run_section.index(password_persist)
+        < first_run_section.index(persist_target)
+        < first_run_section.index(f"\n{setup_command}\n")
+    )
+
+
 def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
     """Assert Quickstart smoke commands validate the lane's initialized project."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")

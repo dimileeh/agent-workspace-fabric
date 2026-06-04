@@ -126,6 +126,9 @@ This lane uses inspectable source and then installs `awf` as a global tool from
 that checkout. It is useful when you want to inspect or patch AWF but still want
 the normal `awf` executable on `PATH`.
 
+Persist the generated local service values into the checkout's Compose env file
+before setup/start so a later upgrade can restore them.
+
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
@@ -133,6 +136,10 @@ uv tool install . --force
 
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+} > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup --source-checkout "$PWD"
@@ -254,6 +261,9 @@ This lane uses inspectable source and no global install. It does not place an
 `awf` executable on the global `PATH`; every AWF command runs through `uv run`
 from the checkout.
 
+Persist the generated local service values into the checkout's Compose env file
+before setup/start so a later upgrade can restore them.
+
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
@@ -261,6 +271,10 @@ uv sync --extra dev
 
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+} > docker/compose/.env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
