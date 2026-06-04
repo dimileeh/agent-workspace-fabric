@@ -558,7 +558,11 @@ def test_awf_command_mentions_ignore_missing_readme_linked_docs(
 
 
 def _markdown_section(text: str, heading: str) -> str:
-    """Return the Markdown body for a second-level heading."""
+    """Return the body of the first matching H2 heading up to the next H2.
+
+    Only H2 (``##``) headings are supported as the stop sentinel.
+    Passing an H3 or deeper heading will over-capture up to the next H2.
+    """
     normalized_text = text.replace("\r\n", "\n")
     heading_match = re.search(
         rf"(?m)^{re.escape(heading)}[ \t]*(?:\n|$)",
