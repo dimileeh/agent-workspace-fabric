@@ -223,10 +223,12 @@ def scan_orphan_workspace_dirs(
             # file at the root path: ``iterdir()`` would raise ``NotADirectoryError``
             # and crash the background sweep. A missing root is also handled here.
             continue
-        for entry in sorted(
-            (e for e in root.iterdir() if e.name.startswith("ws_")),
-            key=lambda item: item.name,
-        ):
+        for entry in root.iterdir():
+            # Filter to ``ws_*`` before any further work; the final ``candidates``
+            # ordering is set by the global sort below, so there is no need to sort
+            # the (potentially thousands-strong) full directory listing here.
+            if not entry.name.startswith("ws_"):
+                continue
             if entry.is_symlink() or not entry.is_dir():
                 continue
             scanned += 1
@@ -257,6 +259,9 @@ def scan_orphan_workspace_dirs(
                 )
             )
 
+    # Oldest-first (largest ``age_seconds`` first) so the most clearly-abandoned
+    # dirs reap before the cap bites; ``str(target.path)`` is a stable secondary
+    # key so ties on ``age_seconds`` resolve deterministically across runs.
     candidates.sort(key=lambda target: (-target.age_seconds, str(target.path)))
     dropped = 0
     if limit >= 0 and len(candidates) > limit:
