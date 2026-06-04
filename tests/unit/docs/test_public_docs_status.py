@@ -301,6 +301,10 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     )
     stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "\nfi\n"
+    api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    postgres_password_export_line = (
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    )
     cases = (
         (
             "Quickstart Lane 2",
@@ -346,6 +350,10 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
 
     for label, section, refresh_prereq, setup_line, start_line in cases:
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
+        assert api_token_export_line in section, f"{label} must restore AWF_API_TOKEN"
+        assert postgres_password_export_line in section, (
+            f"{label} must restore AWF_POSTGRES_PASSWORD"
+        )
         assert stop_guard_line in section, f"{label} must guard optional compose env file"
         assert stop_env_file_line in section, f"{label} must reuse compose env file if present"
         assert stop_fallback_line in section, f"{label} must stop Core without compose env file"
@@ -355,6 +363,8 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         stop_fallback_index = section.index(stop_fallback_line)
         assert (
             section.index(refresh_prereq)
+            < section.index(api_token_export_line)
+            < section.index(postgres_password_export_line)
             < section.index(stop_guard_line)
             < section.index(stop_env_file_line)
             < stop_fallback_index

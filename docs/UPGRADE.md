@@ -54,6 +54,8 @@ Core stack still holds them:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv tool install . --force
+export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 if [ -f docker/compose/.env ]; then
   docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 else
@@ -76,6 +78,8 @@ host ports and blocks while the previous Core stack still holds them:
 cd /path/to/aira-agent-workspace-fabric
 git pull
 uv sync --extra dev
+export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 if [ -f docker/compose/.env ]; then
   docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 else
