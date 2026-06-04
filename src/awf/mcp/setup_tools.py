@@ -392,6 +392,19 @@ def _client_integration_instructions_result(
     try:
         selected = normalize_clients(clients)
         env_file = _resolve_client_env_file(source_path, False)
+        home = _client_home()
+        env = _client_env()
+        plans = [
+            build_client_config_plan(
+                client,
+                env_file=env_file,
+                home=home,
+                which=_client_which,
+                now=_client_now,
+                env=env,
+            )
+            for client in selected
+        ]
     except SetupCheckError as exc:
         return _first_run_result(
             safe_result,
@@ -404,20 +417,17 @@ def _client_integration_instructions_result(
             _client_source_checkout_blocked_payload(exc),
             is_error=True,
         )
-
-    home = _client_home()
-    env = _client_env()
-    plans = [
-        build_client_config_plan(
-            client,
-            env_file=env_file,
-            home=home,
-            which=_client_which,
-            now=_client_now,
-            env=env,
+    except OSError as exc:
+        return _first_run_result(
+            safe_result,
+            _reason_coded_payload(
+                CLIENT_CONFIG_CONFLICT,
+                "could not inspect existing client MCP configuration",
+                {"error_type": type(exc).__name__},
+            ),
+            is_error=True,
         )
-        for client in selected
-    ]
+
     blocked = [plan for plan in plans if plan.action == "conflict"]
     status = "blocked" if blocked else "success"
     payload: dict[str, Any] = {

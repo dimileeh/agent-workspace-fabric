@@ -24,6 +24,7 @@ from awf.host_setup.config import (
     ProviderConfig,
 )
 from awf.host_setup.rendering import (
+    CLIENT_CONFIG_CONFLICT,
     SETUP_CLIENT_UNKNOWN,
     SETUP_READINESS_FAILED,
     START_HEALTH_TIMEOUT,
@@ -31,6 +32,7 @@ from awf.host_setup.rendering import (
     first_run_success_payload,
 )
 from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
+from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from awf.service.bootstrap import (
     SERVICE_BOOTSTRAP_TIMEOUT,
@@ -797,3 +799,68 @@ async def test_client_integration_instructions_unknown_client_is_structured_erro
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == SETUP_CLIENT_UNKNOWN
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_planning_setup_error_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "d" * 40
+
+    def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
+        raise SetupCheckError(
+            f"planner failed with provider secret {raw_token}",
+            reason_code=CLIENT_CONFIG_CONFLICT,
+            details={"client": "claude", "raw": raw_token},
+        )
+
+    monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert raw_token not in rendered
+    assert REDACTION_MARKER in rendered
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_planning_oserror_is_generic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "e" * 40
+    leaked_detail = f"{tmp_path}/config.json contains {raw_token}"
+
+    def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["issues"][0]["details"] == {"error_type": "OSError"}
+    assert leaked_detail not in rendered
+    assert raw_token not in rendered

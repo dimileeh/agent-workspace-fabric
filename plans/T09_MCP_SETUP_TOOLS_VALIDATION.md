@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HA7jn
+
+### Requirement Status
+
+- Preserve successful client instruction behavior and conflict-plan behavior:
+  Complete.
+- Keep unknown-client and source-checkout structured errors unchanged:
+  Complete.
+- Convert `SetupCheckError` raised during client config planning into the
+  existing reason-coded first-run MCP error payload: Complete.
+- Convert unexpected `OSError` raised during client config planning into a
+  generic structured client-config blocker without raw exception text:
+  Complete.
+- Add focused regressions proving planner failures return through
+  `safe_result` without leaking raw exception detail: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_setup_error_is_structured tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_oserror_is_generic -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression tests failed before the implementation change because
+  `build_client_config_plan` exceptions escaped through FastMCP `ToolError`.
+- Regression tests after the implementation change: 2 passed.
+- Focused setup-tools test file: 18 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523
 
 ### Requirement Status

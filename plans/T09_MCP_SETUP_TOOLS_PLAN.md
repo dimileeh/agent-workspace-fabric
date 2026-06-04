@@ -135,6 +135,52 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HA7jn
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` catches
+`SetupCheckError` and `SourceCheckoutError` while normalizing clients and
+resolving the env file, but builds each `ClientConfigPlan` after that guarded
+block. If read-only client planning raises a reason-coded setup failure or an
+unexpected filesystem error, the exception can escape through `asyncio.to_thread`
+instead of being returned as a safe structured MCP result.
+
+Scope is limited to wrapping client-instruction plan construction in the same
+safe error boundary and adding a focused regression for a planning failure.
+
+### Requirements Checklist
+
+- Preserve successful client instruction behavior and conflict-plan behavior.
+- Keep unknown-client and source-checkout structured errors unchanged.
+- Convert `SetupCheckError` raised during client config planning into the
+  existing reason-coded first-run MCP error payload.
+- Convert unexpected `OSError` raised during client config planning into a
+  generic structured client-config blocker without raw exception text.
+- Add a focused regression proving a planner `SetupCheckError` returns through
+  `safe_result` without leaking exception detail.
+
+### Implementation Steps
+
+1. Add focused failing MCP regressions for post-normalization client planning
+   `SetupCheckError` and `OSError` failures.
+2. Move client plan construction inside the guarded block and add a generic
+   `OSError` handler for read-only client config planning failures.
+3. Run the targeted regression and focused setup-tools checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_setup_error_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_planning_oserror_is_generic -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523
 
 ### Problem Statement And Scope
