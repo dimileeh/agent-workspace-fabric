@@ -583,3 +583,17 @@ def test_resolve_bootstrap_host_work_dir_mirrors_compose_bind() -> None:
     # A blank HOME falls through to the explicit-pins-only behavior.
     assert resolve({"HOME": "   "}) is None
     assert resolve({}) is None
+
+
+@pytest.mark.unit
+def test_unescape_mountinfo_field_decodes_escapes_order_independently() -> None:
+    # Plain octal escapes the kernel emits for space/tab/newline/backslash.
+    assert bootstrap._unescape_mountinfo_field("/a\\040b") == "/a b"  # noqa: SLF001
+    assert bootstrap._unescape_mountinfo_field("/a\\011b") == "/a\tb"  # noqa: SLF001
+    assert bootstrap._unescape_mountinfo_field("/a\\012b") == "/a\nb"  # noqa: SLF001
+    assert bootstrap._unescape_mountinfo_field("/a\\134b") == "/a\\b"  # noqa: SLF001
+    # A literal backslash followed by octal-escape-like digits is encoded as
+    # ``\134040``; a single regex pass must decode it to ``\040`` rather than
+    # mangling it into a space the way sequential replacements would (#397 review
+    # issue:4620841664).
+    assert bootstrap._unescape_mountinfo_field("/a\\134040b") == "/a\\040b"  # noqa: SLF001

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -272,14 +273,16 @@ def _mount_binary_available() -> bool:
 
 
 def _unescape_mountinfo_field(field: str) -> str:
-    """Decode the octal escapes ``/proc/self/mountinfo`` uses in path fields."""
+    """Decode the octal escapes ``/proc/self/mountinfo`` uses in path fields.
 
-    return (
-        field.replace("\\134", "\\")
-        .replace("\\040", " ")
-        .replace("\\011", "\t")
-        .replace("\\012", "\n")
-    )
+    The kernel escapes space (``\\040``), tab (``\\011``), newline (``\\012``)
+    and backslash (``\\134``). A single regex pass over each ``\\NNN`` token is
+    order-independent, so a literal backslash followed by octal-escape-like
+    digits (encoded as e.g. ``\\134040``) decodes to ``\\040`` rather than being
+    mangled into a space by sequential replacements.
+    """
+
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), field)
 
 
 def _parse_mountinfo(text: str) -> list[_MountInfoEntry]:
