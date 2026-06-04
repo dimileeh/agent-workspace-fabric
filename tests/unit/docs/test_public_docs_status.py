@@ -337,17 +337,21 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         ), f"{label} must refresh metadata after upgrade and before start"
 
 
-def test_quickstart_lane_2_upgrade_reuses_existing_checkout() -> None:
-    """Assert Lane 2 upgrade commands reuse the checkout created earlier."""
+def test_quickstart_source_checkout_upgrades_reuse_existing_checkout() -> None:
+    """Assert source-checkout upgrade commands reuse the checkout created earlier."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
-    upgrade_section = _quickstart_upgrade_section(
-        quickstart_text,
+    source_lane_headings = (
         "## Lane 2: Source Checkout With Global Tool Install",
+        "## Lane 3: Source Checkout With No Global Install",
     )
 
-    assert "from the existing `aira-agent-workspace-fabric` checkout" in upgrade_section
-    assert "cd aira-agent-workspace-fabric" not in upgrade_section
-    assert "git pull" in upgrade_section
+    for heading in source_lane_headings:
+        upgrade_section = _quickstart_upgrade_section(quickstart_text, heading)
+
+        assert "from the existing `aira-agent-workspace-fabric` checkout" in upgrade_section
+        assert "`cd /path/to/aira-agent-workspace-fabric`" in upgrade_section
+        assert "cd aira-agent-workspace-fabric" not in upgrade_section
+        assert "git pull" in upgrade_section
 
 
 def test_quickstart_first_run_urls_match_smoke_defaults() -> None:
