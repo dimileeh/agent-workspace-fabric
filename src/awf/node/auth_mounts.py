@@ -1299,8 +1299,14 @@ def teardown_workspace_auth_overlay(
     if probe():
         # A capable process (the worker) sees the real mount namespace: nothing
         # is mounted, so teardown is verified. Record the marker so a later
-        # capability-less GC knows this overlay was released here.
-        _write_overlay_unmounted_marker(claude_root, marker)
+        # capability-less GC knows this overlay was released here -- but only when
+        # an overlay scratch (``upper``) actually existed. Copy-fallback
+        # workspaces (``AWF_CLAUDE_AUTH_FORCE_COPY``) never built one, and GC's
+        # capability-less path consults the marker only when ``upper`` exists, so
+        # writing it for a copy workspace is meaningless on-disk noise that only
+        # confuses debugging.
+        if upper.exists():
+            _write_overlay_unmounted_marker(claude_root, marker)
         return
 
     if upper.exists() and not marker.exists():

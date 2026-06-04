@@ -445,6 +445,28 @@ def test_teardown_capable_not_mounted_writes_marker(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_teardown_capable_not_mounted_copy_fallback_skips_marker(tmp_path: Path) -> None:
+    # A copy-fallback workspace (``AWF_CLAUDE_AUTH_FORCE_COPY``) never built an
+    # overlay ``upper``. A capable teardown must not drop a ``.overlay-unmounted``
+    # marker there: GC's capability-less path only consults the marker when
+    # ``upper`` exists, so the marker would be meaningless on-disk noise.
+    work_dir = tmp_path / "work"
+    claude_root = work_dir / "auth" / "ws_copy" / "claude"
+    (claude_root / ".claude").mkdir(parents=True)
+    mounter = FakeOverlayMounter(supported=True)
+
+    teardown_workspace_auth_overlay(
+        work_dir=work_dir,
+        workspace_id="ws_copy",
+        overlay_mounter=mounter,
+        capability_probe=lambda: True,
+    )
+
+    assert mounter.unmounts == []
+    assert not (claude_root / _OVERLAY_UNMOUNTED_MARKER).exists()
+
+
+@pytest.mark.unit
 def test_default_overlay_mounter_supported_false_under_force_copy_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
