@@ -69,6 +69,25 @@ def test_iter_overlay_lowerdirs_decodes_octal_colon_in_path(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
+def test_iter_overlay_lowerdirs_decodes_octal_comma_in_path(tmp_path: Path) -> None:
+    # The mount-option field is comma-separated, so a literal comma in a lowerdir
+    # path is octal-escaped as ``\054`` by overlayfs. The split-on-``,`` over the
+    # options keeps the path whole, but the escape must be decoded back to ``,`` or
+    # GC-B's protected set holds ``...\054...`` instead of the real path and reaps a
+    # base still backing a live overlay. (PRRT_kwDOSJAM6s6HOMbH)
+    comma_base = Path("/srv/weird,dir/_shared/claude-base/sig/.claude")
+    escaped = str(comma_base).replace(",", "\\054")
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(
+        f"overlay {tmp_path / 'm'} overlay rw,lowerdir={escaped},upperdir=/u,workdir=/w 0 0\n"
+    )
+
+    from awf.node.auth_mounts import iter_overlay_lowerdirs
+
+    assert iter_overlay_lowerdirs(proc_mounts) == {comma_base}
+
+
+@pytest.mark.unit
 def test_iter_overlay_lowerdirs_handles_missing_and_optionless(tmp_path: Path) -> None:
     from awf.node.auth_mounts import iter_overlay_lowerdirs
 
@@ -117,6 +136,26 @@ def test_unescape_proc_mount_field_decodes_octal_colon() -> None:
     # A literal backslash immediately followed by a colon is ``\134\072`` and must
     # decode to a backslash then a colon.
     assert _unescape_proc_mount_field("/foo\\134\\072bar") == "/foo\\:bar"
+
+
+@pytest.mark.unit
+def test_unescape_proc_mount_field_decodes_octal_comma() -> None:
+    # The mount-option field is comma-separated, so a literal comma inside a single
+    # lowerdir path is octal-escaped as ``\054`` (the split-on-``,`` over options
+    # therefore never tears such a path apart). The escape must still be decoded
+    # back to ``,`` here, or a base path containing a comma would come back as
+    # ``...\054...`` and fail the ``base_root`` match in ``_protected_signature_dirs``
+    # — letting GC-B reap a base that still backs a live overlay. (PRRT_kwDOSJAM6s6HOMbH)
+    from awf.node.auth_mounts_claude import _unescape_proc_mount_field
+
+    assert _unescape_proc_mount_field("/foo\\054bar") == "/foo,bar"
+    # A literal backslash followed by the text ``054`` is written ``\134054`` and
+    # must round-trip to ``/foo\054bar`` (the backslash, not a decoded comma) —
+    # decoding the comma escape before the backslash keeps that distinction.
+    assert _unescape_proc_mount_field("/foo\\134054bar") == "/foo\\054bar"
+    # A literal backslash immediately followed by a comma is ``\134\054`` and must
+    # decode to a backslash then a comma.
+    assert _unescape_proc_mount_field("/foo\\134\\054bar") == "/foo\\,bar"
 
 
 @pytest.mark.unit

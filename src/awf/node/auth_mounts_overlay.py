@@ -19,21 +19,23 @@ _PROC_MOUNTS = Path("/proc/mounts")
 
 
 def _unescape_proc_mount_field(field: str) -> str:
-    """Decode the octal escapes ``/proc/mounts`` uses for space/tab/newline/colon/backslash.
+    """Decode the octal escapes ``/proc/mounts`` uses for space/tab/newline/colon/comma/backslash.
 
     overlayfs reserves a raw ``:`` to join layered lowerdirs, so a literal colon
     *inside* a single lowerdir path is octal-escaped as ``\\072`` (the comment on
-    the lowerdir parsers calls this out). Callers split on the raw ``:`` separator
-    first — which never tears such a path apart — and then decode each field here,
-    so ``\\072`` must round-trip back to ``:``. Skipping it leaves a base path as
-    ``...\\072...``, which fails the ``base_root`` match in
+    the lowerdir parsers calls this out). The mount-option field is likewise
+    comma-separated, so a literal comma in a path is octal-escaped as ``\\054``.
+    Callers split on the raw ``:``/``,`` separators first — which never tear such a
+    path apart — and then decode each field here, so ``\\072``/``\\054`` must
+    round-trip back to ``:``/``,``. Skipping either leaves a base path as
+    ``...\\072...``/``...\\054...``, which fails the ``base_root`` match in
     ``_protected_signature_dirs`` and lets GC-B reap a base still backing a live
     overlay (PRRT_kwDOSJAM6s6HN8ld).
     """
 
     # Decode the backslash escape *last*: a path containing a literal backslash
-    # followed by ``040``/``011``/``012``/``072`` is encoded as ``\134040`` etc., and
-    # decoding ``\134`` first would leave ``\040`` that the next pass would
+    # followed by ``040``/``011``/``012``/``072``/``054`` is encoded as ``\134040``
+    # etc., and decoding ``\134`` first would leave ``\040`` that the next pass would
     # wrongly turn into a space. Decoding the non-backslash escapes first means a
     # decoded backslash can never be re-read as the start of another escape.
     return (
@@ -41,6 +43,7 @@ def _unescape_proc_mount_field(field: str) -> str:
         .replace("\\011", "\t")
         .replace("\\012", "\n")
         .replace("\\072", ":")
+        .replace("\\054", ",")
         .replace("\\134", "\\")
     )
 
