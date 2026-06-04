@@ -212,6 +212,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
@@ -221,6 +222,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["worker_open_pr_resolver"] = open_pr_resolver
             created["worker_orphan_dir_reconciler"] = orphan_dir_reconciler
             created["worker_classified_orphan_reaper"] = classified_orphan_reaper
+            created["worker_auth_overlay_work_dir"] = auth_overlay_work_dir
             created["worker_config"] = config
 
     engine = _Engine()
@@ -317,6 +319,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].node_id == "node-1"
     assert callable(created["worker_orphan_dir_reconciler"])
     assert callable(created["worker_classified_orphan_reaper"])
+    # The worker is wired with the work dir so it can unmount terminal overlays
+    # in its CAP_SYS_ADMIN namespace before GC removes the auth dir (#374/#380).
+    assert created["worker_auth_overlay_work_dir"] == work_dir
     assert created["worker_config"].auto_cleanup_orphans is False
     assert created["worker_config"].classified_orphan_reap_scan_interval_seconds == 3600.0
     assert created["worker_config"].orphan_reconcile_max_per_scan == 50
@@ -856,6 +861,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -944,6 +950,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config

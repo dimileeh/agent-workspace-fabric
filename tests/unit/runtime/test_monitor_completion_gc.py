@@ -913,6 +913,69 @@ async def test_completed_monitor_auth_overlay_teardown_failure_does_not_block_gc
 
 
 @pytest.mark.unit
+async def test_completed_monitor_auth_overlay_unverifiable_does_not_block_gc(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    from awf.node.auth_mounts import OverlayUnmountUnverifiableError
+
+    # A capability-less completion path cannot see the worker's mount namespace,
+    # so ``teardown_workspace_auth_overlay`` raises ``OverlayUnmountUnverifiableError``
+    # (a ``RuntimeError``, not OSError/SubprocessError). It must be caught here so
+    # the filesystem GC still runs -- letting it propagate out of the ``to_thread``
+    # would skip GC entirely and strand every pressure/auth dir, mirroring how the
+    # ``service gc`` path swallows the unverifiable result and keeps going.
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+    ws_id = await _seed_old_completed_pr_workspace(
+        factory,
+        updated_at=datetime.now(UTC) - timedelta(days=30),
+    )
+    worktree = worktrees_root / ws_id
+    auth = work_dir / "auth" / ws_id
+    _write(worktree / "repo.txt", "repo")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+    )
+
+    def _raise_unverifiable(*, work_dir: Path, workspace_id: str) -> None:
+        raise OverlayUnmountUnverifiableError(
+            reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+            message=f"cannot verify Claude auth overlay teardown for {workspace_id}",
+        )
+
+    with (
+        _mock_worktree_remove_success(),
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.teardown_workspace_auth_overlay",
+            new=_raise_unverifiable,
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await runner._gc_completed_workspace_filesystem(ws_id)
+
+    # The unverifiable teardown is logged with its incapable reason code...
+    assert any(
+        record.get("event") == "monitor.auth_overlay_teardown_incapable"
+        and record.get("workspace_id") == ws_id
+        and record.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE"
+        for record in captured
+    )
+    # ...and GC still ran rather than being skipped entirely.
+    assert any(record.get("event") == "monitor.filesystem_gc_ok" for record in captured)
+    assert not worktree.exists()
+
+
+@pytest.mark.unit
 async def test_completed_monitor_filesystem_gc_revokes_active_secret_leases(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,

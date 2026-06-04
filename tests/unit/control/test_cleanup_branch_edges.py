@@ -11,6 +11,8 @@ because the behavior under test is purely control flow over mockable seams.
 from __future__ import annotations
 
 import asyncio
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -811,3 +813,197 @@ async def test_record_release_failed_without_cleanup_omits_cleanup_payload(
     # 'skipped' outcome: no error / failed-event log emitted.
     assert log.errors == []
     assert captured_payload == {}
+
+
+@pytest.mark.unit
+async def test_release_candidate_unmounts_overlay_and_records_unmounted_true(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A successful terminal runtime release unmounts the Claude overlay in the
+    worker namespace and records ``auth_overlay_unmounted=True`` in the event."""
+    candidate = _candidate("ws_overlay_ok")
+    teardown_calls: list[dict[str, Any]] = []
+
+    def _teardown(**kwargs: Any) -> None:
+        teardown_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "awf.node.auth_mounts.teardown_workspace_auth_overlay",
+        _teardown,
+    )
+
+    class _Cleaner:
+        async def cleanup(self, **_kwargs: Any) -> WorkspaceCleanupResult:
+            return WorkspaceCleanupResult.skipped()
+
+    recorded: list[bool] = []
+
+    async def _record(
+        _candidate: _TerminalRuntimeCandidate,
+        _cleanup: WorkspaceCleanupResult,
+        *,
+        auth_overlay_unmounted: bool,
+    ) -> None:
+        recorded.append(auth_overlay_unmounted)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _auth_overlay_work_dir=tmp_path / "work",
+        _record_terminal_runtime_released=_record,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
+
+    assert teardown_calls == [{"work_dir": tmp_path / "work", "workspace_id": "ws_overlay_ok"}]
+    assert recorded == [True]
+
+
+@pytest.mark.unit
+async def test_release_candidate_overlay_unmount_failure_does_not_block_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A genuine umount failure is logged with its reason code, returns
+    ``auth_overlay_unmounted=False``, and never blocks the runtime release."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    candidate = _candidate("ws_overlay_fail")
+
+    kernel_reason = "umount: /…/merged: target is busy."
+
+    def _teardown(**_kwargs: Any) -> None:
+        raise subprocess.CalledProcessError(32, "umount", stderr=kernel_reason)
+
+    monkeypatch.setattr(
+        "awf.node.auth_mounts.teardown_workspace_auth_overlay",
+        _teardown,
+    )
+
+    class _Cleaner:
+        async def cleanup(self, **_kwargs: Any) -> WorkspaceCleanupResult:
+            return WorkspaceCleanupResult.skipped()
+
+    recorded: list[bool] = []
+
+    async def _record(
+        _candidate: _TerminalRuntimeCandidate,
+        _cleanup: WorkspaceCleanupResult,
+        *,
+        auth_overlay_unmounted: bool,
+    ) -> None:
+        recorded.append(auth_overlay_unmounted)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _auth_overlay_work_dir=tmp_path / "work",
+        _record_terminal_runtime_released=_record,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
+
+    # Release still recorded despite the unmount failure (port reclaim proceeds).
+    assert recorded == [False]
+    assert any(
+        event == "worker.terminal_auth_overlay_unmount_failed"
+        and fields.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"
+        and fields.get("stderr") == kernel_reason
+        for event, fields in log.warnings
+    )
+
+
+@pytest.mark.unit
+async def test_release_candidate_overlay_unverifiable_does_not_abort_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker downgraded from CAP_SYS_ADMIN with surviving overlay ``upper``
+    dirs raises ``OverlayUnmountUnverifiableError`` (a RuntimeError). It must be
+    caught — returning ``auth_overlay_unmounted=False`` — not escape and abort the
+    terminal-runtime-release sweep."""
+    from awf.node.auth_mounts import OverlayUnmountUnverifiableError
+
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    candidate = _candidate("ws_overlay_unverifiable")
+
+    def _teardown(**_kwargs: Any) -> None:
+        raise OverlayUnmountUnverifiableError(
+            reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+            message="no CAP_SYS_ADMIN",
+        )
+
+    monkeypatch.setattr(
+        "awf.node.auth_mounts.teardown_workspace_auth_overlay",
+        _teardown,
+    )
+
+    class _Cleaner:
+        async def cleanup(self, **_kwargs: Any) -> WorkspaceCleanupResult:
+            return WorkspaceCleanupResult.skipped()
+
+    recorded: list[bool] = []
+
+    async def _record(
+        _candidate: _TerminalRuntimeCandidate,
+        _cleanup: WorkspaceCleanupResult,
+        *,
+        auth_overlay_unmounted: bool,
+    ) -> None:
+        recorded.append(auth_overlay_unmounted)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _auth_overlay_work_dir=tmp_path / "work",
+        _record_terminal_runtime_released=_record,
+    )
+
+    # Must not raise: the release is still recorded with the failure flag.
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
+
+    assert recorded == [False]
+    assert any(
+        event == "worker.terminal_auth_overlay_unmount_failed" for event, _fields in log.warnings
+    )
+
+
+@pytest.mark.unit
+async def test_release_candidate_skips_overlay_when_no_work_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no auth-overlay work dir wired, the overlay teardown is skipped and
+    the release records ``auth_overlay_unmounted=None`` (not-applicable, distinct
+    from a ``False`` umount failure) without crashing."""
+    candidate = _candidate("ws_overlay_skip")
+
+    def _teardown(**_kwargs: Any) -> None:  # pragma: no cover - must not be called
+        raise AssertionError("teardown should not run without a work dir")
+
+    monkeypatch.setattr(
+        "awf.node.auth_mounts.teardown_workspace_auth_overlay",
+        _teardown,
+    )
+
+    class _Cleaner:
+        async def cleanup(self, **_kwargs: Any) -> WorkspaceCleanupResult:
+            return WorkspaceCleanupResult.skipped()
+
+    recorded: list[bool | None] = []
+
+    async def _record(
+        _candidate: _TerminalRuntimeCandidate,
+        _cleanup: WorkspaceCleanupResult,
+        *,
+        auth_overlay_unmounted: bool | None,
+    ) -> None:
+        recorded.append(auth_overlay_unmounted)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _auth_overlay_work_dir=None,
+        _record_terminal_runtime_released=_record,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
+
+    assert recorded == [None]

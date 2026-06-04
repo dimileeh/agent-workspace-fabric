@@ -17,6 +17,7 @@ from awf.cli.common import (
     _call,
     _emit,
     _handle_response,
+    warn_on_overlay_unmount_failure,
 )
 from awf.cli.init_ops import (
     _resolve_service_compose_paths,
@@ -573,6 +574,7 @@ def service_gc(
         )
         raise typer.Exit(code=1) from None
     _emit(payload, fmt)
+    warn_on_overlay_unmount_failure(payload)
     if isinstance(payload, dict) and payload.get("status") == "partial":
         raise typer.Exit(code=1)
 
