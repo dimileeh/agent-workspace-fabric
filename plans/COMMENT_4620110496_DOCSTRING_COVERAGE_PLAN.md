@@ -194,6 +194,18 @@ the focused added-line audit now reports one PR-added test without a docstring:
 Add a concise behavior-neutral docstring to that test only, re-run the focused
 audit, and run narrow Ruff plus the affected targeted provider-readiness test.
 
+### Iteration 13 Update
+
+Later MCP startup-redaction-cache commits expanded the PR's Python diff and the
+focused added-line audit now reports two PR-added nested test helpers without
+docstrings:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs.test_read_workspace_log_uses_startup_redaction_secrets.counting_resolve_service_settings`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs.test_read_workspace_log_uses_startup_redaction_secrets.counting_resolve_provider_environ`
+
+Add concise behavior-neutral docstrings to those helpers only, re-run the
+focused audit, and run narrow Ruff plus the affected targeted MCP log test.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

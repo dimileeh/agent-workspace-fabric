@@ -658,6 +658,7 @@ class TestWorkspaceLogs:
             *,
             environ: Mapping[str, str] | None = None,
         ) -> service_config.ServiceSettings:
+            """Count service-setting resolution calls while preserving behavior."""
             nonlocal service_settings_calls
             service_settings_calls += 1
             return real_resolve_service_settings(base, environ=environ)
@@ -671,6 +672,7 @@ class TestWorkspaceLogs:
                 service_config.COMPOSE_ENV_FILE_OMITTED
             ),
         ) -> Mapping[str, str]:
+            """Count provider-environment resolution calls while preserving behavior."""
             nonlocal provider_env_calls
             provider_env_calls += 1
             return real_resolve_provider_environ(
