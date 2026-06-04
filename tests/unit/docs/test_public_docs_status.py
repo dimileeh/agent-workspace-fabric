@@ -1475,7 +1475,7 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
         '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
     )
-    preserve_existing_env = "\n".join(
+    package_preserve_existing_env = "\n".join(
         (
             "    sed \\",
             "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
@@ -1484,6 +1484,27 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
             "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
             "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \\",
             "      .env",
+        )
+    )
+    source_fallback = "\n".join(
+        (
+            'awf_env_source=""',
+            "if [ -f docker/compose/.env ]; then",
+            '  awf_env_source="docker/compose/.env"',
+            "elif [ -f .env ]; then",
+            '  awf_env_source=".env"',
+            "fi",
+        )
+    )
+    source_preserve_existing_env = "\n".join(
+        (
+            "    sed \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \\",
+            '      "$awf_env_source"',
         )
     )
 
@@ -1511,11 +1532,14 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
     )
     assert 'awf_env_tmp="$(mktemp)"' in prerequisites_section
-    assert preserve_existing_env in prerequisites_section
+    assert package_preserve_existing_env in prerequisites_section
+    assert source_fallback in prerequisites_section
+    assert source_preserve_existing_env in prerequisites_section
     assert not re.search(
         r"(?m)^} > \.env\s*\nawf setup\nawf start\nawf service status --format pretty$",
         prerequisites_section,
     )
+    assert "} > docker/compose/.env" not in prerequisites_section
     assert re.search(
         (
             r'(?m)^} > "\$awf_env_tmp"\s*\nmv "\$awf_env_tmp" \.env\n'
@@ -1525,10 +1549,17 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
     )
     assert re.search(
         (
-            r'(?m)^} > docker/compose/\.env\s*\nawf setup --source-checkout "\$PWD"\n'
+            r'(?m)^} > "\$awf_env_tmp"\s*\nmv "\$awf_env_tmp" docker/compose/\.env\n'
+            r'awf setup --source-checkout "\$PWD"\n'
             r'awf start --source-checkout "\$PWD"\nawf service status --format pretty$'
         ),
         prerequisites_section,
+    )
+    assert (
+        prerequisites_section.index(source_fallback)
+        < prerequisites_section.index(source_preserve_existing_env)
+        < prerequisites_section.index('mv "$awf_env_tmp" docker/compose/.env')
+        < prerequisites_section.index('awf setup --source-checkout "$PWD"')
     )
     assert prerequisites_section.count(database_url_export) == 2, (
         "MCP setup package and source-checkout snippets must match first-run docs"

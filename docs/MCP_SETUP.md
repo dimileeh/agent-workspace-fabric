@@ -52,13 +52,30 @@ export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 mkdir -p docker/compose
+awf_env_tmp="$(mktemp)"
+awf_env_source=""
+if [ -f docker/compose/.env ]; then
+  awf_env_source="docker/compose/.env"
+elif [ -f .env ]; then
+  awf_env_source=".env"
+fi
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
-} > docker/compose/.env
+  if [ -n "$awf_env_source" ]; then
+    sed \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_GITHUB_TOKEN[[:space:]]*=/d' \
+      "$awf_env_source"
+  fi
+} > "$awf_env_tmp"
+mv "$awf_env_tmp" docker/compose/.env
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf service status --format pretty
