@@ -1949,3 +1949,51 @@ uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/
 ## Gaps
 
 None found.
+
+## Review Thread `PRRT_kwDOSJAM6s6HNCRx` Service Log Env Sentinel Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `_service_log_secret_values()` now accepts `ComposeEnvFileInput`
+  and resolves `COMPOSE_ENV_FILE_OMITTED` to `LOCAL_SERVICE_COMPOSE_ENV_FILE`
+  before parsing Compose env-file values.
+- Complete: `run_service_logs()` resolves the omitted sentinel before passing
+  the env-file value to subprocess env and command construction.
+- Complete: explicit `Path` and `None` env-file behavior remains covered by the
+  adjacent service-log tests and unchanged code paths.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_resolves_omitted_compose_env_file -q --tb=short -ra
+# failed: ComposeEnvFileOmitted reached compose_env_file_values() and raised AttributeError on .exists()
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_resolves_omitted_compose_env_file tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_resolves_omitted_compose_env_file_before_subprocess tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_skips_short_secret_values -q --tb=short -ra
+# 3 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
+## Gaps
+
+None found.

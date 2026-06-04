@@ -17,7 +17,12 @@ from typing import IO, Literal, Protocol
 import yaml
 
 from awf.common.redaction import redact_secrets
-from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
+from awf.service.config import (
+    LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    LOCAL_SERVICE_COMPOSE_FILE,
+    ComposeEnvFileInput,
+    ComposeEnvFileOmitted,
+)
 from awf.service.environment import (
     cleared_docker_cli_client_keys,
     compose_cli_environ,
@@ -140,7 +145,7 @@ def run_service_logs(
     tail: int = DEFAULT_LOG_TAIL,
     follow: bool = False,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
-    compose_env_file: Path | None = None,
+    compose_env_file: ComposeEnvFileInput = None,
     service_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
 ) -> ServiceLogsResult:
@@ -152,7 +157,8 @@ def run_service_logs(
         raise ServiceLogsError(
             returncode=1, detail=_local_service_compose_not_found_message(compose_file)
         )
-    extra_secrets = _service_log_secret_values(service_environ, compose_env_file)
+    resolved_compose_env_file = _resolve_service_log_compose_env_file(compose_env_file)
+    extra_secrets = _service_log_secret_values(service_environ, resolved_compose_env_file)
     if run_subprocess is None:
 
         def runner(
@@ -179,7 +185,7 @@ def run_service_logs(
         docker_env = _docker_cli_environ(
             service_environ,
             compose_file=compose_file,
-            compose_env_file=compose_env_file,
+            compose_env_file=resolved_compose_env_file,
         )
     except yaml.YAMLError as exc:
         raise ServiceLogsError(
@@ -191,7 +197,7 @@ def run_service_logs(
         tail=tail,
         follow=follow,
         compose_file=compose_file,
-        compose_env_file=compose_env_file,
+        compose_env_file=resolved_compose_env_file,
     )
     try:
         result = runner(
@@ -523,12 +529,13 @@ def _multiline_exact_secret_spans(
 
 def _service_log_secret_values(
     environ: Mapping[str, str] | None,
-    compose_env_file: Path | None,
+    compose_env_file: ComposeEnvFileInput,
 ) -> tuple[str, ...]:
     """Return exact service env values that service logs must redact."""
+    resolved_compose_env_file = _resolve_service_log_compose_env_file(compose_env_file)
     secret_values = [
         value
-        for key, value in compose_env_file_values(compose_env_file).items()
+        for key, value in compose_env_file_values(resolved_compose_env_file).items()
         if value and len(value) >= 4 and is_secret_env_key(key)
     ]
     for source_environ in (os.environ, environ):
@@ -540,6 +547,15 @@ def _service_log_secret_values(
             if value and len(value) >= 4 and is_secret_env_key(key)
         )
     return tuple(dict.fromkeys(secret_values))
+
+
+def _resolve_service_log_compose_env_file(
+    compose_env_file: ComposeEnvFileInput,
+) -> Path | None:
+    """Resolve omitted service-log env-file input to the local default."""
+    if isinstance(compose_env_file, ComposeEnvFileOmitted):
+        return LOCAL_SERVICE_COMPOSE_ENV_FILE
+    return compose_env_file
 
 
 def _docker_cli_environ(

@@ -1557,3 +1557,53 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readine
 uv run --python 3.12 --extra dev ruff check src/awf/service/provider_readiness.py src/awf/common/token_patterns.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/runtime/test_log_redaction.py
 uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/awf/common/token_patterns.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HNCRx` Service Log Env Sentinel Plan
+
+### Problem Statement And Scope
+
+The inline review reports that service-log exact-secret collection can pass the
+public Compose env-file sentinel directly to `compose_env_file_values()`, whose
+contract is `Path | None`. The default service-log call currently passes
+`None`, but the helper still needs to tolerate `ComposeEnvFileInput` consistently
+with adjacent service/MCP paths so the omitted sentinel resolves to the local
+service Compose env file instead of reaching `Path.exists()`.
+
+This repair is limited to resolving the service-log Compose env-file sentinel
+before exact-secret collection and downstream logs command/env construction. It
+does not change explicit `Path` or `None` behavior, provider readiness, MCP log
+redaction, or broad validation ownership.
+
+### Requirements Checklist
+
+- `_service_log_secret_values()` accepts the public `ComposeEnvFileInput`.
+- The omitted Compose env-file sentinel resolves to
+  `LOCAL_SERVICE_COMPOSE_ENV_FILE` before parsing env-file values.
+- `run_service_logs()` resolves the omitted sentinel before passing the env-file
+  value to subprocess env and command construction.
+- Explicit `Path` and `None` env-file behavior remains unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing regression that passes `COMPOSE_ENV_FILE_OMITTED` to
+   `_service_log_secret_values()` and asserts a local-service env-file secret is
+   collected without an `AttributeError`.
+2. Add a focused public-entry regression for `run_service_logs()` that passes
+   `COMPOSE_ENV_FILE_OMITTED`, redacts a local-service env-file secret, and
+   proves the subprocess command receives the resolved env-file path.
+3. Update the service-log helper type and resolve the omitted sentinel to
+   `LOCAL_SERVICE_COMPOSE_ENV_FILE` before helper parsing and downstream
+   `run_service_logs()` command/env construction.
+4. Run the targeted regressions, adjacent focused service-log secret-value test,
+   and narrow ruff/mypy checks for touched files. Broad AWF/GitHub validation
+   remains owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_resolves_omitted_compose_env_file tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_resolves_omitted_compose_env_file_before_subprocess tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_skips_short_secret_values -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```

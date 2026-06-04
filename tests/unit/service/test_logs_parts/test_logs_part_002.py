@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import awf.service.logs as logs_mod
+from awf.service.config import COMPOSE_ENV_FILE_OMITTED, LOCAL_SERVICE_COMPOSE_ENV_FILE
 from awf.service.logs import (
     DEFAULT_LOG_TAIL,
     LOCAL_SERVICE_COMPOSE_FILE,
@@ -894,6 +895,50 @@ def test_service_log_secret_values_skips_short_secret_values(
     ]
     assert not selected_short_values
     assert not missing_long_values
+
+
+@pytest.mark.unit
+def test_service_log_secret_values_resolves_omitted_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Resolve the public omitted env-file sentinel before parsing env files."""
+    secret = "compose-sentinel-secret"
+    compose_env_file = tmp_path / LOCAL_SERVICE_COMPOSE_ENV_FILE
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text(f"CUSTOM_API_KEY={secret}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    values = _service_log_secret_values({}, COMPOSE_ENV_FILE_OMITTED)
+
+    assert secret in values
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_resolves_omitted_compose_env_file_before_subprocess(
+    tmp_path: Path,
+) -> None:
+    """Keep the public omitted env-file sentinel out of subprocess inputs."""
+    secret = "compose-sentinel-log-secret"
+    compose_env_file = tmp_path / LOCAL_SERVICE_COMPOSE_ENV_FILE
+    compose_env_file.parent.mkdir(parents=True, exist_ok=True)
+    compose_env_file.write_text(f"CUSTOM_API_KEY={secret}\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout=f"{secret}\n", stderr="")
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        compose_env_file=COMPOSE_ENV_FILE_OMITTED,
+        run_subprocess=success_run,
+    )
+
+    assert calls[0][2:4] == ["--env-file", str(LOCAL_SERVICE_COMPOSE_ENV_FILE)]
+    assert secret not in result.stdout
+    assert "<redacted>" in result.stdout
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
