@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -553,6 +555,25 @@ def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
     assert "/home/user/.awf/secrets/codex.default" not in written
     assert str(source_root) not in serialized
     assert str(source_root) not in written
+
+
+@pytest.mark.unit
+def test_isoformat_treats_naive_datetime_as_utc() -> None:
+    if not hasattr(time, "tzset"):
+        pytest.skip("tzset is required to exercise host-local timezone conversion")
+    original_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        assert support_bundle_mod._isoformat(datetime(2026, 5, 28, 12, 0)) == (
+            "2026-05-28T12:00:00Z"
+        )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
 
 
 @pytest.mark.unit
