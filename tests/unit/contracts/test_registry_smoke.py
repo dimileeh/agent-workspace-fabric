@@ -45,23 +45,23 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
         "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWaitForWorkspace::test_exits_immediately_when_already_terminal",
     ),
     "Workspace overview": (
-        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_workspace_overview_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_004.py::TestMcpOperatorSurfaceParityPart003::test_workspace_overview_tool_matches_rest_payload",
     ),
     "Merge queue": (
-        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_merge_queue_tool_matches_rest_payload_and_reason_codes",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_004.py::TestMcpOperatorSurfaceParityPart003::test_merge_queue_tool_matches_rest_payload_and_reason_codes",
     ),
     "Task attempts": (
         "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_task_listing_tool_matches_rest_payload",
         "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_task_attempts_tool_matches_rest_payload",
     ),
     "Validation provenance": (
-        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_validation_provenance_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_004.py::TestMcpOperatorSurfaceParityPart003::test_validation_provenance_tool_matches_rest_payload",
     ),
     "Stale reasons": (
-        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_stale_reasons_tool_matches_rest_active_and_resolved_payloads",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_004.py::TestMcpOperatorSurfaceParityPart003::test_stale_reasons_tool_matches_rest_active_and_resolved_payloads",
     ),
     "Artifact metadata": (
-        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_artifacts_tool_matches_rest_metadata_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_004.py::TestMcpOperatorSurfaceParityPart003::test_artifacts_tool_matches_rest_metadata_payload",
     ),
     "Failure analysis metrics": (
         "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_failure_analysis_metrics_tool_matches_rest_payload",
