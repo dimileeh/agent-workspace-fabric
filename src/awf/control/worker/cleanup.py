@@ -233,9 +233,6 @@ async def _maybe_reap_classified_orphans(self: Any) -> None:
                 reason_code=_CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE,
                 error_type=type(exc).__name__,
             )
-        interval = max(0.0, self._config.classified_orphan_reap_scan_interval_seconds)
-        self._next_classified_orphan_reap_scan_at = monotonic() + interval
-        return
 
     interval = max(0.0, self._config.classified_orphan_reap_scan_interval_seconds)
     self._next_classified_orphan_reap_scan_at = monotonic() + interval
