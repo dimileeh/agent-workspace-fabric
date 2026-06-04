@@ -15,13 +15,13 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.companions import parent_workspace_id_from_companion_worktree_id
 from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.session import make_engine
+from awf.db.session import make_engine, session_scope
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
@@ -950,6 +950,70 @@ async def reap_classified_orphans(
         reason_code=ORPHAN_REAP_PARTIAL if errors else ORPHAN_REAP_OK,
         reaped=tuple(reaped),
         errors=tuple(errors),
+    )
+
+
+async def sweep_classified_orphans(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    work_dir: Path | str,
+    docker_host: str,
+    compose_teardown: OrphanResourceComposeTeardown,
+    enabled: bool,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
+    run_subprocess: SubprocessRun | None = None,
+) -> OrphanReapResult:
+    """Scan, classify, and reap readiness-classified orphan resources.
+
+    ``min_retention_hours`` protects retained terminal salvage during
+    classification, while ``min_age_hours`` only guards row-less missing
+    resources during reaping.
+    """
+    if not enabled:
+        return OrphanReapResult(
+            enabled=False,
+            status="disabled",
+            reason_code=ORPHAN_REAP_DISABLED,
+        )
+
+    resolved_run_subprocess = subprocess.run if run_subprocess is None else run_subprocess
+    docker_scan, worktree_scan = await asyncio.gather(
+        asyncio.to_thread(
+            scan_docker_resources,
+            docker_host=docker_host,
+            run_subprocess=resolved_run_subprocess,
+        ),
+        asyncio.to_thread(scan_managed_worktrees, work_dir),
+    )
+
+    try:
+        async with session_scope(session_factory) as session:
+            workspace_view = await workspace_id_view_from_session(
+                session,
+                min_retention_hours=min_retention_hours,
+            )
+    except SQLAlchemyError as exc:
+        _log.warning(
+            "orphan_resources.workspace_view_unavailable",
+            reason_code="DB_UNAVAILABLE",
+            error_type=type(exc).__name__,
+            error=str(exc)[:240],
+        )
+        workspace_view = unavailable_workspace_view()
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker_scan,
+        worktree_scan=worktree_scan,
+        workspace_view=workspace_view,
+        auto_cleanup_orphans=enabled,
+    )
+    return await reap_classified_orphans(
+        summary,
+        work_dir=work_dir,
+        compose_teardown=compose_teardown,
+        enabled=enabled,
+        min_age_hours=min_age_hours,
     )
 
 
