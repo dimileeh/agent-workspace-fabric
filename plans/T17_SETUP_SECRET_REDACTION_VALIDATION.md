@@ -620,6 +620,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review Thread `PRRT_kwDOSJAM6s6HC9ao` Overlapping Exact Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: exact configured-secret discovery now finds overlapping
+  self-occurrences by advancing to the next character after a match start.
+- Complete: a byte slice that intersects only a later overlapping configured
+  secret occurrence is redacted.
+- Complete: focused slice and byte-slice regressions still pass for the touched
+  redaction helper.
+
+Additional files changed:
+
+- `src/awf/common/redaction.py`
+- `tests/unit/runtime/test_log_redaction.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k overlapping_exact_secret
+# failed: returned raw "abc" for byte slice 6:9 in "abcabcabc" with extra secret "abcabc"
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k 'redact_secrets_slice or redact_secrets_byte_slice'
+# 8 passed, 19 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py tests/unit/runtime/test_log_redaction.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
+# Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.

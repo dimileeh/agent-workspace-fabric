@@ -186,6 +186,23 @@ def test_redact_secrets_byte_slice_masks_secret_starting_at_byte_zero() -> None:
 
 
 @pytest.mark.unit
+def test_redact_secrets_byte_slice_masks_overlapping_exact_secret_self_match() -> None:
+    """Mask a byte slice covered only by a later overlapping configured secret."""
+    secret = "abcabc"
+    text = "abcabcabc"
+
+    redacted = redact_secrets_byte_slice(
+        text,
+        6,
+        9,
+        extra_secrets=(secret,),
+    )
+
+    assert redacted == REDACTION_MARKER
+    assert "abc" not in redacted
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

@@ -116,7 +116,7 @@ def _secret_redaction_spans(
                 break
             end = start + len(secret)
             spans.append((start, end))
-            cursor = end
+            cursor = start + 1
 
     spans.extend((match.start(2), match.end(2)) for match in _URL_CREDENTIAL_RE.finditer(text))
     spans.extend((match.start(2), match.end(2)) for match in _AUTHORIZATION_RE.finditer(text))

@@ -444,3 +444,44 @@ uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py
 uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/runtime/test_log_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HC9ao` Overlapping Exact Secret Repair Plan
+
+### Problem Statement And Scope
+
+The review thread identifies that exact `extra_secrets` scanning advances the
+search cursor to the end of each match. If an exact secret can overlap with
+itself, later overlapping occurrences are not included in the merged redaction
+spans, and arbitrary byte slices can expose the suffix of a second occurrence.
+
+This repair is limited to exact configured-secret span discovery in
+`src/awf/common/redaction.py` and a focused runtime regression. It does not
+change provider token pattern definitions, MCP log-read projection, support
+bundle behavior, or broader validation scope.
+
+### Requirements Checklist
+
+- Exact configured-secret discovery finds overlapping self-occurrences.
+- Byte slices that intersect only a later overlapping occurrence are redacted.
+- Existing non-overlapping configured-secret and pattern redaction behavior
+  remains unchanged.
+
+### Implementation Steps
+
+1. Add a focused failing regression for a byte slice that intersects only a
+   later overlapping occurrence of the same configured secret.
+2. Update exact configured-secret scanning to continue from the next character
+   after a match start so overlapping matches are discovered before span merge.
+3. Run focused runtime redaction tests and lint/type checks for the touched
+   files only.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with requirement
+   status and evidence. Broad AWF/GitHub validation remains owned by AWF after
+   agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k overlapping_exact_secret
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py tests/unit/runtime/test_log_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py
+```
