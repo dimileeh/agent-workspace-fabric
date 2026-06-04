@@ -237,6 +237,42 @@ def test_tool_install_lane_stops_after_first_post_install_failure(
 
 
 @pytest.mark.unit
+def test_tool_install_lane_describes_environmental_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Offline wheel build failures use build-specific skip diagnostics."""
+    monkeypatch.setattr(smoke.shutil, "which", lambda name: f"/usr/bin/{name}")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    def runner(
+        command: smoke.CommandSpec,
+        _timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command.argv,
+            returncode=1,
+            stdout="",
+            stderr="error: failed to fetch dependency\nTemporary failure in name resolution\n",
+        )
+
+    results = smoke.run_tool_install_lane(
+        checkout_root=checkout,
+        smoke_root=tmp_path / "smoke",
+        methods=("uv",),
+        timeout_seconds=5,
+        runner=runner,
+    )
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.status == "skipped"
+    assert result.command[:3] == ("uv", "build", "--wheel")
+    assert result.reason == "local wheel build could not resolve dependencies in this environment"
+
+
+@pytest.mark.unit
 def test_copy_source_checkout_preserves_markers_and_excludes_dev_state(tmp_path: Path) -> None:
     """The copied checkout keeps source markers but drops git, caches, and build state."""
     source = _write_source_checkout(tmp_path / "source")

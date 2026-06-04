@@ -475,6 +475,18 @@ def run_tool_install_lane(
     )
     build_completed = run(build, timeout_seconds)
     if build_completed.returncode != 0:
+        combined = _combined_output(build_completed)
+        if _is_environmental_failure(combined):
+            return (
+                SmokeResult(
+                    lane=Lane.TOOL_INSTALL,
+                    status="skipped",
+                    command=build.argv,
+                    reason="local wheel build could not resolve dependencies in this environment",
+                    stdout_tail=_tail(build_completed.stdout),
+                    stderr_tail=_tail(build_completed.stderr),
+                ),
+            )
         return (_tool_install_result(Lane.TOOL_INSTALL, build, build_completed),)
 
     wheels = sorted(dist_dir.glob("*.whl"))
