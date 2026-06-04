@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import re
+import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -12,6 +16,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict
 
+from awf.node.auth_mounts import force_copy_isolation_requested
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
     LOCAL_SERVICE_COMPOSE_FILE,
@@ -37,6 +42,30 @@ PACKAGED_BOOTSTRAP_ASSET_ROOT = Path("bootstrap_assets")
 SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND = "SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND"
 SERVICE_BOOTSTRAP_STAGE_FAILED = "SERVICE_BOOTSTRAP_STAGE_FAILED"
 SERVICE_BOOTSTRAP_TIMEOUT = "SERVICE_BOOTSTRAP_TIMEOUT"
+# Work-dir mount-propagation preflight (#376/#388) reason codes.
+SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED = "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED"
+SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE = (
+    "SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE"
+)
+
+# Compose interpolates these to gate the worker's ``:rshared`` work-dir bind and
+# the per-workspace overlay vs copy posture (see docker/compose/local-service.yml
+# and src/awf/node/auth_mounts.py).
+AWF_WORK_DIR_BIND_PROPAGATION_ENV = "AWF_WORK_DIR_BIND_PROPAGATION"
+AWF_CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
+
+# Compose binds ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` (see
+# docker/compose/local-service.yml), so this is the deterministic default host
+# work dir the preflight must inspect when the operator pins nothing.
+DEFAULT_HOST_WORK_DIR_SUBPATH = ".awf/service"
+
+# Filesystems where a worker-mounted overlay never propagates into the sibling
+# agent container even when the bind is flagged ``:rshared`` (Docker Desktop's
+# gRPC/virtio bridges, Plan 9). On these the copy fallback is the only correct
+# posture, so the preflight forces it rather than provisioning an empty overlay.
+_NON_PROPAGATING_FS_TYPES = frozenset({"virtiofs", "grpcfuse", "fuse.grpcfuse", "9p"})
+
+DEFAULT_MOUNTINFO_PATH = Path("/proc/self/mountinfo")
 
 
 class CompletedProcessLike(Protocol):
@@ -199,6 +228,341 @@ class _BootstrapAssets:
     compose_env_file: Path | None
 
 
+@dataclass(frozen=True)
+class WorkDirPropagationResult:
+    """Outcome of the host work-dir mount-propagation preflight.
+
+    ``propagation`` is the bind-propagation flag to gate the worker's work-dir
+    bind with (``rshared`` / ``rprivate``); ``force_copy`` requests the
+    per-workspace ``~/.claude`` copy fallback when an overlay would never reach
+    the agent container.
+    """
+
+    propagation: str
+    force_copy: bool
+    reason_code: str
+    detail: str
+
+    def to_stage_result(self) -> ServiceBootstrapStageResult:
+        """Render the preflight outcome as a recorded bootstrap stage."""
+
+        return ServiceBootstrapStageResult(
+            stage="work_dir_propagation",
+            command=("awf", "preflight", "work-dir-mount-propagation"),
+            returncode=0,
+            stdout=self.reason_code,
+            stderr=self.detail,
+        )
+
+
+@dataclass(frozen=True)
+class _MountInfoEntry:
+    mount_point: str
+    shared: bool
+    fs_type: str
+
+
+def _host_is_linux() -> bool:
+    """Return whether bootstrap runs on a Linux host (mount(8) propagation works)."""
+
+    return sys.platform.startswith("linux")
+
+
+def _mount_binary_available() -> bool:
+    """Return whether ``mount(8)`` is on PATH for the make-rshared attempt."""
+
+    return shutil.which("mount") is not None
+
+
+def _unescape_mountinfo_field(field: str) -> str:
+    """Decode the octal escapes ``/proc/self/mountinfo`` uses in path fields.
+
+    The kernel escapes space (``\\040``), tab (``\\011``), newline (``\\012``)
+    and backslash (``\\134``). A single regex pass over each ``\\NNN`` token is
+    order-independent, so a literal backslash followed by octal-escape-like
+    digits (encoded as e.g. ``\\134040``) decodes to ``\\040`` rather than being
+    mangled into a space by sequential replacements.
+    """
+
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), field)
+
+
+def _parse_mountinfo(text: str) -> list[_MountInfoEntry]:
+    """Parse ``/proc/self/mountinfo`` into mount-point / propagation / fs-type rows.
+
+    A mount is propagation-shared iff one of its optional fields (between field 6
+    and the ``-`` separator) is a ``shared:N`` tag.
+    """
+
+    entries: list[_MountInfoEntry] = []
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 7:
+            continue
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            continue
+        if separator + 1 >= len(fields):
+            continue
+        optional = fields[6:separator]
+        entries.append(
+            _MountInfoEntry(
+                mount_point=_unescape_mountinfo_field(fields[4]),
+                shared=any(option.startswith("shared:") for option in optional),
+                fs_type=fields[separator + 1],
+            )
+        )
+    return entries
+
+
+def _path_within_mount(mount_point: str, path: str) -> bool:
+    """Return whether ``path`` lies on the mount rooted at ``mount_point``."""
+
+    if mount_point == "/":
+        return True
+    normalized = mount_point.rstrip("/")
+    return path == normalized or path.startswith(normalized + "/")
+
+
+def _work_dir_mount_entry(mountinfo_path: Path, target: Path) -> _MountInfoEntry | None:
+    """Return the longest-prefix mount entry backing ``target``, or ``None``.
+
+    Resolves symlinks in ``target`` (``realpath``) before prefix-matching: the
+    kernel records mount points in ``/proc/self/mountinfo`` as fully
+    symlink-resolved canonical paths, so a work dir reached through a symlink
+    (e.g. a symlinked ``$HOME``) would otherwise fail to match and silently force
+    the copy fallback even where propagation is fine. ``realpath`` does not
+    require the path to exist (it resolves the symlinked prefix and keeps any
+    non-existent tail) and is a no-op on plain, symlink-free paths.
+    """
+
+    try:
+        text = mountinfo_path.read_text()
+    except OSError:
+        return None
+    resolved = os.path.realpath(os.fspath(target))  # noqa: PTH100 - match kernel canonical mount paths
+    best: _MountInfoEntry | None = None
+    for entry in _parse_mountinfo(text):
+        if not _path_within_mount(entry.mount_point, resolved):
+            continue
+        if best is None or len(entry.mount_point) > len(best.mount_point):
+            best = entry
+    return best
+
+
+def _try_make_work_dir_rshared(
+    target: Path,
+    *,
+    run_subprocess: SubprocessRun,
+    environ: Mapping[str, str] | None,
+) -> bool:
+    """Best-effort ``mount --bind`` + ``mount --make-rshared`` on ``target``.
+
+    Returns whether both commands succeeded (exit 0). Any non-zero exit or
+    ``OSError`` (e.g. ``mount`` missing, not root) means we could not make the
+    work dir shared and the caller falls back to the copy posture.
+
+    If the ``--bind`` succeeds but ``--make-rshared`` fails (e.g. the mount
+    namespace disallows propagation-mode changes), the self-referential bind is
+    unwound with ``umount`` before returning ``False`` — otherwise repeated
+    bootstrap runs that hit this edge would accumulate one stale entry per
+    attempt in the host mount table. The unwind is itself best-effort.
+
+    ``mount --bind`` requires the target directory to exist. On a first
+    bootstrap the host work dir (``${HOME}/.awf/service`` by default) has not
+    been created yet — Compose would auto-create the bind source, but this
+    preflight runs before any Compose stage. The directory is therefore created
+    (best effort) before the bind so the bind is not spuriously denied on a host
+    where ``--make-rshared`` would otherwise succeed; a failed creation just
+    leaves the bind to fail and the caller falls back to the copy posture.
+    """
+
+    env = dict(environ) if environ is not None else None
+
+    # Best effort: if the bind source cannot be created, the bind below fails
+    # and the caller falls back to the per-workspace copy posture.
+    with contextlib.suppress(OSError):
+        target.mkdir(parents=True, exist_ok=True)
+
+    def _run(command: list[str]) -> bool:
+        try:
+            result = run_subprocess(
+                command,
+                **_subprocess_run_kwargs(
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                ),
+            )
+        except OSError:
+            return False
+        return result.returncode == 0
+
+    if not _run(["mount", "--bind", str(target), str(target)]):
+        return False
+    if not _run(["mount", "--make-rshared", str(target)]):
+        # The bind landed but the propagation-mode change did not; unwind the
+        # self-referential bind so repeated bootstraps don't leak mount entries.
+        _run(["umount", str(target)])
+        return False
+    return True
+
+
+def ensure_work_dir_mount_propagation(
+    host_work_dir: str,
+    *,
+    run_subprocess: SubprocessRun,
+    environ: Mapping[str, str] | None = None,
+    mountinfo_path: Path = DEFAULT_MOUNTINFO_PATH,
+) -> WorkDirPropagationResult:
+    """Ensure ``host_work_dir`` is an ``rshared`` host mount, or force the copy fallback.
+
+    The worker binds the work dir ``:rshared`` so an overlay it mounts under it is
+    visible to the sibling agent container. That requires the host-side work dir
+    to be a shared mount. This preflight:
+
+    - Reads ``/proc/self/mountinfo`` to find the mount backing ``host_work_dir``.
+      Shared on a propagating fs → ``rshared`` (no copy fallback). A
+      non-propagating fs (Docker Desktop / virtiofs / grpcfuse / Plan 9) forces
+      the copy fallback even when flagged shared, since the overlay never reaches
+      the sibling regardless of propagation mode.
+    - Private but Linux with ``mount(8)`` available → create the work dir if it
+      does not yet exist (the bind source), then attempt ``mount --bind`` +
+      ``mount --make-rshared`` (idempotent), then report ``rshared`` on success.
+    - Non-propagating (Docker Desktop / virtiofs / grpcfuse / Plan 9), non-Linux,
+      no ``mount(8)``, an unreadable mountinfo, or a failed ``--make-rshared`` →
+      ``rprivate`` + ``force_copy=True`` so the worker uses the per-workspace copy
+      instead of silently provisioning an empty ``~/.claude``.
+
+    Best effort and never fatal: the worst case is the (correct) copy fallback.
+    """
+
+    target = Path(host_work_dir).expanduser()
+    entry = _work_dir_mount_entry(mountinfo_path, target)
+    if entry is None:
+        return WorkDirPropagationResult(
+            propagation="rprivate",
+            force_copy=True,
+            reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE,
+            detail=(
+                f"could not resolve a host mount backing {target} via {mountinfo_path}; "
+                "forcing the per-workspace copy fallback"
+            ),
+        )
+    if entry.fs_type in _NON_PROPAGATING_FS_TYPES:
+        # Checked before ``entry.shared``: on these filesystems an overlay never
+        # reaches the sibling agent even when the mount is flagged shared/rshared
+        # (Docker Desktop marks its virtiofs/grpcfuse mounts ``shared:N``), so a
+        # shared flag here is a false reassurance. Force the copy fallback rather
+        # than provisioning an empty overlay.
+        return WorkDirPropagationResult(
+            propagation="rprivate",
+            force_copy=True,
+            reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE,
+            detail=(
+                f"{target} is on a non-propagating mount "
+                f"(fs={entry.fs_type}, mount={entry.mount_point}); forcing the "
+                "per-workspace copy fallback"
+            ),
+        )
+    if entry.shared:
+        return WorkDirPropagationResult(
+            propagation="rshared",
+            force_copy=False,
+            reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED,
+            detail=f"{target} is backed by a shared mount at {entry.mount_point}",
+        )
+    if not _host_is_linux() or not _mount_binary_available():
+        return WorkDirPropagationResult(
+            propagation="rprivate",
+            force_copy=True,
+            reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE,
+            detail=(
+                f"{target} is on a non-propagating mount "
+                f"(fs={entry.fs_type}, mount={entry.mount_point}); forcing the "
+                "per-workspace copy fallback"
+            ),
+        )
+    if _try_make_work_dir_rshared(target, run_subprocess=run_subprocess, environ=environ):
+        return WorkDirPropagationResult(
+            propagation="rshared",
+            force_copy=False,
+            reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED,
+            detail=f"made {target} an rshared mount via mount --make-rshared",
+        )
+    return WorkDirPropagationResult(
+        propagation="rprivate",
+        force_copy=True,
+        reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE,
+        detail=(
+            f"could not make {target} an rshared mount (mount --make-rshared failed); "
+            "forcing the per-workspace copy fallback"
+        ),
+    )
+
+
+def _resolve_bootstrap_host_work_dir(environ: Mapping[str, str]) -> str | None:
+    """Return the host work dir to preflight, or ``None`` when unknowable.
+
+    Mirrors exactly what compose binds for the worker:
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` (see
+    docker/compose/local-service.yml). Only ``AWF_HOST_WORK_DIR`` pins the host
+    bind; when it is unset, falls back to compose's deterministic default
+    ``${HOME}/.awf/service`` so the propagation preflight still runs on the common
+    bootstrap path — exactly the Docker Desktop/virtiofs case this change must
+    detect, where the compose ``:rshared`` default would otherwise stand and leave
+    the worker provisioning an empty overlay. ``AWF_WORK_DIR`` is deliberately not
+    consulted: it is the (often relative, default ``.awf``) in-container CLI/API
+    state root, which compose sets *from* the host bind path rather than reads, so
+    preflighting it would inspect the wrong path and leave the actual
+    ``${HOME}/.awf/service`` bind on its default posture. Returns ``None`` only
+    when ``HOME`` is also absent, leaving today's compose defaults untouched.
+    """
+
+    value = environ.get("AWF_HOST_WORK_DIR")
+    if value and value.strip():
+        return value.strip()
+    home = environ.get("HOME")
+    if home and home.strip():
+        return str(Path(home.strip()) / DEFAULT_HOST_WORK_DIR_SUBPATH)
+    return None
+
+
+def _force_copy_already_requested(environ: Mapping[str, str]) -> bool:
+    """Return whether ``environ`` already carries an operator force-copy request.
+
+    Delegates to ``auth_mounts.force_copy_isolation_requested`` so the preflight
+    and the per-workspace overlay gate share a single source of truth for what
+    counts as an operator override — rather than re-encoding the truthiness set
+    here, where the two could silently drift.
+    """
+
+    return force_copy_isolation_requested(environ)
+
+
+def _apply_work_dir_propagation_env(
+    environ: Mapping[str, str],
+    result: WorkDirPropagationResult,
+) -> dict[str, str]:
+    """Return ``environ`` with the propagation + force-copy vars folded in.
+
+    The preflight can only *raise* the force-copy posture: when it concludes copy
+    is unnecessary it must not overwrite an operator's explicit
+    ``AWF_CLAUDE_AUTH_FORCE_COPY`` override (set in the environment or the compose
+    env file), since ``auth_mounts`` treats that variable as an operator
+    force-copy request that wins over overlay capability. So the effective value
+    is the preflight's result OR any pre-existing operator request.
+    """
+
+    updated = dict(environ)
+    updated[AWF_WORK_DIR_BIND_PROPAGATION_ENV] = result.propagation
+    force_copy = result.force_copy or _force_copy_already_requested(environ)
+    updated[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = "true" if force_copy else "false"
+    return updated
+
+
 async def run_service_bootstrap(
     settings: ServiceSettings,
     *,
@@ -246,6 +610,26 @@ async def run_service_bootstrap(
     service_env = _docker_cli_environ(raw_service_env)
 
     subprocess_env = _docker_cli_environ({**os.environ, **raw_service_env})
+
+    # Work-dir mount-propagation preflight (#376/#388). Runs for the explicitly
+    # configured host work dir, and otherwise for compose's deterministic default
+    # ``${HOME}/.awf/service``: detect whether it propagates so the worker's
+    # ``:rshared`` bind is gated and the overlay/copy posture is chosen before the
+    # api/worker containers start. Skipped only when even ``HOME`` is unknowable,
+    # leaving today's compose defaults (``:rshared`` / overlay) untouched. Best
+    # effort: never fatal.
+    host_work_dir = _resolve_bootstrap_host_work_dir(subprocess_env)
+    if host_work_dir is not None:
+        propagation = await asyncio.to_thread(
+            ensure_work_dir_mount_propagation,
+            host_work_dir,
+            run_subprocess=runner,
+            environ=subprocess_env,
+        )
+        completed.append(propagation.to_stage_result())
+        subprocess_env = _apply_work_dir_propagation_env(subprocess_env, propagation)
+        service_env = _apply_work_dir_propagation_env(service_env, propagation)
+
     for stage in _bootstrap_stages(
         settings,
         options=resolved_options,

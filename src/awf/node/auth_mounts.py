@@ -60,12 +60,72 @@ _STALE_STAGING_MAX_AGE_SECONDS = 3600.0
 _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 _CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED"
 _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
+# Raised by ``teardown_workspace_auth_overlay`` when a process that lacks
+# ``CAP_SYS_ADMIN`` (the CLI / API container) is asked to release a workspace's
+# overlay it cannot see in its own mount namespace and no capable process has
+# recorded a teardown yet. The overlay may still be live in the worker namespace,
+# so removing the auth dir would strand the mount; GC must surface this loudly.
+_CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE = "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE"
+# Logged when a capable process unmounted the overlay but the ``.overlay-unmounted``
+# marker write failed (ENOSPC, transient FS error). Distinct from
+# ``UNMOUNT_INCAPABLE`` (a capability gap): the process here *is* capable, so this
+# is a filesystem write fault, and alerting keyed on the two must not conflate them.
+_CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED"
+# Marker written under ``auth/<id>/claude`` by a capability-holding process (the
+# worker, or any root+CAP_SYS_ADMIN context) once it has unmounted — or verified
+# the absence of — the overlay. It is the cross-namespace signal that lets a
+# later capability-less GC distinguish "the worker already released this overlay"
+# (safe to remove) from "still mounted elsewhere" (must not remove).
+_OVERLAY_UNMOUNTED_MARKER = ".overlay-unmounted"
+# When truthy in the worker environment, force the per-workspace copy fallback
+# even where overlayfs + CAP_SYS_ADMIN are present. The bootstrap mount-propagation
+# preflight sets this on hosts whose work dir cannot be made an ``rshared`` mount
+# (Docker Desktop / virtiofs / grpcfuse), where a worker-mounted overlay would
+# never propagate into the sibling agent container and the agent would see an
+# empty ``~/.claude``. The copy fallback is correct there (no disk saving).
+_CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
 _PROC_SELF_STATUS = Path("/proc/self/status")
 _PROC_MOUNTS = Path("/proc/mounts")
 _CAP_SYS_ADMIN_BIT = 21
 _ISOLATION_OVERLAY = "per_workspace_overlay"
 _ISOLATION_COPY = "per_workspace_copy"
+
+
+class OverlayUnmountUnverifiableError(RuntimeError):
+    """Overlay teardown could not be verified by a capability-less process.
+
+    Raised by :func:`teardown_workspace_auth_overlay` when the calling process
+    lacks ``CAP_SYS_ADMIN`` (CLI / API container), the overlay is not visibly
+    mounted in this namespace, a writable overlay ``upper`` scratch exists, and
+    no capable process has yet recorded the ``.overlay-unmounted`` marker. The
+    overlay may still be live in the worker's mount namespace, so the caller must
+    not remove the auth dir — it surfaces this as a loud GC failure instead of a
+    silent no-op reported as success.
+    """
+
+    def __init__(self, *, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def _force_copy_isolation_requested(host_env: Mapping[str, str] | None = None) -> bool:
+    """Return whether ``AWF_CLAUDE_AUTH_FORCE_COPY`` requests the copy fallback."""
+
+    source = os.environ if host_env is None else host_env
+    value = source.get(_CLAUDE_AUTH_FORCE_COPY_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def force_copy_isolation_requested(host_env: Mapping[str, str] | None = None) -> bool:
+    """Public API: whether ``AWF_CLAUDE_AUTH_FORCE_COPY`` requests the copy fallback.
+
+    A stable wrapper over the module-private probe so callers outside this
+    package (e.g. ``service.provider_readiness``) depend on a public symbol
+    rather than coupling to the underscore-prefixed implementation detail.
+    """
+
+    return _force_copy_isolation_requested(host_env)
 
 
 def _overlay_filesystem_available(proc_filesystems: Path = _PROC_FILESYSTEMS) -> bool:
@@ -175,6 +235,12 @@ class _SubprocessOverlayMounter:
     proc_mounts: Path = _PROC_MOUNTS
 
     def supported(self) -> bool:
+        # An operator/bootstrap force-copy request wins over real overlayfs
+        # capability: on a host whose work dir cannot be made an ``rshared``
+        # mount the overlay would never reach the agent container, so the copy
+        # fallback is the only correct posture there.
+        if _force_copy_isolation_requested():
+            return False
         return _overlay_filesystem_available() and _has_cap_sys_admin()
 
     def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
@@ -210,7 +276,9 @@ def default_overlay_mounter() -> OverlayMounter:
 
 
 def claude_auth_isolation_label(
-    *, overlay_filesystem_available: Callable[[], bool] | None = None
+    *,
+    overlay_filesystem_available: Callable[[], bool] | None = None,
+    force_copy_requested: Callable[[], bool] | None = None,
 ) -> str:
     """Return the isolation posture label for Claude file auth on this host.
 
@@ -229,9 +297,19 @@ def claude_auth_isolation_label(
     worker's ``CAP_SYS_ADMIN`` as the deployment invariant it is. Best effort: an
     individual mount can still fall back to copy, which keeps provisioning correct
     either way.
+
+    An ``AWF_CLAUDE_AUTH_FORCE_COPY`` request wins over real overlayfs capability,
+    exactly as it does in ``_SubprocessOverlayMounter.supported`` — on a
+    non-propagating host bootstrap sets this so the worker provisions with the copy
+    fallback even while overlayfs stays advertised. The label must fold in the same
+    signal or readiness/status would report ``per_workspace_overlay`` while the
+    worker actually uses per-workspace copies, misstating the isolation/disk posture.
     """
 
     probe = overlay_filesystem_available or _overlay_filesystem_available
+    force_copy = force_copy_requested or _force_copy_isolation_requested
+    if force_copy():
+        return _ISOLATION_COPY
     return _ISOLATION_OVERLAY if probe() else _ISOLATION_COPY
 
 
@@ -1155,29 +1233,116 @@ def _reap_stale_claude_base_staging(base_root: Path) -> None:
             shutil.rmtree(staging, ignore_errors=True)
 
 
+def _write_overlay_unmounted_marker(claude_root: Path, marker: Path) -> None:
+    """Record that a capable process verified this overlay's teardown.
+
+    The ``.overlay-unmounted`` marker is the cross-namespace proof that lets a
+    later capability-less GC distinguish "worker already released this overlay"
+    from "still mounted in another namespace". Skipped entirely when the auth
+    dir does not exist (a workspace that was never provisioned), to avoid
+    materializing an empty tree.
+
+    A marker write can fail (ENOSPC, a transient FS error). The worker's
+    terminal-runtime-release sweep runs *once* per workspace, so — contrary to a
+    "best-effort, the next sweep re-writes it" assumption — no later capable
+    sweep re-records it. Lost silently, the marker leaves a capability-less GC
+    seeing ``upper`` without a marker, treating the (already gone) overlay as
+    unverifiable, and skipping the auth-dir delete indefinitely: a pure leak.
+    Since a capable caller reaches here only after the mount is provably gone,
+    fall back to removing the overlay scratch (``upper``/``work``) directly —
+    that clears the very signal GC keys off, so GC can reclaim the auth dir even
+    without the marker. The fallback is itself best-effort (GC's loud-failure
+    path remains the net if even removal fails).
+    """
+
+    if not claude_root.exists():
+        return
+    try:
+        marker.write_text("")
+        return
+    except OSError as exc:
+        _log.warning(
+            "claude_auth_overlay_unmounted_marker_write_failed",
+            reason_code=_CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED,
+            workspace_auth_root=str(claude_root),
+            error=str(exc),
+        )
+    for scratch in ("upper", "work"):
+        shutil.rmtree(claude_root / scratch, ignore_errors=True)
+
+
 def teardown_workspace_auth_overlay(
     *,
     work_dir: Path,
     workspace_id: str,
     overlay_mounter: OverlayMounter | None = None,
+    capability_probe: Callable[[], bool] | None = None,
 ) -> None:
     """Unmount a workspace's Claude overlay before its auth dir is removed.
 
     Unmount-before-remove: a busy overlay mount makes ``rmtree`` fail with
     ``EBUSY``, which is exactly the class of leak GC cannot clean up. This only
-    unmounts (GC owns removal) and is idempotent — a no-op when nothing is
-    mounted, and it re-raises a genuine busy/umount error. The failure is *not*
-    logged here: every caller (``gc._unmount_candidate_auth_overlay`` and
-    ``lifecycle._teardown_completed_workspace_auth_overlay``) already logs it
-    with its own context and the shared ``CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED``
-    reason code, so logging here too would double-record every failure.
+    unmounts (GC owns removal); GC failures are *not* logged here — every caller
+    logs with its own context and the shared ``CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED``
+    reason code, so logging here too would double-record.
+
+    The overlay is created by the **worker** (it alone holds ``CAP_SYS_ADMIN``
+    and shares the agent container's mount namespace). ``awf service gc`` runs in
+    the API container / host CLI, which holds neither — there the worker's mount
+    is *invisible*, so ``is_mounted`` is ``False`` even while the overlay is live.
+    Treating that as a no-op and removing the auth dir would strand the mount and
+    its ``upper`` inodes. The teardown therefore branches on capability
+    (``capability_probe``, defaulting to :func:`_has_cap_sys_admin` so tests need
+    no real caps):
+
+    - **mounted (visible here):** unmount (raises loud on a genuine umount
+      failure, unchanged) and record the ``.overlay-unmounted`` marker.
+    - **not mounted + capable** (worker / root+SYS_ADMIN): a capable process has
+      verified there is nothing to release — record the marker and return.
+    - **not mounted + incapable** (CLI / API): if a writable overlay ``upper``
+      exists and no marker is present, the worker has not yet released this
+      overlay; raise :class:`OverlayUnmountUnverifiableError` so GC fails loudly
+      instead of stranding a live mount. If the marker exists (worker already
+      released) or there is no overlay scratch (legacy full-copy workspace),
+      return a no-op.
     """
 
     mounter = overlay_mounter or default_overlay_mounter()
-    merged = work_dir.expanduser() / "auth" / workspace_id / "claude" / "merged"
-    if not mounter.is_mounted(merged):
+    probe = capability_probe or _has_cap_sys_admin
+    claude_root = work_dir.expanduser() / "auth" / workspace_id / "claude"
+    merged = claude_root / "merged"
+    marker = claude_root / _OVERLAY_UNMOUNTED_MARKER
+    upper = claude_root / "upper"
+
+    if mounter.is_mounted(merged):
+        mounter.unmount(merged)
+        _write_overlay_unmounted_marker(claude_root, marker)
         return
-    mounter.unmount(merged)
+
+    if probe():
+        # A capable process (the worker) sees the real mount namespace: nothing
+        # is mounted, so teardown is verified. Record the marker so a later
+        # capability-less GC knows this overlay was released here -- but only when
+        # an overlay scratch (``upper``) actually existed. Copy-fallback
+        # workspaces (``AWF_CLAUDE_AUTH_FORCE_COPY``) never built one, and GC's
+        # capability-less path consults the marker only when ``upper`` exists, so
+        # writing it for a copy workspace is meaningless on-disk noise that only
+        # confuses debugging.
+        if upper.exists():
+            _write_overlay_unmounted_marker(claude_root, marker)
+        return
+
+    if upper.exists() and not marker.exists():
+        # Capability-less and the overlay's writable layer exists but no capable
+        # process has recorded a teardown: the worker may still hold the mount.
+        raise OverlayUnmountUnverifiableError(
+            reason_code=_CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
+            message=(
+                "cannot verify Claude auth overlay teardown without CAP_SYS_ADMIN "
+                f"for workspace {workspace_id}; the worker releases terminal "
+                "overlays in its own mount namespace"
+            ),
+        )
 
 
 def _prepare_isolated_gemini_auth(*, host_home: Path, target_root: Path) -> tuple[AuthMount, ...]:
