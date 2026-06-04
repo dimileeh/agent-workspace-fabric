@@ -103,6 +103,12 @@ Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HDHwd`: the `uv tool` and
 same copy-paste bash block; split install, upgrade, and uninstall alternatives
 so copying one block cannot run both package managers.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HE3SX`: README first-run
+commands must not advertise bare `awf` commands as applying to the source
+checkout lane with no global install. Scope the bare command block to lanes that
+put `awf` on `PATH`, and show the no-global `uv run --python 3.12 --extra dev
+awf ...` wrapper alongside it.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

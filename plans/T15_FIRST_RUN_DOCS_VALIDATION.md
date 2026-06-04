@@ -43,6 +43,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address review-level comment `issue:4620140358` by removing the
   Getting Started `127.0.0.1` first-run URL contradiction and making the
   Quickstart optional GitHub token assertion self-calibrate from lane headings.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HE3SX` by scoping README bare
+  `awf` first-run commands to lanes that put `awf` on `PATH` and documenting
+  the no-global `uv run --python 3.12 --extra dev awf ...` wrapper alongside
+  them.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -464,6 +468,36 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Result: `4 passed in 0.65s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HE3SX`:
+
+- `README.md` now limits the bare first-run command block to lanes that put
+  `awf` on `PATH`.
+- `README.md` now gives the source-checkout/no-global-install lane a matching
+  first-run block using `uv run --python 3.12 --extra dev awf ...`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects README first-run
+  prose that advertises bare `awf` commands for every lane or omits the
+  no-global wrapper.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
+```
+
+Red-phase result after tightening the focused assertion: failed because
+`README.md` still said `After installing in any lane` before a bare `awf`
+command block.
+
+Final repair result: `1 passed in 0.57s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py

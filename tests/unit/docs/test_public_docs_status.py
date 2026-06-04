@@ -123,16 +123,26 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
 
 
 def test_readme_first_run_grammar_reuses_initialized_project_path() -> None:
-    """Assert README smoke command validates the path initialized just above it."""
+    """Assert README first-run commands are valid for each install lane."""
     readme_text = README_PATH.read_text(encoding="utf-8")
     first_run_section = _markdown_section(readme_text, "## Installation").split(
         "For the full lane-specific commands",
         maxsplit=1,
     )[0]
 
+    assert "After installing in any lane" not in first_run_section
+    assert "For lanes that put `awf` on `PATH`" in first_run_section
+    assert "For the no-global source checkout lane" in first_run_section
     assert "awf init <path>" in first_run_section
     assert "awf smoke run --project <path> --mocked-local --format pretty" in first_run_section
     assert "awf smoke run --mocked-local --format pretty" not in first_run_section
+    assert "uv run --python 3.12 --extra dev awf setup" in first_run_section
+    assert "uv run --python 3.12 --extra dev awf start" in first_run_section
+    assert "uv run --python 3.12 --extra dev awf init <path>" in first_run_section
+    assert (
+        "uv run --python 3.12 --extra dev awf smoke run --project <path> "
+        "--mocked-local --format pretty"
+    ) in first_run_section
 
 
 def test_quickstart_presents_available_complete_first_run_lanes() -> None:
