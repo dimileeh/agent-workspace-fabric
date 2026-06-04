@@ -503,6 +503,7 @@ async def _check_orphan_resources(
     db_check: CheckResult,
     docker_check: CheckResult,
     min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
+    auto_cleanup_orphans: bool = False,
 ) -> CheckResult:
     if not db_check.ok:
         workspace_view = unavailable_workspace_view()
@@ -527,6 +528,7 @@ async def _check_orphan_resources(
         workspace_view=workspace_view,
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
+        auto_cleanup_orphans=auto_cleanup_orphans,
     )
 
 
@@ -546,6 +548,7 @@ def _orphan_resources_check_result(
     workspace_view: WorkspaceIdView,
     docker_scan: ResourceScan,
     worktree_scan: ResourceScan,
+    auto_cleanup_orphans: bool = False,
 ) -> CheckResult:
     if not db_check.ok:
         workspace_view = unavailable_workspace_view()
@@ -556,6 +559,7 @@ def _orphan_resources_check_result(
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
         workspace_view=workspace_view,
+        auto_cleanup_orphans=auto_cleanup_orphans,
     )
     return CheckResult(**summary.to_dict())
 
@@ -574,6 +578,7 @@ async def _check_orphan_resources_with_concurrent_scans(
     workspace_view_task: asyncio.Task[WorkspaceIdView],
     docker_scan_task: asyncio.Task[ResourceScan],
     worktree_scan_task: asyncio.Task[ResourceScan],
+    auto_cleanup_orphans: bool = False,
 ) -> CheckResult:
     db_check, docker_check = await asyncio.gather(db_check_task, docker_check_task)
 
@@ -596,6 +601,7 @@ async def _check_orphan_resources_with_concurrent_scans(
         workspace_view=workspace_view,
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
+        auto_cleanup_orphans=auto_cleanup_orphans,
     )
 
 
@@ -699,6 +705,7 @@ async def readyz(
             workspace_view_task=workspace_view_task,
             docker_scan_task=docker_scan_task,
             worktree_scan_task=worktree_scan_task,
+            auto_cleanup_orphans=service_settings.auto_cleanup_orphans,
         )
     )
     compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(

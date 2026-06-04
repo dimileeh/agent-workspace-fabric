@@ -730,6 +730,7 @@ async def _default_orphan_resource_summary(
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
         workspace_view=workspace_view,
+        auto_cleanup_orphans=settings.auto_cleanup_orphans,
     )
 
 

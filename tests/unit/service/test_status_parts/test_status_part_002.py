@@ -929,3 +929,178 @@ def test_run_subprocess_wrapper_and_fail_without_detail() -> None:
     assert result.returncode == 0
     assert result.stdout == "wrapped\n"
     assert _fail("NO_DETAIL", "") == {"ok": False, "status": "fail", "reason": "NO_DETAIL"}
+
+
+@pytest.mark.unit
+def test_orphan_check_treats_active_workspace_containers_as_expected(tmp_path: Path) -> None:
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_alive-agent-1",
+            state="running",
+            status="Up 3 minutes",
+            project="awf_ws_alive",
+            service="agent",
+        ),
+        _container(
+            id="def",
+            name="awf_ws_alive-postgres-1",
+            state="running",
+            status="Up 3 minutes (healthy)",
+            project="awf_ws_alive",
+            service="postgres",
+        ),
+    )
+
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset({"ws_alive"}),
+            terminal_ids=frozenset(),
+            available=True,
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    assert status["status"] == "ok"
+    orphans = status["checks"]["orphan_workspaces"]
+    assert orphans["reason"] == "NO_ORPHANS"
+    assert orphans["active_count"] == 1
+    assert orphans["orphan_count"] == 0
+
+
+@pytest.mark.unit
+def test_orphan_check_flags_terminal_workspace_with_running_container(tmp_path: Path) -> None:
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_dead-agent-1",
+            state="running",
+            status="Up 1 day",
+            project="awf_ws_dead",
+            service="agent",
+        )
+    )
+
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset({"ws_dead"}),
+            available=True,
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    assert status["status"] == "fail"
+    orphans = status["checks"]["orphan_workspaces"]
+    assert orphans["ok"] is False
+    assert orphans["status"] == "fail"
+    assert orphans["reason"] == "ORPHANS_PRESENT"
+    assert orphans["orphan_count"] == 1
+    assert orphans["active_count"] == 0
+    examples = orphans["examples"]
+    assert isinstance(examples, list)
+    assert len(examples) == 1
+    example = examples[0]
+    assert example["workspace_id"] == "ws_dead"
+    assert example["compose_project"] == "awf_ws_dead"
+    assert example["classification"] == "cleanup_ready"
+    assert example["reason"] == "WORKSPACE_TERMINAL_LIVE_RUNTIME"
+    action = orphans.get("action")
+    assert isinstance(action, str) and action.strip()
+
+
+@pytest.mark.unit
+def test_orphan_check_flags_workspace_missing_from_db(tmp_path: Path) -> None:
+    payload = _docker_ps_payload(
+        _container(
+            id="ghost",
+            name="awf-ws_ghost-agent-1",
+            state="exited",
+            status="Exited (0) 5 minutes ago",
+            project="awf-ws_ghost",
+            service="agent",
+        )
+    )
+
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset({"ws_alive"}),
+            terminal_ids=frozenset(),
+            available=True,
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    orphans = status["checks"]["orphan_workspaces"]
+    assert orphans["ok"] is False
+    assert orphans["reason"] == "ORPHANS_PRESENT"
+    examples = orphans["examples"]
+    assert examples[0]["workspace_id"] == "ws_ghost"
+    assert examples[0]["compose_project"] == "awf-ws_ghost"
+    assert examples[0]["classification"] == "cleanup_ready"
+    assert examples[0]["reason"] == "WORKSPACE_MISSING"
+
+
+@pytest.mark.unit
+def test_orphan_check_skips_non_awf_compose_projects(tmp_path: Path) -> None:
+    payload = _docker_ps_payload(
+        _container(
+            id="x",
+            name="myapp-db-1",
+            state="running",
+            status="Up",
+            project="myapp",
+            service="db",
+        )
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+        )
+    )
+
+    orphans = status["checks"]["orphan_workspaces"]
+    assert orphans["ok"] is True
+    assert orphans["reason"] == "NO_ORPHANS"
+    assert orphans["orphan_count"] == 0

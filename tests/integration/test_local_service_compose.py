@@ -247,6 +247,16 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["AWF_AGENT_IDLE_TIMEOUT_SECONDS"] == (
             "${AWF_AGENT_IDLE_TIMEOUT_SECONDS:-3600}"
         )
+        assert environment["AWF_AUTO_CLEANUP_ORPHANS"] == "${AWF_AUTO_CLEANUP_ORPHANS:-false}"
+        assert environment["AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS"] == (
+            "${AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS:-3600}"
+        )
+        assert environment["AWF_ORPHAN_RECONCILE_MAX_PER_SCAN"] == (
+            "${AWF_ORPHAN_RECONCILE_MAX_PER_SCAN:-50}"
+        )
+        assert environment["AWF_ORPHAN_RECONCILE_MIN_AGE_HOURS"] == (
+            "${AWF_ORPHAN_RECONCILE_MIN_AGE_HOURS:-168}"
+        )
         assert environment["AWF_WORKSPACE_STEADY_CPU"] == "${AWF_WORKSPACE_STEADY_CPU:-3}"
         assert environment["AWF_WORKSPACE_STEADY_MEMORY_GB"] == (
             "${AWF_WORKSPACE_STEADY_MEMORY_GB:-10}"

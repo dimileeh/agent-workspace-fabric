@@ -246,6 +246,9 @@ _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_releas
 _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
 """Reason code accompanying the ``terminal_runtime_release_failed`` event."""
 
+_ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE = "ORPHAN_DIR_RECONCILE_FAILED"
+"""Reason code logged when an orphan-dir reconcile sweep fails non-transiently."""
+
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import types
 from pathlib import Path
@@ -26,6 +27,9 @@ def _settings(
     database_url: str | None = None,
     github_token: str | None = None,
     planning_max_iterations_default: int = 4,
+    auto_cleanup_orphans: bool = False,
+    orphan_reconcile_max_per_scan: int = 50,
+    orphan_reconcile_min_age_hours: float = 168.0,
 ) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
@@ -44,6 +48,9 @@ def _settings(
         agent_wall_timeout_seconds=111,
         agent_idle_timeout_seconds=22,
         planning_max_iterations_default=planning_max_iterations_default,
+        auto_cleanup_orphans=auto_cleanup_orphans,
+        orphan_reconcile_max_per_scan=orphan_reconcile_max_per_scan,
+        orphan_reconcile_min_age_hours=orphan_reconcile_min_age_hours,
         node_id="node-1",
     )
 
@@ -199,6 +206,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            orphan_dir_reconciler: object = None,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
@@ -206,6 +214,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["worker_executor"] = executor
             created["worker_runtime_cleaner"] = runtime_cleaner
             created["worker_open_pr_resolver"] = open_pr_resolver
+            created["worker_orphan_dir_reconciler"] = orphan_dir_reconciler
             created["worker_config"] = config
 
     engine = _Engine()
@@ -300,6 +309,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].max_concurrent_provisions == 2
     assert created["worker_config"].max_concurrent_executions == 4
     assert created["worker_config"].node_id == "node-1"
+    assert callable(created["worker_orphan_dir_reconciler"])
+    assert created["worker_config"].auto_cleanup_orphans is False
+    assert created["worker_config"].orphan_reconcile_max_per_scan == 50
     # Issue #299: the provisioner receives the ComposeManager as its
     # service-startup diagnostics capturer so companion logs/healthcheck state
     # are captured into the SERVICE_STARTUP_FAILURE event before teardown.
@@ -696,6 +708,79 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("auto_cleanup_orphans", [False, True])
+def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    auto_cleanup_orphans: bool,
+) -> None:
+    """The reconciler closure runs report-only unless ``auto_cleanup_orphans``."""
+    created: dict[str, Any] = {}
+
+    class _Engine:
+        pass
+
+    class _AnyInit:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class _ControlWorker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["orphan_dir_reconciler"] = kwargs["orphan_dir_reconciler"]
+            created["worker_config"] = kwargs["config"]
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: _Engine())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: object())
+    for name in (
+        "AsyncioSubprocessRunner",
+        "LogStore",
+        "ValidationRunner",
+        "PullRequestCreator",
+        "BranchOpenPullRequestResolver",
+        "GitManager",
+        "ComposeManager",
+        "ServiceAuthMountResolver",
+        "LocalSecretLeaseMountResolver",
+        "ComposeStackLauncher",
+        "Provisioner",
+        "WorkspaceExecutor",
+        "CcusageCollector",
+    ):
+        monkeypatch.setattr(worker_mod, name, _AnyInit)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    monkeypatch.setattr(
+        worker_mod, "_merge_coordinator_for_database_url", _in_process_merge_coordinator
+    )
+    monkeypatch.setattr(worker_mod, "_companion_image_builder_for", lambda *_a, **_k: None)
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
+    monkeypatch.setattr(worker_mod, "build_default_compose_teardown", lambda _manager: object())
+
+    async def _fake_reconcile(*args: object, **kwargs: object) -> object:
+        created["reconcile_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(worker_mod, "reconcile_orphaned_workspace_dirs", _fake_reconcile)
+
+    settings = _settings(
+        tmp_path,
+        auto_cleanup_orphans=auto_cleanup_orphans,
+        orphan_reconcile_max_per_scan=9,
+        orphan_reconcile_min_age_hours=4.0,
+    )
+    worker_mod.build_worker_runtime(settings)
+
+    assert created["worker_config"].auto_cleanup_orphans is auto_cleanup_orphans
+    assert created["worker_config"].orphan_reconcile_max_per_scan == 9
+    reconciler = created["orphan_dir_reconciler"]
+    assert callable(reconciler)
+    asyncio.run(reconciler())
+    assert created["reconcile_kwargs"]["execute"] is auto_cleanup_orphans
+    assert created["reconcile_kwargs"]["limit"] == 9
+    assert created["reconcile_kwargs"]["min_age_hours"] == 4.0
+
+
+@pytest.mark.unit
 def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_hostname(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -733,6 +818,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            orphan_dir_reconciler: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -819,6 +905,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            orphan_dir_reconciler: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config

@@ -18,12 +18,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import (
     UTC,
     datetime,
     timedelta,
 )
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -60,6 +61,9 @@ from awf.db.resilience import (
 from awf.runtime.inspection import RuntimeInspector
 from awf.service.scheduler import SchedulerOrderCursor
 
+if TYPE_CHECKING:
+    from awf.service.gc_reconcile import OrphanDirReconcileResult
+
 
 class ControlWorker(WorkerDelegatesMixin):
     """Reads pending work from the DB and dispatches it to runtime handlers."""
@@ -73,6 +77,7 @@ class ControlWorker(WorkerDelegatesMixin):
         runtime_inspector: RuntimeInspectorProtocol | None = None,
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
         open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
+        orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
@@ -81,6 +86,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._runtime_cleaner = runtime_cleaner
         self._open_pr_resolver = open_pr_resolver
+        self._orphan_dir_reconciler = orphan_dir_reconciler
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
@@ -94,6 +100,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._next_stale_active_execution_scan_at = 0.0
         self._next_secret_lease_expiration_scan_at = 0.0
         self._next_terminal_runtime_release_scan_at = 0.0
+        self._next_orphan_reconcile_scan_at = 0.0
         self._requested_capacity_resume_after: SchedulerOrderCursor | None = None
         self._requested_capacity_resume_signature: _AllocatedReservationSignature | None = None
         self._requested_capacity_resume_queue_signature: _RequestedCapacityQueueSignature | None = (
@@ -144,6 +151,7 @@ class ControlWorker(WorkerDelegatesMixin):
 
         await self._maybe_expire_due_secret_leases()
         await self._maybe_release_terminal_runtime()
+        await self._maybe_reconcile_orphan_dirs()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery

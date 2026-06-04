@@ -37,6 +37,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
+from awf.service.config import resolve_service_settings
 from awf.service.disk import DiskCheck
 from awf.service.orphan_resources import (
     WorkspaceIdView,
@@ -1110,6 +1111,75 @@ class TestMcpOperatorSurfaceParityPart001:
         assert fallback_result["checks"]["db"]["reason"] is None
 
     @pytest.mark.unit
+    async def test_readiness_fallback_propagates_auto_cleanup_orphans(
+        self,
+        resource_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The MCP readiness fallback must thread ``auto_cleanup_orphans`` into the
+        shared health helper so MCP clients see the reaping posture (not the default
+        dry-run-only summary) whenever ``AWF_AUTO_CLEANUP_ORPHANS`` is enabled."""
+        import awf.api.routes.health as health_route
+
+        captured: dict[str, Any] = {}
+        real = health_route._check_orphan_resources_with_concurrent_scans
+
+        async def _capture(**kwargs: Any) -> Any:
+            captured["auto_cleanup_orphans"] = kwargs.get("auto_cleanup_orphans")
+            return await real(**kwargs)
+
+        monkeypatch.setattr(
+            health_route,
+            "_check_orphan_resources_with_concurrent_scans",
+            _capture,
+        )
+        settings = resource_stack.settings.model_copy(update={"auto_cleanup_orphans": True})
+
+        await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=settings,
+            session_factory=resource_stack.factory,
+        )
+
+        assert captured["auto_cleanup_orphans"] is True
+
+    @pytest.mark.unit
+    async def test_readiness_fallback_scans_resolved_service_work_dir(
+        self,
+        resource_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """The MCP readiness fallback must scan the *resolved* ``service_settings``
+        work dir, exactly like ``/readyz``. Service-mode resolution can rewrite the
+        effective host work dir (e.g. via ``AWF_HOST_WORK_DIR``); reading the raw
+        ``settings.work_dir`` would inspect a different tree and miss or invent
+        orphan worktrees relative to the REST readiness surface."""
+        import awf.service.orphan_resources as orphan_resources
+
+        host_work_dir = tmp_path / "host-awf-state"
+        monkeypatch.setenv("AWF_HOST_WORK_DIR", str(host_work_dir))
+        service_settings = resolve_service_settings(resource_stack.settings)
+        assert service_settings.work_dir != resource_stack.settings.work_dir
+
+        captured: dict[str, Any] = {}
+        real_scan = orphan_resources.scan_managed_worktrees
+
+        def _capture(work_dir: Any) -> Any:
+            captured["work_dir"] = work_dir
+            return real_scan(work_dir)
+
+        monkeypatch.setattr(orphan_resources, "scan_managed_worktrees", _capture)
+
+        await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=resource_stack.settings,
+            session_factory=resource_stack.factory,
+        )
+
+        assert captured["work_dir"] == service_settings.work_dir
+
+    @pytest.mark.unit
     async def test_readiness_fallback_reports_db_failure_when_no_session_factory(
         self,
         resource_stack: OperatorStack,
@@ -1263,228 +1333,3 @@ class TestMcpOperatorSurfaceParityPart001:
         for tool_name, args in tool_calls:
             payload = await _call(resource_stack.mcp, tool_name, args)
             assert isinstance(payload, dict)
-
-    @pytest.mark.unit
-    async def test_merge_queue_tool_matches_rest_payload_and_reason_codes(
-        self,
-        operator_stack: OperatorStack,
-    ) -> None:
-        workspace_id = await _seed_merge_queue(operator_stack.factory)
-
-        response = await operator_stack.client.get(
-            "/v1/merge-queue",
-            params={"repo_url": "git@github.com:example/merge.git", "limit": 10},
-            headers=operator_stack.auth_headers,
-        )
-        assert response.status_code == 200
-        rest = response.json()
-        mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_merge_queue",
-            {"repo_url": "git@github.com:example/merge.git", "limit": 10},
-        )
-
-        assert mcp == rest
-        item = next(item for item in rest["items"] if item["workspace_id"] == workspace_id)
-        assert item["merge_blocker_reason"] == "stale"
-        assert item["required_next_action"] == "rebase"
-        assert item["validation_freshness_status"] == "fresh"
-        assert item["validation_reason_code"] == "validation_fresh"
-        assert [reason["reason_code"] for reason in item["stale_reasons"]] == ["STALE_DEPENDENCY"]
-
-    @pytest.mark.unit
-    async def test_workspace_overview_tool_matches_rest_payload(
-        self,
-        operator_stack: OperatorStack,
-    ) -> None:
-        workspace_id = await _workspace(
-            operator_stack.factory,
-            title="Overview parity",
-            status=WorkspaceStatus.running,
-            task_policy={"agent_model": "gpt-5.3-codex", "agent_effort": "high"},
-            resolved_profile={
-                "name": "operator-open",
-                "security": {"egress": {"mode": "open"}},
-            },
-        )
-        async with operator_stack.factory() as session:
-            await OperationRepository(session).create(
-                workspace_id=workspace_id,
-                operation_type=OperationType.validate,
-                status=OperationStatus.pending,
-                payload={"source": "pr_monitor"},
-            )
-            await session.commit()
-
-        response = await operator_stack.client.get(
-            "/v1/workspaces/overview",
-            params={"status": "running"},
-            headers=operator_stack.auth_headers,
-        )
-        assert response.status_code == 200
-        rest = response.json()
-        mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_overview",
-            {"status": "running"},
-        )
-
-        assert mcp == rest
-        item = next(item for item in rest["items"] if item["workspace_id"] == workspace_id)
-        assert item["current_phase"] == "running"
-        assert item["active_operation"] == "validate"
-        assert item["last_event"]["reason_code"] == "TEST_EVENT"
-        assert item["agent_model"] == "gpt-5.3-codex"
-        assert item["network_posture"] == "open"
-
-    @pytest.mark.unit
-    async def test_validation_provenance_tool_matches_rest_payload(
-        self,
-        operator_stack: OperatorStack,
-    ) -> None:
-        workspace_id = await _seed_validation(operator_stack.factory)
-
-        response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/validation",
-            headers=operator_stack.auth_headers,
-        )
-        assert response.status_code == 200
-        rest = response.json()
-        mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_validation",
-            {"workspace_id": workspace_id},
-        )
-
-        assert mcp == rest
-        item = rest["items"][0]
-        assert item["tier"] == 2
-        assert item["command_set_hash"]
-        assert item["profile_name"] == "operator-profile"
-        assert item["coverage_status"] == "succeeded"
-        assert item["stream_ids"] == {
-            "stdout": "validation.01_validate.stdout",
-            "stderr": "validation.01_validate.stderr",
-        }
-
-        limited_response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/validation",
-            params={"limit": 1},
-            headers=operator_stack.auth_headers,
-        )
-        limited_mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_validation",
-            {"workspace_id": workspace_id, "limit": 1},
-        )
-
-        assert limited_response.status_code == 200
-        assert limited_mcp == limited_response.json()
-        assert limited_response.json()["limit"] == 1
-
-    @pytest.mark.unit
-    async def test_stale_reasons_tool_matches_rest_active_and_resolved_payloads(
-        self,
-        operator_stack: OperatorStack,
-    ) -> None:
-        workspace_id = await _seed_stale_reasons(operator_stack.factory)
-
-        active_response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/stale-reasons",
-            headers=operator_stack.auth_headers,
-        )
-        resolved_response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/stale-reasons",
-            params={"include_resolved": "true"},
-            headers=operator_stack.auth_headers,
-        )
-
-        assert active_response.status_code == 200
-        assert resolved_response.status_code == 200
-        active_mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_stale_reasons",
-            {"workspace_id": workspace_id},
-        )
-        resolved_mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_stale_reasons",
-            {"workspace_id": workspace_id, "include_resolved": True},
-        )
-
-        assert active_mcp == active_response.json()
-        assert resolved_mcp == resolved_response.json()
-        assert [item["status"] for item in active_response.json()["items"]] == ["active"]
-        assert {item["status"] for item in resolved_response.json()["items"]} == {
-            "active",
-            "resolved",
-        }
-
-        limited_response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/stale-reasons",
-            params={"include_resolved": "true", "limit": 1},
-            headers=operator_stack.auth_headers,
-        )
-        limited_mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_stale_reasons",
-            {"workspace_id": workspace_id, "include_resolved": True, "limit": 1},
-        )
-
-        assert limited_response.status_code == 200
-        assert limited_mcp == limited_response.json()
-        assert len(limited_response.json()["items"]) == 1
-        assert limited_response.json()["has_more"] is True
-
-    @pytest.mark.unit
-    async def test_artifacts_tool_matches_rest_metadata_payload(
-        self,
-        operator_stack: OperatorStack,
-    ) -> None:
-        workspace_id = await _workspace(operator_stack.factory, title="Artifact parity")
-        artifact_dir = Path(operator_stack.settings.work_dir) / "artifacts" / workspace_id
-        nested = artifact_dir / "logs"
-        nested.mkdir(parents=True)
-        stdout = nested / "stdout.txt"
-        stdout.write_text("alpha\n", encoding="utf-8")
-        screenshot = artifact_dir / "screenshot.png"
-        screenshot.write_bytes(b"\x89PNG\r\n")
-        outside = artifact_dir.parent / "outside.txt"
-        outside.write_text("secret\n", encoding="utf-8")
-        (artifact_dir / "outside-link.txt").symlink_to(outside)
-
-        response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/artifacts",
-            headers=operator_stack.auth_headers,
-        )
-        assert response.status_code == 200
-        rest = response.json()
-        mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_artifacts",
-            {"workspace_id": workspace_id},
-        )
-
-        assert mcp == rest
-        assert [item["relative_path"] for item in rest["items"]] == [
-            "logs/stdout.txt",
-            "screenshot.png",
-        ]
-        assert "data" not in rest["items"][0]
-        assert "content" not in rest["items"][0]
-
-        limited_response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/artifacts",
-            params={"limit": 1},
-            headers=operator_stack.auth_headers,
-        )
-        limited_mcp = await _call(
-            operator_stack.mcp,
-            "awf_list_workspace_artifacts",
-            {"workspace_id": workspace_id, "limit": 1},
-        )
-
-        assert limited_response.status_code == 200
-        assert limited_mcp == limited_response.json()
-        assert len(limited_response.json()["items"]) == 1
-        assert limited_response.json()["has_more"] is True

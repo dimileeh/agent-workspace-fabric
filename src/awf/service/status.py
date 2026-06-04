@@ -29,6 +29,9 @@ from awf.service.config import (
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphan_resources import (
+    ORPHAN_REAPING_ACTION,
+)
+from awf.service.orphan_resources import (
     scan_docker_resources as scan_runtime_docker_resources,
 )
 from awf.service.orphans import (
@@ -209,7 +212,16 @@ async def collect_service_status(
         run_subprocess=resolved_run,
     )
     orphan_workspaces_check = orphan_summary.to_check_payload()
-    orphan_resources_check = _orphan_resources_check_payload(orphan_workspaces_check)
+    orphan_resources_check = _orphan_resources_check_payload(
+        orphan_workspaces_check,
+        auto_cleanup_orphans=settings.auto_cleanup_orphans,
+    )
+    if settings.auto_cleanup_orphans and orphan_workspaces_check.get("orphan_count"):
+        # The legacy orphan_workspaces payload otherwise keeps its manual-cleanup
+        # action, which contradicts the reaping-aware orphan_resources action on the
+        # same response. Align it so a single status never tells operators both
+        # "the worker will reap this automatically" and "run manual cleanup".
+        orphan_workspaces_check["action"] = ORPHAN_REAPING_ACTION
     stranded_workspaces_check = _stranded_workspaces_check_payload(
         workspace_view,
         runtime_docker_scan,
@@ -437,12 +449,22 @@ def _check_agent_runtime_image(
 
 def _orphan_resources_check_payload(
     orphan_workspaces_check: Mapping[str, object],
+    *,
+    auto_cleanup_orphans: bool = False,
 ) -> CheckPayload:
     payload: CheckPayload = dict(orphan_workspaces_check)
     payload["reason"] = _orphan_resources_reason(payload.get("reason"))
     if "resource_counts" in payload:
         payload.setdefault("counts_by_kind", payload["resource_counts"])
-    payload["cleanup_readiness"] = _orphan_resources_cleanup_readiness(payload)
+    cleanup_readiness = _orphan_resources_cleanup_readiness(
+        payload,
+        auto_cleanup_orphans=auto_cleanup_orphans,
+    )
+    payload["cleanup_readiness"] = cleanup_readiness
+    if auto_cleanup_orphans and payload.get("orphan_count"):
+        # Keep the top-level action consistent with the reaping-aware readiness
+        # action so the two never disagree on the same check payload.
+        payload["action"] = cleanup_readiness["action"]
     return payload
 
 
@@ -556,18 +578,32 @@ def _orphan_resources_reason(reason: object) -> str:
     return str(reason or "UNKNOWN")
 
 
-def _orphan_resources_cleanup_readiness(payload: Mapping[str, object]) -> dict[str, object]:
+def _orphan_resources_cleanup_readiness(
+    payload: Mapping[str, object],
+    *,
+    auto_cleanup_orphans: bool = False,
+) -> dict[str, object]:
     reason = _orphan_resources_reason(payload.get("reason"))
     action = payload.get("action")
+    # Only the orphan-reaping path actually deletes resources; readiness and the
+    # idle/unavailable branches stay report-only so operators are not told the
+    # worker will act when no orphans are present or detection degraded.
     if bool(payload.get("orphan_count")):
+        if auto_cleanup_orphans:
+            # Do not forward the legacy "run manual cleanup" action: with reaping
+            # enabled the worker tears the orphans down itself, so a manual-cleanup
+            # action would contradict ``dry_run_only`` being False.
+            orphan_action: str = ORPHAN_REAPING_ACTION
+        elif isinstance(action, str) and action:
+            orphan_action = action
+        else:
+            orphan_action = "Review the listed AWF resources before running cleanup."
         return {
             "ready": False,
             "status": "blocked",
             "reason": reason,
-            "action": action
-            if isinstance(action, str) and action
-            else "Review the listed AWF resources before running cleanup.",
-            "dry_run_only": True,
+            "action": orphan_action,
+            "dry_run_only": not auto_cleanup_orphans,
         }
     if payload.get("status") == "ok":
         return {

@@ -27,6 +27,13 @@ RuntimeEnv = Literal["local", "ci", "staging", "prod"]
 DEFAULT_LOCAL_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 DEFAULT_MIN_FREE_DISK_BYTES = 10 * 1024 * 1024 * 1024
 DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS = 168
+# Mirrors ``awf.service.gc.DEFAULT_MIN_AGE_HOURS`` (kept local so the foundation
+# config layer does not import the service layer).
+DEFAULT_ORPHAN_RECONCILE_MIN_AGE_HOURS = 168.0
+DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS = 3600.0
+# Mirrors ``awf.service.gc_reconcile.DEFAULT_ORPHAN_RECONCILE_LIMIT`` (kept local
+# so the foundation config layer does not import the service layer).
+DEFAULT_ORPHAN_RECONCILE_LIMIT = 50
 DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
 DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
 _MIN_PRODUCTION_API_TOKEN_LENGTH = 24
@@ -397,6 +404,36 @@ class Settings(BaseSettings):
         description=(
             "Host home directory used by local service mode to discover and copy "
             "agent/GitHub credentials for workspace container auth mounts."
+        ),
+    )
+
+    # Orphan filesystem reconcile (WS-B2). Default OFF: the sweep runs in
+    # report-only mode (visibility into the leak) until an operator opts into
+    # actual deletion via ``auto_cleanup_orphans``.
+    auto_cleanup_orphans: bool = Field(
+        default=False,
+        description=(
+            "Kill-switch gating ACTUAL deletion for both the worker orphan-dir "
+            "reconcile sweep and the readiness-driven orphan reaper. Off (default) "
+            "leaves both report-only."
+        ),
+    )
+    orphan_reconcile_scan_interval_seconds: float = Field(
+        default=DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
+        gt=0,
+        description="Interval between worker orphan-directory reconcile sweeps.",
+    )
+    orphan_reconcile_max_per_scan: int = Field(
+        default=DEFAULT_ORPHAN_RECONCILE_LIMIT,
+        gt=0,
+        description="Maximum orphan directories reaped in one reconcile sweep (bounded batch).",
+    )
+    orphan_reconcile_min_age_hours: float = Field(
+        default=DEFAULT_ORPHAN_RECONCILE_MIN_AGE_HOURS,
+        ge=0,
+        description=(
+            "Minimum directory age before a row-less per-workspace dir is reapable; "
+            "the grace window that protects an in-flight, still-provisioning workspace."
         ),
     )
 

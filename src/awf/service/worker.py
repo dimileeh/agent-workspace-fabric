@@ -43,6 +43,11 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
+from awf.service.gc_reconcile import (
+    OrphanDirReconcileResult,
+    build_default_compose_teardown,
+    reconcile_orphaned_workspace_dirs,
+)
 from awf.service.node_identity import effective_service_node_id
 from awf.service.staleness import TargetBranchState
 from awf.service.target_branch_monitor import (
@@ -229,16 +234,37 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         log_store=log_store,
         usage_sampler=usage_collector,
     )
+    orphan_dir_teardown = build_default_compose_teardown(compose)
+
+    async def _reconcile_orphan_dirs() -> OrphanDirReconcileResult:
+        # Flag off => report-only (execute=False) so operators still see the
+        # leak; flag on => actually reap (compose teardown + filesystem removal).
+        return await reconcile_orphaned_workspace_dirs(
+            session_factory,
+            work_dir=work_dir,
+            compose_teardown=orphan_dir_teardown,
+            min_age_hours=settings.orphan_reconcile_min_age_hours,
+            limit=settings.orphan_reconcile_max_per_scan,
+            execute=settings.auto_cleanup_orphans,
+        )
+
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=provisioner,
         executor=executor,
         runtime_cleaner=runtime_cleaner,
         open_pr_resolver=open_pr_resolver,
+        orphan_dir_reconciler=_reconcile_orphan_dirs,
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,
             max_concurrent_executions=settings.worker_max_concurrent_executions,
+            orphan_reconcile_scan_interval_seconds=(
+                settings.orphan_reconcile_scan_interval_seconds
+            ),
+            orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
+            orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,
+            auto_cleanup_orphans=settings.auto_cleanup_orphans,
             node_id=node_id,
             local_capacity_cpu_cores=settings.local_capacity_cpu_cores,
             local_capacity_memory_gb=settings.local_capacity_memory_gb,

@@ -6,25 +6,55 @@ import asyncio
 import json
 import os
 import subprocess
-from collections.abc import Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.companions import parent_workspace_id_from_companion_worktree_id
+from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
+from awf.service.gc_classify import (
+    PATH_ALREADY_REMOVED,
+    PATH_DELETED,
+)
+from awf.service.gc_reconcile import ComposeTeardownOutcome, build_and_delete_gc_path
+
+if TYPE_CHECKING:
+    from awf.node.compose_manager import ComposeManager
+
+_log = get_logger(__name__)
 
 CHECK_TIMEOUT_SECONDS = 5.0
 ORPHAN_EXAMPLE_LIMIT = 5
 AWF_PROJECT_PREFIXES = ("awf_", "awf-")
+
+# Reason codes for the flag-gated readiness-driven reaper.
+ORPHAN_REAP_DISABLED = "ORPHAN_REAP_DISABLED"
+ORPHAN_REAP_SKIPPED_UNKNOWN = "ORPHAN_REAP_SKIPPED_UNKNOWN"
+ORPHAN_REAP_SKIPPED_YOUNG = "ORPHAN_REAP_SKIPPED_YOUNG"
+ORPHAN_REAP_OK = "ORPHAN_REAP_OK"
+ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
+
+# (project_name, compose_file, workspace_id) -> teardown outcome.
+#
+# Distinct from :data:`gc_reconcile.OrphanComposeTeardown`, which is
+# ``Callable[[OrphanDirTarget], ...]``. The two are deliberately *not*
+# interchangeable: gc_reconcile's reaper works from scanned ``OrphanDirTarget``
+# records, whereas this resource-level reaper already holds the explicit
+# ``(project_name, compose_file, workspace_id)`` triple. The differing name
+# makes the incompatibility explicit rather than letting a same-named alias
+# imply the closures are swappable.
+OrphanResourceComposeTeardown = Callable[[str, Path, str, bool], Awaitable[ComposeTeardownOutcome]]
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "terminal", "missing", "unknown"]
@@ -482,12 +512,24 @@ def parse_docker_resource_rows(kind: ResourceKind, stdout: str) -> tuple[Detecte
     return tuple(resources)
 
 
+# Shared action text for the reaping-enabled state. Both the health-check API
+# (this summary) and the service-status CLI (``status.ORPHAN_REAPING_ACTION``,
+# which imports this constant) must advertise identical wording for the same
+# ``auto_cleanup_orphans`` flag state, so operators never see two messages.
+ORPHAN_REAPING_ACTION = (
+    "Reaping is enabled (auto_cleanup_orphans): the worker will tear down the "
+    "listed orphaned AWF stacks and remove their worktrees automatically; no "
+    "manual cleanup is required."
+)
+
+
 def build_orphan_resource_summary(
     *,
     docker_scan: ResourceScan,
     worktree_scan: ResourceScan,
     workspace_view: WorkspaceIdView,
     example_limit: int = ORPHAN_EXAMPLE_LIMIT,
+    auto_cleanup_orphans: bool = False,
 ) -> OrphanResourceSummary:
     resources = (*docker_scan.resources, *worktree_scan.resources)
     records = tuple(_classify(resource, workspace_view=workspace_view) for resource in resources)
@@ -510,37 +552,17 @@ def build_orphan_resource_summary(
         "worktrees": worktree_scan.to_dict(),
     }
 
-    if orphan_records:
-        examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
-        readiness = CleanupReadiness(
-            ready=False,
-            status="blocked",
-            reason="ORPHAN_RESOURCES_PRESENT",
-            action=(
-                "Review the listed AWF resources and run a non-destructive cleanup plan; "
-                "this check does not remove containers, networks, volumes, or worktrees."
-            ),
-        )
-        return OrphanResourceSummary(
-            ok=False,
-            status="fail",
-            reason="ORPHAN_RESOURCES_PRESENT",
-            detail="Orphan AWF resources remain on this node.",
-            resource_count=len(records),
-            expected_count=len(expected_records),
-            orphan_count=len(orphan_records),
-            unknown_count=len(unknown_records),
-            counts_by_kind=counts_by_kind,
-            orphan_counts_by_kind=orphan_counts_by_kind,
-            expected_counts_by_kind=expected_counts_by_kind,
-            unknown_counts_by_kind=unknown_counts_by_kind,
-            orphan_classification_counts=orphan_classification_counts,
-            cleanup_readiness=readiness,
-            scanners=scanners,
-            examples=examples,
-            records=records,
-        )
-
+    # Unreliable-inventory branches run *before* the orphan-present branch.
+    # A scanner that failed mid-scan (``ok=False``) can still surface partial
+    # resources -- e.g. ``docker ps`` lists containers but the network/volume
+    # list errored -- and those partial records can classify as orphans. If the
+    # orphan-present branch ran first it would advertise reaping
+    # (``dry_run_only=False``, "the worker will tear down the listed stacks")
+    # for an incomplete inventory, yet ``reap_classified_orphans`` explicitly
+    # skips when any scanner is unavailable. Reporting the degraded scan as
+    # unknown/report-only here keeps the summary honest with the reaper so
+    # health/metrics/MCP clients are never told deletion is enabled for an
+    # inventory the worker will not act on.
     if not workspace_view.available:
         examples = tuple(record.to_dict() for record in unknown_records[:example_limit])
         readiness = CleanupReadiness(
@@ -596,6 +618,43 @@ def build_orphan_resource_summary(
             records=records,
         )
 
+    if orphan_records:
+        examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
+        action = (
+            ORPHAN_REAPING_ACTION
+            if auto_cleanup_orphans
+            else (
+                "Review the listed AWF resources and run a non-destructive cleanup plan; "
+                "this check does not remove containers, networks, volumes, or worktrees."
+            )
+        )
+        readiness = CleanupReadiness(
+            ready=False,
+            status="blocked",
+            reason="ORPHAN_RESOURCES_PRESENT",
+            action=action,
+            dry_run_only=not auto_cleanup_orphans,
+        )
+        return OrphanResourceSummary(
+            ok=False,
+            status="fail",
+            reason="ORPHAN_RESOURCES_PRESENT",
+            detail="Orphan AWF resources remain on this node.",
+            resource_count=len(records),
+            expected_count=len(expected_records),
+            orphan_count=len(orphan_records),
+            unknown_count=len(unknown_records),
+            counts_by_kind=counts_by_kind,
+            orphan_counts_by_kind=orphan_counts_by_kind,
+            expected_counts_by_kind=expected_counts_by_kind,
+            unknown_counts_by_kind=unknown_counts_by_kind,
+            orphan_classification_counts=orphan_classification_counts,
+            cleanup_readiness=readiness,
+            scanners=scanners,
+            examples=examples,
+            records=records,
+        )
+
     readiness = CleanupReadiness(
         ready=True,
         status="ready",
@@ -618,6 +677,279 @@ def build_orphan_resource_summary(
         cleanup_readiness=readiness,
         scanners=scanners,
         records=records,
+    )
+
+
+@dataclass(frozen=True)
+class OrphanReapOutcome:
+    """Outcome of reaping one classified orphan (a compose stack or a worktree)."""
+
+    kind: Literal["compose", "worktree"]
+    workspace_id: str
+    status: Literal["reaped", "already_removed", "failed"]
+    reason_code: str
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": self.kind,
+            "workspace_id": self.workspace_id,
+            "status": self.status,
+            "reason_code": self.reason_code,
+        }
+        if self.error is not None:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(frozen=True)
+class OrphanReapResult:
+    """Result of a flag-gated readiness-driven reap pass over a summary."""
+
+    enabled: bool
+    status: Literal["disabled", "skipped", "ok", "partial"]
+    reason_code: str
+    reaped: tuple[OrphanReapOutcome, ...] = ()
+    errors: tuple[OrphanReapOutcome, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "reaped": [outcome.to_dict() for outcome in self.reaped],
+            "errors": [outcome.to_dict() for outcome in self.errors],
+        }
+
+
+def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanResourceComposeTeardown:
+    """Compose-teardown closure over a ``ComposeManager`` (WS-B1 path).
+
+    The caller decides ``remove_volumes`` per workspace: a terminal workspace
+    that is still within its retention window has its live containers/networks
+    classified ``terminal`` (reapable leaked runtime) while its volumes stay
+    ``expected`` salvage evidence, so tearing the stack down must not pass
+    ``--volumes`` and delete those protected volumes. This mirrors the worker
+    terminal-runtime release path (:mod:`awf.control.worker.cleanup`), which
+    tears down retained-terminal runtime with ``remove_volumes=False``.
+    """
+
+    async def _teardown(
+        project_name: str, compose_file: Path, workspace_id: str, remove_volumes: bool
+    ) -> ComposeTeardownOutcome:
+        return await manager.teardown_project(
+            project_name=project_name,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            remove_volumes=remove_volumes,
+        )
+
+    return _teardown
+
+
+def _missing_record_is_aged(
+    record: ClassifiedResource,
+    *,
+    resolved_work_dir: Path,
+    grace_seconds: float,
+    now: float,
+) -> bool:
+    """Confirm a row-less (``missing``) resource is older than the grace window.
+
+    Mirrors :func:`gc_reconcile.scan_orphan_workspace_dirs`'s minimum-age grace:
+    a just-created worktree (or compose stack) can be visible on the filesystem
+    before its workspace row commits, and during that window :func:`_classify`
+    returns ``WORKSPACE_MISSING``. Reaping it would delete an in-flight provision
+    rather than a confirmed orphan, so a ``missing`` record is only reaped once
+    its on-disk provision artifact is older than ``grace_seconds``. ``terminal``
+    records skip this check entirely -- their workspace row confirms they are
+    done, so they are not gated here.
+    """
+    if grace_seconds <= 0.0:
+        return True
+    if record.kind == "worktree":
+        path_text = record.resource.path
+        if not path_text:  # pragma: no cover - worktree records always carry a path.
+            return False
+        anchor = Path(path_text)
+    else:
+        # Docker resources (container/network/volume) anchor on the per-workspace
+        # compose dir -- the same root gc_reconcile protects. If no compose dir
+        # exists, there is no in-flight provision to protect (row and dir both
+        # gone, only docker lingers), so the lingering stack is a genuine orphan.
+        anchor = resolved_work_dir / "compose" / record.workspace_id
+        if not anchor.exists():
+            return True
+    try:
+        mtime = anchor.stat().st_mtime
+    except OSError:  # pragma: no cover - reaper runs as root over its own dirs.
+        return False
+    return (now - mtime) >= grace_seconds
+
+
+async def reap_classified_orphans(
+    summary: OrphanResourceSummary,
+    *,
+    work_dir: Path | str,
+    compose_teardown: OrphanResourceComposeTeardown,
+    enabled: bool,
+    now: float | None = None,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+) -> OrphanReapResult:
+    """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
+
+    Off by default: with ``enabled=False`` this is a pure no-op (report only),
+    preserving the historical ``dry_run_only`` behavior. With ``enabled=True``
+    it tears down each orphaned compose stack (containers/networks/volumes) via
+    WS-B1's :meth:`ComposeManager.teardown_project` and removes orphaned worktree
+    directories via WS-B1's :func:`build_and_delete_gc_path` (which keeps the
+    recursive byte-estimate scan off the event loop). Records classified
+    ``expected`` / ``unknown`` are left untouched, and a permission refusal
+    surfaces loudly (``PATH_DELETE_PERMISSION_DENIED``) as a ``partial`` run --
+    never a silent success. When classification is unreliable (DB/scanner
+    unavailable) it skips entirely rather than reaping on guesswork.
+
+    ``missing`` (row-less) records carry an extra minimum-age guard
+    (``min_age_hours``, mirroring :mod:`gc_reconcile`): a row-less resource whose
+    on-disk artifact is younger than the grace window is left alone, since a
+    just-created worktree can be visible before its workspace row commits and
+    would otherwise be reaped mid-provision. ``terminal`` records are not gated.
+    """
+    if not enabled:
+        return OrphanReapResult(
+            enabled=False,
+            status="disabled",
+            reason_code=ORPHAN_REAP_DISABLED,
+        )
+    # Classification is only reliable when every scanner produced a complete
+    # inventory. A scanner that failed mid-scan (``ok=False``) can still surface
+    # partial resources -- e.g. ``docker ps`` lists containers but the network or
+    # volume list errored -- and those partial records can classify as orphans,
+    # sending ``build_orphan_resource_summary`` down the orphan-present
+    # (``blocked``) branch before it ever reaches the scanner-unavailable
+    # (``unknown``) branch. Reaping on that incomplete inventory would tear down
+    # stacks on guesswork, so check scanner availability alongside the readiness
+    # status rather than relying on ``status == "unknown"`` alone.
+    scanner_unavailable = any(scanner.get("ok") is False for scanner in summary.scanners.values())
+    if summary.cleanup_readiness.status == "unknown" or scanner_unavailable:
+        _log.warning(
+            "orphan_resources.reap_skipped_unknown",
+            reason_code=ORPHAN_REAP_SKIPPED_UNKNOWN,
+            summary_reason=summary.reason,
+            scanner_unavailable=scanner_unavailable,
+        )
+        return OrphanReapResult(
+            enabled=True,
+            status="skipped",
+            reason_code=ORPHAN_REAP_SKIPPED_UNKNOWN,
+        )
+
+    resolved_work_dir = Path(work_dir).expanduser().resolve()
+    resolved_now = time.time() if now is None else now
+    grace_seconds = max(0.0, min_age_hours) * 3600.0
+    orphan_records: list[ClassifiedResource] = []
+    for record in summary.records:
+        if record.classification not in {"terminal", "missing"}:
+            continue
+        if record.classification == "missing" and not _missing_record_is_aged(
+            record,
+            resolved_work_dir=resolved_work_dir,
+            grace_seconds=grace_seconds,
+            now=resolved_now,
+        ):
+            _log.info(
+                "orphan_resources.reap_skipped_young",
+                reason_code=ORPHAN_REAP_SKIPPED_YOUNG,
+                **record.to_dict(),
+            )
+            continue
+        orphan_records.append(record)
+    # One teardown per (project, workspace) so multiple docker resources from the
+    # same stack do not trigger redundant downs.
+    compose_projects: dict[tuple[str, str], None] = {}
+    worktree_records: list[ClassifiedResource] = []
+    # A workspace's volumes are only torn down (``docker compose down --volumes``)
+    # when a volume record for it is itself cleanup-ready. A terminal workspace
+    # still inside its retention window keeps volumes classified ``expected``
+    # (salvage evidence) while only its live containers/networks are reaped, so
+    # removing volumes here would delete the very evidence _classify protected --
+    # matching the worker terminal-runtime release path's ``remove_volumes=False``.
+    volume_ready_workspace_ids: set[str] = set()
+    for record in orphan_records:
+        if record.kind == "worktree":
+            worktree_records.append(record)
+            continue
+        if record.kind == "volume":
+            volume_ready_workspace_ids.add(record.workspace_id)
+        project = record.compose_project or f"awf_{record.workspace_id}"
+        compose_projects[(project, record.workspace_id)] = None
+
+    reaped: list[OrphanReapOutcome] = []
+    errors: list[OrphanReapOutcome] = []
+
+    for project_name, workspace_id in sorted(compose_projects):
+        compose_file = resolved_work_dir / "compose" / workspace_id / "compose.yml"
+        remove_volumes = workspace_id in volume_ready_workspace_ids
+        teardown = await compose_teardown(project_name, compose_file, workspace_id, remove_volumes)
+        outcome = OrphanReapOutcome(
+            kind="compose",
+            workspace_id=workspace_id,
+            status="reaped" if teardown.ok else "failed",
+            reason_code=teardown.reason_code,
+            error=teardown.error,
+        )
+        if teardown.ok:
+            reaped.append(outcome)
+            _log.info("orphan_resources.reaped_compose", **outcome.to_dict())
+        else:
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_compose_failed", **outcome.to_dict())
+
+    for record in worktree_records:
+        path_text = record.resource.path
+        if not path_text:  # pragma: no cover - worktree records always carry a path.
+            continue
+        # Build the GC path (a recursive ``rglob`` byte estimate over a full
+        # worktree checkout) and delete it inside one ``to_thread`` so the scan
+        # never blocks the worker event loop -- matching WS-B1's reconciler.
+        deleted, error, reason_code = await asyncio.to_thread(
+            build_and_delete_gc_path, "worktree", Path(path_text), work_dir=resolved_work_dir
+        )
+        if deleted:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="reaped",
+                reason_code=PATH_DELETED,
+            )
+            reaped.append(outcome)
+            _log.info("orphan_resources.reaped_worktree", **outcome.to_dict())
+        elif reason_code is None or reason_code == PATH_ALREADY_REMOVED:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="already_removed",
+                reason_code=PATH_ALREADY_REMOVED,
+            )
+            reaped.append(outcome)
+        else:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=reason_code,
+                error=error,
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+
+    status: Literal["ok", "partial"] = "partial" if errors else "ok"
+    return OrphanReapResult(
+        enabled=True,
+        status=status,
+        reason_code=ORPHAN_REAP_PARTIAL if errors else ORPHAN_REAP_OK,
+        reaped=tuple(reaped),
+        errors=tuple(errors),
     )
 
 

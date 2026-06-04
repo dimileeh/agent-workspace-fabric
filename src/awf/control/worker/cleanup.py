@@ -35,6 +35,7 @@ from awf.control.worker.config import (
     effective_worker_config_node_id,
 )
 from awf.control.worker.constants import (
+    _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
@@ -148,6 +149,53 @@ async def _maybe_release_terminal_runtime(self: Any) -> None:
 
     interval = max(0.0, self._config.terminal_runtime_release_scan_interval_seconds)
     self._next_terminal_runtime_release_scan_at = monotonic() + interval
+
+
+async def _maybe_reconcile_orphan_dirs(self: Any) -> None:
+    """Periodically reap orphaned per-workspace dirs whose DB row is gone (WS-B2).
+
+    No-op when no reconciler callback is wired. The callback already decides
+    report-only vs execute based on the ``auto_cleanup_orphans`` flag; this
+    method handles interval gating and transient-DB resilience. Like
+    :func:`_maybe_release_terminal_runtime`, all reconcile failures are
+    swallowed-and-rescheduled rather than propagated: non-transient errors
+    are logged loudly via ``_log.exception`` (ERROR level + traceback) so they
+    stay operator-visible, but they are not re-raised. Re-raising would skip
+    all workspace provisioning/dispatch for the iteration and surface through
+    ``run_forever``'s last-resort ``run_once_failed`` handler as a second,
+    context-free log entry that can fire on-call alerts for an
+    already-handled, already-rescheduled event. The cursor is always
+    rescheduled so a failing sweep cannot hot-loop ``run_once``.
+    """
+    if self._orphan_dir_reconciler is None:
+        return
+
+    now = monotonic()
+    if now < self._next_orphan_reconcile_scan_at:
+        return
+
+    try:
+        await self._orphan_dir_reconciler()
+    except Exception as exc:
+        if _worker_exception_is_transient_db_connection(exc):
+            _log.warning(
+                "worker.orphan_dir_reconcile_db_connection_closed",
+                reason_code=DB_CONNECTION_CLOSED_REASON,
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+        else:
+            _log.exception(
+                "worker.orphan_dir_reconcile_failed",
+                reason_code=_ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
+                error_type=type(exc).__name__,
+            )
+        interval = max(0.0, self._config.orphan_reconcile_scan_interval_seconds)
+        self._next_orphan_reconcile_scan_at = monotonic() + interval
+        return
+
+    interval = max(0.0, self._config.orphan_reconcile_scan_interval_seconds)
+    self._next_orphan_reconcile_scan_at = monotonic() + interval
 
 
 async def _release_terminal_runtime_resources(self: Any) -> None:
