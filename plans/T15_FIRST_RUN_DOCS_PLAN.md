@@ -240,6 +240,11 @@ should restore `AWF_API_TOKEN` from `docker/compose/.env` first, then root
 `.env`, and export whichever persisted value is found before stopping or
 starting Core.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HJ2C1`: the Quickstart
+package lane must persist the first-run `AWF_API_TOKEN` and
+`AWF_POSTGRES_PASSWORD` to `.env` before `awf setup` / `awf start`, so a later
+fresh-shell upgrade can restore the same running local Core service values.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

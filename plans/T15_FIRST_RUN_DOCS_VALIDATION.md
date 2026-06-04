@@ -82,6 +82,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
 - Complete: Address review-level comment `issue:4620140358` follow-up by
   splitting mixed Quickstart and Getting Started URL assertions and requiring
   exact, ordered package-upgrade shell anchors for `AWF_API_TOKEN` exports.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HJ2C1` by persisting Quickstart
+  package-lane first-run `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` values to
+  `.env` before `awf setup` / `awf start`, so later fresh-shell upgrades can
+  restore the same running local Core service values.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -1352,6 +1356,44 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Final focused repair result: `7 passed in 0.80s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HJ2C1`:
+
+- `docs/QUICKSTART.md` Lane 1 now tells package-lane users to keep `.env` in
+  the current first-run directory and writes the generated `AWF_API_TOKEN` and
+  `AWF_POSTGRES_PASSWORD` there before `awf setup`.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Quickstart package
+  first-run docs that generate service values without persisting them before
+  startup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade -q
+```
+
+Red-phase result after adding the focused assertion: failed because
+`docs/QUICKSTART.md` still omitted package-lane `.env` persistence.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_keeps_package_manager_alternatives_in_separate_blocks tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start -q
+```
+
+Final focused repair result: `3 passed in 0.72s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py

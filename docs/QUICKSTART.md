@@ -44,11 +44,18 @@ uv tool install agent-workspace-fabric
 pipx install agent-workspace-fabric
 ```
 
-Then run the shared first-run commands:
+Then run the shared first-run commands from the directory where AWF should keep
+the package-lane `.env`. Persist the generated local service values before
+setup/start so a later upgrade can restore the same running Core token and
+password:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+} > .env
 # [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
 # Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
 awf setup

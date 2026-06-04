@@ -227,6 +227,34 @@ def test_quickstart_keeps_package_manager_alternatives_in_separate_blocks() -> N
     assert not mixed_blocks, "; ".join(mixed_blocks)
 
 
+def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None:
+    """Assert package first-run secrets remain available to later upgrades."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lane_section = _markdown_section(quickstart_text, "## Lane 1: uv tool or pipx")
+    first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
+    api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
+    password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
+    password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
+    persist_target = "} > .env"
+    setup_command = "\nawf setup\n"
+
+    assert "persist" in first_run_section.lower()
+    assert api_export in first_run_section
+    assert password_export in first_run_section
+    assert api_persist in first_run_section
+    assert password_persist in first_run_section
+    assert persist_target in first_run_section
+    assert (
+        first_run_section.index(api_export)
+        < first_run_section.index(password_export)
+        < first_run_section.index(api_persist)
+        < first_run_section.index(password_persist)
+        < first_run_section.index(persist_target)
+        < first_run_section.index(setup_command)
+    )
+
+
 def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
     """Assert Quickstart smoke commands validate the lane's initialized project."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
