@@ -611,6 +611,49 @@ class TestReadWorkspaceArtifact:
         assert result["size_bytes"] == len(decoded)
 
     @pytest.mark.unit
+    async def test_read_workspace_artifact_redacts_compose_env_file_provider_secret(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        secret = "opaque-compose-value"
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"ANTHROPIC_AUTH_TOKEN={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact Compose env redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "provider.txt").write_bytes(f"prefix {secret} suffix".encode())
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "provider.txt", "limit_bytes": 1024},
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"prefix <redacted> suffix"
+        assert result["size_bytes"] == len(decoded)
+
+    @pytest.mark.unit
     async def test_read_workspace_artifact_does_not_redact_base64_content(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -836,6 +879,52 @@ class TestReadWorkspaceArtifact:
                 "limit_bytes": 1024,
             },
         )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
+
+    @pytest.mark.unit
+    async def test_binary_artifact_containing_compose_env_file_provider_secret_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        secret = "opaque-compose-binary-value"
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"ANTHROPIC_AUTH_TOKEN={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact binary Compose env blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"\x00" + f"prefix {secret} suffix".encode() + b"\x00\xff"
+        (artifact_dir / "secret-compose-env.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "secret-compose-env.bin",
+                "limit_bytes": 1024,
+            },
+        )
+
         assert isinstance(result, dict)
         assert result["error_code"] == "ARTIFACT_BLOCKED"
 
