@@ -160,10 +160,22 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # The worker provisions workspaces and mounts a shared-base + per-workspace
+    # overlay for ~/.claude (see src/awf/node/auth_mounts.py). SYS_ADMIN lets the
+    # root worker call mount(2)/umount(2); without it the overlay path falls back
+    # to the legacy full copy (correct, but no disk saving). This is a deliberate
+    # least-privilege downgrade scoped to the worker — provider readiness reports
+    # the resulting isolation posture (per_workspace_overlay vs per_workspace_copy).
+    cap_add:
+      - SYS_ADMIN
     volumes:
       - *awf-docker-sock
       - *awf-service-ssh-agent
-      - *awf-host-work-dir
+      # ``:rshared`` so an overlay the worker mounts under the work dir is visible
+      # to the sibling agent container the host daemon launches; the default
+      # ``rprivate`` would leave the agent's bind of the merged view empty. The
+      # host-side work dir must itself be a shared mount.
+      - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:rshared
       - *awf-gh-auth
       - *awf-gcloud-auth
       - *awf-gitconfig-auth
