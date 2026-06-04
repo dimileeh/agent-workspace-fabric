@@ -6,6 +6,8 @@ and shows the matching upgrade and uninstall path.
 
 Use the source checkout lanes when you want to inspect AWF before running it.
 Use a release-installed lane when you want the published package or installer.
+In source checkout lanes, `awf setup` checks and `awf start` uses
+`docker/compose/.env` for Compose-interpolated local service values.
 
 ## Prerequisites
 
