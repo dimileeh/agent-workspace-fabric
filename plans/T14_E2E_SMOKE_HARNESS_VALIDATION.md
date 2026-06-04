@@ -78,6 +78,46 @@ validation, provenance, logs, and merge gating after completion.
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
 
+## CI Repair Iteration: PR #394 Direct Workspace Idempotency
+
+### Requirement Status
+
+- Complete: Preserved production disk-admission behavior and did not change the
+  dedicated disk-pressure tests.
+- Complete: The direct v1 idempotency replay/conflict test now uses
+  `Settings(_env_file=None, min_free_disk_bytes=0)` so it does not depend on
+  real host free space after earlier shard tests.
+- Complete: Added explicit `WorkspaceAcceptedResponse` assertions before the
+  replay ID comparison, so future admission/preflight JSON responses fail at
+  the response-shape assertion.
+- Complete: Only focused repro and lint commands were run locally.
+
+### Evidence
+
+- AWF-provided focused repro before the fix:
+  `uv run --python 3.12 coverage run --parallel-mode -m pytest tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py::TestCreateWorkspacePart002::test_direct_v1_create_replays_same_payload_and_rejects_conflict -q`
+  passed with `1 passed`, showing the failure was not reproducible in a clean
+  single-node run.
+- Focused containing-file repro before the fix:
+  `uv run --python 3.12 coverage run --parallel-mode -m pytest tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py -q`
+  passed with `18 passed`.
+- Confirmed CI-shaped pre-fix repro:
+  `AWF_MIN_FREE_DISK_BYTES=999999999999999 uv run --python 3.12 coverage run --parallel-mode -m pytest tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py::TestCreateWorkspacePart002::test_direct_v1_create_replays_same_payload_and_rejects_conflict -q`
+  failed with `AttributeError: 'JSONResponse' object has no attribute
+  'workspace_id'`, matching the GitHub Actions failure.
+- Post-fix forced-threshold repro:
+  `AWF_MIN_FREE_DISK_BYTES=999999999999999 uv run --python 3.12 coverage run --parallel-mode -m pytest tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py::TestCreateWorkspacePart002::test_direct_v1_create_replays_same_payload_and_rejects_conflict -q`
+  passed with `1 passed`.
+- Post-fix containing-file repro:
+  `uv run --python 3.12 coverage run --parallel-mode -m pytest tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py -q`
+  passed with `18 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.
+
 ## Review Repair Iteration: PRRT_kwDOSJAM6s6HCWUe
 
 ### Requirement Status

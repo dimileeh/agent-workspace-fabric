@@ -274,3 +274,46 @@ sequence control flow in `scripts/first_run_smoke.py`.
   must pass.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## CI Repair Iteration: PR #394 Direct Workspace Idempotency
+
+### Problem Statement And Scope
+
+GitHub Actions run `26984343030` failed
+`tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py::TestCreateWorkspacePart002::test_direct_v1_create_replays_same_payload_and_rejects_conflict`
+because the direct route call returned a `JSONResponse` before the idempotency
+assertions. The focused node and containing file pass in isolation, but the
+same node fails when `AWF_MIN_FREE_DISK_BYTES` is higher than available disk,
+matching the CI shard shape after Docker-heavy integration tests. This repair is
+scoped to isolating this idempotency unit test from real host disk pressure.
+
+### Requirements Checklist
+
+- Preserve the production disk-admission behavior and existing disk-pressure
+  tests.
+- Keep the direct idempotency test focused on replay/conflict semantics rather
+  than host free-space conditions.
+- Add explicit accepted-response assertions so future admission/preflight JSON
+  responses fail with a precise cause.
+- Re-run only focused repro commands; leave broad AWF/GitHub validation to AWF.
+
+### Implementation Steps
+
+1. Confirm the AWF-provided focused repro and containing file behavior.
+2. Reproduce the CI-shaped failure by running the reported node with an
+   impossible `AWF_MIN_FREE_DISK_BYTES`.
+3. Update the direct idempotency test to pass settings with
+   `min_free_disk_bytes=0`.
+4. Add explicit accepted-response type assertions before accessing
+   `workspace_id`.
+5. Re-run the reported node under the forced high-disk-threshold environment
+   and run the containing focused file.
+
+### Verification Commands And Pass Criteria
+
+- `AWF_MIN_FREE_DISK_BYTES=999999999999999 uv run --python 3.12 coverage run --parallel-mode -m pytest tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py::TestCreateWorkspacePart002::test_direct_v1_create_replays_same_payload_and_rejects_conflict -q`
+  must pass after implementation.
+- `uv run --python 3.12 coverage run --parallel-mode -m pytest tests/unit/api/test_workspaces_parts/test_workspaces_part_003.py -q`
+  must pass after implementation.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.
