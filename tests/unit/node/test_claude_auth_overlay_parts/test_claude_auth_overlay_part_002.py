@@ -1254,6 +1254,25 @@ def test_iter_overlay_lowerdirs_collects_all_overlays(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_iter_overlay_lowerdirs_decodes_octal_colon_in_path(tmp_path: Path) -> None:
+    # A literal colon in a lowerdir path is octal-escaped as ``\072`` by overlayfs
+    # (its raw ``:`` is reserved for joining layers), so the split-on-``:`` keeps the
+    # path whole and the escape must be decoded back to ``:``. Otherwise GC-B's
+    # protected set holds ``...\072...`` instead of the real path and reaps a base
+    # still backing a live overlay. (PRRT_kwDOSJAM6s6HN8ld)
+    colon_base = Path("/srv/weird:dir/_shared/claude-base/sig/.claude")
+    escaped = str(colon_base).replace(":", "\\072")
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(
+        f"overlay {tmp_path / 'm'} overlay rw,lowerdir={escaped},upperdir=/u,workdir=/w 0 0\n"
+    )
+
+    from awf.node.auth_mounts import iter_overlay_lowerdirs
+
+    assert iter_overlay_lowerdirs(proc_mounts) == {colon_base}
+
+
+@pytest.mark.unit
 def test_iter_overlay_lowerdirs_handles_missing_and_optionless(tmp_path: Path) -> None:
     from awf.node.auth_mounts import iter_overlay_lowerdirs
 
@@ -1281,6 +1300,27 @@ def test_unescape_proc_mount_field_decodes_backslash_last() -> None:
     assert _unescape_proc_mount_field("/foo\\134012bar") == "/foo\\012bar"
     # The plain escapes still decode correctly.
     assert _unescape_proc_mount_field("a\\040b\\011c\\012d\\134e") == "a b\tc\nd\\e"
+
+
+@pytest.mark.unit
+def test_unescape_proc_mount_field_decodes_octal_colon() -> None:
+    # overlayfs uses a raw ``:`` to join layered lowerdirs, so a literal colon
+    # inside a single lowerdir path is octal-escaped as ``\072`` (the split-on-``:``
+    # in the lowerdir parsers therefore never tears such a path apart). The escape
+    # must still be decoded back to ``:`` here, or a base path containing a colon
+    # would come back as ``...\072...`` and fail the ``base_root`` match in
+    # ``_protected_signature_dirs`` — letting GC-B reap a base that still backs a
+    # live overlay. (PRRT_kwDOSJAM6s6HN8ld)
+    from awf.node.auth_mounts_claude import _unescape_proc_mount_field
+
+    assert _unescape_proc_mount_field("/foo\\072bar") == "/foo:bar"
+    # A literal backslash followed by the text ``072`` is written ``\134072`` and
+    # must round-trip to ``/foo\072bar`` (the backslash, not a decoded colon) —
+    # decoding the colon escape before the backslash keeps that distinction.
+    assert _unescape_proc_mount_field("/foo\\134072bar") == "/foo\\072bar"
+    # A literal backslash immediately followed by a colon is ``\134\072`` and must
+    # decode to a backslash then a colon.
+    assert _unescape_proc_mount_field("/foo\\134\\072bar") == "/foo\\:bar"
 
 
 @pytest.mark.unit
