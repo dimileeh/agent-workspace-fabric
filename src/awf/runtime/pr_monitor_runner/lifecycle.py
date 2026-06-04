@@ -635,16 +635,17 @@ async def _teardown_compose_stack(
 
 
 def _teardown_completed_workspace_auth_overlay(work_dir: Path, workspace_id: str) -> None:
-    """Unmount a completed workspace's Claude auth overlay before GC removes its dir.
+    """Best-effort unmount for a completed workspace's Claude auth overlay.
 
-    The monitor's own filesystem GC (``run_workspace_filesystem_gc`` with no
-    ``compose_teardown`` hook) does not unmount the overlay, unlike the
-    ``service gc`` path which wires teardown through
-    ``_run_terminal_workspace_compose_teardown``. A still-mounted overlay makes
-    GC's ``rmtree`` of ``auth/<workspace_id>`` fail with ``EBUSY`` and strands
-    the merged mount, so unmount here first. Best-effort: a genuine busy/umount
-    error is logged and swallowed (GC's own rmtree surfaces any residual EBUSY)
-    so it never masks the completion signal the merge already produced.
+    Legacy/direct monitor callers may invoke ``run_workspace_filesystem_gc``
+    with no ``compose_teardown`` hook. Preserve the old pre-GC unmount attempt
+    for that path, even though GC now also unmounts via
+    ``_unmount_candidate_auth_overlay`` when it reaches candidate path deletion.
+    A still-mounted overlay makes GC's ``rmtree`` of ``auth/<workspace_id>``
+    fail with ``EBUSY`` and strands the merged mount. Best-effort: a genuine
+    busy/umount error is logged and swallowed (GC's own rmtree surfaces any
+    residual EBUSY) so it never masks the completion signal the merge already
+    produced.
 
     A capability-less completion path raises ``OverlayUnmountUnverifiableError``
     (a ``RuntimeError``) — not ``OSError``/``SubprocessError`` — when it cannot see
@@ -824,6 +825,9 @@ def _track_completed_workspace_compose_teardown(
                 reason_code=COMPOSE_TEARDOWN_CALLBACK_RAISED,
                 error=error_message[:400],
             )
+            # Re-raise so ``_run_gc_compose_teardowns`` records the failure in
+            # ``result.compose_teardowns``; this tracked copy is only for GC
+            # exception paths.
             raise
         tracked_results[candidate.workspace_id] = result
         return result
