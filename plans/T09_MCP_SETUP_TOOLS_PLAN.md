@@ -84,6 +84,47 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HDeYw Start Input Resolution Errors
+
+### Problem Statement And Scope
+
+The review reports that `awf_start_local_service` catches
+`SourceCheckoutError` and `ServiceBootstrapError`, but not setup/config/path
+errors raised while resolving start bootstrap inputs before service bootstrap
+begins. Those exceptions can escape the MCP tool through FastMCP instead of
+being routed through redacted `safe_result` output.
+
+Scope is limited to guarding MCP start input resolution failures. Bootstrap
+failure classification and successful start behavior stay unchanged.
+
+### Requirements Checklist
+
+- Preserve existing structured handling for `SourceCheckoutError` and
+  `ServiceBootstrapError`.
+- Convert setup/config/path failures from start input resolution into
+  redacted MCP error responses.
+- Do not surface raw exception text or path-like details from those failures.
+- Add a focused regression for start input resolution failure.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression where start bootstrap input resolution
+   raises a path-like `ValueError`.
+2. Catch setup/config/path exceptions around the threaded input-resolution
+   step and return a generic structured start error through `safe_result`.
+3. Run the targeted regression and focused checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_input_resolution_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HDb5N
 
 ### Problem Statement And Scope

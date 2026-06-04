@@ -69,6 +69,7 @@ from awf.service.bootstrap import (
 StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 
 START_OPTIONS_INVALID = "START_OPTIONS_INVALID"
+START_INPUT_RESOLUTION_FAILED = "START_INPUT_RESOLUTION_FAILED"
 PROJECT_INIT_INVALID_PATH = "PROJECT_INIT_INVALID_PATH"
 PROJECT_PROFILE_EXISTS = "PROJECT_PROFILE_EXISTS"
 PROJECT_INIT_FAILED = "PROJECT_INIT_FAILED"
@@ -287,11 +288,21 @@ async def _start_local_service_result(
     source_path = _resolve_client_source_checkout_path(source_checkout)
     try:
         inputs = await asyncio.to_thread(_resolve_start_bootstrap_inputs_for_mcp, source_path)
-        options = ServiceBootstrapOptions(
-            timeout_seconds=timeout_seconds,
-            skip_agent_runtime_build=skip_agent_runtime_build,
-            force_rebuild=rebuild,
+    except SourceCheckoutError as exc:
+        return _first_run_result(
+            safe_result,
+            _source_checkout_failure_payload(exc),
+            is_error=True,
         )
+    except (HostSetupConfigError, OSError, ValueError) as exc:
+        return _start_input_resolution_error_result(safe_result, exc)
+
+    options = ServiceBootstrapOptions(
+        timeout_seconds=timeout_seconds,
+        skip_agent_runtime_build=skip_agent_runtime_build,
+        force_rebuild=rebuild,
+    )
+    try:
         result = await run_service_bootstrap(
             inputs.settings,
             options=options,
@@ -299,12 +310,6 @@ async def _start_local_service_result(
             env_file=inputs.compose_env_file,
             asset_root=inputs.asset_root,
             service_environ=inputs.service_env,
-        )
-    except SourceCheckoutError as exc:
-        return _first_run_result(
-            safe_result,
-            _source_checkout_failure_payload(exc),
-            is_error=True,
         )
     except ServiceBootstrapError as exc:
         return _first_run_result(safe_result, _start_failure_payload(exc), is_error=True)
@@ -317,6 +322,18 @@ def _resolve_start_bootstrap_inputs_for_mcp(
 ) -> _StartBootstrapInputs:
     verified = _resolve_start_source_checkout(source_path)
     return _resolve_start_bootstrap_inputs(verified)
+
+
+def _start_input_resolution_error_result(
+    safe_result: SafeResult,
+    exc: HostSetupConfigError | OSError | ValueError,
+) -> CallToolResult:
+    return _error_result(
+        safe_result,
+        START_INPUT_RESOLUTION_FAILED,
+        "could not resolve local service startup inputs",
+        detail={"error_type": type(exc).__name__},
+    )
 
 
 def _initialize_project_profile_result(
