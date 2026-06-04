@@ -1540,6 +1540,100 @@ async def test_single_workspace_gc_revokes_active_secret_leases_before_auth_clea
 
 
 @pytest.mark.unit
+async def test_batch_terminal_gc_compose_teardown_failure_blocks_runtime_side_effects(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    failed_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=210),
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    released_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="b" * 40,
+    )
+    await _issue_gc_secret_lease(session_factory, failed_id, now=now)
+    await _issue_gc_secret_lease(session_factory, released_id, now=now)
+    async with session_factory() as session:
+        repo = ResourceReservationRepository(session)
+        failed_attempt_id = await _task_attempt_for_workspace(session, failed_id)
+        released_attempt_id = await _task_attempt_for_workspace(session, released_id)
+        for workspace_id, attempt_id in (
+            (failed_id, failed_attempt_id),
+            (released_id, released_attempt_id),
+        ):
+            await repo.create(
+                workspace_id=workspace_id,
+                attempt_id=attempt_id,
+                node_id="node_1",
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=2.0,
+                peak_memory_gb=4.0,
+                disk_mb=1024,
+                phase="steady",
+                reserved_at=now - timedelta(hours=300),
+            )
+        await session.commit()
+
+    async def _compose_teardown(
+        candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        if candidate.workspace_id == failed_id:
+            return WorkspaceGCComposeTeardownResult(
+                status="failed",
+                reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                error="network still in use",
+            )
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert result.status == "partial"
+    assert failed_id in result.compose_teardowns
+    assert released_id in result.compose_teardowns
+    assert failed_id not in result.secret_lease_revocations
+    assert failed_id not in result.reservation_releases
+    assert result.secret_lease_revocations == {
+        released_id: {"revoked_count": 1, "reason_code": "TERMINAL_GC"}
+    }
+    assert result.reservation_releases[released_id]["released_count"] == 1
+    async with session_factory() as session:
+        failed_leases = await SecretLeaseRepository(session).list_for_workspace(failed_id)
+        released_leases = await SecretLeaseRepository(session).list_for_workspace(released_id)
+        failed_reservation = await ResourceReservationRepository(session).active_for_workspace(
+            failed_id
+        )
+        released_reservation = await ResourceReservationRepository(session).active_for_workspace(
+            released_id
+        )
+
+    assert failed_leases[0].status == "issued"
+    assert released_leases[0].status == "revoked"
+    assert failed_reservation is not None
+    assert released_reservation is None
+
+
+@pytest.mark.unit
 async def test_batch_terminal_gc_revokes_each_candidate_and_is_retry_safe(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
