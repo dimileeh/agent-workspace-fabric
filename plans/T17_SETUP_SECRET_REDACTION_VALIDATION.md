@@ -1646,6 +1646,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
 ```
 
+## Review-Level Comment `issue:4620175517` MCP Log Startup Secret Cache Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `awf_read_workspace_log` now reuses the service settings and exact
+  extra-secret tuple captured during metrics-tool registration instead of
+  resolving them per log request.
+- Complete: repeated log polls no longer re-resolve the Compose/env-file
+  provider environment.
+- Complete: startup-time Compose/env-file provider secrets still redact exact
+  bare values from workspace log slices, including the selected custom env file.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k startup_redaction_secrets --tb=short -ra
+# failed: two log reads increased resolve_service_settings() calls from 1 to 3
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k startup_redaction_secrets --tb=short -ra
+# 1 passed, 17 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k 'startup_redaction_secrets or compose_env_provider_secret or custom_compose_env_file_provider_secret' --tb=short -ra
+# 3 passed, 15 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 2 source files
+```
+
 ## Gaps
 
 None found.

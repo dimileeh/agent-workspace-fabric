@@ -173,6 +173,8 @@ def build_mcp_server(
         readiness_provider=readiness_provider,
         health_provider=health_provider,
         compose_env_file=compose_env_file,
+        service_settings=service_settings_value,
+        extra_secrets=extra_secret_values,
     )
     register_control_tools(
         mcp=mcp,
@@ -524,11 +526,16 @@ def _mcp_secret_values(
     compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
 ) -> tuple[str, ...]:
     """Return exact secret values that MCP payloads and artifacts must redact."""
+    resolved_compose_env_file: service_config.ComposeEnvFileInput
+    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
+        resolved_compose_env_file = service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    else:
+        resolved_compose_env_file = compose_env_file
     provider_environ = service_config.resolve_local_service_provider_environ(
         provider_environ=None,
         environ=os.environ,
         compose_file=service_config.LOCAL_SERVICE_COMPOSE_FILE,
-        compose_env_file=compose_env_file,
+        compose_env_file=resolved_compose_env_file,
     )
     values: list[str | None] = [
         settings.api_token,

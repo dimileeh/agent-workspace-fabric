@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -634,6 +634,112 @@ class TestWorkspaceLogs:
         assert isinstance(chunk, dict)
         assert chunk["data"] == REDACTION_MARKER
         assert custom_secret not in str(chunk["data"])
+
+    @pytest.mark.unit
+    async def test_read_workspace_log_uses_startup_redaction_secrets(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Avoid re-reading settings or Compose env secrets for every log poll."""
+        secret = "startup-compose-provider-secret"
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"ANTHROPIC_AUTH_TOKEN={secret}\n", encoding="utf-8")
+
+        service_settings_calls = 0
+        provider_env_calls = 0
+        real_resolve_service_settings = service_config.resolve_service_settings
+        real_resolve_provider_environ = service_config.resolve_local_service_provider_environ
+
+        def counting_resolve_service_settings(
+            base: Settings | None = None,
+            *,
+            environ: Mapping[str, str] | None = None,
+        ) -> service_config.ServiceSettings:
+            nonlocal service_settings_calls
+            service_settings_calls += 1
+            return real_resolve_service_settings(base, environ=environ)
+
+        def counting_resolve_provider_environ(
+            *,
+            provider_environ: Mapping[str, str] | None,
+            environ: Mapping[str, str],
+            compose_file: Path | None,
+            compose_env_file: service_config.ComposeEnvFileInput = (
+                service_config.COMPOSE_ENV_FILE_OMITTED
+            ),
+        ) -> Mapping[str, str]:
+            nonlocal provider_env_calls
+            provider_env_calls += 1
+            return real_resolve_provider_environ(
+                provider_environ=provider_environ,
+                environ=environ,
+                compose_file=compose_file,
+                compose_env_file=compose_env_file,
+            )
+
+        monkeypatch.setattr(
+            service_config,
+            "resolve_service_settings",
+            counting_resolve_service_settings,
+        )
+        monkeypatch.setattr(
+            service_config,
+            "resolve_local_service_provider_environ",
+            counting_resolve_provider_environ,
+        )
+
+        settings = Settings(_env_file=None)
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        service_settings_calls_after_build = service_settings_calls
+        provider_env_calls_after_build = provider_env_calls
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe cached log redaction",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        raw_text = f"provider emitted {secret} without assignment context\n"
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="setup.stdout",
+            source="setup",
+            name="Setup stdout",
+            kind="stdout",
+        )
+        await sink.write(raw_text)
+        await sink.close()
+
+        for _ in range(2):
+            chunk = await _call(
+                mcp,
+                "awf_read_workspace_log",
+                {
+                    "workspace_id": workspace.id,
+                    "stream_id": "setup.stdout",
+                    "offset": raw_text.index(secret),
+                    "limit_bytes": len(secret),
+                },
+            )
+            assert isinstance(chunk, dict)
+            assert chunk["data"] == REDACTION_MARKER
+
+        assert service_settings_calls == service_settings_calls_after_build
+        assert provider_env_calls == provider_env_calls_after_build
 
     @pytest.mark.unit
     async def test_read_workspace_log_redacts_slice_starting_inside_configured_secret(

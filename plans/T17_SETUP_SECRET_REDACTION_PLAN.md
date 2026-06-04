@@ -1257,3 +1257,51 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
+
+## Review-Level Comment `issue:4620175517` MCP Log Startup Secret Cache Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports that `awf_read_workspace_log` resolves service
+settings and Compose/env-file redaction secrets on every log-read tool call.
+That makes sustained polling re-read and re-parse the Compose env file, and it
+is inconsistent with other MCP redaction surfaces that use the startup-time
+secret tuple captured when the server is built.
+
+This repair is limited to computing the workspace-log service settings and
+extra secret tuple once during metrics-tool registration, then reusing that
+tuple from the log-read closure. It does not change log redaction rules,
+redaction context sizing, artifact redaction, or broad validation ownership.
+
+### Requirements Checklist
+
+- `awf_read_workspace_log` does not call `resolve_service_settings()` per log
+  request.
+- `awf_read_workspace_log` does not re-resolve Compose/env-file provider
+  secrets per log request.
+- Startup-time Compose/env-file provider secrets still redact exact bare values
+  from workspace log slices.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP log regression that records service-settings and
+   provider-env resolution counts after server build, then performs repeated
+   `awf_read_workspace_log` calls and expects no additional resolution.
+2. Capture `service_settings_value` and `extra_secret_values` once in
+   `register_metrics_tools`, using injected startup values from
+   `build_mcp_server` when available.
+3. Replace the per-call log-read resolution with the captured secret tuple.
+4. Run the targeted regression, adjacent MCP log redaction checks, and narrow
+   ruff/mypy checks for touched files. Broad AWF/GitHub validation remains
+   owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k startup_redaction_secrets --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k 'startup_redaction_secrets or compose_env_provider_secret or custom_compose_env_file_provider_secret' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
+```

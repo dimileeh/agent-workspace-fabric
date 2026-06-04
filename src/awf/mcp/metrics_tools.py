@@ -13,7 +13,7 @@ cleanly when they show up alongside other MCP servers.
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
@@ -394,8 +394,21 @@ def register_metrics_tools(
     readiness_provider: ReadinessProvider | None,
     health_provider: HealthProvider | None,
     compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
+    service_settings: service_config.ServiceSettings | None = None,
+    extra_secrets: Iterable[str] | None = None,
 ) -> None:
     _safe_result = safe_result
+    if extra_secrets is None:
+        service_settings_value = service_settings or service_config.resolve_service_settings(
+            settings_value
+        )
+        extra_secret_values = _workspace_log_redaction_secrets(
+            settings_value,
+            service_settings=service_settings_value,
+            compose_env_file=compose_env_file,
+        )
+    else:
+        extra_secret_values = tuple(extra_secrets)
 
     @mcp.tool(name="awf_get_failure_analysis_summary")
     async def awf_get_failure_analysis_summary(
@@ -563,13 +576,7 @@ def register_metrics_tools(
         ),
     ) -> dict[str, Any] | None:
         """Read a bounded chunk from an indexed durable log stream."""
-        service_settings = service_config.resolve_service_settings(settings_value)
-        extra_secrets = _workspace_log_redaction_secrets(
-            settings_value,
-            service_settings=service_settings,
-            compose_env_file=compose_env_file,
-        )
-        redaction_context = _workspace_log_redaction_context_bytes(extra_secrets)
+        redaction_context = _workspace_log_redaction_context_bytes(extra_secret_values)
         read_offset = _workspace_log_read_offset(
             requested_offset=offset,
             redaction_context=redaction_context,
@@ -616,7 +623,7 @@ def register_metrics_tools(
             result_text,
             offset - projection_offset,
             offset - projection_offset + limit_bytes,
-            extra_secrets=extra_secrets,
+            extra_secrets=extra_secret_values,
             redact_unknown_leading_fragment=redact_unknown_leading_fragment,
             result_offset=projection_offset,
         )
