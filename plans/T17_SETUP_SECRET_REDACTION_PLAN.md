@@ -57,6 +57,13 @@ credential entry, or unrelated refactors are included.
   `TOKEN=` value.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes failed-lookback leading-fragment masking plus a focused regression.
+- Review thread `PRRT_kwDOSJAM6s6HCoIm` identified that invalid UTF-8 bytes
+  before the requested window can expand to a three-byte replacement character
+  during MCP log projection, shifting subsequent byte-slice offsets away from
+  the stored raw log byte offsets.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes byte-preserving projection/redaction for raw log bytes plus a focused
+  regression.
 
 ## Requirements Checklist
 
@@ -80,6 +87,8 @@ credential entry, or unrelated refactors are included.
   window.
 - MCP workspace log reads mask an unknown leading value fragment when
   assignment lookback cannot read enough context to prove the fragment safe.
+- MCP workspace log reads preserve requested byte offsets when invalid UTF-8
+  bytes appear in expanded redaction context before the requested window.
 - Support-bundle setup-state collection returns a redacted failed setup-state
   payload if loaded config summarization raises after the config reader
   succeeds.
@@ -125,6 +134,10 @@ credential entry, or unrelated refactors are included.
 14. Add a focused regression for failed assignment lookback, confirm it fails,
     then mask the unknown leading fragment rather than returning the narrower
     raw projection.
+15. Add a focused regression for invalid UTF-8 bytes before the requested MCP
+    log window, confirm it fails, then preserve raw byte offsets through
+    projection/redaction while still rendering invalid bytes with replacement in
+    returned text.
 
 ## Verification Commands
 
@@ -190,6 +203,16 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'assignment_lookback_failure or pattern_only_secret_assignment or preserves_long_benign_token_without_assignment_context'
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HCoIm` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k invalid_utf8_before_requested_window
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'invalid_utf8_before_requested_window or expanded_context_starts_inside_multibyte_character or read_workspace_log_redacts_slice_starting_inside_configured_secret'
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k redact_secrets_byte_slice
+uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
 ```
 
 Focused lint/type checks, adjusted to touched files:

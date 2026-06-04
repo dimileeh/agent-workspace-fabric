@@ -196,7 +196,7 @@ def _workspace_log_projection_text(
         return str(result["text"]), result_offset
 
     boundary_shift = _leading_utf8_continuation_byte_count(raw_bytes)
-    return raw_bytes[boundary_shift:].decode("utf-8", errors="replace"), (
+    return raw_bytes[boundary_shift:].decode("utf-8", errors="surrogateescape"), (
         result_offset + boundary_shift
     )
 
@@ -207,13 +207,13 @@ def _unknown_leading_log_value_fragment_end(text: str, *, result_offset: int) ->
         return 0
 
     characters = iter(text)
-    first_bytes = next(characters).encode("utf-8")
+    first_bytes = next(characters).encode("utf-8", errors="surrogateescape")
     if not first_bytes or first_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
         return 0
 
     fragment_end = len(first_bytes)
     for char in characters:
-        char_bytes = char.encode("utf-8")
+        char_bytes = char.encode("utf-8", errors="surrogateescape")
         if char_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
             return fragment_end
         fragment_end += len(char_bytes)
@@ -238,8 +238,10 @@ def _workspace_log_assignment_value_covers_byte(text: str, start: int) -> bool:
     for match in _LOG_TOKEN_ASSIGNMENT_RE.finditer(text):
         if match.start("value") > start:
             break
-        value_start = len(text[: match.start("value")].encode("utf-8"))
-        value_end = value_start + len(match.group("value").encode("utf-8"))
+        value_start = len(text[: match.start("value")].encode("utf-8", errors="surrogateescape"))
+        value_end = value_start + len(
+            match.group("value").encode("utf-8", errors="surrogateescape")
+        )
         if value_start <= start < value_end:
             return True
     return False
