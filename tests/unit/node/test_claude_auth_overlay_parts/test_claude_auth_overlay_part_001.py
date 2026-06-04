@@ -427,6 +427,42 @@ def test_overlay_unavailable_falls_back_to_legacy_copy(
 
 
 @pytest.mark.unit
+def test_mount_failure_forwards_called_process_stderr(tmp_path: Path) -> None:
+    """The copy-fallback warning carries ``mount(8)`` stderr, not just the rc.
+
+    ``str(CalledProcessError)`` emits only the command + return code, so the
+    kernel reason an operator needs to diagnose why every workspace degraded to
+    the full-copy path would otherwise be silently dropped.
+    """
+
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    kernel_reason = "special device overlay does not exist"
+    mounter = FakeOverlayMounter(
+        supported=True,
+        mount_error=subprocess.CalledProcessError(32, "mount", stderr=kernel_reason),
+    )
+
+    with capture_logs() as logs:
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_stderr",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    fallback = next(
+        entry
+        for entry in logs
+        if entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
+        and entry.get("event") == "claude_auth_overlay_unavailable"
+    )
+    assert fallback.get("stderr") == kernel_reason
+
+
+@pytest.mark.unit
 def test_shared_base_build_oserror_falls_back_to_legacy_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

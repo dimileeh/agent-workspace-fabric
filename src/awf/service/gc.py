@@ -903,6 +903,9 @@ def _unmount_candidate_auth_overlay(
             reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
             workspace_id=candidate.workspace_id,
             error=repr(exc)[:400],
+            # ``repr(CalledProcessError)`` drops the ``umount(8)`` stderr (e.g.
+            # "target is busy"); forward it so the EBUSY root cause is greppable.
+            stderr=getattr(exc, "stderr", None),
         )
 
 

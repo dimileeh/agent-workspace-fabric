@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -340,8 +341,13 @@ async def test_completed_monitor_auth_overlay_teardown_failure_does_not_block_gc
         worktrees_root=worktrees_root,
     )
 
+    # ``umount(8)`` exits non-zero with its kernel reason on stderr; ``repr`` of
+    # the CalledProcessError drops that text, so the handler must forward stderr
+    # explicitly, mirroring the ``service gc`` handler.
+    kernel_reason = "umount: /…/merged: target is busy."
+
     def _raise_busy(*, work_dir: Path, workspace_id: str) -> None:
-        raise OSError("target is busy")
+        raise subprocess.CalledProcessError(32, "umount", stderr=kernel_reason)
 
     with (
         _mock_worktree_remove_success(),
@@ -353,14 +359,14 @@ async def test_completed_monitor_auth_overlay_teardown_failure_does_not_block_gc
     ):
         await runner._gc_completed_workspace_filesystem(ws_id)
 
-    # The warning must carry diagnostic detail (reason_code + the bound error),
-    # mirroring the ``service gc`` handler, so operators can tell EBUSY from a
-    # missing umount binary or a permission error.
+    # The warning must carry diagnostic detail (reason_code + the bound error +
+    # the kernel stderr), mirroring the ``service gc`` handler, so operators can
+    # tell EBUSY from a missing umount binary or a permission error.
     assert any(
         record.get("event") == "monitor.auth_overlay_teardown_failed"
         and record.get("workspace_id") == ws_id
         and record.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"
-        and "target is busy" in record.get("error", "")
+        and record.get("stderr") == kernel_reason
         for record in captured
     )
     # The teardown failure is swallowed; GC still reclaims the auth dir.

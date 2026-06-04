@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -429,7 +430,11 @@ async def test_service_gc_swallows_and_logs_overlay_unmount_failure(
     )
     _write(work_dir / "auth" / workspace_id / "claude" / "merged" / "settings.json", "{}")
 
-    teardown = Mock(side_effect=OSError("device or resource busy"))
+    # ``umount(8)`` exits non-zero with its kernel reason on stderr; ``repr`` of
+    # the CalledProcessError drops that text, so the handler must forward stderr
+    # explicitly for the EBUSY root cause to be greppable.
+    kernel_reason = "umount: /…/merged: target is busy."
+    teardown = Mock(side_effect=subprocess.CalledProcessError(32, "umount", stderr=kernel_reason))
 
     with (
         patch("awf.node.auth_mounts.teardown_workspace_auth_overlay", teardown),
@@ -445,10 +450,11 @@ async def test_service_gc_swallows_and_logs_overlay_unmount_failure(
 
     # The run is not aborted by the unmount failure ...
     assert result.status == "succeeded"
-    # ... and the failure is recorded with its reason code rather than swallowed
-    # silently.
+    # ... and the failure is recorded with its reason code and the kernel stderr
+    # rather than swallowed silently or reduced to a bare return code.
     assert any(
         entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"
         and entry.get("workspace_id") == workspace_id
+        and entry.get("stderr") == kernel_reason
         for entry in logs
     )

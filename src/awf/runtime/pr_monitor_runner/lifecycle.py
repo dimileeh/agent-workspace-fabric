@@ -655,6 +655,9 @@ def _teardown_completed_workspace_auth_overlay(work_dir: Path, workspace_id: str
             reason_code="CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
             workspace_id=workspace_id,
             error=repr(exc)[:400],
+            # ``repr(CalledProcessError)`` drops the ``umount(8)`` stderr (e.g.
+            # "target is busy"); forward it so the EBUSY root cause is greppable.
+            stderr=getattr(exc, "stderr", None),
         )
 
 

@@ -984,6 +984,11 @@ def _prepare_claude_overlay_mount(
             reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
             workspace_auth_root=str(claude_root),
             error=str(exc),
+            # ``str(CalledProcessError)`` emits only the command + return code; the
+            # kernel reason (e.g. "special device overlay does not exist", "upper
+            # fs does not support tmpfile") sits in ``stderr``. Forward it so an
+            # operator grepping for the copy-fallback degrade sees *why*.
+            stderr=getattr(exc, "stderr", None),
         )
         # Remove only the unused ``merged`` mountpoint. ``upper``/``work`` are left
         # intact: a normal teardown leaves the agent's overlay mutations in
