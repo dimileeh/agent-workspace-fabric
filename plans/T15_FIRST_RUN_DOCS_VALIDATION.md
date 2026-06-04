@@ -1625,6 +1625,38 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HKggm`:
+
+- `docs/QUICKSTART.md` now uses POSIX/BSD-compatible `sed -e` delete
+  expressions to preserve existing package-lane `.env` entries while replacing
+  only the managed AWF service keys.
+- `tests/unit/docs/test_public_docs_status.py` now rejects the GNU-only basic
+  `sed` `\|` alternation and requires the portable multi-`-e` form.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade -q
+```
+
+Red-phase result after updating the focused assertion: failed because
+Quickstart still used the GNU-only `sed` `\|` alternation.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Final focused repair result: `2 passed in 0.76s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

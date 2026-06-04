@@ -244,9 +244,18 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
     database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
     env_tmp = 'awf_env_tmp="$(mktemp)"'
-    preserve_existing_env = (
-        "    sed "
-        "'/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
+    preserve_existing_env = "\n".join(
+        (
+            "    sed \\",
+            "      -e '/^AWF_API_TOKEN=/d' \\",
+            "      -e '/^AWF_POSTGRES_PASSWORD=/d' \\",
+            "      -e '/^AWF_POSTGRES_HOST_PORT=/d' \\",
+            "      -e '/^AWF_DATABASE_URL=/d' \\",
+            "      .env",
+        )
+    )
+    gnu_only_sed_alternation = (
+        "sed '/^\\(AWF_API_TOKEN\\|AWF_POSTGRES_PASSWORD\\|AWF_POSTGRES_HOST_PORT"
         "\\|AWF_DATABASE_URL\\)=/d' .env"
     )
     persist_target = 'mv "$awf_env_tmp" .env'
@@ -264,6 +273,7 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     assert host_port_persist in first_run_section
     assert database_url_persist in first_run_section
     assert preserve_existing_env in first_run_section
+    assert gnu_only_sed_alternation not in first_run_section
     assert persist_target in first_run_section
     assert unsafe_persist_target not in first_run_section
     assert setup_command in first_run_section

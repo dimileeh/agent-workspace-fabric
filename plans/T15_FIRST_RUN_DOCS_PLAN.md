@@ -349,6 +349,16 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKQiy`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKggm`: Quickstart
+package-lane `.env` preservation must use POSIX/BSD-compatible `sed -e`
+delete expressions instead of GNU-only basic `sed` `\|` alternation.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKggm`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
 Focused lint command:
 
 ```bash

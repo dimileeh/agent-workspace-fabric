@@ -61,7 +61,12 @@ awf_env_tmp="$(mktemp)"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
   if [ -f .env ]; then
-    sed '/^\(AWF_API_TOKEN\|AWF_POSTGRES_PASSWORD\|AWF_POSTGRES_HOST_PORT\|AWF_DATABASE_URL\)=/d' .env
+    sed \
+      -e '/^AWF_API_TOKEN=/d' \
+      -e '/^AWF_POSTGRES_PASSWORD=/d' \
+      -e '/^AWF_POSTGRES_HOST_PORT=/d' \
+      -e '/^AWF_DATABASE_URL=/d' \
+      .env
   fi
 } > "$awf_env_tmp"
 mv "$awf_env_tmp" .env
