@@ -575,7 +575,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="awf-first-run-smoke-") as temp_dir:
             results = run_harness(config, smoke_root=Path(temp_dir))
     _print_results(results)
-    return 1 if any(result.status == "failed" for result in results) else 0
+    has_failure = any(result.status == "failed" for result in results)
+    has_pass = any(result.status == "passed" for result in results)
+    return 0 if has_pass and not has_failure else 1
 
 
 def run_harness(config: SmokeConfig, *, smoke_root: Path) -> tuple[SmokeResult, ...]:

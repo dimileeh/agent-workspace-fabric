@@ -185,6 +185,61 @@ def test_parse_args_deduplicates_repeat_methods_in_order() -> None:
 
 
 @pytest.mark.unit
+def test_main_exits_nonzero_when_all_results_are_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-op smoke run must not look successful to exit-code-only automation."""
+
+    def skipped_harness(
+        _config: smoke.SmokeConfig,
+        *,
+        smoke_root: Path,
+    ) -> tuple[smoke.SmokeResult, ...]:
+        assert smoke_root.exists()
+        return (
+            smoke.SmokeResult(
+                lane=smoke.Lane.INSTALLER_RELEASE,
+                status="skipped",
+                reason=smoke.RELEASE_GATE_REASON,
+            ),
+        )
+
+    monkeypatch.setattr(smoke, "run_harness", skipped_harness)
+
+    assert smoke.main(["--lane", "installer-release"]) == 1
+
+
+@pytest.mark.unit
+def test_main_exits_zero_when_any_result_passes_without_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful smoke run may include lane skips as long as something passed."""
+
+    def mixed_harness(
+        _config: smoke.SmokeConfig,
+        *,
+        smoke_root: Path,
+    ) -> tuple[smoke.SmokeResult, ...]:
+        assert smoke_root.exists()
+        return (
+            smoke.SmokeResult(
+                lane=smoke.Lane.INSTALLER_FIXTURE,
+                status="passed",
+                command=("bash", "install.sh", "--dry-run"),
+            ),
+            smoke.SmokeResult(
+                lane=smoke.Lane.INSTALLER_RELEASE,
+                status="skipped",
+                reason=smoke.RELEASE_GATE_REASON,
+            ),
+        )
+
+    monkeypatch.setattr(smoke, "run_harness", mixed_harness)
+
+    assert smoke.main(["--lane", "installer-fixture", "--lane", "installer-release"]) == 0
+
+
+@pytest.mark.unit
 def test_tool_install_lane_stops_after_first_post_install_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
