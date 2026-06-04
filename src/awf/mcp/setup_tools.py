@@ -86,6 +86,8 @@ def register_setup_tools(
     settings_value: Settings,
 ) -> None:
     """Register first-run setup/start/init/client MCP tools."""
+    # Kept for the shared register_* signature; setup tools resolve config via
+    # host-setup helpers instead of AWF Settings.
     _ = settings_value
 
     @mcp.tool(name="awf_get_setup_status")
