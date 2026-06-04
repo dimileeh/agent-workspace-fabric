@@ -113,6 +113,40 @@ docstrings:
 Add concise behavior-neutral docstrings to those definitions only, re-run the
 focused audit, and run narrow Ruff plus the affected targeted unit tests.
 
+### Iteration 8 Update
+
+Later service-log follow-up commits expanded the PR's Python diff and the
+focused added-line audit now reports 15 PR-added nested helpers/test doubles
+without docstrings:
+
+- `src/awf/service/logs.py::run_service_logs.runner`
+- `src/awf/service/logs.py::_run_streaming_subprocess._handle_stream_broken_pipe`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_BrokenFlushSink`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_BrokenFlushSink.write`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_BrokenFlushSink.flush`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess.__init__`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess.wait`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess.terminate`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess.kill`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_popen`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::success_run`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess.__init__`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::_FollowProcess.wait`
+
+Add concise behavior-neutral docstrings to those definitions only, re-run the
+focused audit, and run narrow Ruff plus targeted service-log tests that cover
+the edited helpers.
+
+Follow-up audit after the first docstring pass exposed one adjacent PR-added
+test without a docstring:
+
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_default_subprocess_runner_executes_command`
+
+Add a concise behavior-neutral docstring to that test only and re-run the same
+focused checks.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

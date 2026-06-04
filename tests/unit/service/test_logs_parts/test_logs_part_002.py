@@ -232,21 +232,29 @@ def test_service_logs_follow_broken_stdout_pipe_terminates_default_process(
     """A closed downstream stdout pipe must not leave the followed process running."""
 
     class _BrokenFlushSink:
+        """Sink that accepts writes but fails when flushed."""
+
         def write(self, text: str) -> int:
+            """Accept streamed text before simulating a closed pipe on flush."""
             return len(text)
 
         def flush(self) -> None:
+            """Raise the downstream pipe closure seen by a streaming writer."""
             raise BrokenPipeError
 
     class _FollowProcess:
+        """Follow process double that waits for explicit termination."""
+
         stdout = io.StringIO("line before downstream closes\n")
         stderr = io.StringIO("")
 
         def __init__(self) -> None:
+            """Track termination and kill calls made by the streaming runner."""
             self.terminated = threading.Event()
             self.killed = False
 
         def wait(self, timeout: float | None = None) -> int:
+            """Return only after the runner terminates the followed process."""
             if not self.terminated.wait(0.25):
                 raise AssertionError(
                     "follow process was not terminated after downstream stdout closed"
@@ -254,15 +262,18 @@ def test_service_logs_follow_broken_stdout_pipe_terminates_default_process(
             return -signal.SIGTERM
 
         def terminate(self) -> None:
+            """Record graceful termination from the streaming runner."""
             self.terminated.set()
 
         def kill(self) -> None:
+            """Record forced termination from the streaming runner."""
             self.killed = True
             self.terminated.set()
 
     processes: list[_FollowProcess] = []
 
     def _popen(_args: list[str], **kwargs: object) -> _FollowProcess:
+        """Create a follow-process double with piped stdout and stderr."""
         assert kwargs["stdout"] == subprocess.PIPE
         assert kwargs["stderr"] == subprocess.PIPE
         process = _FollowProcess()
@@ -403,6 +414,7 @@ def test_service_logs_redacts_compose_env_provider_secret_from_captured_output(
     )
 
     def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return captured output containing provider secrets and visible text."""
         return subprocess.CompletedProcess(
             args,
             returncode=0,
@@ -441,11 +453,15 @@ def test_service_logs_follow_redacts_compose_env_provider_secret_from_streamed_o
     )
 
     class _FollowProcess:
+        """Follow process double that streams provider secrets."""
+
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Expose stdout and stderr streams containing secret-bearing lines."""
             self.stdout = io.StringIO(f"stdout bare {secret} and {visible_value}\n")
             self.stderr = io.StringIO(f"stderr bare {secret}\n")
 
         def wait(self, timeout: float | None = None) -> int:
+            """Finish immediately after the streaming threads read both pipes."""
             assert timeout is None
             return 0
 
@@ -484,6 +500,7 @@ def test_service_logs_follow_success_discards_uncaptured_output() -> None:
 
 @pytest.mark.unit
 def test_service_logs_default_subprocess_runner_executes_command() -> None:
+    """Exercise the default captured subprocess runner with a tiny command."""
     result = _run_subprocess(
         [sys.executable, "-c", "print('logs-ok')"],
         check=False,

@@ -171,6 +171,7 @@ def run_service_logs(
             text: Literal[True],
             env: Mapping[str, str] | None = None,
         ) -> CompletedProcessLike:
+            """Run logs with the collected exact-secret redaction context."""
             return _run_subprocess(
                 args,
                 check=check,
@@ -277,6 +278,7 @@ def _run_streaming_subprocess(
     stream_broken_pipe = threading.Event()
 
     def _handle_stream_broken_pipe() -> None:
+        """Stop the streaming child after the downstream pipe closes."""
         stream_broken_pipe.set()
         _terminate_streaming_subprocess(process)
 
