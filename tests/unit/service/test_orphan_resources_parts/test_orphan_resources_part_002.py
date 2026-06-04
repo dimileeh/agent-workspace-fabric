@@ -640,7 +640,7 @@ def test_sweep_classified_orphans_scans_classifies_and_reaps(
     )
 
     async def _workspace_view(_session: object, **kwargs: object) -> WorkspaceIdView:
-        assert kwargs["min_retention_hours"] == 0
+        assert kwargs["min_retention_hours"] == 72.0
         return _ok_view()
 
     monkeypatch.setattr(
@@ -657,6 +657,7 @@ def test_sweep_classified_orphans_scans_classifies_and_reaps(
             compose_teardown=teardown,
             enabled=True,
             min_age_hours=0,
+            min_retention_hours=72.0,
             run_subprocess=_run,
         )
     )

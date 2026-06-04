@@ -961,9 +961,15 @@ async def sweep_classified_orphans(
     compose_teardown: OrphanResourceComposeTeardown,
     enabled: bool,
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
     run_subprocess: SubprocessRun | None = None,
 ) -> OrphanReapResult:
-    """Scan, classify, and reap readiness-classified orphan resources."""
+    """Scan, classify, and reap readiness-classified orphan resources.
+
+    ``min_retention_hours`` protects retained terminal salvage during
+    classification, while ``min_age_hours`` only guards row-less missing
+    resources during reaping.
+    """
     resolved_run_subprocess = subprocess.run if run_subprocess is None else run_subprocess
     docker_scan = await asyncio.to_thread(
         scan_docker_resources,
@@ -976,7 +982,7 @@ async def sweep_classified_orphans(
         async with session_scope(session_factory) as session:
             workspace_view = await workspace_id_view_from_session(
                 session,
-                min_retention_hours=min_age_hours,
+                min_retention_hours=min_retention_hours,
             )
     except SQLAlchemyError as exc:
         _log.warning(

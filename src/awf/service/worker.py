@@ -262,6 +262,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             compose_teardown=classified_orphan_teardown,
             enabled=settings.auto_cleanup_orphans,
             min_age_hours=settings.orphan_reconcile_min_age_hours,
+            min_retention_hours=settings.completed_workspace_retention_hours,
         )
 
     worker = ControlWorker(

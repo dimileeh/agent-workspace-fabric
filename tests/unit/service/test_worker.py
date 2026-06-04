@@ -27,6 +27,7 @@ def _settings(
     database_url: str | None = None,
     github_token: str | None = None,
     planning_max_iterations_default: int = 4,
+    completed_workspace_retention_hours: float = 168.0,
     auto_cleanup_orphans: bool = False,
     classified_orphan_reap_scan_interval_seconds: float = 3600.0,
     orphan_reconcile_max_per_scan: int = 50,
@@ -49,6 +50,7 @@ def _settings(
         agent_wall_timeout_seconds=111,
         agent_idle_timeout_seconds=22,
         planning_max_iterations_default=planning_max_iterations_default,
+        completed_workspace_retention_hours=completed_workspace_retention_hours,
         auto_cleanup_orphans=auto_cleanup_orphans,
         classified_orphan_reap_scan_interval_seconds=(classified_orphan_reap_scan_interval_seconds),
         orphan_reconcile_max_per_scan=orphan_reconcile_max_per_scan,
@@ -785,6 +787,7 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
         tmp_path,
         auto_cleanup_orphans=auto_cleanup_orphans,
         classified_orphan_reap_scan_interval_seconds=123.0,
+        completed_workspace_retention_hours=72.0,
         orphan_reconcile_max_per_scan=9,
         orphan_reconcile_min_age_hours=4.0,
     )
@@ -809,6 +812,7 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     assert created["classified_sweep_kwargs"]["compose_teardown"] is classified_teardown
     assert created["classified_sweep_kwargs"]["enabled"] is auto_cleanup_orphans
     assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
+    assert created["classified_sweep_kwargs"]["min_retention_hours"] == 72.0
 
 
 @pytest.mark.unit
