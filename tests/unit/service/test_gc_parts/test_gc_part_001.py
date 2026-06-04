@@ -1253,7 +1253,7 @@ async def test_single_workspace_gc_ignore_retention_still_preserves_unmerged_wor
 
 
 @pytest.mark.unit
-async def test_single_workspace_gc_tears_down_compose_for_preserved_workspace(
+async def test_single_workspace_gc_skips_fallback_compose_for_unmerged_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1313,16 +1313,8 @@ async def test_single_workspace_gc_tears_down_compose_for_preserved_workspace(
     ]
     assert result.plan.preserved[0].compose_project_name == "awf_preserved_compose"
     assert result.plan.preserved[0].compose_file_path == str(compose_file)
-    assert result.compose_teardowns[workspace_id].reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
-    assert calls == [
-        (
-            workspace_id,
-            COMPLETED_PR_NOT_MERGED,
-            "awf_preserved_compose",
-            str(compose_file),
-            compose_file.parent,
-        )
-    ]
+    assert result.compose_teardowns == {}
+    assert calls == []
     assert worktree.exists()
     assert compose_file.exists()
 
@@ -1395,6 +1387,76 @@ async def test_single_workspace_gc_tears_down_compose_for_retained_merged_worksp
     ]
     assert worktree.exists()
     assert compose_file.exists()
+
+
+@pytest.mark.unit
+async def test_single_workspace_retained_merged_fallback_releases_runtime_side_effects(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        pr=True,
+        pr_merge_sha="a" * 40,
+    )
+    await _issue_gc_secret_lease(session_factory, workspace_id, now=now)
+    async with session_factory() as session:
+        repo = ResourceReservationRepository(session)
+        attempt_id = await _task_attempt_for_workspace(session, workspace_id)
+        await repo.create(
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            node_id="node_1",
+            steady_cpu=1.0,
+            steady_memory_gb=2.0,
+            peak_cpu=2.0,
+            peak_memory_gb=4.0,
+            disk_mb=1024,
+            phase="steady",
+            reserved_at=now - timedelta(hours=1),
+        )
+        await session.commit()
+
+    async def _compose_teardown(
+        _candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=168,
+        compose_teardown=_compose_teardown,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert [preserved.reason_code for preserved in result.plan.preserved] == [
+        WORKSPACE_WITHIN_RETENTION,
+    ]
+    assert result.compose_teardowns[workspace_id].reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert result.to_dict()["secret_leases"] == {
+        workspace_id: {"revoked_count": 1, "reason_code": "TERMINAL_GC"}
+    }
+    assert result.reservation_releases[workspace_id]["released_count"] == 1
+    async with session_factory() as session:
+        leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
+        reservation = await ResourceReservationRepository(session).active_for_workspace(
+            workspace_id
+        )
+
+    assert leases[0].status == "revoked"
+    assert leases[0].revoke_reason_code == "TERMINAL_GC"
+    assert reservation is None
 
 
 @pytest.mark.unit
@@ -1535,7 +1597,7 @@ async def test_single_workspace_gc_triage_preserved_skips_fallback_compose_teard
 
 
 @pytest.mark.unit
-async def test_single_workspace_fallback_compose_teardown_releases_runtime_side_effects(
+async def test_single_workspace_unmerged_pr_skips_fallback_compose_and_runtime_side_effects(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1574,6 +1636,15 @@ async def test_single_workspace_fallback_compose_teardown_releases_runtime_side_
             reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
         )
 
+    calls: list[str] = []
+
+    async def _tracked_compose_teardown(
+        candidate: object,
+    ) -> WorkspaceGCComposeTeardownResult:
+        assert isinstance(candidate, gc.WorkspaceGCCandidate)
+        calls.append(candidate.reason_code)
+        return await _compose_teardown(candidate)
+
     result = await run_workspace_filesystem_gc(
         session_factory,
         work_dir=work_dir,
@@ -1581,7 +1652,7 @@ async def test_single_workspace_fallback_compose_teardown_releases_runtime_side_
         execute=True,
         min_age_hours=168,
         ignore_retention=True,
-        compose_teardown=_compose_teardown,
+        compose_teardown=_tracked_compose_teardown,
         now=now,
     )
 
@@ -1589,19 +1660,19 @@ async def test_single_workspace_fallback_compose_teardown_releases_runtime_side_
     assert [preserved.reason_code for preserved in result.plan.preserved] == [
         COMPLETED_PR_NOT_MERGED,
     ]
-    assert result.to_dict()["secret_leases"] == {
-        workspace_id: {"revoked_count": 1, "reason_code": "TERMINAL_GC"}
-    }
-    assert result.reservation_releases[workspace_id]["released_count"] == 1
+    assert calls == []
+    assert result.compose_teardowns == {}
+    assert result.secret_lease_revocations == {}
+    assert result.reservation_releases == {}
     async with session_factory() as session:
         leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
         reservation = await ResourceReservationRepository(session).active_for_workspace(
             workspace_id
         )
 
-    assert leases[0].status == "revoked"
-    assert leases[0].revoke_reason_code == "TERMINAL_GC"
-    assert reservation is None
+    assert leases[0].status == "issued"
+    assert leases[0].revoke_reason_code is None
+    assert reservation is not None
 
 
 @pytest.mark.unit

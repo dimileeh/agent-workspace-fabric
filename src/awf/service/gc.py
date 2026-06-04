@@ -113,11 +113,7 @@ WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
 COMPOSE_TEARDOWN_CALLBACK_RAISED = "COMPOSE_TEARDOWN_CALLBACK_RAISED"
 
-_PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES = frozenset(
-    {
-        COMPLETED_PR_NOT_MERGED,
-    }
-)
+_PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES: frozenset[str] = frozenset()
 
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
@@ -1116,9 +1112,11 @@ def _workspace_ids_after_compose_teardown(
         if teardown is None or teardown.ok:
             workspace_ids.append(candidate.workspace_id)
     # Non-candidate compose teardowns come from the single-workspace fallback
-    # path only: missing rows or preserved terminal-status workspaces. Once
-    # compose teardown succeeds there, release runtime side effects even when
-    # filesystem paths remain under retention.
+    # path only: missing rows or explicitly allowed preserved terminal-status
+    # workspaces. Runtime side effects are released only after successful
+    # compose teardown; failed teardown keeps leases/reservations in place so
+    # running containers do not lose credentials while the result records the
+    # failed compose outcome for monitoring.
     for workspace_id, teardown in compose_teardowns.items():
         if workspace_id not in candidate_ids and teardown.ok:
             workspace_ids.append(workspace_id)
