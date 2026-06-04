@@ -470,7 +470,7 @@ async def test_completed_workspace_gc_logs_compose_teardown_when_gc_raises_after
     assert compose_calls == [("candidate_project", compose_file, ws_id, True)]
     assert auth_teardowns == [(work_dir, ws_id)]
     assert any(
-        record.get("event") == "monitor.filesystem_gc_failed"
+        record.get("event") == "monitor.filesystem_gc_raised"
         and record.get("workspace_id") == ws_id
         for record in captured
     )
@@ -561,7 +561,7 @@ async def test_completed_workspace_gc_tracks_callback_raised_when_gc_raises_afte
     assert compose_calls == [("candidate_project", compose_file, ws_id, True)]
     assert auth_teardowns == []
     assert any(
-        record.get("event") == "monitor.filesystem_gc_failed"
+        record.get("event") == "monitor.filesystem_gc_raised"
         and record.get("workspace_id") == ws_id
         for record in captured
     )
@@ -662,6 +662,11 @@ async def test_completed_workspace_gc_tracks_shared_callback_failure_result_when
         record for record in captured if record.get("event") == "monitor.compose_teardown_failed"
     ]
     assert failed
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_raised"
+        and record.get("workspace_id") == ws_id
+        for record in captured
+    )
     assert compose_results[ws_id].error is not None
     assert failed[0].get("error") == compose_results[ws_id].error
 

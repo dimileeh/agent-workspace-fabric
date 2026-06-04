@@ -535,7 +535,7 @@ async def test_completed_filesystem_gc_exception_is_logged_and_swallowed(
         await runner._gc_completed_workspace_filesystem("ws_gc")
 
     assert any(
-        event.get("event") == "monitor.filesystem_gc_failed"
+        event.get("event") == "monitor.filesystem_gc_raised"
         and event.get("workspace_id") == "ws_gc"
         for event in captured
     )

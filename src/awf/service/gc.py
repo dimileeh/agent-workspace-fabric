@@ -105,6 +105,10 @@ _workspace_has_pr_merge_predicate = _gc_predicates.workspace_has_pr_merge_predic
 _workspace_pr_not_merged_predicate = _gc_predicates.workspace_pr_not_merged_predicate
 
 DEFAULT_MIN_AGE_HOURS = 168
+# Bound Docker compose teardown fan-out during service GC batches. The work is
+# slow enough to benefit from limited overlap, but unbounded bursts can saturate
+# small Docker daemons.
+_COMPOSE_TEARDOWN_CONCURRENCY_LIMIT = 4
 # Preserved-failed workspaces (work was kept for triage) are otherwise retained
 # indefinitely. Once they age past this cap their pressure dirs are reclaimed
 # while the durable record (DB row, events, logs) is kept. Far above the 168 h
@@ -906,14 +910,19 @@ async def _run_gc_compose_teardowns(
     candidates = list(plan.candidates)
     if not candidates and fallback_candidate is not None:
         candidates = [fallback_candidate]
+    if not candidates:
+        return compose_teardowns
+
+    semaphore = asyncio.Semaphore(_COMPOSE_TEARDOWN_CONCURRENCY_LIMIT)
 
     async def _teardown_candidate(
         candidate: WorkspaceGCCandidate,
     ) -> tuple[str, WorkspaceGCComposeTeardownResult | None]:
-        try:
-            teardown = await _run_compose_teardown(candidate, compose_teardown)
-        except Exception as exc:
-            teardown = compose_teardown_result_for_exception(exc)
+        async with semaphore:
+            try:
+                teardown = await _run_compose_teardown(candidate, compose_teardown)
+            except Exception as exc:
+                teardown = compose_teardown_result_for_exception(exc)
         return candidate.workspace_id, teardown
 
     results = await asyncio.gather(*(_teardown_candidate(candidate) for candidate in candidates))

@@ -878,8 +878,10 @@ async def _gc_completed_workspace_filesystem(
             compose_teardown=gc_compose_teardown,
         )
     except Exception as exc:
+        # Keep the historical alert signal distinct from ordinary partial GC
+        # failures logged below.
         _log.warning(
-            "monitor.filesystem_gc_failed",
+            "monitor.filesystem_gc_raised",
             workspace_id=workspace_id,
             error=repr(exc)[:400],
         )

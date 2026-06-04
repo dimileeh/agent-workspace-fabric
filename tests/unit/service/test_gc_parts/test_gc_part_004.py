@@ -528,11 +528,12 @@ async def test_batch_terminal_gc_compose_teardown_failure_blocks_runtime_side_ef
 
 
 @pytest.mark.unit
-async def test_gc_compose_teardowns_start_later_candidates_while_first_is_pending(
+async def test_gc_compose_teardowns_are_bounded(
     tmp_path: Path,
 ) -> None:
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    limit = gc._COMPOSE_TEARDOWN_CONCURRENCY_LIMIT
 
     def _path(workspace_id: str, kind: str) -> gc.WorkspaceGCPath:
         return gc.WorkspaceGCPath(
@@ -554,47 +555,62 @@ async def test_gc_compose_teardowns_start_later_candidates_while_first_is_pendin
             auth=_path(workspace_id, "auth"),
         )
 
-    first_started = asyncio.Event()
-    second_started = asyncio.Event()
-    release_first = asyncio.Event()
+    blocked_ids = [f"ws-{index}" for index in range(limit)]
+    overflow_id = f"ws-{limit}"
+    blocked_started = {workspace_id: asyncio.Event() for workspace_id in blocked_ids}
+    overflow_started = asyncio.Event()
+    release_blocked = asyncio.Event()
     started: list[str] = []
+    active = 0
+    max_active = 0
 
     async def _compose_teardown(
         candidate: gc.WorkspaceGCCandidate,
     ) -> WorkspaceGCComposeTeardownResult:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
         started.append(candidate.workspace_id)
-        if candidate.workspace_id == "ws-first":
-            first_started.set()
-            await release_first.wait()
-        if candidate.workspace_id == "ws-second":
-            second_started.set()
-        return WorkspaceGCComposeTeardownResult(
-            status="succeeded",
-            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
-        )
+        try:
+            if candidate.workspace_id in blocked_started:
+                blocked_started[candidate.workspace_id].set()
+                await release_blocked.wait()
+            if candidate.workspace_id == overflow_id:
+                overflow_started.set()
+            return WorkspaceGCComposeTeardownResult(
+                status="succeeded",
+                reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+            )
+        finally:
+            active -= 1
 
+    candidates = [_candidate(workspace_id) for workspace_id in [*blocked_ids, overflow_id]]
     plan = gc.WorkspaceGCPlan(
         work_dir=work_dir,
         min_age_hours=24,
         cutoff_at=now,
         include_statuses=(WorkspaceStatus.completed.value,),
         exclude_statuses=(),
-        candidates=[_candidate("ws-first"), _candidate("ws-second")],
+        candidates=candidates,
         preserved=[],
     )
 
     task = asyncio.create_task(gc._run_gc_compose_teardowns(plan, _compose_teardown))
     try:
-        await asyncio.wait_for(first_started.wait(), timeout=1)
-        await asyncio.wait_for(second_started.wait(), timeout=1)
+        for started_event in blocked_started.values():
+            await asyncio.wait_for(started_event.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert overflow_id not in started
+        assert max_active == limit
     finally:
-        release_first.set()
+        release_blocked.set()
         with suppress(Exception):
             await asyncio.wait_for(task, timeout=1)
 
+    await asyncio.wait_for(overflow_started.wait(), timeout=1)
     results = task.result()
-    assert started == ["ws-first", "ws-second"]
-    assert list(results) == ["ws-first", "ws-second"]
+    assert started == [candidate.workspace_id for candidate in candidates]
+    assert list(results) == [candidate.workspace_id for candidate in candidates]
     assert all(result.ok for result in results.values())
 
 
