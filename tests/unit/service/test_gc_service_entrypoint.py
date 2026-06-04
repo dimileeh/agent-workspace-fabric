@@ -333,6 +333,54 @@ async def test_service_gc_reaps_superseded_claude_bases_when_enabled(
 
 
 @pytest.mark.unit
+async def test_service_gc_reaps_base_pinned_only_by_deleted_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Regression (PRRT_kwDOSJAM6s6HIHN6): when the candidate being deleted holds the
+    # last ``base.signature`` pin on a superseded base, the base must be reclaimed in
+    # the SAME execute pass. The reaper has to run *after* the candidate auth dir (its
+    # pin) is removed; if it runs first the pin still protects the base and the
+    # ~1.7GB base leaks until a second GC run.
+    work_dir = tmp_path / "service"
+    host_home = tmp_path / "host-home"  # no ~/.claude → no current-signature base
+    host_home.mkdir()
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    signature = "sigsuperseded000"
+    superseded = _make_superseded_base(work_dir, signature)
+    workspace_id = await _completed_merged_workspace(
+        session_factory,
+        updated_at=now - timedelta(hours=200),
+    )
+    # The candidate being GC'd is the sole pin on the superseded base.
+    auth = work_dir / "auth" / workspace_id
+    _write(auth / "claude" / "base.signature", signature)
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    manager = _RecordingComposeManager()
+
+    result = await run_service_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        template_path=_TEMPLATE,
+        execute=True,
+        min_age_hours=24,
+        host_home=host_home,
+        reap_claude_bases=True,
+        compose_manager=manager,  # type: ignore[arg-type]
+        now=now,
+    )
+
+    # The candidate auth dir (and its pin) is gone, so the base is no longer protected
+    # and is reaped in this pass — not left behind for a second GC run.
+    assert not auth.exists()
+    assert result.claude_base_reap is not None
+    assert result.claude_base_reap["reaped"] == [signature]
+    assert not superseded.parent.exists()
+    assert result.status == "succeeded"
+
+
+@pytest.mark.unit
 async def test_service_gc_omits_base_reap_when_disabled(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

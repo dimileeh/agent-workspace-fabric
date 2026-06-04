@@ -569,11 +569,11 @@ async def run_terminal_workspace_gc(
         now=current_time,
     )
     # The shared-base reaper is a host-wide step independent of the per-workspace
-    # candidates, run on both dry-run and execute so the dry-run plan previews which
-    # superseded bases would be reclaimed (the reaper honors the GC ``execute`` flag
-    # via its own closure).
-    claude_base_reap_result = await claude_base_reap() if claude_base_reap is not None else None
+    # candidates. On a dry run nothing is deleted, so previewing which superseded
+    # bases would be reclaimed against the current on-disk state is order-independent
+    # (the reaper honors the GC ``execute`` flag via its own closure).
     if not execute:
+        claude_base_reap_result = await claude_base_reap() if claude_base_reap is not None else None
         return _gc_result(
             plan=plan,
             dry_run=True,
@@ -612,6 +612,11 @@ async def run_terminal_workspace_gc(
     companion_image_prune_result = (
         await companion_image_prune() if companion_image_prune is not None else None
     )
+    # Reap superseded shared bases *after* the candidate auth dirs (and their
+    # ``base.signature`` pins) are deleted above, so a base pinned only by a workspace
+    # just reclaimed in this pass is reaped now instead of leaking until the next GC
+    # (PRRT_kwDOSJAM6s6HIHN6).
+    claude_base_reap_result = await claude_base_reap() if claude_base_reap is not None else None
     return _gc_result(
         plan=plan,
         dry_run=False,
