@@ -18,6 +18,7 @@ import yaml
 
 from awf.common.redaction import redact_secrets
 from awf.service.config import (
+    COMPOSE_ENV_FILE_OMITTED,
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
     LOCAL_SERVICE_COMPOSE_FILE,
     ComposeEnvFileInput,
@@ -145,19 +146,24 @@ def run_service_logs(
     tail: int = DEFAULT_LOG_TAIL,
     follow: bool = False,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
-    compose_env_file: ComposeEnvFileInput = None,
+    compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
     service_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
 ) -> ServiceLogsResult:
     """Run ``docker compose logs`` for the local service stack."""
 
     capture_output = not follow
+    discover_default_compose_env_file = compose_file == LOCAL_SERVICE_COMPOSE_FILE
     compose_file = _resolve_local_service_compose_file(compose_file)
     if compose_file == LOCAL_SERVICE_COMPOSE_FILE and not compose_file.exists():
         raise ServiceLogsError(
             returncode=1, detail=_local_service_compose_not_found_message(compose_file)
         )
-    resolved_compose_env_file = _resolve_service_log_compose_env_file(compose_env_file)
+    resolved_compose_env_file = _resolve_service_log_compose_env_file(
+        compose_env_file,
+        compose_file=compose_file,
+        discover_default_compose_env_file=discover_default_compose_env_file,
+    )
     extra_secrets = _service_log_secret_values(service_environ, resolved_compose_env_file)
     if run_subprocess is None:
 
@@ -551,9 +557,19 @@ def _service_log_secret_values(
 
 def _resolve_service_log_compose_env_file(
     compose_env_file: ComposeEnvFileInput,
+    *,
+    compose_file: Path | None = None,
+    discover_default_compose_env_file: bool = False,
 ) -> Path | None:
     """Resolve omitted service-log env-file input to the local default."""
     if isinstance(compose_env_file, ComposeEnvFileOmitted):
+        if discover_default_compose_env_file and compose_file is not None:
+            candidate = compose_file.parent / LOCAL_SERVICE_COMPOSE_ENV_FILE.name
+            if candidate.exists():
+                return candidate
+            return None
+        if compose_file is not None:
+            return None
         return LOCAL_SERVICE_COMPOSE_ENV_FILE
     return compose_env_file
 

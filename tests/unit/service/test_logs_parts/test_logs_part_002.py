@@ -937,9 +937,48 @@ def test_service_logs_resolves_omitted_compose_env_file_before_subprocess(
         run_subprocess=success_run,
     )
 
-    assert calls[0][2:4] == ["--env-file", str(LOCAL_SERVICE_COMPOSE_ENV_FILE)]
+    assert calls[0][2:4] == ["--env-file", str(compose_env_file)]
     assert secret not in result.stdout
     assert "<redacted>" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_logs_default_resolves_adjacent_compose_env_file_for_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Default helper calls must redact provider secrets from the discovered compose env."""
+    secret = "default-compose-only-provider-secret"
+    compose_file = tmp_path / LOCAL_SERVICE_COMPOSE_FILE
+    compose_env_file = tmp_path / LOCAL_SERVICE_COMPOSE_ENV_FILE
+    nested_dir = tmp_path / "nested" / "project"
+    compose_file.parent.mkdir(parents=True)
+    nested_dir.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env_file.write_text(f"ANTHROPIC_AUTH_TOKEN={secret}\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Record subprocess arguments and emit the compose-only secret bare."""
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout=f"{secret}\n", stderr="")
+
+    monkeypatch.chdir(nested_dir)
+
+    result = run_service_logs(services=[ServiceLogName.api], run_subprocess=success_run)
+
+    assert calls[0][2:4] == ["--env-file", str(compose_env_file)]
+    assert calls[0][4:6] == ["-f", str(compose_file)]
+    assert secret not in result.stdout
+    assert "<redacted>" in result.stdout
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_env_file=None,
+        run_subprocess=success_run,
+    )
+
+    assert calls[1][2:4] == ["-f", str(compose_file)]
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

@@ -127,6 +127,13 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 MCP/service-log scope and only
   changes the explanatory MCP offset comment, followed service-log teardown, a
   focused regression, and this plan/validation evidence.
+- Review thread `PRRT_kwDOSJAM6s6HNslE` identified that direct
+  `run_service_logs()` callers using default local-service compose discovery
+  still default `compose_env_file` to explicit `None`, so exact-secret
+  collection skips the adjacent `docker/compose/.env` provider credentials.
+- This repair remains inside the existing T17 service-log redaction scope and
+  only changes default service-log env-file resolution, a focused regression,
+  and this plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -166,6 +173,9 @@ credential entry, or unrelated refactors are included.
   values loaded from the selected Compose env file, even when those values do
   not match token shape patterns and appear without an assignment or bearer
   prefix.
+- Default `run_service_logs()` local-service compose discovery reads the
+  adjacent Compose env file for exact-secret redaction while preserving explicit
+  `compose_env_file=None` as no env file.
 - Followed service-log streaming replaces invalid bytes before redaction so
   non-UTF-8 container output cannot terminate a stream reader.
 - Followed service-log streaming terminates the followed subprocess at most
@@ -1111,6 +1121,51 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py -q -k 'compose_env_file_provider_secret or custom_compose_env_secret' --tb=short -ra
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HNslE` Service Log Default Env Sentinel Plan
+
+### Problem Statement And Scope
+
+The inline review reports that direct `run_service_logs()` callers using the
+helper defaults still pass `compose_env_file=None`. That means the exact-secret
+redaction context treats the call as explicit "no env file" and skips
+provider secrets in the adjacent default `docker/compose/.env`, even though the
+same helper resolves the default local-service compose file from the checkout.
+
+This repair is limited to default service-log env-file resolution and exact
+secret redaction for direct helper callers. It does not change CLI
+path-verification behavior, explicit `compose_env_file=None`, MCP log
+redaction, provider precedence, or broad validation ownership.
+
+### Requirements Checklist
+
+- Direct default `run_service_logs()` resolves the adjacent default Compose
+  env file when the default local-service compose file is discovered.
+- Bare provider secret values from that default env file are exact-redacted
+  from captured service-log output.
+- Explicit `compose_env_file=None` remains an explicit no-env-file choice.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing service-log regression where a nested caller relies on
+   default compose discovery and the adjacent default `.env` contains a bare
+   provider secret emitted by Docker logs.
+2. Update `run_service_logs()` to use omitted env-file semantics by default and
+   resolve that sentinel relative to the resolved default compose file.
+3. Run the targeted regression, adjacent service-log redaction checks, and
+   narrow ruff/mypy checks for touched files. Broad AWF/GitHub validation
+   remains owned by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_default_resolves_adjacent_compose_env_file_for_redaction -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'default_resolves_adjacent_compose_env_file_for_redaction or redacts_compose_env_provider_secret or resolves_omitted_compose_env_file'
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
 
 ## Review-Level Comment `issue:4620175517` Dead Wrapper And Secret-Key Helper Plan

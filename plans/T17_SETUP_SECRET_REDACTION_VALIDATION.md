@@ -33,6 +33,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: Captured and followed service-log output redact exact provider
   credential values loaded from the selected Compose env file when the log emits
   the bare value without an assignment or bearer prefix.
+- Complete: Default `run_service_logs()` local-service compose discovery reads
+  the adjacent Compose env file for exact-secret redaction while explicit
+  `compose_env_file=None` remains no-env-file behavior.
 - Complete: Followed service-log streaming replaces invalid bytes before
   redaction so non-UTF-8 container output cannot terminate a stream reader.
 - Complete: MCP workspace log reads do not skip data when the expanded log read
@@ -1944,6 +1947,60 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/provider_readiness.p
 
 uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/awf/common/token_patterns.py
 # Success: no issues found in 2 source files
+```
+
+## Gaps
+
+None found.
+
+## Review Thread `PRRT_kwDOSJAM6s6HNslE` Service Log Default Env Sentinel Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: direct default `run_service_logs()` resolves an adjacent default
+  Compose env file when default local-service compose discovery finds
+  `docker/compose/local-service.yml`.
+- Complete: captured service-log output exact-redacts bare provider secret
+  values loaded from that adjacent Compose env file.
+- Complete: explicit `compose_env_file=None` remains an explicit no-env-file
+  choice and keeps `--env-file` out of the Docker Compose command.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_default_resolves_adjacent_compose_env_file_for_redaction -q --tb=short -ra
+# failed: default run_service_logs() built `docker compose -f ... logs` without `--env-file`
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_default_resolves_adjacent_compose_env_file_for_redaction -q --tb=short -ra
+# 1 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'default_resolves_adjacent_compose_env_file_for_redaction or redacts_compose_env_provider_secret or resolves_omitted_compose_env_file or finds_default_compose_file_from_parent_directory or defaults_to_relative_compose_path_in_cwd' --tb=short -ra
+# 7 passed, 30 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_001.py::test_service_logs_returns_captured_output_for_non_follow_success tests/unit/service/test_logs_parts/test_logs_part_001.py::test_service_logs_passes_derived_compose_postgres_password_to_subprocess_env tests/unit/service/test_logs_parts/test_logs_part_001.py::test_service_logs_omits_env_when_caller_matches_interpolation_value_and_env_file_is_stale -q --tb=short -ra
+# 3 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
 ```
 
 ## Gaps
