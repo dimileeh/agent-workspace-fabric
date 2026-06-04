@@ -165,3 +165,36 @@ validation, provenance, logs, and merge gating after completion.
 
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HCi01
+
+### Requirement Status
+
+- Complete: Added focused regression coverage in
+  `tests/unit/scripts/test_first_run_smoke.py` showing an early environmental
+  skip still allows the setup dry-run JSON proof command to run.
+- Complete: `_run_source_command_sequence` now stops only on hard `failed`
+  results, preserving reported `skipped` results while continuing to the
+  source-checkout proof attempt.
+- Complete: Preserved fail-fast behavior for hard failures; the existing
+  post-install failure regression still passes.
+- Complete: Environmental skip classification remains unchanged.
+
+### Evidence
+
+- Confirmed pre-fix focused regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_sequence_runs_setup_proof_after_environmental_skip -q`
+  failed because the setup dry-run JSON command was never invoked after the
+  early environmental skip.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_sequence_runs_setup_proof_after_environmental_skip tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure -q`
+  passed with `2 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+- File-scoped format check:
+  `uv run --python 3.12 --extra dev ruff format --check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.

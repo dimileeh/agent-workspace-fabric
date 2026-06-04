@@ -710,7 +710,7 @@ def _run_source_command_sequence(
         completed = runner(command, timeout_seconds)
         result = _source_command_result(lane, command, completed, checkout)
         results.append(result)
-        if result.status != "passed":
+        if result.status == "failed":
             break
     return tuple(results)
 

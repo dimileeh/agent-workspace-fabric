@@ -192,3 +192,43 @@ while making duplicate lane arguments idempotent before execution.
   must pass.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## Review Repair Iteration: PRRT_kwDOSJAM6s6HCi01
+
+### Problem Statement And Scope
+
+Inline review thread `PRRT_kwDOSJAM6s6HCi01` reports that an environmental
+skip from an early source-lane command probe stops `_run_source_command_sequence`
+before the final setup dry-run JSON command can prove the selected
+`--source-checkout`. The fix is scoped to the source/post-install command
+sequence control flow in `scripts/first_run_smoke.py`.
+
+### Requirements Checklist
+
+- Add focused regression coverage showing an early environmental skip still
+  allows the setup dry-run JSON proof command to run.
+- Preserve fail-fast behavior for hard command failures.
+- Keep environmental skip classification unchanged.
+- Avoid broad AWF/GitHub validation in the agent phase; AWF owns full
+  validation after completion.
+
+### Implementation Steps
+
+1. Add a unit test in `tests/unit/scripts/test_first_run_smoke.py` for
+   `_run_source_command_sequence` continuing after an environmental skip and
+   reaching a passing setup dry-run JSON command.
+2. Run the focused new test and confirm it fails before implementation.
+3. Update `_run_source_command_sequence` to stop only on hard failures.
+4. Re-run the focused new test plus the existing post-install fail-fast
+   regression.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_sequence_runs_setup_proof_after_environmental_skip -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_command_sequence_runs_setup_proof_after_environmental_skip tests/unit/scripts/test_first_run_smoke.py::test_tool_install_lane_stops_after_first_post_install_failure -q`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.

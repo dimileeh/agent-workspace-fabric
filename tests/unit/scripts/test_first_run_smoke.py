@@ -318,6 +318,72 @@ def test_source_command_result_skips_environmental_dependency_failures(
 
 
 @pytest.mark.unit
+def test_source_command_sequence_runs_setup_proof_after_environmental_skip(
+    tmp_path: Path,
+) -> None:
+    """An early environmental skip must not bypass the source-checkout proof."""
+    checkout = tmp_path / "checkout"
+    outside = tmp_path / "outside"
+    checkout.mkdir()
+    outside.mkdir()
+    help_command = smoke.CommandSpec(
+        argv=("uv", "run", "--project", str(checkout), "awf", "--help"),
+        env={},
+        cwd=outside,
+    )
+    setup_command = smoke.CommandSpec(
+        argv=(
+            "uv",
+            "run",
+            "--project",
+            str(checkout),
+            "awf",
+            "setup",
+            "--dry-run",
+            "--source-checkout",
+            str(checkout),
+            "--format",
+            "json",
+        ),
+        env={},
+        cwd=outside,
+    )
+    calls: list[smoke.CommandSpec] = []
+
+    def runner(
+        command: smoke.CommandSpec,
+        _timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command.argv == help_command.argv:
+            return subprocess.CompletedProcess(
+                args=command.argv,
+                returncode=1,
+                stdout="",
+                stderr="error: failed to fetch dependency\n",
+            )
+        payload = {"details": {"source_checkout": {"root": str(checkout.resolve())}}}
+        return subprocess.CompletedProcess(
+            args=command.argv,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    results = smoke._run_source_command_sequence(
+        smoke.Lane.SOURCE_UV_RUN,
+        (help_command, setup_command),
+        checkout=checkout,
+        timeout_seconds=5,
+        runner=runner,
+    )
+
+    assert [command.argv for command in calls] == [help_command.argv, setup_command.argv]
+    assert [result.status for result in results] == ["skipped", "passed"]
+    assert results[-1].source_checkout == {"root": str(checkout.resolve())}
+
+
+@pytest.mark.unit
 def test_run_command_reports_timeout_as_failed_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
