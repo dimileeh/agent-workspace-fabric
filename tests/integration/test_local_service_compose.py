@@ -255,6 +255,9 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS"] == (
             "${AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS:-3600}"
         )
+        assert environment["AWF_CLASSIFIED_ORPHAN_REAP_SCAN_INTERVAL_SECONDS"] == (
+            "${AWF_CLASSIFIED_ORPHAN_REAP_SCAN_INTERVAL_SECONDS:-3600}"
+        )
         assert environment["AWF_ORPHAN_RECONCILE_MAX_PER_SCAN"] == (
             "${AWF_ORPHAN_RECONCILE_MAX_PER_SCAN:-50}"
         )

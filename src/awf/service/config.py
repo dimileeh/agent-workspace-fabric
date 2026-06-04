@@ -103,6 +103,9 @@ class ServiceSettings:
     workspace_cleanup_batch_limit: int = DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT
     auto_cleanup_orphans: bool = False
     orphan_reconcile_scan_interval_seconds: float = DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS
+    classified_orphan_reap_scan_interval_seconds: float = (
+        DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS
+    )
     orphan_reconcile_max_per_scan: int = DEFAULT_ORPHAN_RECONCILE_LIMIT
     orphan_reconcile_min_age_hours: float = DEFAULT_ORPHAN_RECONCILE_MIN_AGE_HOURS
     network_posture_open_legacy_cutoff: datetime | None = None
@@ -240,6 +243,9 @@ def resolve_service_settings(
         workspace_cleanup_batch_limit=settings.workspace_cleanup_batch_limit,
         auto_cleanup_orphans=settings.auto_cleanup_orphans,
         orphan_reconcile_scan_interval_seconds=settings.orphan_reconcile_scan_interval_seconds,
+        classified_orphan_reap_scan_interval_seconds=(
+            settings.classified_orphan_reap_scan_interval_seconds
+        ),
         orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
         orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,
         network_posture_open_legacy_cutoff=settings.network_posture_open_legacy_cutoff,
