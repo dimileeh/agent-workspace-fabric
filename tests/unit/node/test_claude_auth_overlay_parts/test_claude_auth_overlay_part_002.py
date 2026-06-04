@@ -1377,12 +1377,17 @@ def test_reconcile_per_file_copy_error_is_skipped(
     def _copy_fails(src: object, dst: object, *args: object, **kwargs: object) -> object:
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(auth_mounts_mod.shutil, "copy2", _copy_fails)
+    # The fd-based safe copy streams content via ``shutil.copyfileobj``; a mid-stream
+    # write failure must be swallowed so reconciliation never blocks provisioning.
+    monkeypatch.setattr(auth_mounts_mod.shutil, "copyfileobj", _copy_fails)
 
     _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
 
-    assert not (merged / "f").exists()
+    # Best-effort: the failure is swallowed and nothing is forwarded into the live
+    # overlay's underlying ``upper`` (as with a partial ``copy2``, an empty leaf may be
+    # left in ``merged`` — never any content, never an exception).
     assert not (upper / "f").exists()
+    assert (merged / "f").read_text() == ""
 
 
 @pytest.mark.unit
@@ -1505,8 +1510,8 @@ def test_reconcile_refuses_directory_destination(tmp_path: Path) -> None:
     # file, holding an inner symlink whose name matches the legacy basename. ``shutil.copy2``
     # treats a directory ``dst`` as a *containing* directory and writes ``dst / basename(src)``
     # — i.e. through that planted inner symlink — letting the root copy escape the ``.claude``
-    # tree. ``_safe_overlay_dest`` only rejected symlinks, so the directory dest slipped
-    # through. It must refuse the directory destination and write nothing outside the tree.
+    # tree. The fd-based open of the leaf is ``O_WRONLY``, so a directory dest fails with
+    # ``EISDIR``: it must refuse the directory destination and write nothing outside the tree.
     legacy = tmp_path / "legacy"
     merged = tmp_path / "merged"
     upper = tmp_path / "upper"
@@ -1560,8 +1565,8 @@ def test_reconcile_refuses_fifo_destination(tmp_path: Path) -> None:
     # The agent (writing the live ``merged`` upper layer) planted a FIFO at the same
     # relative path as a legacy regular-file edit. ``shutil.copy2`` ``open``s ``dst`` for
     # writing, and a FIFO with no peer reader blocks the root worker indefinitely, hanging
-    # provisioning. ``_safe_overlay_dest`` only rejected symlinks and directories, so the
-    # special-file dest slipped through. It must refuse the FIFO destination and forward
+    # provisioning. The fd-based open uses ``O_NONBLOCK``, so a reader-less FIFO fails with
+    # ``ENXIO`` instead of blocking: it must refuse the FIFO destination and forward
     # nothing. (If this regressed, the test itself would hang.)
     legacy = tmp_path / "legacy"
     merged = tmp_path / "merged"
@@ -1579,3 +1584,54 @@ def test_reconcile_refuses_fifo_destination(tmp_path: Path) -> None:
     # The FIFO is left intact, never opened/clobbered, and nothing reached ``upper``.
     assert stat.S_ISFIFO((merged / "f").stat().st_mode)
     assert not (upper / "f").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_refuses_fifo_destination_with_a_live_reader(tmp_path: Path) -> None:
+    # A FIFO with a *live reader* opens successfully even under ``O_WRONLY | O_NONBLOCK``
+    # (the reader-less ``ENXIO`` guard does not catch it), so the ``S_ISREG`` ``fstat``
+    # guard is what must refuse it: the root worker only ever writes a regular file, never
+    # forwarding content into an agent-planted FIFO. (If this regressed, the test could
+    # hang on the write — there is no peer draining the pipe.)
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    (legacy / "f").write_text("fallback edit\n")
+    fifo = merged / "f"
+    os.mkfifo(fifo)
+    # Hold the read end open so the write-side open below succeeds instead of ENXIO.
+    reader_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    finally:
+        os.close(reader_fd)
+
+    # The FIFO is left intact (never written through) and nothing reached ``upper``.
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+    assert not (upper / "f").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_forwards_into_a_preexisting_merged_parent_dir(tmp_path: Path) -> None:
+    # When the destination's parent directory already exists in the live ``merged``
+    # overlay, the fd-based descent's ``os.mkdir`` raises ``FileExistsError`` and is a
+    # no-op — it must still re-open the existing real directory under ``O_NOFOLLOW`` and
+    # forward the edit into it (a non-symlink existing parent is not a structural
+    # conflict).
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    (legacy / "nested").mkdir()
+    (legacy / "nested" / "f").write_text("fallback edit\n")
+    # The parent dir already exists in ``merged`` (e.g. copied up by an earlier file).
+    (merged / "nested").mkdir()
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    assert (merged / "nested" / "f").read_text() == "fallback edit\n"

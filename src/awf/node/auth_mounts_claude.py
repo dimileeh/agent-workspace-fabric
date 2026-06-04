@@ -13,10 +13,12 @@ tests.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Collection, Mapping
@@ -568,67 +570,83 @@ def _safe_mtime_ns(path: Path, *, follow_symlinks: bool = True) -> int | None:
         return None
 
 
-def _safe_overlay_dest(merged: Path, rel: Path) -> Path | None:
-    """Resolve ``merged / rel`` for a root write, refusing any symlinked component.
+def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
+    """Copy ``src`` into ``merged / rel`` as root, never following an agent-planted
+    symlink at *any* component — closing a TOCTOU symlink-injection escape.
 
-    The destination lives under the live ``merged`` overlay whose upper layer was
-    written by the (untrusted) agent. A prior overlay run may have left an agent-created
-    symlink at ``rel`` — or at any parent component — and ``shutil.copy2`` follows
-    destination symlinks by default. As the root worker that would write the legacy
-    file's content *through* the link to a target outside the ``.claude`` tree, turning
-    agent-controlled overlay contents into an arbitrary root-write primitive.
+    The destination lives under the live ``merged`` overlay whose upper layer is written
+    by the (untrusted) agent. Resolving it by *name* — an ``is_symlink()``/``is_dir()``
+    guard followed by ``shutil.copy2`` — is racy: a concurrent agent can swap a
+    checked-clean component for a symlink in the window before the write. Worse,
+    ``Path.mkdir(exist_ok=True)`` *itself* follows a symlink: its ``EEXIST`` fast path
+    calls ``is_dir()``, which resolves a planted ``merged/.config -> /etc/sudoers.d``
+    link and silently succeeds, after which every lexical ``Path.__truediv__`` resolves
+    *through* the link and the root copy lands outside the ``.claude`` tree (an arbitrary
+    root-write primitive).
 
-    So walk every component of ``rel`` and refuse (return ``None``) if any is a symlink,
-    materializing missing parent dirs one level at a time so ``mkdir`` never traverses
-    through a planted link. The final destination is refused too if it is a symlink *or*
-    an existing directory: ``copy2`` treats a directory ``dst`` as a containing dir and
-    writes ``dst / basename(src)`` inside it, so an agent-created directory holding an
-    inner symlink would still let the root copy escape the tree. Any other existing
-    *non-regular* destination (FIFO/socket/device) is refused too: ``copy2`` ``open``s
-    ``dst`` for writing, and a FIFO with no peer reader would block the root worker
-    indefinitely, hanging provisioning. The returned destination is therefore guaranteed
-    to be a non-existent path or a plain regular file — never a symlink, directory, or
-    special file — so the subsequent ``copy2`` writes a plain file and can neither follow
-    a link out of the tree nor block on a special file. Returns ``None`` — skip this file,
-    best-effort — on any structural conflict (symlinked or non-dir component, or a
-    symlink/directory/special file at the destination) or ``OSError``.
+    So the destination is never touched by name. Descend component-by-component with
+    ``openat(O_NOFOLLOW | O_DIRECTORY)`` file descriptors: each ``open`` *atomically*
+    refuses a symlinked component (``ELOOP``) and a non-directory one (``ENOTDIR``), with
+    no check/use gap. Missing parents are created with ``os.mkdir(dir_fd=...)`` (a no-op
+    ``FileExistsError`` if present) and then re-opened under ``O_NOFOLLOW`` so a link
+    planted between the ``mkdir`` and the ``open`` is still rejected. The leaf is opened
+    *relative to the parent ``dir_fd``* with ``O_WRONLY | O_CREAT | O_NOFOLLOW |
+    O_NONBLOCK``:
+
+    - ``O_NOFOLLOW`` fails (``ELOOP``) on a symlink leaf — the copy can never follow a
+      planted link out of the tree.
+    - ``O_WRONLY`` on a directory leaf fails (``EISDIR``); ``copy2`` would instead have
+      written ``dst / basename(src)`` *inside* it, through any inner planted link.
+    - ``O_NONBLOCK`` makes opening a reader-less FIFO fail (``ENXIO``) rather than block
+      the root worker forever; the ``S_ISREG`` ``fstat`` guard rejects any other special
+      file (e.g. a FIFO with a live reader) before a byte is written.
+
+    Best-effort: any structural conflict or ``OSError`` skips just this file and never
+    raises, so reconciliation never blocks provisioning. Mode and mtime are preserved
+    (matching ``copy2``) so the "upper wins ties" generation rule downstream still sees
+    the forwarded edit's real mtime.
     """
 
-    current = merged
-    for part in rel.parent.parts:
-        current = current / part
-        if current.is_symlink():
-            return None
-        try:
-            current.mkdir(exist_ok=True)
-        except OSError:
-            # A non-directory already occupies the component (FileExistsError) or the
-            # dir is otherwise uncreatable: cannot descend safely, so skip the file.
-            return None
-    dest = current / rel.name
-    if dest.is_symlink():
-        # A planted destination symlink: refuse to follow it (``copy2`` would write
-        # through to its target) rather than escape the tree or clobber the agent's link.
-        return None
-    if dest.is_dir():
-        # An agent-created directory occupies the destination of a legacy *file*.
-        # ``shutil.copy2`` treats a directory ``dst`` as a containing directory and
-        # writes ``dst / basename(src)`` inside it — and the agent could have planted a
-        # symlink at that inner path, so the root copy would follow it out of the tree
-        # (the symlink check above only guards ``dest`` itself, not its children). It is
-        # also a file/dir type conflict regardless. Refuse the structural conflict.
-        # (``dest`` is not a symlink here — that is rejected above — so ``is_dir`` cannot
-        # be fooled by a symlink-to-directory.)
-        return None
-    if dest.exists() and not dest.is_file():
-        # An existing *non-regular* destination (FIFO/socket/device) the agent planted in
-        # the live ``merged`` upper layer. ``shutil.copy2`` ``open``s ``dst`` for writing,
-        # and a FIFO with no peer reader blocks the root worker indefinitely, hanging
-        # provisioning. (Symlinks and directories are already rejected above; this catches
-        # the remaining special-file types.) Only a non-existent path or a plain file is a
-        # safe copy target — refuse anything else.
-        return None
-    return dest
+    fds: list[int] = []
+    try:
+        dir_fd = os.open(merged, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(dir_fd)
+        for part in rel.parent.parts:
+            # ``FileExistsError`` means the parent already exists; re-open it under
+            # ``O_NOFOLLOW`` below so a symlink occupying the component is still rejected
+            # (``ELOOP``).
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(part, dir_fd=dir_fd)
+            dir_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            fds.append(dir_fd)
+        dst_fd = os.open(
+            rel.name,
+            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=dir_fd,
+        )
+        fds.append(dst_fd)
+        if not stat.S_ISREG(os.fstat(dst_fd).st_mode):
+            # A non-regular leaf the agent planted that still opened (e.g. a FIFO with a
+            # live reader): never write to it — refuse the structural conflict.
+            return
+        src_st = src.stat()
+        os.ftruncate(dst_fd, 0)
+        with (
+            src.open("rb") as src_file,
+            os.fdopen(dst_fd, "wb", closefd=False) as dst_file,
+        ):
+            shutil.copyfileobj(src_file, dst_file)
+        os.fchmod(dst_fd, stat.S_IMODE(src_st.st_mode))
+        os.utime(dst_fd, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
+    except OSError:
+        # Best-effort: a symlinked/non-dir component (``O_NOFOLLOW``/``O_DIRECTORY``), a
+        # symlink/dir/reader-less-FIFO leaf (``ELOOP``/``EISDIR``/``ENXIO``), or any I/O
+        # error skips just this file. Never blocks provisioning.
+        return
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 def _reconcile_fallback_edits_into_upper(
@@ -665,11 +683,12 @@ def _reconcile_fallback_edits_into_upper(
       and only a *strictly newer* legacy edit overwrites it.
 
     Per-file ``OSError`` is caught and skipped — best-effort, never blocks
-    provisioning. Never logs file contents (no secret leakage). Each destination is
-    resolved through :func:`_safe_overlay_dest`, which refuses any symlinked path
-    component: ``merged``'s upper layer is agent-controlled, and ``copy2`` follows
-    destination symlinks, so a planted link would otherwise let this root write escape
-    the ``.claude`` tree.
+    provisioning. Never logs file contents (no secret leakage). Each copy goes through
+    :func:`_safe_overlay_copy`, which descends with ``O_NOFOLLOW`` file descriptors and
+    opens the leaf relative to the parent ``dir_fd``: ``merged``'s upper layer is
+    agent-controlled, and a name-based copy would follow a planted symlink at any
+    component, so an fd-based descent (no check/use gap) is required to keep this root
+    write inside the ``.claude`` tree.
 
     *Source* symlinks are likewise refused: a fresh legacy copy is materialized via
     ``copytree(symlinks=False)`` so it never contains symlinks, but the agent can plant
@@ -743,16 +762,12 @@ def _reconcile_fallback_edits_into_upper(
             upper_mtime_ns = _safe_mtime_ns(upper_file, follow_symlinks=False)
             if upper_mtime_ns is not None and legacy_mtime_ns <= upper_mtime_ns:
                 continue
-            merged_file = _safe_overlay_dest(merged, rel)
-            if merged_file is None:
-                # A symlinked (or otherwise unsafe) destination component: refuse the
-                # write so an agent-planted link cannot redirect this root copy outside
-                # the ``.claude`` tree. Best-effort — drop just this file.
-                continue
-            try:
-                shutil.copy2(legacy_file, merged_file)
-            except OSError:
-                continue
+            # Copy via :func:`_safe_overlay_copy`, which descends with ``O_NOFOLLOW`` file
+            # descriptors and opens the leaf relative to the parent ``dir_fd`` — so an
+            # agent-planted symlink at *any* component cannot redirect this root copy
+            # outside the ``.claude`` tree (no name-based check/use gap). Best-effort: it
+            # swallows any structural conflict or ``OSError`` and drops just this file.
+            _safe_overlay_copy(merged, rel, legacy_file)
 
 
 def _prepare_isolated_claude_auth(
