@@ -905,4 +905,8 @@ async def test_release_monitor_factory_uses_manual_merge_contract(
     assert len(_calls(cmd, _is_pr_comment)) == 1
     assert not _has_call(cmd, _is_docker_down)
     assert not _has_call(cmd, _is_pr_merge)
+    assert any(
+        record.get("event") == "monitor.compose_teardown_ok" and record.get("workspace_id") == ws_id
+        for record in captured
+    )
     assert sleep_fn.calls == [60]
