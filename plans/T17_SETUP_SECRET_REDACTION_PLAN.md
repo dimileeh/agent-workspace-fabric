@@ -39,6 +39,11 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 redaction/support-bundle scope and
   only changes the MCP comment, setup-state loaded-path guard, focused
   regression, and this plan/validation evidence.
+- Review thread `PRRT_kwDOSJAM6s6HBBcY` identified that MCP workspace log reads
+  can expand the read offset into the middle of a multibyte UTF-8 sequence,
+  causing decoded replacement bytes to shift later byte-window projection.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes byte-preserving MCP log-read projection plus a focused regression.
 
 ## Requirements Checklist
 
@@ -53,6 +58,8 @@ credential entry, or unrelated refactors are included.
   provider refs.
 - MCP workspace log reads redact with enough surrounding context that arbitrary
   requested offsets cannot reveal substrings of configured secrets.
+- MCP workspace log reads preserve requested byte offsets when redaction context
+  expansion starts inside a multibyte UTF-8 character.
 - MCP workspace log reads do not expose pattern-only secret assignment values
   when the assignment key prefix is outside the fixed context window.
 - Support-bundle setup-state collection returns a redacted failed setup-state
@@ -91,6 +98,9 @@ credential entry, or unrelated refactors are included.
     discarding the rest of the support bundle.
 11. Add a concise comment explaining the retained MCP binary secret-detection
     safety nets after the shared `redact_secrets` guard.
+12. Add a focused regression where the expanded MCP log-read context starts
+    inside a multibyte character, confirm it fails, then preserve raw log bytes
+    through MCP byte-window projection.
 
 ## Verification Commands
 
@@ -131,6 +141,14 @@ Review-level comment `issue:4620175517` repair checks:
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_support_bundle.py -q -k setup_state_degrades_loaded_config_summary_errors
 uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py src/awf/mcp/server.py tests/unit/service/test_support_bundle.py
 uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/mcp/server.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HBBcY` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k expanded_context_starts_inside_multibyte_character
+uv run --python 3.12 --extra dev ruff check src/awf/runtime/logs.py src/awf/service/workspaces.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/runtime/logs.py src/awf/service/workspaces.py src/awf/mcp/metrics_tools.py
 ```
 
 Focused lint/type checks, adjusted to touched files:

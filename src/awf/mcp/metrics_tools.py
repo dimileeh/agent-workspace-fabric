@@ -105,6 +105,8 @@ _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 _MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
 _LOG_REDACTION_CONTEXT_BYTES = 4096
 _LOG_REDACTION_VALUE_DELIMITER_BYTES = frozenset(b" \t\r\n\v\f\"'`,;)}]")
+_UTF8_CONTINUATION_BYTE_MASK = 0b1100_0000
+_UTF8_CONTINUATION_BYTE_VALUE = 0b1000_0000
 # sync_release_pr omits base_branch -> target the release branch (main), not the
 # legacy development default, so the release PR is opened development -> main
 # instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
@@ -171,6 +173,30 @@ def _workspace_log_read_offset(*, requested_offset: int, redaction_context: int)
     if requested_offset <= redaction_context:
         return 0
     return requested_offset - redaction_context - 1
+
+
+def _leading_utf8_continuation_byte_count(data: bytes) -> int:
+    """Return bytes to skip so decoding starts on a UTF-8 boundary."""
+    for index, value in enumerate(data[:3]):
+        if value & _UTF8_CONTINUATION_BYTE_MASK != _UTF8_CONTINUATION_BYTE_VALUE:
+            return index
+    return min(len(data), 3)
+
+
+def _workspace_log_projection_text(
+    result: dict[str, Any],
+    *,
+    result_offset: int,
+) -> tuple[str, int]:
+    """Return text and absolute byte offset for byte-window projection."""
+    raw_bytes = result.get("raw_bytes")
+    if not isinstance(raw_bytes, bytes):
+        return str(result["text"]), result_offset
+
+    boundary_shift = _leading_utf8_continuation_byte_count(raw_bytes)
+    return raw_bytes[boundary_shift:].decode("utf-8", errors="replace"), (
+        result_offset + boundary_shift
+    )
 
 
 def _unknown_leading_log_value_fragment_end(text: str, *, result_offset: int) -> int:
@@ -422,6 +448,7 @@ def register_metrics_tools(
             stream_id,
             offset=read_offset,
             limit_bytes=read_limit,
+            include_bytes=True,
         )
         if result is None:
             return None
@@ -433,12 +460,15 @@ def register_metrics_tools(
             expanded_next_offset=result_next_offset,
             expanded_eof=bool(result["eof"]),
         )
-        result_text = str(result["text"])
+        result_text, projection_offset = _workspace_log_projection_text(
+            result,
+            result_offset=result_offset,
+        )
         data = _redact_workspace_log_byte_slice(
             result_text,
-            offset - result_offset,
-            offset - result_offset + limit_bytes,
-            result_offset=result_offset,
+            offset - projection_offset,
+            offset - projection_offset + limit_bytes,
+            result_offset=projection_offset,
             extra_secrets=extra_secrets,
         )
         return WorkspaceLogReadResponse(

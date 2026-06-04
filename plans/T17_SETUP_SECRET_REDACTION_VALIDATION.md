@@ -16,6 +16,8 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
   workspace log reads cannot expose raw setup secrets or provider refs.
 - Complete: MCP workspace log reads redact with enough surrounding context that
   arbitrary requested offsets cannot reveal substrings of configured secrets.
+- Complete: MCP workspace log reads preserve requested byte offsets when
+  redaction context expansion starts inside a multibyte UTF-8 character.
 - Complete: MCP workspace log reads do not expose pattern-only secret
   assignment values when the assignment key prefix is outside the fixed context
   window.
@@ -180,6 +182,46 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/support_bundle.py sr
 
 uv run --python 3.12 --extra dev mypy src/awf/service/support_bundle.py src/awf/mcp/server.py
 # Success: no issues found in 2 source files
+```
+
+## Review Thread `PRRT_kwDOSJAM6s6HBBcY` Iteration
+
+Additional files changed:
+
+- `src/awf/runtime/logs.py`
+- `src/awf/service/workspaces.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k expanded_context_starts_inside_multibyte_character
+# failed: returned "<redacted> TARG" after replacement-decoded bytes shifted the requested window
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k expanded_context_starts_inside_multibyte_character
+# 1 passed, 26 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q
+# 27 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_logs.py -q -k read_clamps_offsets_and_zero_limits
+# 1 passed, 25 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_workspaces_observability_parts/test_workspaces_observability_part_001.py -q -k read_log_rejects_missing_and_out_of_root_streams_then_reads_chunk
+# 1 passed, 59 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/runtime/logs.py src/awf/service/workspaces.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/runtime/logs.py src/awf/service/workspaces.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 3 source files
 ```
 
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds

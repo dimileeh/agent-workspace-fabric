@@ -35,6 +35,7 @@ from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
+from awf.service.provider_readiness import KNOWN_SECRET_ENV_KEYS
 from tests.postgres import postgres_test_engine
 
 _PROVIDER_AUTH_ENV_KEYS = (
@@ -1080,6 +1081,65 @@ class TestWorkspaceLogs:
             "next_offset": offset + limit_bytes,
             "eof": False,
             "data": "beta",
+        }
+
+    @pytest.mark.unit
+    async def test_read_workspace_log_preserves_offsets_when_expanded_context_starts_inside_multibyte_character(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Preserve byte offsets when redaction context starts inside UTF-8."""
+        for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+
+        log_root = tmp_path / "logs"
+        service = WorkspaceService(factory, log_root=log_root)
+        mcp = build_mcp_server(service=service)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            raw_log = log_root / workspace.id / "agent.stdout.log"
+            raw_log.parent.mkdir(parents=True)
+            prefix = "\U0001f525" + ("x" * 4095) + " "
+            raw_text = f"{prefix}TARGET\n"
+            raw_log.write_text(raw_text, encoding="utf-8")
+            await WorkspaceLogStreamRepository(session).create_or_get(
+                workspace_id=workspace.id,
+                stream_id="agent.stdout",
+                source="agent",
+                name="Agent stdout",
+                kind="stdout",
+                path=str(raw_log),
+            )
+            await session.commit()
+
+        offset = len(prefix.encode())
+        limit_bytes = len(b"TARGET")
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": offset,
+                "limit_bytes": limit_bytes,
+            },
+        )
+
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": offset,
+            "next_offset": offset + limit_bytes,
+            "eof": False,
+            "data": "TARGET",
         }
 
     @pytest.mark.unit
