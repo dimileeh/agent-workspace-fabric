@@ -927,6 +927,7 @@ def test_service_logs_resolves_omitted_compose_env_file_before_subprocess(
     calls: list[list[str]] = []
 
     def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Record the subprocess arguments and return redaction input."""
         calls.append(args)
         return subprocess.CompletedProcess(args, returncode=0, stdout=f"{secret}\n", stderr="")
 
