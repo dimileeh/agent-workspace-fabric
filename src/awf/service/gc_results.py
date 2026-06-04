@@ -27,15 +27,22 @@ class WorkspaceGCPreserved:
     updated_at: datetime
     age_hours: int
     reason_code: str
+    compose_project_name: str | None = None
+    compose_file_path: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "workspace_id": self.workspace_id,
             "status": self.status,
             "updated_at": self.updated_at.isoformat(),
             "age_hours": self.age_hours,
             "reason_code": self.reason_code,
         }
+        if self.compose_project_name is not None:
+            payload["compose_project_name"] = self.compose_project_name
+        if self.compose_file_path is not None:
+            payload["compose_file_path"] = self.compose_file_path
+        return payload
 
 
 @dataclass(frozen=True)

@@ -715,6 +715,9 @@ def _compose_project_for_gc_log(
     for candidate in result.plan.candidates:
         if candidate.workspace_id == workspace_id:
             return candidate.compose_project_name or fallback_compose_project
+    for preserved in result.plan.preserved:
+        if preserved.workspace_id == workspace_id:
+            return preserved.compose_project_name or fallback_compose_project
     return fallback_compose_project
 
 

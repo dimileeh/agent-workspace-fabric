@@ -457,6 +457,56 @@ async def test_completed_monitor_preserved_success_still_logs_filesystem_gc_defe
     assert not any(record.get("event") == "monitor.filesystem_gc_failed" for record in captured)
 
 
+@pytest.mark.unit
+async def test_completed_monitor_preserved_compose_teardown_log_uses_preserved_project(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-preserved-compose-project"
+    now = datetime.now(UTC)
+    fake_result = _empty_workspace_gc_result(
+        work_dir,
+        workspace_id=ws_id,
+        preserved=[
+            WorkspaceGCPreserved(
+                workspace_id=ws_id,
+                status=WorkspaceStatus.completed.value,
+                updated_at=now,
+                age_hours=1,
+                reason_code="COMPLETED_PR_NOT_MERGED",
+                compose_project_name="proj_from_db",
+            )
+        ],
+        compose_teardown=WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        ),
+    )
+    runner = SimpleNamespace(_work_dir=work_dir, _deps=SimpleNamespace(session_factory=factory))
+
+    with (
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=AsyncMock(return_value=fake_result),
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="proj_from_monitor",
+            compose_file=work_dir / "compose" / ws_id / "compose.yml",
+        )
+
+    assert any(
+        record.get("event") == "monitor.compose_teardown_ok"
+        and record.get("workspace_id") == ws_id
+        and record.get("compose_project") == "proj_from_db"
+        for record in captured
+    )
+
+
 async def _seed_old_completed_pr_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,

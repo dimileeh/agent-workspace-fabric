@@ -1311,6 +1311,8 @@ async def test_single_workspace_gc_tears_down_compose_for_preserved_workspace(
     assert [preserved.reason_code for preserved in result.plan.preserved] == [
         COMPLETED_PR_NOT_MERGED,
     ]
+    assert result.plan.preserved[0].compose_project_name == "awf_preserved_compose"
+    assert result.plan.preserved[0].compose_file_path == str(compose_file)
     assert result.compose_teardowns[workspace_id].reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
     assert calls == [
         (

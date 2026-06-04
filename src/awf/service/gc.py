@@ -1375,14 +1375,20 @@ def _classify_workspace_for_gc(
 
     updated_at = _to_utc(workspace.updated_at)
     age_hours = max(0, int((now - updated_at).total_seconds() // 3600))
-    if not cleanup_enabled:
+
+    def _preserved(reason_code: str) -> WorkspaceGCPreserved:
         return WorkspaceGCPreserved(
             workspace_id=workspace.id,
             status=workspace.status,
             updated_at=updated_at,
             age_hours=age_hours,
-            reason_code=WORKSPACE_CLEANUP_DISABLED,
+            reason_code=reason_code,
+            compose_project_name=workspace.compose_project_name,
+            compose_file_path=workspace.compose_file_path,
         )
+
+    if not cleanup_enabled:
+        return _preserved(WORKSPACE_CLEANUP_DISABLED)
 
     def _preserved_failed_or_age_capped() -> WorkspaceGCCandidate | WorkspaceGCPreserved:
         # Work was preserved for triage. Reap pressure dirs once past the cap;
@@ -1394,13 +1400,7 @@ def _classify_workspace_for_gc(
                 now=now,
                 reason_code=PRESERVED_FAILED_AGE_CAP_RECLAIMED,
             )
-        return WorkspaceGCPreserved(
-            workspace_id=workspace.id,
-            status=workspace.status,
-            updated_at=updated_at,
-            age_hours=age_hours,
-            reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
-        )
+        return _preserved(FAILED_WORKSPACE_TRIAGE_PRESERVED)
 
     if default_policy:
         if workspace.status == WorkspaceStatus.failed.value:
@@ -1412,13 +1412,7 @@ def _classify_workspace_for_gc(
                         now=now,
                         reason_code=FAILED_WORKSPACE_NO_WORK,
                     )
-                return WorkspaceGCPreserved(
-                    workspace_id=workspace.id,
-                    status=workspace.status,
-                    updated_at=updated_at,
-                    age_hours=age_hours,
-                    reason_code=WORKSPACE_WITHIN_RETENTION,
-                )
+                return _preserved(WORKSPACE_WITHIN_RETENTION)
             return _preserved_failed_or_age_capped()
         if workspace.status == "superseded":
             if _failed_terminal_workspace_has_no_work(workspace):
@@ -1429,44 +1423,20 @@ def _classify_workspace_for_gc(
                         now=now,
                         reason_code=FAILED_WORKSPACE_NO_WORK,
                     )
-                return WorkspaceGCPreserved(
-                    workspace_id=workspace.id,
-                    status=workspace.status,
-                    updated_at=updated_at,
-                    age_hours=age_hours,
-                    reason_code=WORKSPACE_WITHIN_RETENTION,
-                )
+                return _preserved(WORKSPACE_WITHIN_RETENTION)
             return _preserved_failed_or_age_capped()
         if workspace.status != WorkspaceStatus.completed.value:
             return None
         if not _has_pr_metadata(workspace):
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=COMPLETED_WORKSPACE_WITHOUT_PR,
-            )
+            return _preserved(COMPLETED_WORKSPACE_WITHOUT_PR)
         if not _pr_has_merged(workspace):
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=COMPLETED_PR_NOT_MERGED,
-            )
+            return _preserved(COMPLETED_PR_NOT_MERGED)
         # A merged PR's pressure dirs are disposable the moment it lands. With
         # ``ignore_retention`` the post-merge caller reclaims them immediately
         # instead of waiting out the retention window; the durable record (DB
         # row, events, logs) is preserved either way (GC never deletes it).
         if updated_at > cutoff_at and not ignore_retention:
-            return WorkspaceGCPreserved(
-                workspace_id=workspace.id,
-                status=workspace.status,
-                updated_at=updated_at,
-                age_hours=age_hours,
-                reason_code=WORKSPACE_WITHIN_RETENTION,
-            )
+            return _preserved(WORKSPACE_WITHIN_RETENTION)
         # Distinguish an immediate post-merge reclaim (``ignore_retention``
         # bypassed the window) from one that naturally aged out, so audit logs
         # and ``WorkspaceEvent`` trails do not mislabel a minutes-old workspace
@@ -1483,25 +1453,13 @@ def _classify_workspace_for_gc(
         )
 
     if updated_at > cutoff_at:
-        return WorkspaceGCPreserved(
-            workspace_id=workspace.id,
-            status=workspace.status,
-            updated_at=updated_at,
-            age_hours=age_hours,
-            reason_code=WORKSPACE_WITHIN_RETENTION,
-        )
+        return _preserved(WORKSPACE_WITHIN_RETENTION)
     if (
         workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES
         and workspace.compose_project_name is not None
         and not _failed_terminal_workspace_has_no_work(workspace)
     ):
-        return WorkspaceGCPreserved(
-            workspace_id=workspace.id,
-            status=workspace.status,
-            updated_at=updated_at,
-            age_hours=age_hours,
-            reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
-        )
+        return _preserved(TERMINAL_WORKSPACE_RETENTION_EXPIRED)
 
     if workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES:
         return _candidate_for_workspace(
