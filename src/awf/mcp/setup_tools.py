@@ -317,7 +317,7 @@ async def _start_local_service_result(
             _source_checkout_failure_payload(exc),
             is_error=True,
         )
-    except (HostSetupConfigError, OSError, ValueError) as exc:
+    except (HostSetupConfigError, OSError, RuntimeError, ValueError) as exc:
         return _start_input_resolution_error_result(safe_result, exc)
 
     options = ServiceBootstrapOptions(
@@ -349,7 +349,7 @@ def _resolve_start_bootstrap_inputs_for_mcp(
 
 def _start_input_resolution_error_result(
     safe_result: SafeResult,
-    exc: HostSetupConfigError | OSError | ValueError,
+    exc: HostSetupConfigError | OSError | RuntimeError | ValueError,
 ) -> CallToolResult:
     return _error_result(
         safe_result,

@@ -962,6 +962,41 @@ async def test_start_local_service_input_resolution_failure_is_structured(
 
 
 @pytest.mark.unit
+async def test_start_local_service_runtime_input_resolution_failure_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    leaked_detail = "home directory unavailable while building service environment"
+
+    def fail_bootstrap_inputs(_verified: object) -> SimpleNamespace:
+        raise RuntimeError(leaked_detail)
+
+    bootstrap_calls: list[bool] = []
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", fail_bootstrap_inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "START_INPUT_RESOLUTION_FAILED"
+    assert payload["message"] == "could not resolve local service startup inputs"
+    assert payload["detail"] == {"error_type": "RuntimeError"}
+    assert bootstrap_calls == []
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
 async def test_start_local_service_source_checkout_value_error_is_structured(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
