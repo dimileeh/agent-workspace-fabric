@@ -1714,6 +1714,93 @@ class TestWorkspaceLogs:
         assert fragment not in str(chunk["data"])
 
     @pytest.mark.unit
+    async def test_read_workspace_log_redacts_assignment_lookback_still_mid_fragment(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keep masking if assignment lookback still starts inside a long value."""
+        for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+
+        requested_offset = 100_000
+        fragment = "still-leaking-assignment-tail"
+        requested_limit_bytes = len(fragment.encode())
+        context_bytes = metrics_tools_mod._LOG_REDACTION_CONTEXT_BYTES  # noqa: SLF001
+        lookback_bytes = metrics_tools_mod._LOG_REDACTION_ASSIGNMENT_LOOKBACK_BYTES  # noqa: SLF001
+        first_offset = requested_offset - context_bytes - 1
+        lookback_offset = first_offset - lookback_bytes
+        first_bytes = (b"x" * (requested_offset - first_offset)) + fragment.encode() + b" done\n"
+        lookback_result_bytes = (
+            (b"x" * (requested_offset - lookback_offset)) + fragment.encode() + b" done\n"
+        )
+        first_next_offset = first_offset + len(first_bytes)
+        calls: list[tuple[int, int]] = []
+
+        service = WorkspaceService(factory)
+
+        async def still_mid_fragment_read_log(
+            workspace_id: str,
+            stream_id: str,
+            *,
+            offset: int = 0,
+            limit_bytes: int = 65_536,
+            include_bytes: bool = False,
+        ) -> dict[str, object]:
+            """Return a covering lookback that still lacks the assignment key."""
+            assert workspace_id == "ws_lookback_mid_fragment"
+            assert stream_id == "setup.stdout"
+            assert include_bytes is True
+            calls.append((offset, limit_bytes))
+            if len(calls) == 1:
+                assert offset == first_offset
+                return {
+                    "stream_id": stream_id,
+                    "offset": offset,
+                    "next_offset": first_next_offset,
+                    "eof": False,
+                    "text": first_bytes.decode(),
+                    "raw_bytes": first_bytes,
+                }
+            if len(calls) == 2:
+                assert offset == lookback_offset
+                assert limit_bytes == first_next_offset - lookback_offset
+                return {
+                    "stream_id": stream_id,
+                    "offset": offset,
+                    "next_offset": first_next_offset,
+                    "eof": False,
+                    "text": lookback_result_bytes.decode(),
+                    "raw_bytes": lookback_result_bytes,
+                }
+            raise AssertionError("unexpected read_log call")
+
+        monkeypatch.setattr(service, "read_log", still_mid_fragment_read_log)
+        mcp = build_mcp_server(service=service, settings=Settings(_env_file=None))
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": "ws_lookback_mid_fragment",
+                "stream_id": "setup.stdout",
+                "offset": requested_offset,
+                "limit_bytes": requested_limit_bytes,
+            },
+        )
+
+        assert isinstance(chunk, dict)
+        assert calls == [
+            (first_offset, context_bytes + 1 + requested_limit_bytes + context_bytes),
+            (lookback_offset, first_next_offset - lookback_offset),
+        ]
+        assert chunk["offset"] == requested_offset
+        assert chunk["next_offset"] == requested_offset + requested_limit_bytes
+        assert chunk["eof"] is False
+        assert chunk["data"] == REDACTION_MARKER
+        assert fragment not in str(chunk["data"])
+
+    @pytest.mark.unit
     async def test_read_workspace_log_preserves_long_benign_token_without_assignment_context(
         self,
         factory: async_sessionmaker[AsyncSession],

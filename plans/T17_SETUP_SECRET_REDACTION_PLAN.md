@@ -64,6 +64,12 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 MCP log-redaction scope and only
   changes byte-preserving projection/redaction for raw log bytes plus a focused
   regression.
+- Review thread `PRRT_kwDOSJAM6s6HC827` identified that assignment lookback can
+  cover the requested byte window while still starting inside an unknown
+  leading token fragment, causing MCP log reads to clear the untrusted-fragment
+  flag without proving the assignment key or a safe token boundary is visible.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  changes lookback projection trust checks plus a focused regression.
 
 ## Requirements Checklist
 
@@ -89,6 +95,9 @@ credential entry, or unrelated refactors are included.
   assignment lookback cannot read enough context to prove the fragment safe.
 - MCP workspace log reads preserve requested byte offsets when invalid UTF-8
   bytes appear in expanded redaction context before the requested window.
+- MCP workspace log reads do not clear unknown-leading-fragment masking merely
+  because assignment lookback covers the requested byte window; the widened
+  projection must either show assignment context or a safe token boundary.
 - Support-bundle setup-state collection returns a redacted failed setup-state
   payload if loaded config summarization raises after the config reader
   succeeds.
@@ -138,6 +147,10 @@ credential entry, or unrelated refactors are included.
     log window, confirm it fails, then preserve raw byte offsets through
     projection/redaction while still rendering invalid bytes with replacement in
     returned text.
+16. Add a focused regression for a successful assignment lookback that still
+    starts mid-token, confirm it fails, then keep unknown-leading-fragment
+    masking unless the widened projection proves assignment context or a safe
+    boundary.
 
 ## Verification Commands
 
@@ -213,6 +226,15 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py -q -k redact_secrets_byte_slice
 uv run --python 3.12 --extra dev ruff check src/awf/common/redaction.py src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/metrics_tools.py
+```
+
+Review-thread `PRRT_kwDOSJAM6s6HC827` repair checks:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k assignment_lookback_still_mid_fragment
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'assignment_lookback_still_mid_fragment or assignment_lookback_failure or pattern_only_secret_assignment or preserves_long_benign_token_without_assignment_context'
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```
 
 Focused lint/type checks, adjusted to touched files:

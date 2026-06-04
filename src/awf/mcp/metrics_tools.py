@@ -296,6 +296,17 @@ async def _workspace_log_assignment_lookback_projection(
         lookback_result,
         result_offset=int(lookback_result["offset"]),
     )
+    lookback_slice_start = requested_offset - lookback_projection_offset
+    still_unknown_fragment = _workspace_log_slice_starts_in_unknown_leading_fragment(
+        lookback_text,
+        lookback_slice_start,
+        result_offset=lookback_projection_offset,
+    )
+    if still_unknown_fragment and not _workspace_log_assignment_value_covers_byte(
+        lookback_text,
+        lookback_slice_start,
+    ):
+        return lookback_text, lookback_projection_offset, True
     return lookback_text, lookback_projection_offset, False
 
 

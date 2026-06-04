@@ -573,6 +573,53 @@ uv run --python 3.12 --extra dev mypy src/awf/common/redaction.py src/awf/mcp/me
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review Thread `PRRT_kwDOSJAM6s6HC827` Assignment Lookback Trust Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP workspace log reads no longer clear unknown-leading-fragment
+  masking merely because assignment lookback covers the requested byte window.
+- Complete: a widened lookback projection must show either visible assignment
+  coverage for the requested slice or no unknown leading token fragment before
+  the fragment is treated as safe.
+- Complete: prior failed-lookback masking, pattern-only assignment masking, and
+  benign-token preservation remain covered by focused MCP regressions.
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k assignment_lookback_still_mid_fragment
+# failed: returned raw "still-leaking-assignment-tail" after a covering lookback that still started mid-token
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k assignment_lookback_still_mid_fragment
+# 1 passed, 36 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q -k 'assignment_lookback_still_mid_fragment or assignment_lookback_failure or pattern_only_secret_assignment or preserves_long_benign_token_without_assignment_context'
+# 4 passed, 33 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+# Success: no issues found in 1 source file
+```
+
+Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
+were not run in the agent phase; AWF owns those gates after completion.
+
 ## Gaps
 
 None found.
