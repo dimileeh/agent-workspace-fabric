@@ -142,7 +142,7 @@ def test_provider_readiness_existing_file_providers_report_credential_scope(
     # Pin the Claude isolation posture so this assertion does not depend on
     # whether the test host happens to support overlayfs + CAP_SYS_ADMIN.
     monkeypatch.setattr(
-        provider_readiness, "claude_auth_isolation_label", lambda: "per_workspace_copy"
+        provider_readiness, "claude_auth_isolation_label", lambda **_: "per_workspace_copy"
     )
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
