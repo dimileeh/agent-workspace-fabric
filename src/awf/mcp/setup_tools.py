@@ -251,7 +251,11 @@ def _get_setup_status_result(
         },
         "providers": _provider_statuses(config.providers),
         "clients": _client_statuses(config.clients),
-        "source_checkout": _setup_status_source_checkout(config, details),
+        "source_checkout": _setup_status_source_checkout(
+            config,
+            details,
+            rendered.get("issues"),
+        ),
         "issues": _setup_status_issues(rendered.get("issues")),
         "next_steps": _list_of_strings(rendered.get("next_steps")),
     }
@@ -531,7 +535,11 @@ def _source_checkout_status(config: HostSetupConfig) -> dict[str, Any]:
 def _setup_status_source_checkout(
     config: HostSetupConfig,
     details: Mapping[str, Any],
+    issues: Any,
 ) -> dict[str, Any]:
+    if _has_blocking_source_checkout_issue(issues):
+        return {"present": False}
+
     persisted = _source_checkout_status(config)
     if persisted["present"]:
         return persisted
@@ -549,6 +557,20 @@ def _setup_status_source_checkout(
         "marker_count": None,
     }
     return payload
+
+
+def _has_blocking_source_checkout_issue(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        item_mapping = _mapping(item)
+        severity = item_mapping.get("severity")
+        if severity not in ("blocked", "failed"):
+            continue
+        details = _mapping(item_mapping.get("details"))
+        if details.get("check") == "source_checkout":
+            return True
+    return False
 
 
 def _safe_setup_checks(value: Any) -> list[dict[str, str]]:

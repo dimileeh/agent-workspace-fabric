@@ -31,7 +31,7 @@ from awf.host_setup.rendering import (
     first_run_failure_payload,
     first_run_success_payload,
 )
-from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
+from awf.host_setup.source_assets import SOURCE_CHECKOUT_ASSETS_STALE, SourceCheckoutAssetMetadata
 from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from awf.service.bootstrap import (
@@ -354,6 +354,53 @@ async def test_get_setup_status_marks_blocked_and_failed_readiness_as_mcp_error(
     assert payload["issues"] == [
         {"reason_code": SETUP_READINESS_FAILED, "severity": status, "check": "docker"}
     ]
+
+
+@pytest.mark.unit
+async def test_get_setup_status_hides_stale_persisted_source_checkout_when_revalidation_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    stale_checkout = tmp_path / "stale-awf"
+    readiness = first_run_failure_payload(
+        command="awf setup",
+        reason_code=SOURCE_CHECKOUT_ASSETS_STALE,
+        summary="stored source checkout is stale",
+        status="blocked",
+        details={
+            "check": "source_checkout",
+            "root": str(stale_checkout),
+            "missing_markers": ["pyproject.toml"],
+        },
+        next_steps=("Select a valid source checkout.",),
+    )
+    config = HostSetupConfig(
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=stale_checkout,
+            verified_at=datetime(2026, 1, 2, tzinfo=UTC),
+            markers=("pyproject.toml",),
+        )
+    )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", lambda: config)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_get_setup_status", {})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["issues"] == [
+        {
+            "reason_code": SOURCE_CHECKOUT_ASSETS_STALE,
+            "severity": "blocked",
+            "check": "source_checkout",
+        }
+    ]
+    assert payload["source_checkout"] == {"present": False}
 
 
 @pytest.mark.unit

@@ -77,6 +77,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HBQTg
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` can show stale persisted
+source-checkout metadata as `source_checkout.present=true` even when the
+current setup readiness probe blocks on source-checkout revalidation. That
+contradicts the current probe result and can mislead operators about whether
+the checkout is usable.
+
+Scope is limited to the MCP setup-status source-checkout presentation and its
+focused regression.
+
+### Requirements Checklist
+
+- Preserve persisted source-checkout metadata when the current readiness probe
+  succeeds.
+- Preserve explicit-checkout probed metadata behavior.
+- When rendered readiness includes a blocking source-checkout issue, do not
+  report the persisted checkout as present.
+- Add a focused regression proving stale persisted checkout metadata is hidden
+  when source-checkout revalidation blocks.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression for blocked source-checkout readiness
+   with persisted metadata.
+2. Teach the setup-status source-checkout helper to let a current blocking
+   source-checkout issue override persisted metadata.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_hides_stale_persisted_source_checkout_when_revalidation_blocks -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HAbmv
 
 ### Problem Statement And Scope
