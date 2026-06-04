@@ -698,6 +698,10 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     )
     stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "fi"
+    api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    postgres_password_export_line = (
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    )
     setup_line = 'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"'
     no_global_commands = (
         setup_line,
@@ -715,6 +719,8 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     assert stop_env_file_line in no_global_section
     assert stop_fallback_line in no_global_section
     assert stop_guard_end_line in no_global_section
+    assert api_token_export_line in no_global_section
+    assert postgres_password_export_line in no_global_section
     stop_fallback_index = no_global_section.index(stop_fallback_line)
     assert (
         no_global_section.index("uv sync --extra dev")
@@ -722,6 +728,8 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
         < no_global_section.index(stop_env_file_line)
         < stop_fallback_index
         < no_global_section.index(stop_guard_end_line, stop_fallback_index)
+        < no_global_section.index(api_token_export_line)
+        < no_global_section.index(postgres_password_export_line)
         < no_global_section.index(setup_line)
     )
     for command in no_global_commands:
@@ -740,6 +748,10 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     )
     stop_fallback_line = "docker compose -f docker/compose/local-service.yml stop"
     stop_guard_end_line = "fi"
+    api_token_export_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
+    postgres_password_export_line = (
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    )
     setup_line = 'awf setup --source-checkout "$PWD"'
     global_commands = (
         setup_line,
@@ -760,6 +772,8 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     assert stop_env_file_line in global_section
     assert stop_fallback_line in global_section
     assert stop_guard_end_line in global_section
+    assert api_token_export_line in global_section
+    assert postgres_password_export_line in global_section
     stop_fallback_index = global_section.index(stop_fallback_line)
     assert (
         global_section.index("uv tool install . --force")
@@ -767,6 +781,8 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
         < global_section.index(stop_env_file_line)
         < stop_fallback_index
         < global_section.index(stop_guard_end_line, stop_fallback_index)
+        < global_section.index(api_token_export_line)
+        < global_section.index(postgres_password_export_line)
         < global_section.index(setup_line)
     )
     for command in global_commands:

@@ -141,6 +141,8 @@ if [ -f docker/compose/.env ]; then
 else
   docker compose -f docker/compose/local-service.yml stop
 fi
+export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
 awf service status --format pretty
@@ -157,6 +159,8 @@ if [ -f docker/compose/.env ]; then
 else
   docker compose -f docker/compose/local-service.yml stop
 fi
+export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf service status --format pretty
