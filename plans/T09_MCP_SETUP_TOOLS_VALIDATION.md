@@ -53,6 +53,55 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Bootstrap Execution Failure Reason Code
+
+Plan reference: `T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve `START_INPUT_RESOLUTION_FAILED` for failures raised while resolving
+  start inputs before `run_service_bootstrap()` is called: Complete.
+- Report `CalledProcessError`, `OSError`, `RuntimeError`, and `ValueError`
+  raised from `run_service_bootstrap()` with a dedicated bootstrap-execution
+  reason code: Complete.
+- Keep bootstrap execution failure payloads structured as first-run `awf start`
+  failures and continue excluding raw exception detail from MCP output:
+  Complete.
+- Add or update focused regressions for bootstrap-time `RuntimeError` and
+  `CalledProcessError`: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_path_runtime_error_is_first_run_failure tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_called_process_error_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_input_resolution_failure_is_structured tests/unit/mcp/test_setup_tools.py::test_start_local_service_runtime_input_resolution_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Updated bootstrap execution regressions failed before the implementation
+  change because both paths still returned `START_INPUT_RESOLUTION_FAILED`.
+- Bootstrap execution regressions after the implementation change: 2 passed.
+- Neighboring input-resolution regressions after the implementation change:
+  2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Command Suffix And Preview Probe Logging
 
 ### Requirement Status

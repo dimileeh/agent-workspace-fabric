@@ -74,6 +74,7 @@ StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 
 START_OPTIONS_INVALID = "START_OPTIONS_INVALID"
 START_INPUT_RESOLUTION_FAILED = "START_INPUT_RESOLUTION_FAILED"
+START_BOOTSTRAP_EXECUTION_FAILED = "START_BOOTSTRAP_EXECUTION_FAILED"
 PROJECT_INIT_INVALID_PATH = "PROJECT_INIT_INVALID_PATH"
 PROJECT_PROFILE_EXISTS = "PROJECT_PROFILE_EXISTS"
 PROJECT_INIT_FAILED = "PROJECT_INIT_FAILED"
@@ -371,8 +372,8 @@ def _start_bootstrap_path_error_result(
     exc: CalledProcessError | OSError | RuntimeError | ValueError,
 ) -> CallToolResult:
     failure = ServiceBootstrapError(
-        reason_code=START_INPUT_RESOLUTION_FAILED,
-        message="could not resolve local service startup inputs",
+        reason_code=START_BOOTSTRAP_EXECUTION_FAILED,
+        message="could not execute local service bootstrap",
         stderr=f"error_type={type(exc).__name__}",
     )
     return _first_run_result(safe_result, _start_failure_payload(failure), is_error=True)

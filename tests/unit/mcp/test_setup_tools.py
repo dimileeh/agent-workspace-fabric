@@ -1002,10 +1002,11 @@ async def test_start_local_service_bootstrap_path_runtime_error_is_first_run_fai
     assert result.isError is True
     assert payload["status"] == "failed"
     assert payload["command"] == "awf start"
-    assert payload["reason_code"] == "START_INPUT_RESOLUTION_FAILED"
+    assert payload["reason_code"] == "START_BOOTSTRAP_EXECUTION_FAILED"
+    assert payload["summary"] == "awf start failed: could not execute local service bootstrap"
     bootstrap = payload["issues"][0]["details"]["bootstrap"]
-    assert bootstrap["reason_code"] == "START_INPUT_RESOLUTION_FAILED"
-    assert bootstrap["message"] == "could not resolve local service startup inputs"
+    assert bootstrap["reason_code"] == "START_BOOTSTRAP_EXECUTION_FAILED"
+    assert bootstrap["message"] == "could not execute local service bootstrap"
     assert leaked_detail not in rendered
 
 
@@ -1038,7 +1039,7 @@ async def test_start_local_service_bootstrap_called_process_error_is_structured(
     rendered = _json_text(result)
 
     assert result.isError is True
-    assert payload["reason_code"] == "START_INPUT_RESOLUTION_FAILED"
+    assert payload["reason_code"] == "START_BOOTSTRAP_EXECUTION_FAILED"
     assert payload["issues"][0]["details"]["bootstrap"]["stderr"] == "error_type=CalledProcessError"
     assert raw_token not in rendered
 

@@ -84,6 +84,53 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Bootstrap Execution Failure Reason Code
+
+### Problem Statement And Scope
+
+The review reports that `_start_bootstrap_path_error_result()` handles
+exceptions raised by `run_service_bootstrap()` but fabricates a
+`START_INPUT_RESOLUTION_FAILED` diagnostic. That reason code belongs to the
+earlier input-resolution phase and can mislead operators when Docker/bootstrap
+execution fails after inputs were resolved.
+
+Scope is limited to the MCP `awf_start_local_service` bootstrap exception
+boundary and its focused regressions. Input-resolution failures should keep
+their existing reason code and payload shape.
+
+### Requirements Checklist
+
+- Preserve `START_INPUT_RESOLUTION_FAILED` for failures raised while resolving
+  start inputs before `run_service_bootstrap()` is called.
+- Report `CalledProcessError`, `OSError`, `RuntimeError`, and `ValueError`
+  raised from `run_service_bootstrap()` with a dedicated bootstrap-execution
+  reason code.
+- Keep bootstrap execution failure payloads structured as first-run `awf start`
+  failures and continue excluding raw exception detail from MCP output.
+- Add or update focused regressions for bootstrap-time `RuntimeError` and
+  `CalledProcessError`.
+
+### Implementation Steps
+
+1. Update focused MCP start-service tests to expect the dedicated bootstrap
+   execution reason code on bootstrap-time exceptions.
+2. Confirm the updated regressions fail against the current implementation.
+3. Add the dedicated reason code and message in
+   `_start_bootstrap_path_error_result()`.
+4. Run the targeted regressions and focused checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_path_runtime_error_is_first_run_failure tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_called_process_error_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_input_resolution_failure_is_structured tests/unit/mcp/test_setup_tools.py::test_start_local_service_runtime_input_resolution_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Command Suffix And Preview Probe Logging
 
 ### Problem Statement And Scope
