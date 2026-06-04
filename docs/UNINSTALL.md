@@ -41,7 +41,7 @@ if [ -f docker/compose/.env ]; then
 else
   docker compose -f docker/compose/local-service.yml stop
 fi
-awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
+uv run --python 3.12 --extra dev awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 
 or edit `~/.awf/config.yml` and remove only the top-level `source_checkout:` block

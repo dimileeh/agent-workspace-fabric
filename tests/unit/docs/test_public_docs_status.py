@@ -985,7 +985,12 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
     assert port_block_guidance in intro_words
     assert no_stop_guidance in intro_words
     intro_setup_line = (
-        "awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+        "uv run --python 3.12 --extra dev awf setup "
+        "--source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+    )
+    assert (
+        "\nawf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
+        not in intro_section
     )
     assert intro_words.index(core_stop_guidance) < intro_words.index(intro_setup_line)
     assert stop_guard_line in intro_section
