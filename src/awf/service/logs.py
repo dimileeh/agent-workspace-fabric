@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -273,15 +273,24 @@ def _run_streaming_subprocess(
         text=text,
         env=env,
     )
+
+    stream_broken_pipe = threading.Event()
+
+    def _handle_stream_broken_pipe() -> None:
+        stream_broken_pipe.set()
+        _terminate_streaming_subprocess(process)
+
     stdout_thread = _start_redacted_stream_thread(
         process.stdout,
         sys.stdout,
         extra_secrets=extra_secret_values,
+        on_broken_pipe=_handle_stream_broken_pipe,
     )
     stderr_thread = _start_redacted_stream_thread(
         process.stderr,
         sys.stderr,
         extra_secrets=extra_secret_values,
+        on_broken_pipe=_handle_stream_broken_pipe,
     )
     try:
         returncode = process.wait()
@@ -291,6 +300,8 @@ def _run_streaming_subprocess(
     finally:
         stdout_thread.join()
         stderr_thread.join()
+    if stream_broken_pipe.is_set():
+        return subprocess.CompletedProcess(args, 0, stdout=None, stderr=None)
     if check and returncode != 0:
         raise subprocess.CalledProcessError(returncode, args)
     return subprocess.CompletedProcess(args, returncode, stdout=None, stderr=None)
@@ -311,11 +322,12 @@ def _start_redacted_stream_thread(
     sink: IO[str],
     *,
     extra_secrets: Iterable[str] = (),
+    on_broken_pipe: Callable[[], None],
 ) -> threading.Thread:
     """Start a thread that redacts a subprocess pipe before writing it."""
     thread = threading.Thread(
         target=_stream_redacted_pipe,
-        args=(source, sink, tuple(extra_secrets)),
+        args=(source, sink, tuple(extra_secrets), on_broken_pipe),
     )
     thread.start()
     return thread
@@ -324,17 +336,24 @@ def _start_redacted_stream_thread(
 def _stream_redacted_pipe(
     source: IO[str] | None,
     sink: IO[str],
-    extra_secrets: Iterable[str] = (),
+    extra_secrets: Iterable[str],
+    on_broken_pipe: Callable[[], None],
 ) -> None:
     """Copy pipe lines to a sink after applying shared secret redaction."""
     if source is None:
         return
     extra_secret_values = tuple(extra_secrets)
-    for line in source:
-        # Current token/provider-ref patterns are single-line; multiline
-        # patterns will need carry-over context instead of per-line redaction.
-        sink.write(redact_secrets(line, extra_secrets=extra_secret_values))
-        sink.flush()
+    try:
+        for line in source:
+            # Current token/provider-ref patterns are single-line; multiline
+            # patterns will need carry-over context instead of per-line redaction.
+            sink.write(redact_secrets(line, extra_secrets=extra_secret_values))
+            sink.flush()
+    except BrokenPipeError:
+        try:
+            source.close()
+        finally:
+            on_broken_pipe()
 
 
 def _service_log_secret_values(

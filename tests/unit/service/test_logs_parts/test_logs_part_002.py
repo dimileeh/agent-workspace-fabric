@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -221,6 +222,65 @@ def test_service_logs_follow_keyboard_interrupt_reaps_default_process(
     assert processes[0].terminated is True
     assert processes[0].killed is expected_killed
     assert processes[0].wait_timeouts == expected_wait_timeouts
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_follow_broken_stdout_pipe_terminates_default_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed downstream stdout pipe must not leave the followed process running."""
+
+    class _BrokenFlushSink:
+        def write(self, text: str) -> int:
+            return len(text)
+
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+    class _FollowProcess:
+        stdout = io.StringIO("line before downstream closes\n")
+        stderr = io.StringIO("")
+
+        def __init__(self) -> None:
+            self.terminated = threading.Event()
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            if not self.terminated.wait(0.25):
+                raise AssertionError(
+                    "follow process was not terminated after downstream stdout closed"
+                )
+            return -signal.SIGTERM
+
+        def terminate(self) -> None:
+            self.terminated.set()
+
+        def kill(self) -> None:
+            self.killed = True
+            self.terminated.set()
+
+    processes: list[_FollowProcess] = []
+
+    def _popen(_args: list[str], **kwargs: object) -> _FollowProcess:
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        process = _FollowProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(sys, "stdout", _BrokenFlushSink())
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+    )
+
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert len(processes) == 1
+    assert processes[0].terminated.is_set()
+    assert processes[0].killed is False
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
