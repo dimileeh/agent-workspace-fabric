@@ -131,11 +131,16 @@ def test_readme_first_run_grammar_reuses_initialized_project_path() -> None:
     )[0]
 
     assert "After installing in any lane" not in first_run_section
-    assert "For lanes that put `awf` on `PATH`" in first_run_section
+    assert "For package-manager and virtualenv lanes that put `awf` on `PATH`" in (
+        first_run_section
+    )
+    assert "For the source checkout with global tool install lane" in first_run_section
     assert "For the no-global source checkout lane" in first_run_section
     assert "awf init <path>" in first_run_section
     assert "awf smoke run --project <path> --mocked-local --format pretty" in first_run_section
     assert "awf smoke run --mocked-local --format pretty" not in first_run_section
+    assert 'awf setup --source-checkout "$PWD"' in first_run_section
+    assert 'awf start --source-checkout "$PWD"' in first_run_section
     assert (
         'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"' in first_run_section
     )
@@ -151,6 +156,11 @@ def test_readme_first_run_grammar_reuses_initialized_project_path() -> None:
         "uv run --python 3.12 --extra dev awf smoke run --project <path> "
         "--mocked-local --format pretty"
     ) in first_run_section
+    global_source_section = first_run_section.split(
+        "For the source checkout with global tool install lane",
+        maxsplit=1,
+    )[1].split("For the no-global source checkout lane", maxsplit=1)[0]
+    assert not re.search(r"(?m)^awf (setup|start)\s*$", global_source_section)
 
 
 def test_quickstart_presents_available_complete_first_run_lanes() -> None:

@@ -95,6 +95,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   Started package/virtualenv first-run `AWF_API_TOKEN` and
   `AWF_POSTGRES_PASSWORD` values to `.env`, and persisting source-checkout
   first-run values to `docker/compose/.env`, before setup/start commands.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HKuFE` by splitting the README
+  first-run global-source lane away from release-installed PATH commands and
+  passing `--source-checkout "$PWD"` to global-source setup/start.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -535,6 +538,12 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 ```
 
 Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
+Additional README snippet syntax result: `1 passed in 0.76s`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
@@ -1734,6 +1743,41 @@ persistence block in a temporary directory seeded with `PROVIDER_TOKEN=keep`,
 `AWF_API_TOKEN=old`, and `APP_CONFIG=value`. Result: the repro passed; `.env`
 contained the new AWF service values, no longer contained `AWF_API_TOKEN=old`,
 and retained both non-AWF entries.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HKuFE`:
+
+- `README.md` now scopes the bare `awf setup` / `awf start` first-run block to
+  package-manager and virtualenv lanes.
+- `README.md` now gives the source checkout with global tool install lane its
+  own startup block with `awf setup --source-checkout "$PWD"` and
+  `awf start --source-checkout "$PWD"`, so fresh global source installs use the
+  checkout's assets before any persisted `source_checkout` metadata exists.
+- `tests/unit/docs/test_public_docs_status.py` now rejects bare README
+  setup/start commands inside the global source checkout lane.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
+```
+
+Red-phase result after updating the focused assertion: failed because the
+README still used the shared PATH-lane wording and did not split out the global
+source checkout startup block.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
+```
+
+Final focused repair result: `1 passed in 0.68s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

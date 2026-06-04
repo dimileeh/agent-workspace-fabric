@@ -157,11 +157,22 @@ manifest, checksums, and distribution artifacts are published and verified.
 | Source checkout with global tool install | You want inspectable source, then a global `awf` executable installed from that checkout. | `git clone ...` then `uv tool install . --force` |
 | Source checkout with no global install | You want inspectable source and no global `awf` on `PATH`. | `git clone ...` then `uv run --python 3.12 --extra dev awf ...` |
 
-For lanes that put `awf` on `PATH`, the first-run command grammar is:
+For package-manager and virtualenv lanes that put `awf` on `PATH`, the first-run
+command grammar is:
 
 ```bash
 awf setup
 awf start
+awf init <path>
+awf smoke run --project <path> --mocked-local --format pretty
+```
+
+For the source checkout with global tool install lane, run from the checkout and
+pin setup/start to that checkout's assets:
+
+```bash
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
 awf init <path>
 awf smoke run --project <path> --mocked-local --format pretty
 ```

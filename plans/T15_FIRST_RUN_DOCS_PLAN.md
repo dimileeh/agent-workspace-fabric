@@ -384,6 +384,19 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKuFA`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKuFE`: README first-run
+commands must not let the source checkout with global tool install lane inherit
+the release-installed bare `awf setup` / `awf start` startup block. Split that
+lane out and pass `--source-checkout "$PWD"` to setup/start so fresh global
+source installs use the current checkout's Compose assets even when no
+`source_checkout` metadata has been persisted yet.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HKuFE`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
+```
+
 Focused lint command:
 
 ```bash
