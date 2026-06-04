@@ -566,6 +566,14 @@ async def run_service_workspace_gc(
             )
 
         claude_base_reap = _reap_bases
+    elif reap_claude_bases:
+        # ``reap_claude_bases`` is on but no ``host_home`` was supplied, so GC-B has no
+        # host ``~/.claude`` signature to protect the current base with — running it
+        # blind could reap a live base, so it is skipped. The production route always
+        # threads ``settings.host_home`` (default ``"~"``), so this only fires for a
+        # programmatic caller that set the flag without a home; log it so the otherwise
+        # silent no-op is diagnosable.
+        _log.warning("service_gc_claude_base_reap_skipped_no_host_home")
     return await run_terminal_workspace_gc(
         session_factory,
         work_dir=normalized_work_dir,

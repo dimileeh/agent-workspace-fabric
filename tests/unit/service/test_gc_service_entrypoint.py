@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -408,6 +409,44 @@ async def test_service_gc_omits_base_reap_when_disabled(
     assert "claude_base_reap" not in result.to_dict()
     # Disabled: the superseded base is left untouched.
     assert superseded.is_dir()
+
+
+@pytest.mark.unit
+async def test_service_gc_skips_base_reap_with_warning_when_host_home_missing(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # ``reap_claude_bases=True`` with ``host_home=None`` has no host signature to
+    # protect the current base with, so GC-B is skipped rather than run blind. The
+    # production route always passes ``settings.host_home``; a programmatic caller that
+    # forgets it gets a logged warning instead of a silent no-op.
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    superseded = _make_superseded_base(work_dir, "sigsuperseded000")
+    manager = _RecordingComposeManager()
+
+    with capture_logs() as logs:
+        result = await run_service_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            template_path=_TEMPLATE,
+            execute=True,
+            min_age_hours=24,
+            host_home=None,
+            reap_claude_bases=True,
+            compose_manager=manager,  # type: ignore[arg-type]
+            now=now,
+        )
+
+    assert result.claude_base_reap is None
+    assert "claude_base_reap" not in result.to_dict()
+    # Skipped, not reaped: the superseded base survives.
+    assert superseded.is_dir()
+    assert any(
+        entry.get("event") == "service_gc_claude_base_reap_skipped_no_host_home"
+        and entry.get("log_level") == "warning"
+        for entry in logs
+    )
 
 
 @pytest.mark.unit

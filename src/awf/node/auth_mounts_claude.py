@@ -711,6 +711,19 @@ def _reconcile_fallback_edits_into_upper(
     silently lost. Tracking them would require diffing legacy against base and
     synthesizing whiteouts, which the mtime-only (no content-hash) design omits.
 
+    Known limitation (edits inside an agent-planted directory symlink are not
+    forwarded): ``os.walk`` runs with the default ``followlinks=False``, so if the
+    agent replaced a subdirectory with a symlink (e.g. ``legacy/.config ->
+    /other/dir``) during the fallback session, the walk lists it in ``_dirs`` but
+    never descends, and files reachable only *through* that link are not yielded or
+    forwarded. This is deliberate, not a regression: descending (``followlinks=True``)
+    would let this root worker read content at the link target — possibly outside the
+    ``.claude`` tree — and surface it through the agent-visible overlay, the same
+    arbitrary root-read primitive the per-file source-symlink skip above guards
+    against. The only "lost" data is content that never lived in the ``.claude`` copy
+    to begin with (it lives at the link target); genuine edits to files in *real*
+    subdirectories are walked and forwarded normally.
+
     Known limitation (a newer host write can un-delete an overlay deletion): an
     overlay-era deletion is recorded in ``upper`` as a whiteout character device,
     and ``_safe_mtime_ns`` returns that whiteout's *creation* mtime (when the agent
