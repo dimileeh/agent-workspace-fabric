@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,6 +85,92 @@ async def test_setup_tools_are_registered(tmp_path: Path) -> None:
         assert "password" not in joined_property_names
         assert "secret" not in joined_property_names
         assert "credential" not in joined_property_names
+
+
+@pytest.mark.unit
+async def test_setup_status_init_and_client_tools_offload_blocking_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    event_loop_thread_id = threading.get_ident()
+    helper_thread_ids: dict[str, int] = {}
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="ready",
+        details={"selected_providers": [], "checks": []},
+        next_steps=(),
+    )
+    project = tmp_path / "repo"
+    project.mkdir()
+    preview = SimpleNamespace(
+        path=project,
+        draft=SimpleNamespace(template="generic"),
+        to_dict=lambda: {
+            "path": str(project),
+            "inspection": {"detected_template": "generic"},
+            "draft": {"template": "generic", "yaml": "name: generic\n"},
+            "diagnostics": {},
+        },
+    )
+    env_file = tmp_path / ".env"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    def record_helper_thread(name: str) -> None:
+        helper_thread_ids[name] = threading.get_ident()
+
+    def fake_run_setup(**_kwargs: Any) -> Any:
+        record_helper_thread("setup_status")
+        return readiness
+
+    def fake_preview(
+        _path: Path,
+        *,
+        template: str,
+        include_smoke_request: bool,
+    ) -> Any:
+        _ = (template, include_smoke_request)
+        record_helper_thread("initialize_project_profile")
+        return preview
+
+    def fake_resolve_client_env_file(
+        _source_checkout: Path | None,
+        _require_existing: bool = False,
+    ) -> Path:
+        record_helper_thread("client_integration_instructions")
+        return env_file
+
+    monkeypatch.setattr(setup_tools, "_run_setup", fake_run_setup)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", HostSetupConfig)
+    monkeypatch.setattr(setup_tools, "preview_project_onboarding", fake_preview)
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fake_resolve_client_env_file)
+    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
+    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
+    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(setup_tools, "_client_env", lambda: {})
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    setup_status = await mcp.call_tool("awf_get_setup_status", {})
+    init_profile = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project)},
+    )
+    client_instructions = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+
+    assert setup_status.isError is False
+    assert init_profile.isError is False
+    assert client_instructions.isError is False
+    assert set(helper_thread_ids) == {
+        "setup_status",
+        "initialize_project_profile",
+        "client_integration_instructions",
+    }
+    assert all(thread_id != event_loop_thread_id for thread_id in helper_thread_ids.values())
 
 
 @pytest.mark.unit

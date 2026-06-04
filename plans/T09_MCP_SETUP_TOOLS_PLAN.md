@@ -82,6 +82,53 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAAvH
+
+### Problem Statement And Scope
+
+The PR review reports that three async MCP setup handlers call synchronous
+helpers directly: `awf_get_setup_status`,
+`awf_initialize_project_profile`, and
+`awf_get_client_integration_instructions`. Those helpers perform filesystem,
+host config, system-check, and client-plan work, so running them directly can
+block the MCP server event loop.
+
+Scope is limited to preserving the existing async MCP public surface while
+offloading the three synchronous helper calls to worker threads.
+
+### Requirements Checklist
+
+- Keep the existing async MCP tool signatures and response payloads stable.
+- Offload `_get_setup_status_result` from `awf_get_setup_status` with
+  `asyncio.to_thread`.
+- Offload `_initialize_project_profile_result` from
+  `awf_initialize_project_profile` with `asyncio.to_thread`.
+- Offload `_client_integration_instructions_result` from
+  `awf_get_client_integration_instructions` with `asyncio.to_thread`.
+- Add a focused regression proving the blocking setup helper work does not run
+  on the event-loop thread.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression that records the event-loop thread and
+   verifies the blocking helper dependencies run on worker threads for the
+   three affected tools.
+2. Add `asyncio.to_thread` offloading in the three async wrappers.
+3. Run the targeted regression and focused setup-tools test file, plus focused
+   lint/type checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_setup_status_init_and_client_tools_offload_blocking_work -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-yQ
 
 ### Problem Statement And Scope

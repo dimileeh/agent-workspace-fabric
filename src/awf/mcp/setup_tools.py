@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -101,7 +102,8 @@ def register_setup_tools(
         ),
     ) -> StructuredToolResult:
         """Return first-run setup status and safe setup metadata."""
-        return _get_setup_status_result(
+        return await asyncio.to_thread(
+            _get_setup_status_result,
             safe_result=safe_result,
             providers=providers or [],
             source_checkout=source_checkout,
@@ -167,7 +169,8 @@ def register_setup_tools(
         ),
     ) -> StructuredToolResult:
         """Preview or write a project-local AWF workspace profile."""
-        return _initialize_project_profile_result(
+        return await asyncio.to_thread(
+            _initialize_project_profile_result,
             safe_result=safe_result,
             project_path=project_path,
             include_smoke_request=include_smoke_request,
@@ -190,7 +193,8 @@ def register_setup_tools(
         ),
     ) -> StructuredToolResult:
         """Return secret-free MCP client integration instructions."""
-        return _client_integration_instructions_result(
+        return await asyncio.to_thread(
+            _client_integration_instructions_result,
             safe_result=safe_result,
             clients=clients or list(CLIENT_DESCRIPTORS),
             source_checkout=source_checkout,

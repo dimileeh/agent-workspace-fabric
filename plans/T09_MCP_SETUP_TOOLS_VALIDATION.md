@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HAAvH
+
+### Requirement Status
+
+- Keep the existing async MCP tool signatures and response payloads stable:
+  Complete.
+- Offload `_get_setup_status_result` from `awf_get_setup_status` with
+  `asyncio.to_thread`: Complete.
+- Offload `_initialize_project_profile_result` from
+  `awf_initialize_project_profile` with `asyncio.to_thread`: Complete.
+- Offload `_client_integration_instructions_result` from
+  `awf_get_client_integration_instructions` with `asyncio.to_thread`:
+  Complete.
+- Add a focused regression proving the blocking setup helper work does not run
+  on the event-loop thread: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_setup_status_init_and_client_tools_offload_blocking_work -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because all three
+  helper dependencies recorded the event-loop thread.
+- Regression test after the implementation change: 1 passed.
+- Focused setup-tools test file: 13 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-yQ
 
 ### Requirement Status
