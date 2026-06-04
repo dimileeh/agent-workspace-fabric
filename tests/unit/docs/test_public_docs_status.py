@@ -1520,6 +1520,42 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         ), f"{label} must provide guarded Core stop commands before metadata refresh"
 
 
+def test_uninstall_source_checkout_env_restore_accepts_exported_dotenv_entries(
+    tmp_path: Path,
+) -> None:
+    """Assert uninstall snippets accept dotenv syntax AWF itself accepts."""
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+    env_file = tmp_path / ".env"
+
+    for key in ("AWF_API_TOKEN", "AWF_POSTGRES_PASSWORD"):
+        expressions = set(re.findall(rf"sed -n '([^']*{key}[^']*)'", uninstall_text))
+        assert len(expressions) == 1
+        expression = expressions.pop()
+        env_file.write_text(
+            "\n".join(
+                (
+                    f"{key}_BACKUP=keep",
+                    f"  export {key}=from-export",
+                    f"\t{key} = from-leading-space",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["sed", "-n", expression, str(env_file)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.stdout.splitlines() == [
+            "from-export",
+            "from-leading-space",
+        ]
+
+
 def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     """Assert no-global checkout rollback does not require a global awf executable."""
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")

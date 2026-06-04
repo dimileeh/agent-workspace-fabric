@@ -24,7 +24,7 @@ cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -36,7 +36,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -106,7 +106,7 @@ cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -118,7 +118,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
@@ -165,7 +165,7 @@ cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^AWF_API_TOKEN=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
@@ -177,7 +177,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in docker/compose/.env .env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^AWF_POSTGRES_PASSWORD=//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
