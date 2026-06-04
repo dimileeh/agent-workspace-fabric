@@ -836,6 +836,7 @@ def _markdown_section(text: str, heading: str) -> str:
 
 
 def _quickstart_upgrade_section(text: str, heading: str) -> str:
+    """Return the lane's upgrade block between upgrade and uninstall labels."""
     section = _markdown_section(text, heading)
     assert "Upgrade:" in section, f"{heading} is missing Upgrade block"
     assert "Uninstall:" in section, f"{heading} is missing Uninstall block"

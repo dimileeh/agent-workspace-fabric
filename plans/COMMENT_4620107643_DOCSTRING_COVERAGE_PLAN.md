@@ -28,6 +28,15 @@ the PR diff introduced or directly touched.
 4. Write `plans/COMMENT_4620107643_DOCSTRING_COVERAGE_VALIDATION.md` with the
    results.
 
+## Follow-up iteration for current HEAD
+
+A re-audit after later review repairs found one new PR-touched helper without a
+docstring: `_quickstart_upgrade_section` in
+`tests/unit/docs/test_public_docs_status.py`. This iteration will add a concise
+behavior-neutral helper docstring, re-run the diff-scoped AST audit, run focused
+Ruff/pytest checks for the touched docs test file, and update the validation
+record.
+
 ## Verification commands and pass criteria
 
 - Diff-scoped AST audit over `origin/development...HEAD` reports

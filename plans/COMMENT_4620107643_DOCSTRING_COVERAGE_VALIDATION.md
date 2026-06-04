@@ -30,3 +30,24 @@ coverage gate remain managed after agent completion.
 ## Gaps
 
 None for the diff-scoped review repair.
+
+## Follow-up validation for current HEAD
+
+After later review repairs, a fresh diff-scoped AST audit found one new
+PR-touched helper without a docstring:
+`tests/unit/docs/test_public_docs_status.py:838 _quickstart_upgrade_section`.
+This iteration added a concise behavior-neutral helper docstring only.
+
+Focused validation:
+
+- Pre-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `touched_defs=27`, `missing_docstrings_on_touched_defs=1`.
+- Post-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `touched_defs=27`, `missing_docstrings_on_touched_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q`:
+  `37 passed in 1.22s`.
+
+Full AWF/GitHub validation, full coverage, and broad external docstring
+coverage remain managed after agent completion.
