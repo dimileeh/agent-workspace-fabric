@@ -24,7 +24,9 @@ from awf.host_setup.config import (
 )
 from awf.host_setup.rendering import (
     SETUP_CLIENT_UNKNOWN,
+    SETUP_READINESS_FAILED,
     START_HEALTH_TIMEOUT,
+    first_run_failure_payload,
     first_run_success_payload,
 )
 from awf.mcp.server import build_mcp_server
@@ -161,6 +163,39 @@ async def test_get_setup_status_returns_only_status_and_safe_refs(
     assert raw_token not in rendered
     assert "GITHUB_TOKEN" not in rendered
     assert "env://GITHUB_TOKEN" not in rendered
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["blocked", "failed"])
+async def test_get_setup_status_marks_blocked_and_failed_readiness_as_mcp_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status: str,
+) -> None:
+    from awf.mcp import setup_tools
+
+    readiness = first_run_failure_payload(
+        command="awf setup",
+        reason_code=SETUP_READINESS_FAILED,
+        summary=f"host readiness is {status}",
+        status=status,
+        details={"check": "docker"},
+        next_steps=("Fix host readiness.",),
+    )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", HostSetupConfig)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_get_setup_status", {})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == status
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["issues"] == [
+        {"reason_code": SETUP_READINESS_FAILED, "severity": status, "check": "docker"}
+    ]
 
 
 @pytest.mark.unit

@@ -246,7 +246,7 @@ def _get_setup_status_result(
         "issues": _setup_status_issues(rendered.get("issues")),
         "next_steps": _list_of_strings(rendered.get("next_steps")),
     }
-    return safe_result(payload)
+    return safe_result(payload, is_error=payload["status"] in ("blocked", "failed"))
 
 
 async def _start_local_service_result(

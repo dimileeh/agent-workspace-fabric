@@ -53,6 +53,50 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6G_-HM
+
+### Requirement Status
+
+- Preserve successful and warning setup status responses as non-error MCP tool
+  calls: Complete.
+- Mark `awf_get_setup_status` responses as MCP errors when rendered readiness
+  status is `blocked` or `failed`: Complete.
+- Keep the existing setup status response payload shape and redaction behavior:
+  Complete.
+- Add a focused regression proving blocked and failed readiness payloads set
+  `result.isError`: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_marks_blocked_and_failed_readiness_as_mcp_error -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change with `result.isError`
+  still `False` for both `blocked` and `failed` setup readiness payloads.
+- Regression test after the implementation change: 2 passed.
+- Focused setup-tools test file: 11 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HK
 
 ### Requirement Status

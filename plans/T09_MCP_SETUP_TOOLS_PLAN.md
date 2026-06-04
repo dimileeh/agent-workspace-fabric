@@ -81,3 +81,42 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
+
+## Review Repair: PRRT_kwDOSJAM6s6G_-HM
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` returns a normal MCP tool
+result when `_run_setup` returns a `blocked` or `failed` first-run readiness
+payload without raising. That makes host readiness blockers look successful at
+the MCP protocol layer unless clients inspect the payload status.
+
+Scope is limited to MCP setup status `isError` parity and its focused regression
+test.
+
+### Requirements Checklist
+
+- Preserve successful and warning setup status responses as non-error MCP tool
+  calls.
+- Mark `awf_get_setup_status` responses as MCP errors when rendered readiness
+  status is `blocked` or `failed`.
+- Keep the existing setup status response payload shape and redaction behavior.
+- Add a focused regression proving blocked and failed readiness payloads set
+  `result.isError`.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for blocked/failed setup status.
+2. Change `_get_setup_status_result` to pass `is_error=True` only when rendered
+   setup readiness status is `blocked` or `failed`.
+3. Run the targeted regression and focused setup-tools test file.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_marks_blocked_and_failed_readiness_as_mcp_error -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
