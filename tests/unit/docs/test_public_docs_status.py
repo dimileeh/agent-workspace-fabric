@@ -108,6 +108,8 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "docs/QUICKSTART.md" in readme_text
     assert "docs/UPGRADE.md" in readme_text
     assert "docs/UNINSTALL.md" in readme_text
+    assert "curl -fsSL https://aira.pro/install.sh | sh" in readme_text
+    assert "&#124;" not in readme_text
     assert "docs/START_HERE.md" not in readme_text
     assert "currently a stub" not in quickstart_text.lower()
     assert "awf setup" in quickstart_text

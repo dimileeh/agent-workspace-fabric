@@ -151,10 +151,16 @@ start, project init, mocked smoke, upgrade, and uninstall.
 
 | Lane | Use When | Install |
 |---|---|---|
-| Curl installer | You want the shortest release-installed path and accept that it is least inspectable before execution. | `curl -fsSL https://aira.pro/install.sh &#124; sh` |
+| Curl installer | You want the shortest release-installed path and accept that it is least inspectable before execution. | Run the command below. |
 | `uv tool` / `pipx` | You want a release-installed package mediated by an isolated Python tool manager. | `uv tool install agent-workspace-fabric` or `pipx install agent-workspace-fabric` |
 | Source checkout with global tool install | You want inspectable source, then a global `awf` executable installed from that checkout. | `git clone ...` then `uv tool install . --force` |
 | Source checkout with no global install | You want inspectable source and no global `awf` on `PATH`. | `git clone ...` then `uv run --python 3.12 --extra dev awf ...` |
+
+For the curl installer lane:
+
+```bash
+curl -fsSL https://aira.pro/install.sh | sh
+```
 
 After installing in any lane, the first-run command grammar is:
 
