@@ -212,6 +212,11 @@ at the changed document, and tighten package upgrade env-restore anchor lookup
 so the `AWF_API_TOKEN` export match is an exact shell line found after the
 preceding guard/require anchors.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HJDHL`: README no-global
+source-checkout setup/start commands must pass `--source-checkout "$PWD"` so a
+fresh checkout is selected even when stale persisted `source_checkout` metadata
+exists.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -252,6 +257,12 @@ anchor follow-up:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_urls_match_smoke_defaults tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_rejects_prefixed_api_export_line tests/unit/docs/test_public_docs_status.py::test_package_upgrade_docs_restore_service_env_before_start -q
+```
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HJDHL`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
 ```
 
 Focused lint command:

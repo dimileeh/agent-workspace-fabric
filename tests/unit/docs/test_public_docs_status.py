@@ -136,8 +136,16 @@ def test_readme_first_run_grammar_reuses_initialized_project_path() -> None:
     assert "awf init <path>" in first_run_section
     assert "awf smoke run --project <path> --mocked-local --format pretty" in first_run_section
     assert "awf smoke run --mocked-local --format pretty" not in first_run_section
-    assert "uv run --python 3.12 --extra dev awf setup" in first_run_section
-    assert "uv run --python 3.12 --extra dev awf start" in first_run_section
+    assert (
+        'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"' in first_run_section
+    )
+    assert (
+        'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"' in first_run_section
+    )
+    assert not re.search(
+        r"(?m)^uv run --python 3\.12 --extra dev awf (setup|start)\s*$",
+        first_run_section,
+    )
     assert "uv run --python 3.12 --extra dev awf init <path>" in first_run_section
     assert (
         "uv run --python 3.12 --extra dev awf smoke run --project <path> "

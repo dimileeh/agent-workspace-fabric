@@ -170,8 +170,8 @@ For the no-global source checkout lane, run the same subcommands through the
 checkout wrapper from the source checkout:
 
 ```bash
-uv run --python 3.12 --extra dev awf setup
-uv run --python 3.12 --extra dev awf start
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf init <path>
 uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty
 ```

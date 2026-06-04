@@ -47,6 +47,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   `awf` first-run commands to lanes that put `awf` on `PATH` and documenting
   the no-global `uv run --python 3.12 --extra dev awf ...` wrapper alongside
   them.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HJDHL` by pinning README
+  no-global source-checkout `setup` and `start` commands with
+  `--source-checkout "$PWD"` so stale persisted source-checkout metadata cannot
+  override the current checkout.
 - Complete: Address PR thread `PRRT_kwDOSJAM6s6HFXeN` by stopping local Core
   before source-checkout upgrade snippets refresh persisted `source_checkout`
   metadata with `awf setup --source-checkout "$PWD"`.
@@ -1183,6 +1187,44 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 ```
 
 Final focused repair result: `2 passed in 0.67s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Result: `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HJDHL`:
+
+- `README.md` now passes `--source-checkout "$PWD"` to the no-global
+  source-checkout `setup` and `start` commands.
+- `tests/unit/docs/test_public_docs_status.py` now rejects bare no-global
+  README `setup` or `start` wrapper lines that omit the explicit source
+  checkout.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
+```
+
+Red-phase result after tightening the focused assertion: failed because
+`README.md` still omitted `--source-checkout "$PWD"` from the no-global
+`setup` command.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_readme_first_run_grammar_reuses_initialized_project_path -q
+```
+
+Final focused repair result: `1 passed in 0.68s`.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
