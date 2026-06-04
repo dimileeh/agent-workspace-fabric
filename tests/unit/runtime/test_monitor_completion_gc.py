@@ -126,6 +126,38 @@ def _empty_workspace_gc_result(work_dir: Path) -> WorkspaceGCResult:
 
 
 @pytest.mark.unit
+def test_completed_workspace_compose_teardown_uses_teardown_only_template_sentinel(
+    tmp_path: Path,
+) -> None:
+    class _Runner:
+        _work_dir = tmp_path
+
+    init_calls: list[tuple[Path, Path]] = []
+
+    class _FakeComposeManager:
+        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+            init_calls.append((work_dir, template_path))
+
+    with patch(
+        "awf.runtime.pr_monitor_runner.lifecycle.ComposeManager",
+        new=_FakeComposeManager,
+    ):
+        callback = lifecycle._completed_workspace_compose_teardown(
+            _Runner(),
+            compose_project="monitor_project",
+            compose_file=tmp_path / "monitor" / "compose.yml",
+        )
+
+    assert callback is not None
+    assert init_calls == [
+        (
+            tmp_path,
+            tmp_path / "compose" / ".completed-workspace-teardown-does-not-render.yml.j2",
+        )
+    ]
+
+
+@pytest.mark.unit
 async def test_completed_workspace_compose_teardown_callback_uses_candidate_metadata(
     tmp_path: Path,
 ) -> None:

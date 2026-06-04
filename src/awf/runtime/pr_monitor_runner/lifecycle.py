@@ -649,9 +649,13 @@ def _teardown_completed_workspace_auth_overlay(work_dir: Path, workspace_id: str
         )
 
 
-def _default_completed_workspace_compose_template() -> Path:
-    """Resolve the workspace compose template for monitor-side teardown."""
-    return Path(__file__).resolve().parents[4] / "docker" / "compose" / "workspace.base.yml.j2"
+def _completed_workspace_teardown_template_sentinel(work_dir: Path) -> Path:
+    """Return the unused template sentinel for monitor-side compose teardown."""
+    # ``ComposeManager`` requires a template path for render setup, but this
+    # teardown-only instance never renders: it only calls ``teardown_project``
+    # with a persisted compose file. Keep the sentinel under ``work_dir`` so
+    # installed packages do not infer a fragile source-tree-relative path.
+    return work_dir / "compose" / ".completed-workspace-teardown-does-not-render.yml.j2"
 
 
 def _compose_file_for_gc_candidate(
@@ -676,7 +680,7 @@ def _completed_workspace_compose_teardown(
 
     manager = ComposeManager(
         work_dir=self._work_dir,
-        template_path=_default_completed_workspace_compose_template(),
+        template_path=_completed_workspace_teardown_template_sentinel(self._work_dir),
     )
 
     async def _teardown(candidate: WorkspaceGCCandidate) -> WorkspaceGCComposeTeardownResult:
