@@ -27,13 +27,16 @@ success. Base contents/secrets are never logged.
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 from awf.common.logging import get_logger
 from awf.node.auth_mounts import (
     _CLAUDE_BASE_DIRNAME,
+    _OVERLAY_UNMOUNTED_MARKER,
     _PROC_MOUNTS,
     _SHARED_AUTH_DIRNAME,
+    _has_cap_sys_admin,
     _host_claude_signature,
     _shared_claude_base_dir,
     iter_overlay_lowerdirs,
@@ -59,6 +62,14 @@ CLAUDE_BASE_REAP_PARTIAL = "CLAUDE_BASE_REAP_PARTIAL"
 # Nothing to do: the base root is absent, or every base is protected (current /
 # live-mounted / pinned) so no superseded base exists.
 CLAUDE_BASE_GC_NOOP = "CLAUDE_BASE_GC_NOOP"
+# The reaper ran in a process that cannot see the worker's mount namespace (the API
+# container binds the work dir ``rprivate``; only the worker holds ``CAP_SYS_ADMIN``
+# and the ``rshared`` bind) *and* a surviving overlay carries no ``base.signature``
+# pin. Such a base could be a live worker-mounted lower that is invisible here and
+# has no pin to fall back on, so every candidate is conservatively protected this
+# pass rather than risk reaping a base still backing a running agent. Mirrors
+# ``auth_mounts.OverlayUnmountUnverifiableError`` (PRRT_kwDOSJAM6s6HI1tS).
+CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE = "CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE"
 
 # Marker file each overlay-backed workspace writes recording which shared base its
 # ``upper`` belongs to (see ``auth_mounts._record_overlay_base_pin``).
@@ -112,6 +123,53 @@ def _pinned_base_dirs(
     return pinned
 
 
+def _has_unverifiable_live_overlay(
+    work_dir: Path, *, pruned_auth_dirs: frozenset[Path] = frozenset()
+) -> bool:
+    """Return whether a surviving overlay may be live but cannot be pinned to a base.
+
+    A workspace whose ``claude/upper`` overlay scratch exists but that carries
+    *neither* a ``base.signature`` pin *nor* an ``.overlay-unmounted`` teardown
+    marker may still hold a **live** overlay in the worker's mount namespace, mounted
+    against a base that this process cannot observe via its own ``/proc/mounts`` — the
+    API container binds the work dir ``rprivate`` and lacks ``CAP_SYS_ADMIN``, so a
+    worker-mounted lowerdir never appears here. Such a base is invisible to the
+    live-mount protection *and* has no pin to fall back on, so it cannot be safely
+    classified as superseded. Mirrors the incapable branch of
+    :func:`auth_mounts.teardown_workspace_auth_overlay`. ``pruned_auth_dirs`` (the
+    terminal candidates this pass deletes) are excluded — they will not remount.
+    """
+
+    auth_root = work_dir / "auth"
+    pruned = {auth_dir.resolve(strict=False) for auth_dir in pruned_auth_dirs}
+    try:
+        workspace_dirs = list(auth_root.iterdir())
+    except OSError:
+        return False
+    for workspace_dir in workspace_dirs:
+        if workspace_dir.name == _SHARED_AUTH_DIRNAME:
+            continue
+        if workspace_dir.resolve(strict=False) in pruned:
+            continue
+        claude_root = workspace_dir / "claude"
+        if not (claude_root / "upper").exists():
+            # No overlay scratch (legacy full-copy workspace, or never provisioned):
+            # nothing that could be a live overlay lower.
+            continue
+        if (claude_root / _OVERLAY_UNMOUNTED_MARKER).exists():
+            # A capable process (the worker) recorded teardown: the old base is no
+            # longer a live lower, so classifying it is safe.
+            continue
+        marker = claude_root / _BASE_SIGNATURE_MARKER
+        try:
+            signature = marker.read_text().strip()
+        except OSError:
+            signature = ""
+        if not signature:
+            return True
+    return False
+
+
 def _protected_signature_dirs(
     *,
     work_dir: Path,
@@ -156,6 +214,7 @@ def reap_superseded_claude_bases(
     proc_mounts: Path = _PROC_MOUNTS,
     execute: bool = False,
     pruned_auth_dirs: frozenset[Path] = frozenset(),
+    capability_probe: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Reap superseded shared ``~/.claude`` overlay bases under ``work_dir`` (#389).
 
@@ -168,10 +227,20 @@ def reap_superseded_claude_bases(
     inspectable report:
 
     ``status`` (``ok`` / ``partial`` / ``skipped``), ``execute``, ``base_root``,
-    ``scanned`` / ``protected`` / ``reaped`` / ``planned`` signature lists, and
-    per-signature ``errors``. A permission-denied removal makes ``status`` ``partial``
-    (reason ``CLAUDE_BASE_REAP_PARTIAL``); the per-error reason distinguishes a
-    permission denial (``CLAUDE_BASE_REAP_PERMISSION_DENIED``) from other ``OSError``.
+    ``scanned`` / ``protected`` / ``reaped`` / ``planned`` / ``unverifiable``
+    signature lists, and per-signature ``errors``. A permission-denied removal makes
+    ``status`` ``partial`` (reason ``CLAUDE_BASE_REAP_PARTIAL``); the per-error reason
+    distinguishes a permission denial (``CLAUDE_BASE_REAP_PERMISSION_DENIED``) from
+    other ``OSError``.
+
+    ``capability_probe`` (defaulting to :func:`auth_mounts._has_cap_sys_admin`)
+    reports whether this process can observe the worker's overlay mounts. When it
+    cannot (the API container) *and* a surviving overlay has no ``base.signature``
+    pin, the ``/proc/mounts`` live-mount protection is untrustworthy and a live base
+    could be invisible *and* unpinned — so every candidate is conservatively
+    protected (listed under ``unverifiable``) and ``reason_code`` becomes
+    ``CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE`` rather than reaping a base that may
+    still back a running agent (PRRT_kwDOSJAM6s6HI1tS).
     """
 
     work_dir = Path(work_dir).expanduser()
@@ -187,6 +256,7 @@ def reap_superseded_claude_bases(
         "protected": [],
         "reaped": [],
         "planned": [],
+        "unverifiable": [],
         "errors": [],
     }
     try:
@@ -204,10 +274,21 @@ def reap_superseded_claude_bases(
         pruned_auth_dirs=pruned_auth_dirs,
     )
 
+    # If this process cannot see the worker's mount namespace (the API container),
+    # the ``/proc/mounts`` live-mount protection above is blind to worker-mounted
+    # overlays. When a surviving overlay also has no ``base.signature`` pin, neither
+    # protection can vouch for its base, so reaping any candidate risks removing a
+    # live lower. Decline to reap this pass instead (PRRT_kwDOSJAM6s6HI1tS).
+    probe = capability_probe or _has_cap_sys_admin
+    live_mount_unverifiable = not probe() and _has_unverifiable_live_overlay(
+        work_dir, pruned_auth_dirs=pruned_auth_dirs
+    )
+
     scanned: list[str] = []
     protected_names: list[str] = []
     reaped: list[str] = []
     planned: list[str] = []
+    unverifiable: list[str] = []
     errors: list[dict[str, str]] = []
 
     for signature_dir in signature_dirs:
@@ -224,6 +305,13 @@ def reap_superseded_claude_bases(
         if signature_dir in protected_dirs:
             protected_names.append(signature_dir.name)
             continue
+        if live_mount_unverifiable:
+            # Cannot verify live worker mounts here and a surviving overlay has no
+            # pin: this base might back a running agent. Protect it conservatively
+            # rather than reap a base that could be an invisible live lower.
+            protected_names.append(signature_dir.name)
+            unverifiable.append(signature_dir.name)
+            continue
         if not execute:
             planned.append(signature_dir.name)
             continue
@@ -237,10 +325,22 @@ def reap_superseded_claude_bases(
     report["protected"] = protected_names
     report["reaped"] = reaped
     report["planned"] = planned
+    report["unverifiable"] = unverifiable
     report["errors"] = errors
     report["status"], report["reason_code"] = _reap_status(
         reaped=reaped, planned=planned, errors=errors
     )
+    if unverifiable:
+        # A superseded base was identified but deliberately not reaped because the
+        # live-mount view is untrustworthy and the overlay is unpinned. Surface it
+        # loudly with a dedicated reason code so this is never a silent no-op.
+        report["reason_code"] = CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+        _log.warning(
+            "gc.claude_base_reap_live_mount_unverifiable",
+            reason_code=CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE,
+            base_root=str(base_root),
+            unverifiable=unverifiable,
+        )
     return report
 
 

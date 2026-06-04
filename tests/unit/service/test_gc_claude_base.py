@@ -20,6 +20,7 @@ from awf.node.auth_mounts import _host_claude_signature, _shared_claude_base_dir
 from awf.service import gc_claude_base as gc_claude_base_mod
 from awf.service.gc_claude_base import (
     CLAUDE_BASE_GC_NOOP,
+    CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE,
     CLAUDE_BASE_REAP_PARTIAL,
     CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
     CLAUDE_BASE_REAP_PERMISSION_DENIED,
@@ -425,6 +426,153 @@ def test_pinned_dir_scan_tolerates_missing_auth_root(tmp_path: Path) -> None:
 
     assert report["status"] == "skipped"
     assert report["scanned"] == []
+
+
+def _make_overlay_scratch(
+    work_dir: Path, ws: str, *, pin: str | None = None, unmounted: bool = False
+) -> Path:
+    """Create a workspace overlay scratch (``claude/upper``) for ``ws``.
+
+    Optionally writes a ``base.signature`` pin and/or the ``.overlay-unmounted``
+    teardown marker so tests can exercise the unverifiable-live-overlay guard.
+    """
+
+    claude_root = work_dir / "auth" / ws / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    if pin is not None:
+        (claude_root / "base.signature").write_text(pin + "\n")
+    if unmounted:
+        (claude_root / ".overlay-unmounted").write_text("")
+    return claude_root
+
+
+@pytest.mark.unit
+def test_declines_to_reap_when_live_mount_unverifiable(tmp_path: Path) -> None:
+    # The dangerous case the reaper must refuse: it runs in a process that cannot see
+    # the worker's mount namespace (incapable) *and* a surviving overlay has no
+    # ``base.signature`` pin, so a live worker-mounted base could be invisible here
+    # and unpinned. Every candidate is conservatively protected rather than reaped.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    # A surviving overlay scratch with no pin and no teardown marker: possibly live.
+    _make_overlay_scratch(work_dir, "ws_live")
+
+    with capture_logs() as logs:
+        report = reap_superseded_claude_bases(
+            work_dir=work_dir,
+            host_home=host_home,
+            execute=True,
+            capability_probe=lambda: False,
+        )
+
+    assert report["reaped"] == []
+    assert report["unverifiable"] == ["sigsuper0000000"]
+    assert "sigsuper0000000" in report["protected"]
+    assert report["reason_code"] == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE
+    assert any(
+        entry.get("reason_code") == CLAUDE_BASE_REAP_LIVE_MOUNT_UNVERIFIABLE for entry in logs
+    )
+    # The possibly-live base was not reclaimed.
+    assert base_super.is_dir()
+
+
+@pytest.mark.unit
+def test_capable_process_reaps_despite_unpinned_overlay_scratch(tmp_path: Path) -> None:
+    # A capable process (the worker) sees the real mount namespace, so the
+    # ``/proc/mounts`` live-mount protection is authoritative even for an unpinned
+    # overlay — the unverifiable guard does not fire and reaping proceeds.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    _make_overlay_scratch(work_dir, "ws_live")
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=True,
+        capability_probe=lambda: True,
+    )
+
+    assert report["reaped"] == ["sigsuper0000000"]
+    assert report["unverifiable"] == []
+    assert not base_super.parent.exists()
+
+
+@pytest.mark.unit
+def test_unverifiable_guard_skipped_when_overlay_scratch_is_pinned(tmp_path: Path) -> None:
+    # An overlay scratch that carries a ``base.signature`` pin is *not* unverifiable:
+    # the pin protects its base across namespaces, so an unrelated superseded base is
+    # still reaped even by an incapable process.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    base_pinned = _make_base(work_dir, "sigpinned0000000")
+    _make_overlay_scratch(work_dir, "ws_live", pin="sigpinned0000000")
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=True,
+        capability_probe=lambda: False,
+    )
+
+    assert report["reaped"] == ["sigsuper0000000"]
+    assert report["unverifiable"] == []
+    assert "sigpinned0000000" in report["protected"]
+    assert base_pinned.is_dir()
+    assert not base_super.parent.exists()
+
+
+@pytest.mark.unit
+def test_unverifiable_guard_skipped_when_overlay_already_unmounted(tmp_path: Path) -> None:
+    # An overlay scratch with the ``.overlay-unmounted`` teardown marker was already
+    # released by a capable process, so its old base is no longer a live lower and the
+    # unverifiable guard does not fire — the superseded base is reaped.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    _make_overlay_scratch(work_dir, "ws_torn_down", unmounted=True)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=True,
+        capability_probe=lambda: False,
+    )
+
+    assert report["reaped"] == ["sigsuper0000000"]
+    assert report["unverifiable"] == []
+    assert not base_super.parent.exists()
+
+
+@pytest.mark.unit
+def test_unverifiable_overlay_scratch_pruned_candidate_does_not_block(tmp_path: Path) -> None:
+    # An unpinned overlay scratch belonging to an auth dir the same GC pass deletes
+    # (a terminal candidate) will not remount, so it must not trip the unverifiable
+    # guard — the superseded base is still reaped.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base_super = _make_base(work_dir, "sigsuper0000000")
+    claude_root = _make_overlay_scratch(work_dir, "ws_terminal")
+    pruned = frozenset({claude_root.parent})
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        execute=True,
+        capability_probe=lambda: False,
+        pruned_auth_dirs=pruned,
+    )
+
+    assert report["reaped"] == ["sigsuper0000000"]
+    assert report["unverifiable"] == []
+    assert not base_super.parent.exists()
 
 
 @pytest.mark.unit
