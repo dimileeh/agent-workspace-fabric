@@ -20,6 +20,7 @@ from awf.service.logs import (
     ServiceLogsResult,
     _resolve_local_service_compose_file,
     _run_subprocess,
+    _service_log_secret_values,
     run_service_logs,
 )
 
@@ -621,6 +622,48 @@ def test_service_logs_redacts_inherited_env_secret_from_captured_output(
     rendered = result.stdout + result.stderr
     assert secret not in rendered
     assert "<redacted>" in rendered
+
+
+@pytest.mark.unit
+def test_service_log_secret_values_skips_short_secret_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep short exact-secret candidates out of service-log redaction inputs."""
+    compose_short_secret = "a1!"
+    compose_long_secret = "compose-secret"
+    inherited_short_secret = "b2!"
+    inherited_long_secret = "inherited-secret"
+    explicit_short_secret = "c3!"
+    explicit_long_secret = "explicit-secret"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        (f"CUSTOM_API_KEY={compose_short_secret}\nCUSTOM_CLIENT_SECRET={compose_long_secret}\n"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CUSTOM_AUTH_TOKEN", inherited_short_secret)
+    monkeypatch.setenv("CUSTOM_LONG_AUTH_TOKEN", inherited_long_secret)
+
+    values = _service_log_secret_values(
+        {
+            "CUSTOM_PASSWORD": explicit_short_secret,
+            "CUSTOM_LONG_PASSWORD": explicit_long_secret,
+        },
+        compose_env_file,
+    )
+
+    selected_short_values = [
+        raw
+        for raw in (compose_short_secret, inherited_short_secret, explicit_short_secret)
+        if raw in values
+    ]
+    missing_long_values = [
+        raw
+        for raw in (compose_long_secret, inherited_long_secret, explicit_long_secret)
+        if raw not in values
+    ]
+    assert not selected_short_values
+    assert not missing_long_values
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

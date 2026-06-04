@@ -1053,3 +1053,56 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
+
+## Review-Level Comment `issue:4620175517` Service-Log Short Secret Filter Plan
+
+### Problem Statement And Scope
+
+The review-level comment includes three follow-ups. Local code already aligns
+MCP payload/artifact secret-key discovery with MCP log/service-log discovery by
+using `_is_service_secret_env_key()` in `_mcp_secret_values()`. The MCP
+per-call Compose/env reread concern is a non-blocking latency trade-off already
+kept outside this repair's correctness scope. The remaining actionable cleanup
+is that `_service_log_secret_values()` collects short secret-like values before
+the shared exact-secret redactor filters them later.
+
+This repair is limited to filtering short exact-secret candidates in service-log
+secret discovery, a focused helper regression, and validation evidence. It does
+not change MCP log-read window sizing, introduce env-file caching, or alter
+existing token/provider-ref redaction behavior.
+
+### Requirements Checklist
+
+- `_service_log_secret_values()` ignores secret-like values shorter than four
+  characters from the selected Compose env file, inherited process environment,
+  and explicit service environment mappings.
+- Longer secret-like values from the same sources remain selected for exact
+  service-log redaction.
+- The MCP `_mcp_secret_values()` key-filter item is documented as stale because
+  the local code already uses `_is_service_secret_env_key()`.
+- The MCP env-file caching item is documented as a deferred performance
+  trade-off, not a correctness or leak fix in this comment cycle.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing regression for `_service_log_secret_values()` that
+   includes short and long secret-like values from Compose, inherited, and
+   explicit environment sources.
+2. Add the minimum-length filter where service-log exact-secret candidates are
+   collected.
+3. Run the targeted helper regression, the adjacent service-log redaction
+   checks, and narrow ruff/mypy checks for touched files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k short_secret_values --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'short_secret_values or inherited_env_secret or compose_env_provider_secret' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```

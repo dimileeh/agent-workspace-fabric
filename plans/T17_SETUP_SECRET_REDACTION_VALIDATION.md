@@ -1446,6 +1446,57 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
 ```
 
+## Review-Level Comment `issue:4620175517` Service-Log Short Secret Filter Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `_service_log_secret_values()` now skips secret-like values shorter
+  than four characters from the selected Compose env file, inherited process
+  environment, and explicit service environment mappings.
+- Complete: longer secret-like values from the same sources remain selected for
+  service-log exact-secret redaction.
+- Complete: the MCP `_mcp_secret_values()` key-filter item is stale in the
+  local branch; `src/awf/mcp/server.py` already imports and uses
+  `_is_service_secret_env_key()` when selecting provider env exact secrets.
+- Complete: the MCP env-file caching item is treated as a deferred performance
+  trade-off in this comment cycle; it does not create a direct secret leak and
+  the current per-call path keeps env-file changes visible.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k short_secret_values --tb=short -ra
+# failed: the helper still selected a short Compose-env secret-like value before filtering
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k short_secret_values --tb=short -ra
+# 1 passed, 28 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'short_secret_values or inherited_env_secret or compose_env_provider_secret' --tb=short -ra
+# 5 passed, 24 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.
