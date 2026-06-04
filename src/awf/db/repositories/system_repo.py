@@ -5,7 +5,7 @@ from __future__ import annotations
 import builtins
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,7 @@ from awf.db.repositories.base import (
     QueueDecisionCreate,
     _circuit_breaker_expired,
     _provider_model_circuit_breaker_insert_if_absent_stmt,
+    _worker_heartbeat_upsert_stmt,
     resolve_session_dialect_name,
 )
 
@@ -114,8 +115,9 @@ class EgressAuditRepository:
 class WorkerHeartbeatRepository:
     """CRUD helpers for control-worker heartbeat liveness records."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def get(self, *, worker_id: str) -> WorkerHeartbeat | None:
         stmt = select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id == worker_id)
@@ -130,14 +132,30 @@ class WorkerHeartbeatRepository:
         last_heartbeat_at: datetime,
         poll_interval_seconds: float,
     ) -> WorkerHeartbeat:
+        now = datetime.now(UTC)
+        heartbeat_values: dict[str, Any] = {
+            "worker_id": worker_id,
+            "node_id": node_id,
+            "started_at": started_at,
+            "last_heartbeat_at": last_heartbeat_at,
+            "poll_interval_seconds": poll_interval_seconds,
+        }
+        upsert_stmt = _worker_heartbeat_upsert_stmt(self._dialect_name)
+        if upsert_stmt is not None:
+            result = await self._session.execute(
+                upsert_stmt.values(
+                    **heartbeat_values,
+                    created_at=now,
+                    updated_at=now,
+                ).execution_options(populate_existing=True)
+            )
+            await self._session.flush()
+            return cast(WorkerHeartbeat, result.scalar_one())
+
         heartbeat = await self.get(worker_id=worker_id)
         if heartbeat is None:
             heartbeat = WorkerHeartbeat(
-                worker_id=worker_id,
-                node_id=node_id,
-                started_at=started_at,
-                last_heartbeat_at=last_heartbeat_at,
-                poll_interval_seconds=poll_interval_seconds,
+                **heartbeat_values,
             )
             self._session.add(heartbeat)
         else:
