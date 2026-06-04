@@ -909,3 +909,52 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HJbA2` Inherited Service Env Secret Plan
+
+### Problem Statement And Scope
+
+The review thread reports that `awf service logs` omits inherited process
+environment secrets from exact service-log redaction when `service_environ` is
+omitted. In that default path Docker inherits `os.environ`, but
+`_service_log_secret_values()` only scans the Compose env file and an explicit
+mapping, so a bare non-pattern value from an exported secret-like variable can
+appear in captured or followed service logs.
+
+This repair is limited to inherited service-log exact-secret discovery, focused
+captured/followed service-log regressions, and validation evidence. It does not
+change MCP log reads, shared token patterns, Docker command construction, or
+broad AWF/GitHub validation ownership.
+
+### Requirements Checklist
+
+- Captured service logs redact bare non-pattern values from inherited
+  secret-like environment keys when `service_environ` is omitted.
+- Followed service-log streams redact the same inherited exact secret values
+  before writing to the operator terminal.
+- Explicit `service_environ` and selected Compose env-file exact-secret
+  redaction remain covered and unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused failing captured and followed service-log regressions using an
+   inherited `ANTHROPIC_AUTH_TOKEN` value that does not match token patterns.
+2. Include secret-like values from `os.environ` in `_service_log_secret_values()`
+   along with selected Compose env-file values and any explicit service
+   environment mapping.
+3. Run the targeted service-log regressions, the adjacent Compose-env
+   service-log redaction tests, and narrow ruff/mypy checks for touched files.
+4. Update `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md` with status and
+   evidence. Broad AWF/GitHub validation remains owned by AWF after agent
+   completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k inherited_env_secret --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'inherited_env_secret or compose_env_provider_secret' --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```

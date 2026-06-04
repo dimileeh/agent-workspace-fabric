@@ -382,9 +382,13 @@ def _service_log_secret_values(
         for key, value in compose_env_file_values(compose_env_file).items()
         if value and _is_service_secret_env_key(key)
     ]
-    if environ is not None:
+    for source_environ in (os.environ, environ):
+        if source_environ is None:
+            continue
         secret_values.extend(
-            value for key, value in environ.items() if value and _is_service_secret_env_key(key)
+            value
+            for key, value in source_environ.items()
+            if value and _is_service_secret_env_key(key)
         )
     return tuple(dict.fromkeys(secret_values))
 

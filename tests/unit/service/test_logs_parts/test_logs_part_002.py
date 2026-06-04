@@ -596,6 +596,35 @@ def test_service_logs_redacts_compose_env_provider_secret_from_captured_output(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_redacts_inherited_env_secret_from_captured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redact secret-like caller env values inherited by the default logs subprocess."""
+    secret = "opaque-inherited-claude-value"
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", secret)
+
+    def success_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return captured output containing an inherited provider secret value."""
+        assert kwargs["env"] is None
+        return subprocess.CompletedProcess(
+            args,
+            returncode=0,
+            stdout=f"stdout bare {secret}\n",
+            stderr=f"stderr bare {secret}\n",
+        )
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        run_subprocess=success_run,
+    )
+
+    rendered = result.stdout + result.stderr
+    assert secret not in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_follow_redacts_compose_env_provider_secret_from_streamed_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -636,6 +665,44 @@ def test_service_logs_follow_redacts_compose_env_provider_secret_from_streamed_o
     assert result == ServiceLogsResult(stdout="", stderr="")
     assert secret not in rendered
     assert visible_value in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_follow_redacts_inherited_env_secret_from_streamed_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Apply inherited exact-secret redaction to followed log streams."""
+    secret = "opaque-inherited-follow-claude-value"
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", secret)
+
+    class _FollowProcess:
+        """Follow process double that streams inherited provider secrets."""
+
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            """Expose stdout and stderr streams containing secret-bearing lines."""
+            assert kwargs["env"] is None
+            self.stdout = io.StringIO(f"stdout bare {secret}\n")
+            self.stderr = io.StringIO(f"stderr bare {secret}\n")
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Finish immediately after the streaming threads read both pipes."""
+            assert timeout is None
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FollowProcess)
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+    )
+
+    captured = capfd.readouterr()
+    rendered = captured.out + captured.err
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert secret not in rendered
     assert "<redacted>" in rendered
 
 

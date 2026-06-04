@@ -1304,6 +1304,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 
+## Review Thread `PRRT_kwDOSJAM6s6HJbA2` Inherited Service Env Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: captured service logs now redact bare non-pattern values from
+  inherited secret-like environment keys when `service_environ` is omitted.
+- Complete: followed service-log streams redact the same inherited exact secret
+  values before writing to the operator terminal.
+- Complete: explicit `service_environ` and selected Compose env-file
+  exact-secret redaction remain covered by the adjacent focused tests.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k inherited_env_secret --tb=short -ra
+# failed: both captured and followed service-log tests returned the raw inherited ANTHROPIC_AUTH_TOKEN value
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k inherited_env_secret --tb=short -ra
+# 2 passed, 26 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q -k 'inherited_env_secret or compose_env_provider_secret' --tb=short -ra
+# 4 passed, 24 deselected
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
 ## Gaps
 
 None found.
