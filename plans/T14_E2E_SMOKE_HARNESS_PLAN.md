@@ -33,6 +33,48 @@ formatting diagnostics instead of crashing.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
 
+## CI Repair Iteration: PR #394 Python Full Coverage
+
+### Problem Statement And Scope
+
+GitHub Actions run `26948000216` failed the two first-run source smoke lane
+tests with uv reporting that `/tmp/pyproject.toml` lacked `project.version`.
+The focused smoke nodes pass in isolation, but a prior smoke-service unit test
+writes a malformed project file directly to `/tmp`, and the source smoke lanes
+copy their checkout under pytest's `/tmp` tree. This repair is scoped to
+removing that cross-test pollution without weakening the source smoke checks.
+
+### Requirements Checklist
+
+- Keep the failing source smoke integration tests active; do not skip or weaken
+  their assertions.
+- Stop the smoke-service unit test from writing a malformed global
+  `/tmp/pyproject.toml`.
+- Add a valid source-lane parent project sentinel so uv stops ancestor
+  discovery before any unrelated temp-directory project file.
+- Preserve the unit test's coverage of `_default_profile_preview`.
+- Re-run focused repro commands only; leave broad AWF/GitHub validation to AWF.
+
+### Implementation Steps
+
+1. Update `test_default_profile_preview_direct_call` to use its `tmp_path`
+   fixture as the project root.
+2. Assert the helper is invoked against that temp project root, preserving the
+   behavior being tested.
+3. Write a minimal valid `pyproject.toml` at each source lane smoke root before
+   copying the checkout.
+4. Re-run the leaking unit test plus both failing integration smoke nodes,
+   including a repro with a pre-existing malformed `/tmp/pyproject.toml`.
+
+### Verification Commands And Pass Criteria
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_smoke.py::TestCollectSmokeReportExceptionPaths::test_default_profile_preview_direct_call tests/integration/test_first_run_smoke.py::test_source_uv_run_lane_proves_checkout_from_outside tests/integration/test_first_run_smoke.py::test_source_tool_install_lane_installs_isolated_awf -q`
+  must pass.
+- A focused repro that temporarily creates malformed `/tmp/pyproject.toml` and
+  runs the same three nodes must pass and restore `/tmp`.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.
+
 ## CI Repair Iteration: Supported Script Surface
 
 ### Problem Statement And Scope

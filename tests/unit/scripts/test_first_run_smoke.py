@@ -347,6 +347,25 @@ def test_copy_source_checkout_preserves_markers_and_excludes_dev_state(tmp_path:
 
 
 @pytest.mark.unit
+def test_prepare_source_lane_dirs_writes_parent_project_sentinel(tmp_path: Path) -> None:
+    """Source lanes stop uv ancestor discovery before a polluted temp parent."""
+    source = _write_source_checkout(tmp_path / "source")
+    smoke_root = tmp_path / "smoke"
+
+    checkout, outside = smoke._prepare_source_lane_dirs(source, smoke_root)
+
+    sentinel = smoke_root / "pyproject.toml"
+    assert checkout == smoke_root / "source-checkout"
+    assert outside == smoke_root / "outside"
+    assert sentinel.read_text(encoding="utf-8") == (
+        "[project]\n"
+        'name = "awf-first-run-smoke-root"\n'
+        'version = "0.0.0"\n'
+        'requires-python = ">=3.12"\n'
+    )
+
+
+@pytest.mark.unit
 def test_source_uv_run_commands_use_project_and_outside_cwd(tmp_path: Path) -> None:
     """No-global source lane runs uv from outside the checkout with scrubbed env."""
     checkout = tmp_path / "checkout"

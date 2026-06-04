@@ -36,6 +36,48 @@ Plan reference: `plans/T14_E2E_SMOKE_HARNESS_PLAN.md`
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
 
+## CI Repair Iteration: PR #394 Python Full Coverage
+
+### Requirement Status
+
+- Complete: The failing source smoke integration tests remain active and their
+  pass/source-checkout assertions were not weakened.
+- Complete: `test_default_profile_preview_direct_call` now uses `tmp_path`
+  instead of writing malformed project metadata to global `/tmp`.
+- Complete: `scripts/first_run_smoke.py` writes a minimal valid parent
+  `pyproject.toml` at each source lane smoke root so uv does not walk up to an
+  unrelated `/tmp/pyproject.toml`.
+- Complete: `_default_profile_preview` coverage is preserved with an assertion
+  that the helper receives the temp project root.
+- Complete: Only focused repro and lint commands were run locally.
+
+### Evidence
+
+- Confirmed pre-fix CI-shaped repro:
+  a focused command that temporarily wrote malformed `/tmp/pyproject.toml` and
+  ran `tests/integration/test_first_run_smoke.py::test_source_uv_run_lane_proves_checkout_from_outside`
+  plus `tests/integration/test_first_run_smoke.py::test_source_tool_install_lane_installs_isolated_awf`
+  failed with `2 failed`, matching the GitHub Actions `project.version` error.
+- Confirmed pre-fix sentinel regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_prepare_source_lane_dirs_writes_parent_project_sentinel -q`
+  failed because the source lane root had no parent project sentinel.
+- Post-fix polluted-temp repro:
+  `PATH=/tmp/awf-uv-0.5.31/bin:$PATH uv run --python 3.12 --extra dev pytest tests/unit/service/test_smoke.py::TestCollectSmokeReportExceptionPaths::test_default_profile_preview_direct_call tests/unit/scripts/test_first_run_smoke.py::test_prepare_source_lane_dirs_writes_parent_project_sentinel tests/integration/test_first_run_smoke.py::test_source_uv_run_lane_proves_checkout_from_outside tests/integration/test_first_run_smoke.py::test_source_tool_install_lane_installs_isolated_awf -q`
+  passed with `4 passed` while the command temporarily created and then
+  restored malformed `/tmp/pyproject.toml`.
+- AWF-provided focused repro:
+  `uv run --python 3.12 --extra dev pytest tests/integration/test_first_run_smoke.py::test_source_uv_run_lane_proves_checkout_from_outside tests/integration/test_first_run_smoke.py::test_source_tool_install_lane_installs_isolated_awf -q`
+  passed with `2 passed`.
+- Focused lint:
+  `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py tests/unit/service/test_smoke.py tests/integration/test_first_run_smoke.py`
+  passed.
+- Focused format check:
+  `uv run --python 3.12 --extra dev ruff format --check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py tests/unit/service/test_smoke.py tests/integration/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.
+
 ## Review Repair Iteration: PRRT_kwDOSJAM6s6HCWUe
 
 ### Requirement Status

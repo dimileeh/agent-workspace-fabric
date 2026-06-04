@@ -43,6 +43,11 @@ SOURCE_CHECKOUT_REASON_CODES = {
     "SOURCE_CHECKOUT_INVALID",
     "SOURCE_CHECKOUT_ASSETS_STALE",
 }
+SOURCE_LANE_PARENT_PYPROJECT = """[project]
+name = "awf-first-run-smoke-root"
+version = "0.0.0"
+requires-python = ">=3.12"
+"""
 _TAIL_CHARS = 4000
 _IGNORED_SOURCE_NAMES = frozenset(
     {
@@ -677,6 +682,9 @@ def _parse_args(argv: Sequence[str] | None) -> SmokeConfig:
 
 def _prepare_source_lane_dirs(checkout_root: Path, smoke_root: Path) -> tuple[Path, Path]:
     smoke_root.mkdir(parents=True, exist_ok=True)
+    # uv walks project ancestors while building a path dependency. Keep a valid
+    # boundary here so unrelated /tmp/pyproject.toml files cannot poison lanes.
+    (smoke_root / "pyproject.toml").write_text(SOURCE_LANE_PARENT_PYPROJECT, encoding="utf-8")
     checkout = copy_source_checkout(checkout_root, smoke_root / "source-checkout")
     outside = smoke_root / "outside"
     outside.mkdir(parents=True, exist_ok=True)
