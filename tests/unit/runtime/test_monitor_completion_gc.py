@@ -24,6 +24,7 @@ from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor_runner import lifecycle
 from awf.service.gc import (
+    COMPOSE_TEARDOWN_CALLBACK_RAISED,
     WorkspaceCleanupExecutionStatus,
     WorkspaceGCCandidate,
     WorkspaceGCComposeTeardownResult,
@@ -461,6 +462,99 @@ async def test_completed_workspace_gc_logs_compose_teardown_when_gc_raises_after
         record.get("event") == "monitor.compose_teardown_ok"
         and record.get("workspace_id") == ws_id
         and record.get("compose_project") == "candidate_project"
+        for record in captured
+    )
+
+
+@pytest.mark.unit
+async def test_completed_workspace_gc_tracks_callback_raised_when_gc_raises_after_teardown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    ws_id = "ws-gc-raises-after-compose-callback"
+    compose_file = work_dir / "compose" / ws_id / "compose.yml"
+    runner = SimpleNamespace(
+        _work_dir=work_dir,
+        _deps=SimpleNamespace(session_factory=factory),
+    )
+    compose_patch, compose_calls = mock_completed_compose_manager(
+        exc=RuntimeError("compose unavailable")
+    )
+    auth_teardowns: list[tuple[Path, str]] = []
+
+    async def _raise_after_compose_teardown_callback(
+        _session_factory: async_sessionmaker[AsyncSession],
+        *,
+        compose_teardown: object,
+        **_kwargs: object,
+    ) -> WorkspaceGCResult:
+        assert callable(compose_teardown)
+        candidate = WorkspaceGCCandidate(
+            workspace_id=ws_id,
+            status=WorkspaceStatus.completed.value,
+            updated_at=datetime.now(UTC),
+            age_hours=0,
+            reason_code="COMPLETED_PR_IMMEDIATE_RECLAIM",
+            worktree=WorkspaceGCPath(
+                kind="worktree",
+                path=work_dir / "git" / "worktrees" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose=WorkspaceGCPath(
+                kind="compose",
+                path=work_dir / "compose" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            auth=WorkspaceGCPath(
+                kind="auth",
+                path=work_dir / "auth" / ws_id,
+                exists=True,
+                estimated_bytes=0,
+            ),
+            compose_project_name="candidate_project",
+        )
+        with pytest.raises(RuntimeError, match="compose unavailable"):
+            await compose_teardown(candidate)
+        raise RuntimeError("database unavailable after compose callback")
+
+    def _record_auth_teardown(work_dir: Path, workspace_id: str) -> None:
+        auth_teardowns.append((work_dir, workspace_id))
+
+    with (
+        compose_patch,
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
+            new=_raise_after_compose_teardown_callback,
+        ),
+        patch(
+            "awf.runtime.pr_monitor_runner.lifecycle._teardown_completed_workspace_auth_overlay",
+            new=_record_auth_teardown,
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        await lifecycle._gc_completed_workspace_filesystem(
+            runner,
+            ws_id,
+            compose_project="monitor_project",
+            compose_file=compose_file,
+        )
+
+    assert compose_calls == [("candidate_project", compose_file, ws_id, True)]
+    assert auth_teardowns == []
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_raised"
+        and record.get("workspace_id") == ws_id
+        for record in captured
+    )
+    assert any(
+        record.get("event") == "monitor.compose_teardown_failed"
+        and record.get("workspace_id") == ws_id
+        and record.get("compose_project") == "candidate_project"
+        and record.get("reason_code") == COMPOSE_TEARDOWN_CALLBACK_RAISED
+        and record.get("error") == "RuntimeError: compose unavailable"
         for record in captured
     )
 

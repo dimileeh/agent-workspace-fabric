@@ -42,6 +42,14 @@ from awf.service.gc import (
 """Terminal workspace filesystem GC tests."""
 
 
+@pytest.mark.unit
+def test_preserved_compose_teardown_fallback_table_includes_completed_retention_state() -> None:
+    assert (
+        WORKSPACE_WITHIN_RETENTION,
+        WorkspaceStatus.completed.value,
+    ) in gc._PRESERVED_COMPOSE_TEARDOWN_FALLBACK_STATES
+
+
 @pytest.fixture(autouse=True)
 def _mock_default_worktree_remover():
     with patch(

@@ -113,9 +113,13 @@ WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN = "WORKSPACE_GC_EMPTY_PLAN_COMPOSE_TEARDOWN"
 COMPOSE_TEARDOWN_CALLBACK_RAISED = "COMPOSE_TEARDOWN_CALLBACK_RAISED"
 
-# Extension point: add preserved-workspace reason codes here when future states
-# should allow compose teardown before their filesystem retention expires.
-_PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES: frozenset[str] = frozenset()
+# Extension point: add preserved-workspace reason/status pairs here when future
+# states should allow compose teardown before their filesystem retention expires.
+_PRESERVED_COMPOSE_TEARDOWN_FALLBACK_STATES: frozenset[tuple[str, str]] = frozenset(
+    {
+        (WORKSPACE_WITHIN_RETENTION, WorkspaceStatus.completed.value),
+    }
+)
 
 CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
 CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
@@ -1145,12 +1149,10 @@ def _missing_workspace_compose_teardown_candidate(
 def _preserved_workspace_allows_compose_teardown_fallback(
     preserved: WorkspaceGCPreserved,
 ) -> bool:
-    if (
-        preserved.reason_code == WORKSPACE_WITHIN_RETENTION
-        and preserved.status == WorkspaceStatus.completed.value
-    ):
-        return True
-    return preserved.reason_code in _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_REASON_CODES
+    return (
+        preserved.reason_code,
+        preserved.status,
+    ) in _PRESERVED_COMPOSE_TEARDOWN_FALLBACK_STATES
 
 
 def _worktree_remove_delete_errors(

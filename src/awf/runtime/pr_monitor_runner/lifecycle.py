@@ -68,6 +68,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.service.gc import (
+    COMPOSE_TEARDOWN_CALLBACK_RAISED,
     WorkspaceGCCandidate,
     WorkspaceGCComposeTeardown,
     WorkspaceGCComposeTeardownResult,
@@ -810,11 +811,21 @@ def _track_completed_workspace_compose_teardown(
         return None
 
     async def _tracked(candidate: WorkspaceGCCandidate) -> WorkspaceGCComposeTeardownResult:
-        result = compose_teardown(candidate)
-        if isawaitable(result):
-            result = await result
-        tracked_results[candidate.workspace_id] = result
         tracked_projects[candidate.workspace_id] = candidate.compose_project_name or compose_project
+        try:
+            result = compose_teardown(candidate)
+            if isawaitable(result):
+                result = await result
+        except Exception as exc:
+            error = str(exc)
+            error_message = f"{type(exc).__name__}: {error}" if error else type(exc).__name__
+            tracked_results[candidate.workspace_id] = WorkspaceGCComposeTeardownResult(
+                status="failed",
+                reason_code=COMPOSE_TEARDOWN_CALLBACK_RAISED,
+                error=error_message[:400],
+            )
+            raise
+        tracked_results[candidate.workspace_id] = result
         return result
 
     return _tracked
@@ -877,9 +888,8 @@ async def _gc_completed_workspace_filesystem(
                 workspace_id=tracked_workspace_id,
                 compose_project=tracked_compose_projects.get(tracked_workspace_id),
             )
-        # If the teardown callback raises before the tracking wrapper records a
-        # result, this local map can be incomplete. That is safe here: the auth
-        # overlay is unmounted only when we observed a tracked successful teardown.
+        # A present tracked success is the only fallback-path signal that the
+        # auth overlay can be unmounted without leaving containers holding it.
         raised_teardown = tracked_compose_teardowns.get(workspace_id)
         if compose_teardown is not None and raised_teardown is not None and raised_teardown.ok:
             await asyncio.to_thread(
