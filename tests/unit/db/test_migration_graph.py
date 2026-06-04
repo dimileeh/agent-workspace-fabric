@@ -41,7 +41,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["e8f9a0b1c2d3"]
+    assert script.get_heads() == ["f9a0b1c2d3e4"]
 
 
 @pytest.mark.unit
@@ -184,6 +184,22 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
                         ]
                     )
                 )
+                worker_heartbeat_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("worker_heartbeats")
+                        ]
+                    )
+                )
+                worker_heartbeat_indexes = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            index["name"]
+                            for index in inspect(sync_conn).get_indexes("worker_heartbeats")
+                        ]
+                    )
+                )
         finally:
             await engine.dispose()
 
@@ -193,6 +209,7 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "policy_findings",
         "callback_subscriptions",
         "callback_deliveries",
+        "worker_heartbeats",
     } <= tables
     assert {
         "id",
@@ -296,6 +313,20 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "attempt_count",
         "next_attempt_at",
     } <= callback_delivery_columns
+    assert {
+        "worker_id",
+        "node_id",
+        "started_at",
+        "last_heartbeat_at",
+        "poll_interval_seconds",
+        "created_at",
+        "updated_at",
+    } <= worker_heartbeat_columns
+    assert {
+        "ix_worker_heartbeats_node_id",
+        "ix_worker_heartbeats_last_heartbeat_at",
+        "ix_worker_heartbeats_node_last_heartbeat",
+    } <= worker_heartbeat_indexes
 
 
 @pytest.mark.unit

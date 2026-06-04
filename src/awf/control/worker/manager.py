@@ -24,10 +24,13 @@ from datetime import (
     datetime,
     timedelta,
 )
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import redact_audit_text
 from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
@@ -53,19 +56,28 @@ from awf.control.worker.types import (
     _RequestedCapacityQueueSignature,
 )
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import WorkerHeartbeatRepository, WorkspaceRepository
 from awf.db.resilience import (
     DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
     run_db_operation_with_retry,
 )
 from awf.runtime.inspection import RuntimeInspector
 from awf.service.scheduler import SchedulerOrderCursor
+from awf.service.worker_heartbeat import (
+    WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+    worker_heartbeat_write_interval_seconds,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from awf.service.gc_reconcile import OrphanDirReconcileResult
     from awf.service.orphan_resources import OrphanReapResult
+
+
+_WORKER_HEARTBEAT_RETENTION = timedelta(days=1)
+_WORKER_HEARTBEAT_PRUNE_BATCH_LIMIT = 500
+_WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS = 60 * 60
 
 
 class ControlWorker(WorkerDelegatesMixin):
@@ -118,6 +130,9 @@ class ControlWorker(WorkerDelegatesMixin):
             None
         )
         self._requested_capacity_resume_provider_suppression_expires_at: datetime | None = None
+        self._worker_started_at = datetime.now(UTC)
+        self._last_heartbeat_written_at: float | None = None
+        self._last_heartbeat_pruned_at: float | None = None
 
     def request_stop(self: Any) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -155,6 +170,9 @@ class ControlWorker(WorkerDelegatesMixin):
         for ``run_forever`` to sleep; non-zero means we may be throughput-bound
         and should immediately loop again.
         """
+        await self._record_heartbeat_safely()
+        await self._prune_stale_heartbeats_safely()
+
         dispatched_ids: set[str] = set()
         execution_dispatched_ids: set[str] = set()
 
@@ -274,6 +292,9 @@ class ControlWorker(WorkerDelegatesMixin):
 
     async def wait_for_execution_tasks(self: Any) -> None:
         """Wait for ready execution or monitor-resume tasks started by this worker."""
+        heartbeat_interval = worker_heartbeat_write_interval_seconds(
+            self._config.poll_interval_seconds
+        )
         while self._execution_tasks:
             tasks = tuple(self._execution_tasks.values())
             # Wait for the FIRST task to finish instead of gather()-ing them all:
@@ -282,8 +303,16 @@ class ControlWorker(WorkerDelegatesMixin):
             # never surface — wait_for_execution_tasks() would hang and once=True
             # runs would exit as if successful. Inspecting tasks as they complete
             # lets a real failure raise immediately while a draining monitor's
-            # CancelledError is still tolerated.
-            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            # CancelledError is still tolerated. The timeout keeps once=True
+            # workers heartbeating while long-running execution tasks drain.
+            done, _pending = await asyncio.wait(
+                tasks,
+                timeout=heartbeat_interval,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                await self._record_heartbeat_safely()
+                continue
             for workspace_id, task in list(self._execution_tasks.items()):
                 if task in done:
                     self._execution_tasks.pop(workspace_id, None)
@@ -294,22 +323,133 @@ class ControlWorker(WorkerDelegatesMixin):
                 exc = task.exception()
                 if exc is not None:
                     raise exc
+            if self._execution_tasks:
+                await self._record_heartbeat_safely()
 
     async def run_forever(self: Any) -> None:
-        while not self._stopped.is_set():
-            try:
-                dispatched = await self.run_once()
-            except Exception:  # pragma: no cover - defensive: never die silently
-                _log.exception("worker.run_once_failed")
-                dispatched = 0
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name=f"awf-worker-heartbeat-{self._worker_id}",
+        )
+        try:
+            while not self._stopped.is_set():
+                try:
+                    dispatched = await self.run_once()
+                except Exception:  # pragma: no cover - defensive: never die silently
+                    _log.exception("worker.run_once_failed")
+                    dispatched = 0
 
-            if dispatched == 0:
-                # Sleep up to poll_interval, waking early if a stop was requested.
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._stopped.wait(),
-                        timeout=self._config.poll_interval_seconds,
-                    )
+                if dispatched == 0:
+                    # Sleep up to poll_interval, waking early if a stop was requested.
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            self._stopped.wait(),
+                            timeout=self._config.poll_interval_seconds,
+                        )
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                _log.warning(
+                    "worker.heartbeat_task_failed",
+                    reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                    worker_id=self._worker_id,
+                    node_id=effective_worker_config_node_id(self._config),
+                    error_type=type(exc).__name__,
+                    error=redact_audit_text(str(exc))[:240],
+                )
+
+    async def _heartbeat_loop(self: Any) -> None:
+        interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)
+        while not self._stopped.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stopped.wait(), timeout=interval)
+            if self._stopped.is_set():
+                break
+            await self._record_heartbeat_safely()
+            await self._prune_stale_heartbeats_safely()
+
+    async def _record_heartbeat_safely(self: Any) -> None:
+        now = monotonic()
+        last_written_at = self._last_heartbeat_written_at
+        interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)
+        if last_written_at is not None and now - last_written_at < interval:
+            return
+        try:
+            await self._record_heartbeat()
+            self._last_heartbeat_written_at = now
+        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError, TypeError) as exc:
+            self._last_heartbeat_written_at = now
+            _log.warning(
+                "worker.heartbeat_write_failed",
+                reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                error_type=type(exc).__name__,
+                error=redact_audit_text(str(exc))[:240],
+            )
+
+    async def _record_heartbeat(self: Any) -> None:
+        async def _operation(session: AsyncSession) -> None:
+            now = datetime.now(UTC)
+            await WorkerHeartbeatRepository(session).record_heartbeat(
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                started_at=self._worker_started_at,
+                last_heartbeat_at=now,
+                poll_interval_seconds=self._config.poll_interval_seconds,
+            )
+
+        await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
+
+    async def _prune_stale_heartbeats_safely(self: Any) -> None:
+        now = monotonic()
+        last_pruned_at = self._last_heartbeat_pruned_at
+        if (
+            last_pruned_at is not None
+            and now - last_pruned_at < _WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS
+        ):
+            return
+        try:
+            await self._prune_stale_heartbeats()
+        except (SQLAlchemyError, RuntimeError, TimeoutError, OSError, TypeError) as exc:
+            _log.warning(
+                "worker.heartbeat_prune_failed",
+                reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                error_type=type(exc).__name__,
+                error=redact_audit_text(str(exc))[:240],
+            )
+        finally:
+            # Rate-limit prune attempts after both success and handled failure
+            # so a database outage does not turn stale-row cleanup into retry load.
+            self._last_heartbeat_pruned_at = now
+
+    async def _prune_stale_heartbeats(self: Any) -> None:
+        async def _operation(session: AsyncSession) -> None:
+            cutoff = datetime.now(UTC) - _WORKER_HEARTBEAT_RETENTION
+            await WorkerHeartbeatRepository(session).prune_stale(
+                before=cutoff,
+                limit=_WORKER_HEARTBEAT_PRUNE_BATCH_LIMIT,
+            )
+
+        await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _log_transient_db_retry(self: Any, exc: BaseException, attempt: int) -> None:
         _log.warning(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -16,6 +17,12 @@ from awf.service.smoke import (
     _extract_validation_commands,
     _phase_service_readiness,
     collect_smoke_report,
+)
+from awf.service.worker_heartbeat import (
+    worker_heartbeat_age_seconds,
+    worker_heartbeat_is_fresh,
+    worker_heartbeat_stale_after_seconds,
+    worker_heartbeat_write_interval_seconds,
 )
 
 
@@ -144,6 +151,21 @@ def _console_checker(reachable: bool, expected_url: str = "http://localhost:3000
         return reachable
 
     return _fn
+
+
+@pytest.mark.unit
+def test_worker_heartbeat_helpers_handle_invalid_poll_and_naive_datetimes() -> None:
+    now = datetime(2026, 6, 4, tzinfo=UTC)
+    naive_same_instant = datetime(2026, 6, 4)
+
+    assert worker_heartbeat_stale_after_seconds("not-a-number") == 15.0  # type: ignore[arg-type]
+    assert worker_heartbeat_write_interval_seconds("not-a-number") == 1.0  # type: ignore[arg-type]
+    assert worker_heartbeat_age_seconds(naive_same_instant, now=now) == 0.0
+    assert worker_heartbeat_is_fresh(
+        naive_same_instant,
+        now=now,
+        poll_interval_seconds=None,
+    )
 
 
 @pytest.mark.unit
@@ -579,7 +601,12 @@ class TestCollectSmokeReportExceptionPaths:
         """Mocked success keeps Core health real and proves it via sub-statuses."""
 
         async def _healthy_svc(settings, *, http_client=None):
-            return {"status": "ok", "api": "ok", "worker_db_substrate": "ok"}
+            return {
+                "status": "ok",
+                "api": "ok",
+                "worker": "ok",
+                "worker_reason": "WORKER_HEARTBEAT_FRESH",
+            }
 
         report = await collect_smoke_report(
             project=tmp_path,
@@ -595,19 +622,26 @@ class TestCollectSmokeReportExceptionPaths:
         assert service_phase["status"] == "ok"
         assert service_phase["reason_code"] == "SMOKE_SERVICE_READY"
         assert service_phase["evidence"]["api"] == "ok"
-        assert service_phase["evidence"]["worker_db_substrate"] == "ok"
+        assert service_phase["evidence"]["worker"] == "ok"
+        assert service_phase["evidence"]["worker_reason"] == "WORKER_HEARTBEAT_FRESH"
         # PR path is mocked (no GitHub authority handed over); overall not fail.
         pr_phase = next(p for p in report["phases"] if p["name"] == "pr_monitor")
         assert pr_phase["reason_code"] == "SMOKE_PR_MOCKED_LOCAL"
         assert report["status"] != "fail"
 
-    async def test_service_readiness_fails_when_worker_substrate_down_in_mocked(
+    async def test_service_readiness_fails_when_worker_heartbeat_stale_in_mocked(
         self, tmp_path: Path
     ) -> None:
-        """API up but worker DB substrate down is a hard fail even in mocked mode."""
+        """API up but worker heartbeat stale is a hard fail even in mocked mode."""
 
         async def _worker_down_svc(settings, *, http_client=None):
-            return {"status": "degraded", "api": "ok", "worker_db_substrate": "fail"}
+            return {
+                "status": "degraded",
+                "api": "ok",
+                "worker": "fail",
+                "worker_reason": "WORKER_HEARTBEAT_STALE",
+                "worker_detail": "Latest worker heartbeat is 60.0s old",
+            }
 
         report = await collect_smoke_report(
             project=tmp_path,
@@ -623,11 +657,15 @@ class TestCollectSmokeReportExceptionPaths:
         assert service_phase["status"] == "fail"
         assert service_phase["reason_code"] == "SMOKE_WORKER_UNAVAILABLE"
         assert service_phase["evidence"]["api"] == "ok"
-        assert service_phase["evidence"]["worker_db_substrate"] == "fail"
+        assert service_phase["evidence"]["worker"] == "fail"
+        assert service_phase["evidence"]["worker_reason"] == "WORKER_HEARTBEAT_STALE"
+        assert service_phase["evidence"]["worker_detail"] == (
+            "Latest worker heartbeat is 60.0s old"
+        )
         assert report["status"] == "fail"
 
     async def test_service_readiness_plain_ok_collector_stays_ok(self, tmp_path: Path) -> None:
-        """Backward compat: a plain ``{"status": "ok"}`` collector (no substrate key) is ok."""
+        """Backward compat: a plain ``{"status": "ok"}`` collector is ok."""
 
         async def _plain_ok_svc(settings, *, http_client=None):
             return {"status": "ok"}
@@ -645,16 +683,119 @@ class TestCollectSmokeReportExceptionPaths:
         service_phase = next(p for p in report["phases"] if p["name"] == "service_readiness")
         assert service_phase["status"] == "ok"
         assert service_phase["reason_code"] == "SMOKE_SERVICE_READY"
-        # The collector never probed the substrate, so it must not be claimed as
-        # reachable/ok — surface it as unknown / not probed instead.
-        assert service_phase["evidence"]["worker_db_substrate"] == "unknown"
+        # The collector never probed the heartbeat, so it must not be claimed as
+        # reachable/ok - surface it as unknown / not probed instead.
+        assert service_phase["evidence"]["worker"] == "unknown"
+        assert service_phase["evidence"]["worker_reason"] == "unknown"
         assert "not probed" in service_phase["message"]
-        assert "substrate reachable" not in service_phase["message"]
+        assert "heartbeat fresh" not in service_phase["message"]
 
-    async def test_default_service_collector_returns_ok_when_db_ready(
+    async def test_default_service_collector_returns_ok_when_worker_fresh(
         self,
     ) -> None:
-        """`/healthz` 200 + `/readyz` `checks.db.ok=true` ⇒ api + worker_db_substrate both ok."""
+        """`/healthz` 200 + `/readyz` `checks.worker.ok=true` proves worker liveness."""
+
+        async def _get(url: str):
+            if url.endswith("/healthz"):
+                return SimpleNamespace(status_code=200)
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "checks": {
+                        "db": {"ok": True},
+                        "worker": {"ok": True, "reason": "WORKER_HEARTBEAT_FRESH"},
+                    }
+                },
+            )
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_instance = SimpleNamespace()
+            mock_instance.get = _get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_service_collector(_settings())
+        assert result["status"] == "ok"
+        assert result["api"] == "ok"
+        assert result["worker"] == "ok"
+        assert result["worker_reason"] == "WORKER_HEARTBEAT_FRESH"
+
+    async def test_default_service_collector_worker_fail_when_heartbeat_stale_even_on_503(
+        self,
+    ) -> None:
+        """`/readyz` 503 (providers missing) but readable body ⇒ stale worker fails.
+
+        Proves the provider-free worker heartbeat signal works while the overall
+        /readyz status is 503 because no provider token is configured.
+        """
+
+        async def _get(url: str):
+            if url.endswith("/healthz"):
+                return SimpleNamespace(status_code=200)
+            return SimpleNamespace(
+                status_code=503,
+                json=lambda: {
+                    "checks": {
+                        "db": {"ok": True},
+                        "worker": {
+                            "ok": False,
+                            "reason": "WORKER_HEARTBEAT_STALE",
+                            "detail": "Latest worker heartbeat is 60.0s old",
+                        },
+                    }
+                },
+            )
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_instance = SimpleNamespace()
+            mock_instance.get = _get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_service_collector(_settings())
+        assert result["status"] == "degraded"
+        assert result["api"] == "ok"
+        assert result["worker"] == "fail"
+        assert result["worker_reason"] == "WORKER_HEARTBEAT_STALE"
+        assert result["worker_detail"] == "Latest worker heartbeat is 60.0s old"
+
+    async def test_default_service_collector_ok_when_worker_fresh_even_on_503(
+        self,
+    ) -> None:
+        """`/readyz` 503 (providers missing) but `checks.worker.ok=true` ⇒ ok.
+
+        This is the headline no-token proof: providers are unconfigured (so the
+        overall ``/readyz`` status is 503) yet the worker heartbeat is fresh, which
+        must still report ``status: ok``. Locks in the success side of the 503
+        branch so a future HTTP-status guard cannot silently regress it.
+        """
+
+        async def _get(url: str):
+            if url.endswith("/healthz"):
+                return SimpleNamespace(status_code=200)
+            return SimpleNamespace(
+                status_code=503,
+                json=lambda: {
+                    "checks": {
+                        "db": {"ok": True},
+                        "worker": {"ok": True, "reason": "WORKER_HEARTBEAT_FRESH"},
+                    }
+                },
+            )
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_instance = SimpleNamespace()
+            mock_instance.get = _get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_service_collector(_settings())
+        assert result["status"] == "ok"
+        assert result["api"] == "ok"
+        assert result["worker"] == "ok"
+        assert result["worker_reason"] == "WORKER_HEARTBEAT_FRESH"
+
+    async def test_default_service_collector_fails_closed_when_worker_check_missing(
+        self,
+    ) -> None:
+        """A DB-ok `/readyz` body without `checks.worker` cannot prove worker liveness."""
 
         async def _get(url: str):
             if url.endswith("/healthz"):
@@ -670,65 +811,10 @@ class TestCollectSmokeReportExceptionPaths:
             mock_cls.return_value.__aenter__.return_value = mock_instance
 
             result = await _default_service_collector(_settings())
-        assert result["status"] == "ok"
-        assert result["api"] == "ok"
-        assert result["worker_db_substrate"] == "ok"
-
-    async def test_default_service_collector_worker_fail_when_db_down_even_on_503(
-        self,
-    ) -> None:
-        """`/readyz` 503 (providers missing) but readable body ⇒ api ok, substrate fail.
-
-        Proves the provider-free worker-DB-substrate signal works while the overall
-        /readyz status is 503 because no provider token is configured.
-        """
-
-        async def _get(url: str):
-            if url.endswith("/healthz"):
-                return SimpleNamespace(status_code=200)
-            return SimpleNamespace(
-                status_code=503,
-                json=lambda: {"checks": {"db": {"ok": False}}},
-            )
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            mock_instance = SimpleNamespace()
-            mock_instance.get = _get
-            mock_cls.return_value.__aenter__.return_value = mock_instance
-
-            result = await _default_service_collector(_settings())
         assert result["status"] == "degraded"
         assert result["api"] == "ok"
-        assert result["worker_db_substrate"] == "fail"
-
-    async def test_default_service_collector_ok_when_db_ready_even_on_503(
-        self,
-    ) -> None:
-        """`/readyz` 503 (providers missing) but `checks.db.ok=true` ⇒ api + substrate ok.
-
-        This is the headline no-token proof: providers are unconfigured (so the
-        overall ``/readyz`` status is 503) yet the DB substrate is healthy, which
-        must still report ``status: ok``. Locks in the success side of the 503
-        branch so a future HTTP-status guard cannot silently regress it.
-        """
-
-        async def _get(url: str):
-            if url.endswith("/healthz"):
-                return SimpleNamespace(status_code=200)
-            return SimpleNamespace(
-                status_code=503,
-                json=lambda: {"checks": {"db": {"ok": True}}},
-            )
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            mock_instance = SimpleNamespace()
-            mock_instance.get = _get
-            mock_cls.return_value.__aenter__.return_value = mock_instance
-
-            result = await _default_service_collector(_settings())
-        assert result["status"] == "ok"
-        assert result["api"] == "ok"
-        assert result["worker_db_substrate"] == "ok"
+        assert result["worker"] == "fail"
+        assert result["worker_reason"] == "WORKER_HEARTBEAT_UNAVAILABLE"
 
     async def test_default_service_collector_returns_unreachable_on_503_healthz(
         self,
@@ -750,7 +836,7 @@ class TestCollectSmokeReportExceptionPaths:
     async def test_default_service_collector_worker_fail_when_readyz_raises(
         self,
     ) -> None:
-        """`/readyz` failing while `/healthz` is up still yields a real (fail) substrate signal."""
+        """`/readyz` failing while `/healthz` is up still fails worker evidence."""
         import httpx
 
         async def _get(url: str):
@@ -766,7 +852,8 @@ class TestCollectSmokeReportExceptionPaths:
             result = await _default_service_collector(_settings())
         assert result["status"] == "degraded"
         assert result["api"] == "ok"
-        assert result["worker_db_substrate"] == "fail"
+        assert result["worker"] == "fail"
+        assert result["worker_reason"] == "WORKER_HEARTBEAT_UNAVAILABLE"
 
     async def test_default_service_collector_error_bubbles_to_phase_handler(
         self,
