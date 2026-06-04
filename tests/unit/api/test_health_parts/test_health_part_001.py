@@ -342,6 +342,37 @@ async def test_readyz_worker_heartbeat_fresh_returns_worker_ok(
 
 
 @pytest.mark.unit
+async def test_readyz_worker_heartbeat_uses_effective_service_node_id(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app, client = ready_app_and_client
+    monkeypatch.setattr(
+        health_route,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            work_dir=str(tmp_path / "work"),
+            worker_node_id="   ",
+        ),
+    )
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    worker = body["checks"]["worker"]
+    assert worker["ok"] is True
+    assert worker["reason"] == "WORKER_HEARTBEAT_FRESH"
+    assert worker["detail"] == "Latest worker heartbeat is fresh for node 'local'"
+
+
+@pytest.mark.unit
 async def test_readyz_worker_heartbeat_missing_returns_503(
     ready_app_and_client: tuple[Any, AsyncClient],
 ) -> None:

@@ -37,8 +37,9 @@ from awf.db.resilience import (
     invalidate_or_rollback_session,
     run_db_operation_with_retry,
 )
-from awf.service.config import DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID, resolve_service_settings
+from awf.service.config import resolve_service_settings
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
+from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
     ResourceScan,
     WorkspaceIdView,
@@ -701,7 +702,7 @@ async def readyz(
     service_settings = resolve_service_settings(settings)
     runner = _get_command_runner_for_request(request)
     factory = getattr(request.app.state, "db_session_factory", None)
-    worker_node_id = service_settings.node_id or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
+    worker_node_id = effective_service_node_id(service_settings)
 
     async def _check_egress_audit() -> CheckResult:
         if factory is None:
