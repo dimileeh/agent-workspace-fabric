@@ -6,6 +6,7 @@ import logging
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from subprocess import CalledProcessError
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -1006,6 +1007,40 @@ async def test_start_local_service_bootstrap_path_runtime_error_is_first_run_fai
     assert bootstrap["reason_code"] == "START_INPUT_RESOLUTION_FAILED"
     assert bootstrap["message"] == "could not resolve local service startup inputs"
     assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
+async def test_start_local_service_bootstrap_called_process_error_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "d" * 40
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+        compose_file=tmp_path / "compose.yml",
+        compose_env_file=None,
+        asset_root=None,
+        service_env={},
+    )
+
+    async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        raise CalledProcessError(17, ["docker", "compose", raw_token], stderr=raw_token)
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: None)
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fail_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["reason_code"] == "START_INPUT_RESOLUTION_FAILED"
+    assert payload["issues"][0]["details"]["bootstrap"]["stderr"] == "error_type=CalledProcessError"
+    assert raw_token not in rendered
 
 
 @pytest.mark.unit

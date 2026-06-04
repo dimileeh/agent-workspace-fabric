@@ -341,7 +341,7 @@ async def _start_local_service_result(
         )
     except ServiceBootstrapError as exc:
         return _first_run_result(safe_result, _start_failure_payload(exc), is_error=True)
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
         return _start_bootstrap_path_error_result(safe_result, exc)
 
     return _first_run_result(safe_result, _start_success_payload(inputs.settings, result))
@@ -368,7 +368,7 @@ def _start_input_resolution_error_result(
 
 def _start_bootstrap_path_error_result(
     safe_result: SafeResult,
-    exc: OSError | RuntimeError | ValueError,
+    exc: CalledProcessError | OSError | RuntimeError | ValueError,
 ) -> CallToolResult:
     failure = ServiceBootstrapError(
         reason_code=START_INPUT_RESOLUTION_FAILED,
