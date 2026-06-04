@@ -532,8 +532,10 @@ def test_getting_started_recommends_setup_start_then_project_init() -> None:
 def test_getting_started_compose_env_snippet_feeds_setup_and_start() -> None:
     """Regression: avoid duplicate token keys in docker/compose/.env examples."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
-    snippet_start = readme.index("env_example=docker/compose/.env.example")
-    snippet_end = readme.index("uv run --python 3.12 --extra dev awf setup")
+    snippet_start = readme.find("env_example=docker/compose/.env.example")
+    assert snippet_start != -1, "Expected docker/compose/.env example snippet start not found"
+    snippet_end = readme.find("uv run --python 3.12 --extra dev awf setup", snippet_start)
+    assert snippet_end != -1, "Expected setup command after docker/compose/.env example not found"
     snippet = readme[snippet_start:snippet_end]
 
     assert "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)='" in readme
