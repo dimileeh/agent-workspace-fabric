@@ -1105,6 +1105,10 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         "## Claude Code",
         maxsplit=1,
     )[0]
+    database_url_export = (
+        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
+        '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+    )
 
     assert len(re.findall(r"(?m)^awf setup\s*$", prerequisites_section)) == 1
     assert len(re.findall(r"(?m)^awf start\s*$", prerequisites_section)) == 1
@@ -1140,10 +1144,10 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
         ),
         prerequisites_section,
     )
-    assert (
-        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
-        '${AWF_POSTGRES_PASSWORD}@127.0.0.1:${AWF_POSTGRES_HOST_PORT}/awf"'
-    ) in prerequisites_section
+    assert prerequisites_section.count(database_url_export) == 2, (
+        "MCP setup package and source-checkout snippets must match first-run docs"
+    )
+    assert "@127.0.0.1:${AWF_POSTGRES_HOST_PORT}/awf" not in prerequisites_section
     assert not re.search(r"(?m)^awf service bootstrap\s*$", prerequisites_section)
 
 
