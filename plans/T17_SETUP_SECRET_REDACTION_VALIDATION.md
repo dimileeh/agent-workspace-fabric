@@ -1950,6 +1950,58 @@ uv run --python 3.12 --extra dev mypy src/awf/service/provider_readiness.py src/
 
 None found.
 
+## Review Thread `PRRT_kwDOSJAM6s6HNhqB` MCP Shadowed Compose Env Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP exact-secret discovery now includes raw secret-key values parsed
+  from the selected Compose env file in addition to merged provider environment
+  values.
+- Complete: MCP workspace log reads exact-redact a selected Compose env-file
+  provider secret when the MCP process environment shadows the same key with a
+  different value.
+- Complete: short values and non-secret env keys still use the existing
+  minimum-length and `is_secret_env_key()` filters.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_redacts_shadowed_compose_env_file_provider_secret -q --tb=short -ra
+# failed: returned `shadowed-compose-env-file-secret` instead of `<redacted>`
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_redacts_shadowed_compose_env_file_provider_secret -q --tb=short -ra
+# 1 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_redacts_custom_compose_env_file_provider_secret tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_redacts_shadowed_compose_env_file_provider_secret tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_uses_startup_redaction_secrets -q --tb=short -ra
+# 3 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+# Success: no issues found in 1 source file
+```
+
+## Gaps
+
+None found.
+
 ## Review Thread `PRRT_kwDOSJAM6s6HNTqp` MCP Exact Extra-Secret Iteration
 
 Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`

@@ -1652,3 +1652,48 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HNhqB` MCP Shadowed Compose Env Secret Plan
+
+### Problem Statement And Scope
+
+The inline review reports that MCP exact-secret discovery reads provider
+credentials from the merged Compose provider environment. When the selected
+Compose env file and the MCP process environment define the same secret key,
+the merged provider environment keeps only the process value. The raw env-file
+value is still a configured secret and must be exact-redacted from MCP
+structured payloads, artifacts, and workspace log reads.
+
+This repair is limited to MCP startup exact-secret collection for the selected
+Compose env file. It does not change provider environment precedence, service
+logs, Compose runtime behavior, or broad validation ownership.
+
+### Requirements Checklist
+
+- MCP exact-secret discovery includes raw secret values parsed from the selected
+  Compose env file before or in addition to merged provider environment values.
+- A Compose env-file secret is exact-redacted even when the MCP process
+  environment shadows the same secret key with a different value.
+- Short values and non-secret env keys remain excluded by the existing secret
+  key and minimum-length filters.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP workspace-log regression where
+   `ANTHROPIC_AUTH_TOKEN` has one value in the selected Compose env file and a
+   different value in the MCP process environment.
+2. Update MCP secret collection to parse the selected Compose env file directly
+   and include secret-key values before reading the merged provider environment.
+3. Run the targeted regression, adjacent MCP log redaction tests, and narrow
+   ruff/mypy checks for touched files. Broad AWF/GitHub validation remains owned
+   by AWF after agent completion.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_redacts_shadowed_compose_env_file_provider_secret -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```

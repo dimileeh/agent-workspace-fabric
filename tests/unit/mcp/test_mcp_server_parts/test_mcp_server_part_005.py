@@ -636,6 +636,70 @@ class TestWorkspaceLogs:
         assert custom_secret not in str(chunk["data"])
 
     @pytest.mark.unit
+    async def test_read_workspace_log_redacts_shadowed_compose_env_file_provider_secret(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Redact selected env-file secrets even when process env shadows the key."""
+        for key in (*KNOWN_SECRET_ENV_KEYS, "AWF_API_TOKEN", "AWF_GITHUB_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+
+        env_file_secret = "shadowed-compose-env-file-secret"
+        host_secret = "shadowing-host-provider-secret"
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", host_secret)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(
+            f"ANTHROPIC_AUTH_TOKEN={env_file_secret}\n",
+            encoding="utf-8",
+        )
+
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(
+            service=service,
+            settings=Settings(_env_file=None),
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe shadowed Compose env redaction",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        raw_text = f"provider emitted {env_file_secret} without assignment context\n"
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="setup.stdout",
+            source="setup",
+            name="Setup stdout",
+            kind="stdout",
+        )
+        await sink.write(raw_text)
+        await sink.close()
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "setup.stdout",
+                "offset": raw_text.index(env_file_secret),
+                "limit_bytes": len(env_file_secret),
+            },
+        )
+
+        assert isinstance(chunk, dict)
+        assert chunk["data"] == REDACTION_MARKER
+        assert env_file_secret not in str(chunk["data"])
+
+    @pytest.mark.unit
     async def test_read_workspace_log_uses_startup_redaction_secrets(
         self,
         factory: async_sessionmaker[AsyncSession],

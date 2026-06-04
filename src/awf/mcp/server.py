@@ -17,6 +17,7 @@ import inspect
 import json
 import os
 from collections.abc import Awaitable, Callable, Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
@@ -35,6 +36,7 @@ from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.environment import compose_env_file_values
 from awf.service.local_capacity import detect_local_capacity
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.provider_readiness import ProviderName, is_secret_env_key
@@ -526,11 +528,7 @@ def _mcp_secret_values(
     compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
 ) -> tuple[str, ...]:
     """Return exact secret values that MCP payloads and artifacts must redact."""
-    resolved_compose_env_file: service_config.ComposeEnvFileInput
-    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
-        resolved_compose_env_file = service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
-    else:
-        resolved_compose_env_file = compose_env_file
+    resolved_compose_env_file = _resolve_mcp_compose_env_file(compose_env_file)
     provider_environ = service_config.resolve_local_service_provider_environ(
         provider_environ=None,
         environ=os.environ,
@@ -543,8 +541,32 @@ def _mcp_secret_values(
         service_settings.api_token,
         service_settings.github_token,
     ]
+    values.extend(_mcp_compose_env_file_secret_values(resolved_compose_env_file))
     values.extend(value for key, value in provider_environ.items() if is_secret_env_key(key))
     return tuple(dict.fromkeys(value for value in values if value and len(value) >= 4))
+
+
+def _resolve_mcp_compose_env_file(
+    compose_env_file: service_config.ComposeEnvFileInput,
+) -> Path | None:
+    """Resolve omitted MCP env-file input to the local service default."""
+    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
+        return service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    return compose_env_file
+
+
+def _mcp_compose_env_file_secret_values(compose_env_file: Path | None) -> tuple[str, ...]:
+    """Return raw selected Compose env-file secret values for exact redaction."""
+    resolved_env_file = (
+        service_config.resolve_local_service_compose_env_file(compose_env_file)
+        if compose_env_file is not None
+        else None
+    )
+    return tuple(
+        value
+        for key, value in compose_env_file_values(resolved_env_file).items()
+        if value and len(value) >= 4 and is_secret_env_key(key)
+    )
 
 
 def _redact_sensitive_payload(
