@@ -208,6 +208,7 @@ async def collect_support_bundle(
 
 
 def _default_setup_config_reader() -> HostSetupConfig:
+    """Read the operator's host setup configuration from its default location."""
     return read_host_setup_config()
 
 
@@ -216,6 +217,7 @@ def _setup_state(
     *,
     secrets: frozenset[str],
 ) -> dict[str, object]:
+    """Build a secret-free summary of the host setup configuration state."""
     try:
         config = setup_config_reader()
     except HostSetupConfigError as exc:
@@ -270,6 +272,7 @@ def _provider_setup_summary(
     *,
     secrets: frozenset[str],
 ) -> dict[str, object]:
+    """Summarize one provider without exposing its credential reference."""
     credential_ref = provider.credential_ref
     return {
         "status": _redact_text(provider.status, secrets),
@@ -281,6 +284,7 @@ def _provider_setup_summary(
 
 
 def _source_checkout_summary(config: HostSetupConfig) -> dict[str, object]:
+    """Summarize source-checkout state without exposing host paths."""
     source_checkout = config.source_checkout
     if source_checkout is None:
         return {"configured": False}
@@ -292,6 +296,7 @@ def _source_checkout_summary(config: HostSetupConfig) -> dict[str, object]:
 
 
 def _credential_ref_kind(credential_ref: str | None) -> str | None:
+    """Classify a credential reference by backend scheme."""
     if credential_ref is None:
         return None
     if credential_ref.startswith("keyring://"):
@@ -304,10 +309,12 @@ def _credential_ref_kind(credential_ref: str | None) -> str | None:
 
 
 def _optional_redacted_text(value: str | None, secrets: frozenset[str]) -> str | None:
+    """Redact an optional text value while preserving absent values."""
     return None if value is None else _redact_text(value, secrets)
 
 
 def _isoformat(value: datetime | None) -> str | None:
+    """Format datetimes as UTC ISO-8601 strings for stable bundle output."""
     if value is None:
         return None
     if value.tzinfo is None:

@@ -67,6 +67,7 @@ def test_redact_secrets_catches_truncated_github_tokens(token: str) -> None:
 
 @pytest.mark.unit
 def test_redact_secrets_slice_masks_overlapping_exact_secret() -> None:
+    """Mask a requested slice that starts inside an exact configured secret."""
     secret = "opaque-nonpattern-workspace-secret-value"
     text = f"before AWF_GITHUB_TOKEN={secret} after"
     offset = text.index("workspace")
@@ -85,6 +86,7 @@ def test_redact_secrets_slice_masks_overlapping_exact_secret() -> None:
 
 @pytest.mark.unit
 def test_redact_secrets_slice_preserves_nonsecret_requested_text() -> None:
+    """Return unmasked text when the requested slice does not overlap a secret."""
     secret = "opaque-nonpattern-workspace-secret-value"
     text = f"before AWF_GITHUB_TOKEN={secret} after"
     offset = text.index("before")
@@ -103,6 +105,7 @@ def test_redact_secrets_slice_preserves_nonsecret_requested_text() -> None:
 
 @pytest.mark.unit
 def test_redact_secrets_slice_preserves_text_after_secret_span() -> None:
+    """Return plain text for a slice that begins after a secret span."""
     secret = "opaque-nonpattern-workspace-secret-value"
     text = f"before AWF_GITHUB_TOKEN={secret} after"
     offset = text.index("after")
@@ -121,6 +124,7 @@ def test_redact_secrets_slice_preserves_text_after_secret_span() -> None:
 
 @pytest.mark.unit
 def test_redact_secrets_slice_returns_plain_text_when_no_secret_matches() -> None:
+    """Return the requested slice unchanged when no secret patterns match."""
     text = "before ordinary output after"
     offset = text.index("ordinary")
     limit = len("ordinary")
@@ -159,6 +163,7 @@ def test_redact_secrets_handles_token_assignments_and_bearer_values(
 
 @pytest.mark.unit
 def test_redact_secrets_redacts_provider_refs_and_plain_file_paths() -> None:
+    """Redact setup credential references and their plain-file paths."""
     raw_refs = (
         "keyring://awf/github/default",
         "env://OPENAI_API_KEY",

@@ -215,11 +215,13 @@ def test_service_logs_failure_prefers_stderr_then_stdout_then_generic_detail() -
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_redacts_captured_output_and_failure_detail() -> None:
+    """Redact captured service-log output and command failure details."""
     token = "ghp_serviceLogsSecret123456"
     plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
     env_ref = "env://OPENAI_API_KEY"
 
     def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return successful compose logs that contain setup secret material."""
         return subprocess.CompletedProcess(
             args,
             returncode=0,
@@ -235,6 +237,7 @@ def test_service_logs_redacts_captured_output_and_failure_detail() -> None:
     assert "<redacted>" in rendered_success
 
     def failure_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return a failing compose run whose stderr includes setup secret material."""
         return subprocess.CompletedProcess(
             args,
             returncode=2,

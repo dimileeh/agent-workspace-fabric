@@ -75,6 +75,7 @@ def _secret_redaction_spans(
     *,
     extra_secrets: Iterable[str],
 ) -> list[_RedactionSpan]:
+    """Find all secret spans that should be masked in the original text."""
     spans: list[_RedactionSpan] = []
     for secret in sorted({secret for secret in extra_secrets if len(secret) >= 4}, key=len):
         cursor = 0
@@ -98,6 +99,7 @@ def _secret_redaction_spans(
 
 
 def _merge_redaction_spans(spans: Iterable[_RedactionSpan]) -> list[_RedactionSpan]:
+    """Coalesce overlapping or adjacent redaction spans."""
     merged: list[_RedactionSpan] = []
     for start, end in sorted(span for span in spans if span[0] < span[1]):
         if not merged or start > merged[-1][1]:
@@ -113,6 +115,7 @@ def _render_redacted_slice(
     end: int,
     spans: list[_RedactionSpan],
 ) -> str:
+    """Render a requested text slice while masking intersecting secret spans."""
     pieces: list[str] = []
     cursor = start
     for span_start, span_end in spans:

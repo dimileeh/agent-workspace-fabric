@@ -440,6 +440,7 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
 def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
     tmp_path: Path,
 ) -> None:
+    """Include setup-state metadata without leaking credential references."""
     settings = _settings(tmp_path)
     raw_refs = (
         "keyring://awf/github/default",
@@ -485,12 +486,15 @@ def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
     )
 
     async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return healthy service status for setup-state bundle collection."""
         return _green_status()
 
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a healthy doctor report for setup-state bundle collection."""
         return _green_doctor()
 
     async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return an empty recent-failure summary for setup-state tests."""
         return _mock_failure_summary()
 
     bundle = asyncio.run(
@@ -562,6 +566,7 @@ def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
 
 @pytest.mark.unit
 def test_isoformat_treats_naive_datetime_as_utc() -> None:
+    """Treat naive support-bundle timestamps as UTC rather than host-local time."""
     if not hasattr(time, "tzset"):
         pytest.skip("tzset is required to exercise host-local timezone conversion")
     original_tz = os.environ.get("TZ")
@@ -581,19 +586,24 @@ def test_isoformat_treats_naive_datetime_as_utc() -> None:
 
 @pytest.mark.unit
 def test_support_bundle_setup_state_redacts_config_load_errors(tmp_path: Path) -> None:
+    """Redact host setup config read errors embedded in support bundles."""
     settings = _settings(tmp_path)
     plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
 
     async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return healthy service status for config-error bundle collection."""
         return _green_status()
 
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a healthy doctor report for config-error bundle collection."""
         return _green_doctor()
 
     async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return an empty recent-failure summary for config-error tests."""
         return _mock_failure_summary()
 
     def _config_reader() -> HostSetupConfig:
+        """Raise a setup config error containing a credential reference."""
         raise HostSetupConfigError(
             reason_code="HOST_SETUP_CONFIG_CORRUPT",
             message=f"bad credential ref {plain_ref}",
@@ -628,26 +638,34 @@ def test_support_bundle_setup_state_redacts_config_load_errors(tmp_path: Path) -
 def test_support_bundle_setup_state_degrades_unexpected_config_reader_errors(
     tmp_path: Path,
 ) -> None:
+    """Record unexpected setup config reader failures without leaking refs."""
     settings = _settings(tmp_path)
     plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
 
     class ConfigReaderError(RuntimeError):
+        """Synthetic config reader exception carrying redacted details."""
+
         reason_code = "CONFIG_READER_FAILED"
 
         def __init__(self) -> None:
+            """Populate the synthetic exception with secret-bearing details."""
             super().__init__(f"reader failed for {plain_ref}")
             self.details = {"credential_ref": plain_ref}
 
     async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return healthy service status for unexpected-error bundle collection."""
         return _green_status()
 
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a healthy doctor report for unexpected-error bundle collection."""
         return _green_doctor()
 
     async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return an empty recent-failure summary for unexpected-error tests."""
         return _mock_failure_summary()
 
     def _config_reader() -> HostSetupConfig:
+        """Raise an unexpected setup reader error with secret-bearing details."""
         raise ConfigReaderError()
 
     bundle = asyncio.run(

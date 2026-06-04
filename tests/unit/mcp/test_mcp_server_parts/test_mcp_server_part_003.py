@@ -1067,6 +1067,7 @@ class TestWorkspaceLogs:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Redact setup credential references returned through MCP log reads."""
         service = WorkspaceService(factory, log_root=tmp_path / "logs")
         mcp = build_mcp_server(service=service)
         async with factory() as session:
@@ -1122,6 +1123,7 @@ class TestWorkspaceLogs:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Mask a log slice that starts inside a configured extra secret."""
         secret = "opaque-nonpattern-workspace-secret-value"
         log_root = tmp_path / "logs"
         service = WorkspaceService(factory, log_root=log_root)
