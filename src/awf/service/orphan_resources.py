@@ -971,12 +971,14 @@ async def sweep_classified_orphans(
     resources during reaping.
     """
     resolved_run_subprocess = subprocess.run if run_subprocess is None else run_subprocess
-    docker_scan = await asyncio.to_thread(
-        scan_docker_resources,
-        docker_host=docker_host,
-        run_subprocess=resolved_run_subprocess,
+    docker_scan, worktree_scan = await asyncio.gather(
+        asyncio.to_thread(
+            scan_docker_resources,
+            docker_host=docker_host,
+            run_subprocess=resolved_run_subprocess,
+        ),
+        asyncio.to_thread(scan_managed_worktrees, work_dir),
     )
-    worktree_scan = await asyncio.to_thread(scan_managed_worktrees, work_dir)
 
     try:
         async with session_scope(session_factory) as session:

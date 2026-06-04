@@ -672,6 +672,69 @@ def test_sweep_classified_orphans_scans_classifies_and_reaps(
 
 
 @pytest.mark.unit
+def test_sweep_classified_orphans_starts_scanners_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import awf.service.orphan_resources as orphan_resources
+
+    started: set[str] = set()
+    sequential_starts: list[str] = []
+    both_scanners_started = asyncio.Event()
+
+    def _docker_scan(**_kwargs: object) -> Any:
+        return empty_docker_scan()
+
+    def _worktree_scan(work_dir: Path | str) -> Any:
+        assert work_dir == tmp_path
+        return empty_worktree_scan()
+
+    async def _to_thread(func: Any, /, *args: object, **kwargs: object) -> Any:
+        if func in {_docker_scan, _worktree_scan}:
+            scanner = "docker" if func is _docker_scan else "worktree"
+            started.add(scanner)
+            if len(started) == 2:
+                both_scanners_started.set()
+            try:
+                await asyncio.wait_for(both_scanners_started.wait(), timeout=0.25)
+            except TimeoutError:
+                sequential_starts.append(scanner)
+            return func(*args, **kwargs)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(orphan_resources.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(orphan_resources, "scan_docker_resources", _docker_scan)
+    monkeypatch.setattr(orphan_resources, "scan_managed_worktrees", _worktree_scan)
+    monkeypatch.setattr(
+        orphan_resources,
+        "session_scope",
+        lambda _factory: _SessionScope(),
+    )
+
+    async def _workspace_view(_session: object, **_kwargs: object) -> WorkspaceIdView:
+        return _ok_view()
+
+    monkeypatch.setattr(
+        orphan_resources,
+        "workspace_id_view_from_session",
+        _workspace_view,
+    )
+
+    result = asyncio.run(
+        orphan_resources.sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+        )
+    )
+
+    assert result.status == "ok"
+    assert started == {"docker", "worktree"}
+    assert sequential_starts == []
+
+
+@pytest.mark.unit
 def test_sweep_classified_orphans_skips_when_workspace_view_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
