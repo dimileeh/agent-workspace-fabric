@@ -416,6 +416,18 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HK9Wu`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_strips_exported_awf_env_entries tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HLHOk`: Getting Started
+package/virtualenv first-run `.env` preservation must also remove old
+AWF-managed values written as `export KEY=...` or with leading/key-adjacent
+whitespace before appending the remaining `.env`, matching the Quickstart
+package-lane behavior.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HLHOk`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_strips_exported_awf_env_entries tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

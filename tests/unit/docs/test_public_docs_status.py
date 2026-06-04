@@ -971,10 +971,10 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     preserve_existing_env = "\n".join(
         (
             "    sed \\",
-            "      -e '/^AWF_API_TOKEN=/d' \\",
-            "      -e '/^AWF_POSTGRES_PASSWORD=/d' \\",
-            "      -e '/^AWF_POSTGRES_HOST_PORT=/d' \\",
-            "      -e '/^AWF_DATABASE_URL=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_API_TOKEN[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \\",
+            "      -e '/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}AWF_DATABASE_URL[[:space:]]*=/d' \\",
             "      .env",
         )
     )
@@ -1054,6 +1054,55 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
             < section.index(persist_target)
             < section.index(setup_command)
         ), f"{label} must persist service env before setup"
+
+
+def test_getting_started_package_first_run_strips_exported_awf_env_entries(
+    tmp_path: Path,
+) -> None:
+    """Assert Getting Started replaces exported or whitespace-padded AWF env entries."""
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
+        encoding="utf-8",
+    )
+    startup_section = getting_started_text.split(
+        "### Recommended First-Run Sequence",
+        maxsplit=1,
+    )[1].split("### Configure Environment", maxsplit=1)[0]
+    package_section = startup_section.split(
+        "For package-manager or virtualenv installs:",
+        maxsplit=1,
+    )[1].split(
+        "For a source checkout with a global `awf` executable, run from the checkout:",
+        maxsplit=1,
+    )[0]
+    sed_expressions = re.findall(r"^\s+-e '([^']+)'\s*\\$", package_section, re.MULTILINE)
+    assert len(sed_expressions) == 4
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "export AWF_API_TOKEN=old-token",
+                " export AWF_POSTGRES_PASSWORD=old-password",
+                "\tAWF_POSTGRES_HOST_PORT = 15432",
+                "export AWF_DATABASE_URL = old-url",
+                "PROVIDER_TOKEN=keep",
+                "AWF_API_TOKEN_BACKUP=keep",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = ["sed"]
+    for expression in sed_expressions:
+        command.extend(("-e", expression))
+    command.append(str(env_file))
+
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    assert result.stdout.splitlines() == [
+        "PROVIDER_TOKEN=keep",
+        "AWF_API_TOKEN_BACKUP=keep",
+    ]
 
 
 def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
