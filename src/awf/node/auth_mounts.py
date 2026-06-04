@@ -801,14 +801,26 @@ def _safe_mtime_ns(path: Path) -> int | None:
         return None
 
 
-def _reconcile_fallback_edits_into_upper(*, legacy: Path, upper: Path, base: Path) -> None:
-    """Forward fallback-era legacy edits into the overlay ``upper`` before reaping it.
+def _reconcile_fallback_edits_into_upper(
+    *, legacy: Path, merged: Path, upper: Path, base: Path
+) -> None:
+    """Forward fallback-era legacy edits into the overlay before reaping it.
 
     Closes #381: when a surviving non-empty ``upper`` exists but a transient remount
     failure degraded a provision to the legacy full copy, the agent may have mutated
     Claude auth/config in that legacy copy. When the overlay later remounts,
     ``merged`` (``upper`` over ``base``) shadows the legacy copy and the caller
     ``rmtree``s it — dropping those fallback edits. This reconciles them first.
+
+    The forwarded copies are written **through the live ``merged`` mount**, never
+    directly into the underlying ``upper`` dir. By the time this runs the overlay is
+    already mounted, and overlayfs treats external writes to the upper/lower trees of
+    a live mount as undefined behavior — files poked straight into ``upper`` can read
+    back stale or invisible through ``merged`` (what the agent actually sees). Writing
+    via ``merged`` lets the kernel perform the copy-up coherently, so the reconciled
+    edit lands in ``upper`` *and* is immediately visible to the agent. The generation
+    comparisons below only *stat* the underlying ``upper``/``base`` (reads are safe);
+    only the copy itself routes through ``merged``.
 
     Generation/mtime rule, walking every regular file ``rel`` under ``legacy``:
 
@@ -817,8 +829,8 @@ def _reconcile_fallback_edits_into_upper(*, legacy: Path, upper: Path, base: Pat
       preserves host mtimes via ``copy2``, so an unedited file matches the base and
       is skipped — this filters the whole baseline tree out, preserving the
       overlay's disk savings (only the small edited set is ever copied).
-    - A fallback edit is copied into ``upper`` only when ``upper[rel]`` is absent OR
-      ``legacy[rel].st_mtime_ns > upper[rel].st_mtime_ns``. **``upper`` wins ties:**
+    - A fallback edit is forwarded (via ``merged``) only when ``upper[rel]`` is absent
+      OR ``legacy[rel].st_mtime_ns > upper[rel].st_mtime_ns``. **``upper`` wins ties:**
       an equal-or-newer upper edit is the agent's authoritative overlay-era change,
       and only a *strictly newer* legacy edit overwrites it.
 
@@ -867,9 +879,10 @@ def _reconcile_fallback_edits_into_upper(*, legacy: Path, upper: Path, base: Pat
             upper_mtime_ns = _safe_mtime_ns(upper_file)
             if upper_mtime_ns is not None and legacy_mtime_ns <= upper_mtime_ns:
                 continue
+            merged_file = merged / rel
             try:
-                upper_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(legacy_file, upper_file)
+                merged_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_file, merged_file)
             except OSError:
                 continue
 
@@ -949,16 +962,23 @@ def _prepare_isolated_claude_auth(
             # the workspace's lifetime. ``ignore_errors`` keeps a stuck reap from
             # failing provisioning — a later provision retries the cleanup.
             #
-            # Before reaping it, reconcile any *fallback-era edits* it carries back
-            # into ``upper`` (#381): a prior provision that degraded to this legacy
+            # Before reaping it, reconcile any *fallback-era edits* it carries forward
+            # into the overlay (#381): a prior provision that degraded to this legacy
             # copy may have mutated Claude auth/config there, and the remounted
             # overlay (``merged`` = upper over ``base``) would otherwise shadow then
             # drop those edits. Reconciliation copies only the strictly-newer legacy
             # edits forward (``upper`` wins ties), so the fresh-copy baseline — which
             # matches ``base`` — is left untouched and the overlay's disk savings hold.
+            # The copies route *through* the live ``merged`` mount (``mount.source``),
+            # not straight into ``upper``: the overlay is already mounted here, and
+            # writing into a live overlay's upper tree directly is undefined behavior
+            # that can leave the edits invisible/stale to the agent reading ``merged``.
             if legacy_claude_copy.exists():
                 _reconcile_fallback_edits_into_upper(
-                    legacy=legacy_claude_copy, upper=upper, base=base
+                    legacy=legacy_claude_copy,
+                    merged=Path(mount.source),
+                    upper=upper,
+                    base=base,
                 )
                 shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:

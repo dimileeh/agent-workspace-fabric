@@ -762,13 +762,17 @@ def test_live_mount_reuse_reconciles_against_actual_base_when_host_changed(
     )
 
     upper = claude_root / "upper"
+    merged = claude_root / "merged"
     # Reconciliation compared legacy files against the base the live mount *actually*
     # uses (base A, recovered from the mount), not the freshly recomputed base B that
-    # is missing ``keeper.json``. The unedited baseline file therefore stays out of
-    # ``upper`` — comparing against base B would have mis-copied it as a "new" edit.
+    # is missing ``keeper.json``. The unedited baseline file therefore stays out of the
+    # overlay — comparing against base B would have mis-copied it as a "new" edit.
+    assert not (merged / "keeper.json").exists()
     assert not (upper / "keeper.json").exists()
-    # A genuine fallback edit (absent from base A) is still forwarded into ``upper``.
-    assert (upper / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    # A genuine fallback edit (absent from base A) is still forwarded — written through
+    # the live ``merged`` mount (in production the kernel copies it up into ``upper``;
+    # the fake mounter has no real copy-up, so it lands in ``merged`` here).
+    assert (merged / "edited.json").read_text() == '{"fallback": "edit"}\n'
     # The legacy copy is reaped once reconciled.
     assert not legacy.exists()
     # The pin records the base the live overlay is actually mounted against.

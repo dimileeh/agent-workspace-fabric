@@ -1105,9 +1105,14 @@ def test_fallback_edit_reconciled_into_remounted_upper(tmp_path: Path) -> None:
 
     by_target = {m.target: m for m in mounts}
     assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # The fallback edit was copied into ``upper`` (newer legacy wins over an absent
-    # upper entry), and the agent's overlay-era data is untouched.
-    assert (claude_root / "upper" / "settings.json").read_text() == '{"theme": "fallback-edited"}\n'
+    # The fallback edit is forwarded *through* the live ``merged`` mount (newer legacy
+    # wins over an absent upper entry), never poked straight into ``upper`` under the
+    # live overlay. In production overlayfs copies it up into ``upper`` coherently; the
+    # fake mounter has no real copy-up, so here it lands in ``merged``. The agent's
+    # overlay-era data already in ``upper`` is untouched.
+    assert (
+        claude_root / "merged" / "settings.json"
+    ).read_text() == '{"theme": "fallback-edited"}\n'
     assert (claude_root / "upper" / "agent_note.txt").read_text() == "overlay-era note\n"
     # The stale legacy copy is reaped after reconciliation.
     assert not (claude_root / ".claude").exists()
@@ -1157,10 +1162,11 @@ def test_fresh_legacy_copy_is_not_copied_into_upper(tmp_path: Path) -> None:
         overlay_mounter=mounter,
     )
 
-    # No baseline file leaked into ``upper``; only the agent's overlay-era data
-    # remains and the stale legacy copy is reaped.
+    # No baseline file leaked into the agent's view (``merged``) or into ``upper``;
+    # only the agent's overlay-era data remains and the stale legacy copy is reaped.
+    assert not (claude_root / "merged" / "settings.json").exists()
+    assert not (claude_root / "merged" / "skills").exists()
     assert not (claude_root / "upper" / "settings.json").exists()
-    assert not (claude_root / "upper" / "skills").exists()
     assert (claude_root / "upper" / "agent_note.txt").read_text() == "overlay-era note\n"
     assert not (claude_root / ".claude").exists()
 
@@ -1233,14 +1239,16 @@ def test_reconcile_skips_unstattable_legacy_file(tmp_path: Path) -> None:
     # A legacy entry whose ``stat`` fails (a dangling symlink) is skipped, never
     # fatal, and copies nothing.
     legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
     upper = tmp_path / "upper"
     base = tmp_path / "base"
-    for directory in (legacy, upper, base):
+    for directory in (legacy, merged, upper, base):
         directory.mkdir()
     (legacy / "dangling").symlink_to(tmp_path / "missing-target")
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
 
+    assert list(merged.iterdir()) == []
     assert list(upper.iterdir()) == []
 
 
@@ -1249,20 +1257,22 @@ def test_reconcile_upper_wins_ties(tmp_path: Path) -> None:
     # The base lacks the file (so it reads as a fallback edit), but ``upper`` already
     # holds an equal-or-newer version — the agent's authoritative overlay-era change.
     # Only a *strictly newer* legacy edit may overwrite it, so the tie leaves ``upper``
-    # untouched.
+    # untouched and nothing is forwarded through ``merged``.
     legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
     upper = tmp_path / "upper"
     base = tmp_path / "base"
-    for directory in (legacy, upper, base):
+    for directory in (legacy, merged, upper, base):
         directory.mkdir()
     (legacy / "f").write_text("legacy edit\n")
     (upper / "f").write_text("upper edit\n")
     legacy_mtime_ns = (legacy / "f").stat().st_mtime_ns
     os.utime(upper / "f", ns=(legacy_mtime_ns, legacy_mtime_ns))  # equal mtimes
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
 
     assert (upper / "f").read_text() == "upper edit\n"
+    assert not (merged / "f").exists()
 
 
 @pytest.mark.unit
@@ -1272,9 +1282,10 @@ def test_reconcile_per_file_copy_error_is_skipped(
     # A per-file copy failure is best-effort: it is swallowed so reconciliation never
     # blocks provisioning.
     legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
     upper = tmp_path / "upper"
     base = tmp_path / "base"
-    for directory in (legacy, upper, base):
+    for directory in (legacy, merged, upper, base):
         directory.mkdir()
     (legacy / "f").write_text("fallback edit\n")  # base lacks it, upper lacks it
 
@@ -1283,6 +1294,33 @@ def test_reconcile_per_file_copy_error_is_skipped(
 
     monkeypatch.setattr(auth_mounts_mod.shutil, "copy2", _copy_fails)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
 
+    assert not (merged / "f").exists()
     assert not (upper / "f").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_writes_through_merged_not_directly_into_upper(tmp_path: Path) -> None:
+    # A genuine fallback edit (absent from base, absent from upper) is forwarded
+    # *through* the live ``merged`` mount, not poked straight into the underlying
+    # ``upper`` dir — overlayfs treats external writes to a live overlay's upper tree
+    # as undefined behavior that can read back stale/invisible through ``merged``. The
+    # real kernel then copies the write up into ``upper``; the test has no real overlay,
+    # so the file lands in ``merged`` and ``upper`` stays untouched, proving the write
+    # target is ``merged``.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    (legacy / "nested").mkdir()
+    (legacy / "nested" / "f").write_text("fallback edit\n")
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # Forwarded through ``merged`` (including the copied-up parent dir)...
+    assert (merged / "nested" / "f").read_text() == "fallback edit\n"
+    # ...never written directly into ``upper`` under the live overlay.
+    assert not (upper / "nested").exists()
