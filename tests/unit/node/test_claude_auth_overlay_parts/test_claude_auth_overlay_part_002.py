@@ -1267,6 +1267,23 @@ def test_iter_overlay_lowerdirs_handles_missing_and_optionless(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_unescape_proc_mount_field_decodes_backslash_last() -> None:
+    # ``/proc/mounts`` encodes a literal backslash as ``\134``. A path holding a
+    # backslash immediately followed by the digits ``040``/``011``/``012`` —
+    # ``/foo\040bar`` — is therefore written ``/foo\134040bar``. Decoding the
+    # backslash escape first would leave ``/foo\040bar`` and the space pass would
+    # then corrupt it into ``/foo bar``; the non-backslash escapes must decode
+    # first so a decoded backslash is never re-read as another escape.
+    from awf.node.auth_mounts_claude import _unescape_proc_mount_field
+
+    assert _unescape_proc_mount_field("/foo\\134040bar") == "/foo\\040bar"
+    assert _unescape_proc_mount_field("/foo\\134011bar") == "/foo\\011bar"
+    assert _unescape_proc_mount_field("/foo\\134012bar") == "/foo\\012bar"
+    # The plain escapes still decode correctly.
+    assert _unescape_proc_mount_field("a\\040b\\011c\\012d\\134e") == "a b\tc\nd\\e"
+
+
+@pytest.mark.unit
 def test_reconcile_skips_unstattable_legacy_file(tmp_path: Path) -> None:
     # A legacy entry whose ``stat`` fails (a dangling symlink) is skipped, never
     # fatal, and copies nothing.

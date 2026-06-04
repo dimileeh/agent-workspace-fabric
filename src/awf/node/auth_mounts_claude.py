@@ -164,11 +164,16 @@ def _has_cap_sys_admin(proc_status: Path = _PROC_SELF_STATUS) -> bool:
 def _unescape_proc_mount_field(field: str) -> str:
     """Decode the octal escapes ``/proc/mounts`` uses for space/tab/newline/backslash."""
 
+    # Decode the backslash escape *last*: a path containing a literal backslash
+    # followed by ``040``/``011``/``012`` is encoded as ``\134040`` etc., and
+    # decoding ``\134`` first would leave ``\040`` that the next pass would
+    # wrongly turn into a space. Decoding the non-backslash escapes first means a
+    # decoded backslash can never be re-read as the start of another escape.
     return (
-        field.replace("\\134", "\\")
-        .replace("\\040", " ")
+        field.replace("\\040", " ")
         .replace("\\011", "\t")
         .replace("\\012", "\n")
+        .replace("\\134", "\\")
     )
 
 
