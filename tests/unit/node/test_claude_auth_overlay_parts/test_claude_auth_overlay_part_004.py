@@ -795,3 +795,9 @@ def test_unpinned_upper_discard_skipped_when_mount_races_live(tmp_path: Path) ->
         entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
         for entry in logs
     )
+    # The became-mounted skip is now observable: the last-moment recheck saw ``merged``
+    # go live and logged the skip reason instead of discarding (#418/#419).
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DISCARD_SKIPPED_LIVE_MOUNT"
+        for entry in logs
+    )
