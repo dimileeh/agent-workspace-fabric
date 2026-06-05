@@ -21,8 +21,10 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import ScalarSelect
 
 from awf.common.audit import redact_audit_value
 from awf.common.callback_events import (
@@ -736,6 +738,57 @@ def terminal_runtime_effectively_released_expr(
         latest_type.isnot(None),
         latest_type == literal(TERMINAL_RUNTIME_RELEASE_EVENT_TYPE),
     )
+
+
+def latest_terminal_runtime_release_event_order_expr(
+    correlated_to: type[Workspace] | None = None,
+    workspace_id: str | None = None,
+) -> ScalarSelect[int | None]:
+    """Return the ``event_order`` of the latest ``terminal_runtime_released`` event.
+
+    This is the *floor* of the current effective-release cycle: deferred overlay-umount
+    markers (``pending``/``resolved``/``exhausted``) are append-only and workspace-lifetime,
+    but a release that was revoked (``terminal_runtime_release_revoked``) and later genuinely
+    re-released opens a *new* cycle. A marker written for an earlier cycle has an
+    ``event_order`` strictly below this floor; scoping marker predicates to
+    ``event_order >= floor`` keeps a stale ``resolved``/``exhausted`` marker from
+    permanently excluding the workspace from the deferred sweep, and keeps an earlier
+    cycle's co-written ``pending`` markers from inflating the bounded-sweep count into a
+    premature ``exhausted`` for the current release (issue #399).
+
+    ``event_order`` is reserved (non-NULL) for every event the marker/release helpers
+    write, and is per-workspace monotonic, so the latest release event's order is a sound
+    cycle boundary. Callers should treat a ``NULL`` result (no release event recorded yet)
+    as "no floor" and fall back to the lifetime predicate.
+
+    Ordering mirrors :func:`terminal_runtime_effectively_released_expr`
+    (``occurred_at DESC, event_order DESC, id DESC``) so the floor agrees with the
+    event that the effective-release check considers latest.
+
+    Must pass exactly one of *correlated_to* or *workspace_id* (same contract as
+    :func:`terminal_runtime_effectively_released_expr`).
+    """
+    if (correlated_to is None) == (workspace_id is None):
+        raise ValueError("Pass exactly one of correlated_to or workspace_id")
+
+    rel = aliased(WorkspaceEvent)
+    stmt = (
+        select(rel.event_order)
+        .where(rel.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        .where(rel.reason_code == TERMINAL_RUNTIME_RELEASE_REASON_CODE)
+        .order_by(
+            rel.occurred_at.desc(),
+            rel.event_order.desc().nullslast(),
+            rel.id.desc(),
+        )
+        .limit(1)
+    )
+    if correlated_to is not None:
+        stmt = stmt.where(rel.workspace_id == correlated_to.id).correlate(correlated_to)
+    else:
+        stmt = stmt.where(rel.workspace_id == workspace_id)
+
+    return stmt.scalar_subquery()
 
 
 async def has_terminal_runtime_released_event(

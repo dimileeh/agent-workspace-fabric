@@ -17,7 +17,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm.attributes import flag_modified
@@ -57,6 +57,7 @@ from awf.db.models import (
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
     has_terminal_runtime_released_event,
+    latest_terminal_runtime_release_event_order_expr,
     terminal_runtime_effectively_released_expr,
 )
 from awf.db.resilience import (
@@ -1275,6 +1276,16 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
     ``repo_url``, at least one ``pending`` marker, and no ``resolved`` and no
     ``exhausted`` marker.
 
+    All three marker predicates are scoped to the *current* effective-release cycle —
+    events at or after the latest ``terminal_runtime_released`` ``event_order`` (the
+    ``latest_terminal_runtime_release_event_order_expr`` floor). Markers are append-only
+    and workspace-lifetime, so without this scope a workspace that was revoked and later
+    genuinely re-released would (a) stay excluded forever by a stale earlier-cycle
+    ``resolved``/``exhausted`` marker even though the new cycle's overlay is still mounted,
+    and (b) carry an inflated ``pending`` count toward the bounded sweep. Scoping resets
+    the marker view per release cycle so each genuine release gets its full deferred-sweep
+    budget (issue #399).
+
     Candidates are additionally gated on the *effective-release* predicate (the same
     ``terminal_runtime_effectively_released_expr`` the terminal-runtime candidate/resume
     paths use, here in its positive form). A ``pending`` marker is always co-written
@@ -1324,10 +1335,22 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
         active_reservation_node,
         latest_reservation_node,
     )
+    # Scope every overlay marker to the *current* effective-release cycle. Markers are
+    # append-only and workspace-lifetime, but a release that was revoked and later
+    # genuinely re-released opens a new cycle; a ``resolved``/``exhausted`` (or a stale
+    # ``pending``) from an earlier cycle must not leak into this one. ``event_order`` is
+    # per-workspace monotonic and reserved for every marker, so markers at or after the
+    # latest ``terminal_runtime_released`` order belong to the current cycle. ``coalesce``
+    # to ``-1`` keeps the lifetime predicate when no release event exists yet (no floor).
+    release_cycle_floor = func.coalesce(
+        latest_terminal_runtime_release_event_order_expr(correlated_to=Workspace),
+        literal(-1),
+    )
     pending_exists = (
         select(WorkspaceEvent.id)
         .where(WorkspaceEvent.workspace_id == Workspace.id)
         .where(WorkspaceEvent.event_type == _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE)
+        .where(WorkspaceEvent.event_order >= release_cycle_floor)
         .correlate(Workspace)
         .exists()
     )
@@ -1342,6 +1365,7 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
                 )
             )
         )
+        .where(WorkspaceEvent.event_order >= release_cycle_floor)
         .correlate(Workspace)
         .exists()
     )
@@ -1402,18 +1426,27 @@ async def _count_terminal_auth_overlay_unmount_pending_events(
     self: Any,
     workspace_id: str,
 ) -> int:
-    """Return the number of ``pending`` overlay-umount markers for *workspace_id*.
+    """Return the number of current-cycle ``pending`` overlay-umount markers for *workspace_id*.
 
     The count equals the number of umount attempts recorded so far and bounds the
-    deferred re-sweeps (event-based counter).
+    deferred re-sweeps (event-based counter). It is scoped to the current
+    effective-release cycle (markers at or after the latest ``terminal_runtime_released``
+    order) so that ``pending`` markers co-written with an earlier release that was later
+    revoked do not inflate the count into a premature ``exhausted`` for the current
+    release (issue #399).
     """
 
     async def _operation(session: AsyncSession) -> int:
+        release_cycle_floor = func.coalesce(
+            latest_terminal_runtime_release_event_order_expr(workspace_id=workspace_id),
+            literal(-1),
+        )
         stmt = (
             select(func.count())
             .select_from(WorkspaceEvent)
             .where(WorkspaceEvent.workspace_id == workspace_id)
             .where(WorkspaceEvent.event_type == _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE)
+            .where(WorkspaceEvent.event_order >= release_cycle_floor)
         )
         return int((await session.execute(stmt)).scalar_one())
 
@@ -1429,8 +1462,19 @@ async def _has_terminal_auth_overlay_unmount_terminal_event(
     session: AsyncSession,
     workspace_id: str,
 ) -> bool:
-    """Return True if a ``resolved`` or ``exhausted`` overlay-umount marker exists."""
+    """Return True if a current-cycle ``resolved`` or ``exhausted`` overlay-umount marker exists.
+
+    Scoped to the current effective-release cycle (markers at or after the latest
+    ``terminal_runtime_released`` order) so an earlier cycle's terminal marker neither
+    suppresses a fresh ``resolved``/``exhausted`` write nor — paired with the equally
+    scoped candidate query — wedges the sweep into re-listing a workspace it can never
+    resolve in the current cycle (issue #399).
+    """
     _ = self
+    release_cycle_floor = func.coalesce(
+        latest_terminal_runtime_release_event_order_expr(workspace_id=workspace_id),
+        literal(-1),
+    )
     stmt = (
         select(WorkspaceEvent.id)
         .where(WorkspaceEvent.workspace_id == workspace_id)
@@ -1442,6 +1486,7 @@ async def _has_terminal_auth_overlay_unmount_terminal_event(
                 )
             )
         )
+        .where(WorkspaceEvent.event_order >= release_cycle_floor)
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none() is not None

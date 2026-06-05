@@ -44,6 +44,7 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    latest_terminal_runtime_release_event_order_expr,
 )
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
@@ -992,6 +993,178 @@ async def test_count_pending_events_reflects_marker_count(
 
     count = await sweeper._count_terminal_auth_overlay_unmount_pending_events(ws_id)  # noqa: SLF001
     assert count == 3
+
+
+# --------------------------------------------------------------------------- #
+# 7b. Overlay markers are scoped to the current effective-release cycle
+# --------------------------------------------------------------------------- #
+#
+# Markers are append-only and workspace-lifetime. A release that is revoked
+# (``terminal_runtime_release_revoked``) and later genuinely re-released opens a *new*
+# cycle: the agent container is recreated and the overlay is mounted afresh, so the new
+# release owes its own full deferred-sweep budget. Without scoping, an earlier cycle's
+# ``resolved``/``exhausted`` marker would exclude the workspace forever, and the earlier
+# cycle's co-written ``pending`` markers would inflate the bound into a premature
+# ``exhausted`` — so issue #399 retries never run for the new release.
+
+
+async def _build_revoked_then_rereleased_cycle(
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    *,
+    cycle1_pending: int = 1,
+    cycle1_terminal: str | None = None,
+) -> None:
+    """Append a release→revoke→re-release history spanning two effective-release cycles.
+
+    Cycle 1 records a ``terminal_runtime_released`` with *cycle1_pending* co-written
+    ``pending`` markers and an optional terminal marker (*cycle1_terminal* is
+    ``"resolved"`` or ``"exhausted"``), then a later ``terminal_runtime_release_revoked``
+    that supersedes it. Cycle 2 records a still-later genuine ``terminal_runtime_released``
+    (the latest release/revoke event → effectively released) with one fresh ``pending``
+    marker. Only the cycle-2 marker falls at or after the latest release ``event_order``,
+    so the current-cycle-scoped predicates must see exactly one pending and no terminal
+    marker.
+    """
+    released_1 = await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    )
+    released_1.occurred_at = datetime(2026, 5, 31, 12, 0, 0, tzinfo=UTC)
+    for _ in range(cycle1_pending):
+        await repo.add_event(
+            ws,
+            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            payload={"attempt": 1},
+        )
+    if cycle1_terminal == "resolved":
+        await repo.add_event(
+            ws,
+            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
+        )
+    elif cycle1_terminal == "exhausted":
+        await repo.add_event(
+            ws,
+            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
+            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_REASON_CODE,
+        )
+    revoked = await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    )
+    revoked.occurred_at = datetime(2026, 5, 31, 12, 0, 1, tzinfo=UTC)
+    released_2 = await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    )
+    released_2.occurred_at = datetime(2026, 5, 31, 12, 0, 2, tzinfo=UTC)
+    await repo.add_event(
+        ws,
+        event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+        reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+        payload={"attempt": 1},
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_query_scopes_terminal_marker_to_current_cycle(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A ``resolved``/``exhausted`` marker from an earlier revoked-then-re-released cycle
+    must NOT exclude the workspace from the current cycle's deferred sweep — the new
+    release re-mounted the overlay and owes its own retry."""
+    sweeper = _sweeper(factory)
+    resolved_id: str = ""
+    exhausted_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws_resolved = await _make_workspace(
+            session, repo, compose_project_name="awf_rereleased_resolved"
+        )
+        ws_exhausted = await _make_workspace(
+            session, repo, compose_project_name="awf_rereleased_exhausted"
+        )
+        resolved_id = ws_resolved.id
+        exhausted_id = ws_exhausted.id
+        await _build_revoked_then_rereleased_cycle(repo, ws_resolved, cycle1_terminal="resolved")
+        await _build_revoked_then_rereleased_cycle(repo, ws_exhausted, cycle1_terminal="exhausted")
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(limit=None)  # noqa: SLF001
+    candidate_ids = {c.workspace_id for c in candidates}
+    assert resolved_id in candidate_ids, (
+        "a stale resolved marker from a prior revoked cycle must not exclude the "
+        "re-released workspace from the current deferred sweep"
+    )
+    assert exhausted_id in candidate_ids, (
+        "a stale exhausted marker from a prior revoked cycle must not exclude the "
+        "re-released workspace from the current deferred sweep"
+    )
+
+
+@pytest.mark.asyncio
+async def test_count_pending_events_scoped_to_current_release_cycle(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The bounded-sweep count ignores ``pending`` markers co-written with an earlier
+    (revoked) release, so a fresh release is not pushed straight to ``exhausted``."""
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        # Four stale cycle-1 pending markers (≥ the bound of 5 once the lone cycle-2
+        # marker is added) must not count toward the current release's budget.
+        await _build_revoked_then_rereleased_cycle(repo, ws, cycle1_pending=4)
+        await session.commit()
+
+    count = await sweeper._count_terminal_auth_overlay_unmount_pending_events(ws_id)  # noqa: SLF001
+    assert count == 1, (
+        "pending markers co-written with an earlier revoked release must not count "
+        "toward the current release's bounded deferred-sweep budget"
+    )
+
+
+@pytest.mark.asyncio
+async def test_has_terminal_marker_scoped_to_current_release_cycle(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The write-path terminal-marker guard ignores an earlier cycle's ``resolved``
+    marker, so the current cycle can still record its own terminal marker (and the
+    candidate query — equally scoped — does not re-list it forever)."""
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await _build_revoked_then_rereleased_cycle(repo, ws, cycle1_terminal="resolved")
+        await session.commit()
+
+    async with factory() as session:
+        assert (
+            await sweeper._has_terminal_auth_overlay_unmount_terminal_event(session, ws_id)  # noqa: SLF001
+        ) is False, (
+            "a resolved marker from an earlier revoked cycle must not block the current "
+            "cycle from recording its own terminal overlay-umount marker"
+        )
+
+
+def test_latest_release_event_order_expr_requires_exactly_one_selector() -> None:
+    """The cycle-floor helper rejects ambiguous/empty selectors (same contract as the
+    effective-release expression)."""
+    with pytest.raises(ValueError, match="exactly one"):
+        latest_terminal_runtime_release_event_order_expr()
+    with pytest.raises(ValueError, match="exactly one"):
+        latest_terminal_runtime_release_event_order_expr(
+            correlated_to=Workspace, workspace_id="ws_x"
+        )
 
 
 @pytest.mark.asyncio
