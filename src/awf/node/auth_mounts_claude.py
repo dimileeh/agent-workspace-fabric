@@ -631,12 +631,43 @@ def _prepare_isolated_claude_auth(
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)
             if not target_dir.exists():
-                shutil.copytree(
-                    source_dir,
-                    target_dir,
-                    ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
-                    ignore_dangling_symlinks=True,
-                )
+                # Materialize the legacy copy atomically: ``copytree`` into a sibling
+                # staging dir, then ``replace`` it into ``.claude`` only once the copy
+                # is complete. A plain ``copytree`` straight into ``.claude`` that is
+                # interrupted (crash, SIGKILL, OSError mid-copy) leaves a *partial*
+                # tree, and the ``not target_dir.exists()`` reuse guard above would then
+                # adopt it as the authoritative legacy copy on the next provision. Its
+                # never-copied files would read as confident agent deletions to the #402
+                # whiteout pass (:func:`_forward_fallback_deletions_as_whiteouts`), which
+                # would synthesize overlayfs whiteouts that *hide still-valid lower
+                # credentials* from ``merged`` — the exact credential-hiding the
+                # reconcile design forbids. Staging + an atomic rename guarantees
+                # ``.claude`` only ever exists as a *complete* copy; an interrupted
+                # attempt leaves only the discardable staging dir (reclaimed by the
+                # ``finally``, or — on a hard kill — by the per-workspace teardown that
+                # reaps ``target_root`` wholesale). Mirrors the shared-base build's
+                # staging pattern in :func:`_ensure_shared_claude_base`.
+                staging = Path(tempfile.mkdtemp(prefix=".claude-legacy-", dir=target_root))
+                staged_copy = staging / ".claude"
+                try:
+                    shutil.copytree(
+                        source_dir,
+                        staged_copy,
+                        ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
+                        ignore_dangling_symlinks=True,
+                    )
+                    try:
+                        staged_copy.replace(target_dir)
+                    except OSError:
+                        # A concurrent provision of the same workspace won the race and
+                        # already materialized ``.claude`` (renaming onto the now
+                        # non-empty dir fails): reuse theirs. Any other failure leaves
+                        # ``.claude`` absent — re-raise so the caller surfaces it rather
+                        # than mounting a missing source.
+                        if not target_dir.exists():
+                            raise
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
             mounts.append(
                 AuthMount(
                     source=str(target_dir),

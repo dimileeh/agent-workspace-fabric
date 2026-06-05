@@ -125,6 +125,15 @@ def _forward_fallback_deletions_as_whiteouts(
     **confidently** attributed to the agent, records an overlayfs whiteout in
     ``upper`` so the deletion survives the remount.
 
+    This rests on the legacy copy being *complete*: ``base``-present/``legacy``-absent
+    is read as an agent deletion, so a legacy tree truncated by an interrupted copy
+    would falsely flag every never-copied file as deleted and whiteout still-valid
+    lower credentials. The caller materializes the legacy copy atomically — ``copytree``
+    into a staging dir then an atomic ``replace`` into ``.claude`` — so ``.claude`` only
+    ever exists as a whole copy and a partial tree is never reused (see the legacy
+    branch of :func:`resolve_service_auth_mounts`). Without that guarantee the
+    confident-deletion inference below would be unsound.
+
     Credential safety is paramount: a misclassified deletion must never *hide* a
     still-needed credential, so every ambiguous case fails safe toward leaving the
     base copy visible. A removal is whiteouted only when *all* hold:

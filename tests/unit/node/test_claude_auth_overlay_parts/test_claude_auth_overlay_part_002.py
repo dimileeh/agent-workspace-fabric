@@ -539,11 +539,18 @@ def test_shared_base_build_replace_failure_logs_and_falls_back(
     _seed_host_claude(host_home)
     base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
 
-    def _replace_fails(self: Path, target: Path) -> None:
+    real_replace = auth_mounts_mod.Path.replace
+
+    def _replace_fails(self: Path, target: Path) -> object:
         # A genuine failure (e.g. permissions) leaves ``base`` absent — this is
         # not a lost race, so it must surface log evidence rather than silently
-        # returning a non-existent base.
-        raise PermissionError("operation not permitted")
+        # returning a non-existent base. Scope the failure to the shared-base
+        # staging replace (``.claude-base-*``); the legacy full-copy fallback also
+        # materializes via staging + ``replace`` (``.claude-legacy-*``) and must be
+        # allowed to complete so the degrade path it exercises actually succeeds.
+        if ".claude-base-" in str(self):
+            raise PermissionError("operation not permitted")
+        return real_replace(self, target)
 
     monkeypatch.setattr(auth_mounts_mod.Path, "replace", _replace_fails)
 
@@ -606,6 +613,71 @@ def test_shared_base_build_copytree_failure_cleans_staging_and_falls_back(
     assert any(entry.get("reason_code") == "CLAUDE_AUTH_SHARED_BASE_FAILED" for entry in logs)
     # No orphaned staging dir remains under the shared root.
     assert list(base.parent.glob(".claude-base-*")) == []
+
+
+@pytest.mark.unit
+def test_interrupted_legacy_copy_leaves_no_reusable_partial_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted legacy ``copytree`` must not leave a reusable partial ``.claude``.
+
+    The #402 deletion pass reads ``base``-present / ``legacy``-absent as a *confident*
+    agent deletion and whiteouts the lower credential. A legacy ``.claude`` left
+    *incomplete* by an interrupted ``copytree`` (crash/SIGKILL mid-tree) — then adopted
+    by the ``not target_dir.exists()`` reuse guard on the next provision — would make
+    every never-copied credential read as a deletion and be hidden from ``merged``
+    (PRRT_kwDOSJAM6s6HRGv0). The copy is materialized via a staging dir + atomic
+    ``replace``, so ``.claude`` only ever exists as a *whole* copy: an interrupted
+    attempt leaves no reusable partial and no orphaned staging dir, and the next
+    provision rebuilds a complete copy from scratch.
+    """
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    real_copytree = auth_mounts_mod.shutil.copytree
+
+    def _interrupted_copytree(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        # Model a copy killed partway through the tree: the destination dir and a
+        # single file already exist when the failure hits — the exact partial shape
+        # that, if reused, would flag the rest of ``~/.claude`` as agent deletions.
+        dst_path = Path(dst)
+        dst_path.mkdir(parents=True, exist_ok=True)
+        (dst_path / "settings.json").write_text("partial")
+        raise OSError("copy interrupted mid-tree")
+
+    # Overlay unsupported → the legacy full-copy branch runs (no shared base build).
+    monkeypatch.setattr(auth_mounts_mod.shutil, "copytree", _interrupted_copytree)
+    with pytest.raises(OSError):
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_partial",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=False),
+        )
+
+    claude_root = work_dir / "auth" / "ws_partial" / "claude"
+    # The partial copy landed only in the throwaway staging dir, never at ``.claude``,
+    # so the ``not target_dir.exists()`` reuse guard cannot adopt it ...
+    assert not (claude_root / ".claude").exists()
+    # ... and the staging dir was reclaimed rather than orphaned under the auth root.
+    assert list(claude_root.glob(".claude-legacy-*")) == []
+
+    # A clean retry rebuilds a *complete* legacy copy from scratch (no partial reuse):
+    # every host credential is present, so the deletion pass sees no spurious absences.
+    monkeypatch.setattr(auth_mounts_mod.shutil, "copytree", real_copytree)
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_partial",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=False),
+    )
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert (claude_root / ".claude" / "skills" / "demo" / "SKILL.md").exists()
 
 
 @pytest.mark.unit
