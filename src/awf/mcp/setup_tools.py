@@ -705,18 +705,17 @@ def _initialize_project_profile_result(
     force: bool,
 ) -> CallToolResult:
     repository = _resolve_project_init_path(project_path)
-    if not repository.exists():
-        return _project_init_path_error(
-            safe_result,
-            "project path does not exist",
-            repository=repository,
-        )
-    if not repository.is_dir():
-        return _project_init_path_error(
-            safe_result,
-            "project path is not a directory",
-            repository=repository,
-        )
+    try:
+        if not repository.exists():
+            return _project_init_path_error(safe_result, "project path does not exist", repository)
+        if not repository.is_dir():
+            return _project_init_path_error(
+                safe_result,
+                "project path is not a directory",
+                repository,
+            )
+    except OSError:
+        return _project_init_path_error(safe_result, "could not inspect project path", repository)
 
     try:
         existing_profile_path = _existing_project_profile_path(repository)
@@ -869,13 +868,16 @@ def _client_integration_instructions_result(
             )
             for client in selected
         ]
-    except SetupCheckError as exc:
+    except (SetupCheckError, HostSetupConfigError) as exc:
+        details = (
+            _config_error_details(exc) if isinstance(exc, HostSetupConfigError) else exc.details
+        )
         return _first_run_result(
             safe_result,
             _client_instruction_reason_coded_payload(
                 exc.reason_code,
                 str(exc),
-                exc.details,
+                details,
                 requested_clients=clients,
                 selected_clients=selected,
                 source_checkout=source_path,
@@ -1000,7 +1002,6 @@ def _error_result(
 def _project_init_path_error(
     safe_result: SafeResult,
     message: str,
-    *,
     repository: Path,
 ) -> CallToolResult:
     return _error_result(

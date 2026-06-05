@@ -201,6 +201,44 @@ async def test_client_integration_instructions_persisted_source_checkout_failure
 
 
 @pytest.mark.unit
+async def test_client_integration_instructions_host_config_error_preserves_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    config_path = tmp_path / ".awf" / "config.yml"
+
+    def fail_env_file(source_path: Path | None, _require_existing: bool) -> Path:
+        assert source_path is None
+        raise HostSetupConfigError(
+            reason_code=HOST_SETUP_CONFIG_CORRUPT,
+            message="Host setup config is corrupt or unsupported.",
+            path=config_path,
+            details={"error_type": "ParserError"},
+        )
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fail_env_file)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
+    assert payload["command"] == "awf setup --client claude"
+    assert payload["issues"][0]["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
+    assert payload["issues"][0]["details"] == {
+        "error_type": "ParserError",
+        "path": str(config_path),
+    }
+
+
+@pytest.mark.unit
 async def test_client_integration_instructions_preserves_explicit_empty_clients(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

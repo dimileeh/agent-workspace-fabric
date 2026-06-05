@@ -371,6 +371,43 @@ async def test_initialize_project_profile_path_value_error_returns_structured_er
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("probe", ["exists", "is_dir"])
+async def test_initialize_project_profile_path_probe_oserror_returns_structured_error(
+    probe: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    expected_project = project.resolve()
+    leaked_detail = "/srv/awf/private/repo permission denied"
+    original_probe = getattr(setup_tools.Path, probe)
+
+    def fail_probe(path: Path) -> bool:
+        if path == expected_project:
+            raise PermissionError(leaked_detail)
+        return original_probe(path)
+
+    monkeypatch.setattr(setup_tools.Path, probe, fail_probe)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "template": "generic"},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_INVALID_PATH"
+    assert payload["message"] == "could not inspect project path"
+    assert payload["detail"] == {"project_path": str(expected_project)}
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
 async def test_initialize_project_profile_preview_failure_does_not_surface_exception_text(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

@@ -218,6 +218,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523
+
+### Problem Statement And Scope
+
+The review reports two first-run MCP exception-boundary gaps:
+`awf_get_client_integration_instructions` maps `HostSetupConfigError` from
+client env-file resolution to generic setup readiness failure, and
+`awf_initialize_project_profile` can let `Path.exists()` or `Path.is_dir()`
+`OSError`s escape before safe result handling.
+
+Scope is limited to those exception paths and focused regressions. Existing
+success payloads, source-checkout error rendering, and project-profile
+preview/write behavior stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the specific `HostSetupConfigError.reason_code` and config-error
+  details for client-integration instruction planning failures.
+- Keep client-integration responses secret-free and command-shaped for the
+  requested/selected clients.
+- Convert project-path `exists()` and `is_dir()` probe `OSError`s into
+  structured MCP errors instead of letting them escape the tool boundary.
+- Add focused regressions for both reported paths.
+
+### Implementation Steps
+
+1. Add focused failing regressions for client-integration host config errors
+   and project-profile path probe `OSError`s.
+2. Add specific `HostSetupConfigError` handling in the client-integration
+   planning block.
+3. Guard initial project-path `exists()` / `is_dir()` probes and return a
+   structured project-init path error on probe failure.
+4. Run the targeted regressions and focused lint/type checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_host_config_error_preserves_reason_code tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_path_probe_oserror_returns_structured_error -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6Hc2bA Persisted Stale Checkout Remediation
 
 ### Problem Statement And Scope

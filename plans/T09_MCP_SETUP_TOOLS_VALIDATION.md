@@ -205,6 +205,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve the specific `HostSetupConfigError.reason_code` and config-error
+  details for client-integration instruction planning failures: Complete.
+- Keep client-integration responses secret-free and command-shaped for the
+  requested/selected clients: Complete.
+- Convert project-path `exists()` and `is_dir()` probe `OSError`s into
+  structured MCP errors instead of letting them escape the tool boundary:
+  Complete.
+- Add focused regressions for both reported paths: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `tests/unit/mcp/test_setup_tools_project_profile.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_host_config_error_preserves_reason_code tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_path_probe_oserror_returns_structured_error -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression tests failed before the implementation change with
+  `SETUP_READINESS_FAILED` for `HostSetupConfigError` and FastMCP `ToolError`
+  escapes for `Path.exists()` / `Path.is_dir()` `PermissionError`s.
+- Targeted regressions after the implementation change: 3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+- `src/awf/mcp/setup_tools.py` remains at 1493 lines, within the local
+  maintainability guard.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6Hc2bA
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
