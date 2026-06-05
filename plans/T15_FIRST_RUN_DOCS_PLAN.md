@@ -643,3 +643,22 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
 ```
+
+Post-review adjustment for review-level comment `issue:4620140358`: the
+Getting Started package/virtualenv first-run snippet must match Quickstart's
+dotenv-safe `AWF_POSTGRES_PASSWORD` persistence, including URL-encoding for
+`AWF_DATABASE_URL`, double-quoted dotenv escaping for Compose, and newline
+rejection. The Uninstall intro source-checkout metadata refresh example must
+make clear that the `uv run --python 3.12 --extra dev awf setup
+--source-checkout ...` form is for the no-global source lane and that the
+global-source lane uses the equivalent bare `awf setup --source-checkout ...`
+command documented below.
+
+Focused repair commands for review-level comment `issue:4620140358`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_url_encodes_custom_postgres_password tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```

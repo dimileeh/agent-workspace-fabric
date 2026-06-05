@@ -118,6 +118,11 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   package-lane first-run snippet persist `AWF_POSTGRES_PASSWORD` as an escaped
   double-quoted dotenv value, preserving `$`, inline `#`, quotes, and
   backslashes under Compose dotenv parsing.
+- Complete: Address review-level comment `issue:4620140358` by making the
+  Getting Started package/virtualenv first-run snippet use the same
+  dotenv-safe Postgres password persistence as Quickstart, and by clarifying
+  that the Uninstall intro metadata-refresh command uses Lane 3/no-global
+  grammar with a Lane 2/global-tool equivalent documented below.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -2479,6 +2484,47 @@ Final focused repair result: targeted regression plus snippet syntax checks
 `5 passed in 1.78s`; full focused public-docs file `73 passed in 3.67s`;
 `ruff check` passed; `ruff format --check` reported
 `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for review-level comment `issue:4620140358`:
+
+- `docs/GETTING_STARTED.md` now mirrors Quickstart's package/virtualenv
+  first-run password handling: the snippet URL-encodes
+  `AWF_POSTGRES_PASSWORD` for `AWF_DATABASE_URL`, rejects newline-containing
+  passwords, and persists a double-quoted dotenv-escaped copy for Compose.
+- `docs/UNINSTALL.md` now explains that the introductory source-checkout
+  metadata refresh example uses the no-global `uv run --python 3.12 --extra dev
+  awf ...` wrapper, while the global source-checkout lane uses the equivalent
+  bare `awf setup --source-checkout ...` form documented below.
+- `tests/unit/docs/test_public_docs_status.py` adds a focused executable
+  Getting Started regression for passwords containing `$`, inline `#`, quotes,
+  backslashes, and URL-reserved characters, plus an assertion that the uninstall
+  intro frames the example by lane.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_url_encodes_custom_postgres_password tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Red-phase result after updating the focused regressions: failed as expected
+with `4 failed`; the current Getting Started snippet still lacked
+`awf_postgres_password_dotenv` and the Uninstall intro did not identify the
+no-global wrapper or global-source equivalent.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_url_encodes_custom_postgres_password tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+git diff --check
+```
+
+Final focused repair result: targeted docs regressions `4 passed in 0.88s`;
+copy-paste snippet syntax check `1 passed in 0.77s`; `ruff check` passed;
+`ruff format --check` reported `1 file already formatted`; `git diff --check`
+reported no whitespace errors.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

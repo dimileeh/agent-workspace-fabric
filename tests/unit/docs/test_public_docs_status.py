@@ -1476,7 +1476,11 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     package_api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
     package_password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     package_host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
+    package_password_dotenv_export = 'awf_postgres_password_dotenv="$('
     package_env_tmp = 'awf_env_tmp="$(mktemp)"'
+    package_password_persist = (
+        "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$awf_postgres_password_dotenv\""
+    )
     package_persist_target = 'mv "$awf_env_tmp" .env'
     package_setup_command = "\nawf setup\n"
 
@@ -1485,11 +1489,16 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     assert package_password_export in package_section
     assert package_host_port_export in package_section
     assert PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE in package_section
+    assert package_password_dotenv_export in package_section
+    assert "AWF_POSTGRES_PASSWORD cannot contain newlines" in package_section
     assert PACKAGE_DATABASE_URL_ENCODED_EXPORT in package_section
     assert PACKAGE_DATABASE_URL_RAW_PASSWORD_EXPORT not in package_section
     assert package_env_tmp in package_section
     assert "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\"" in package_section
-    assert "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\"" in package_section
+    assert package_password_persist in package_section
+    assert "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\"" not in (
+        package_section
+    )
     assert "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\"" in package_section
     assert "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\"" in package_section
     assert package_persist_target in package_section
@@ -1498,6 +1507,9 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE,
     )
     assert package_section.index(PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE) < (
+        package_section.index(package_password_dotenv_export)
+    )
+    assert package_section.index(package_password_dotenv_export) < (
         package_section.index(PACKAGE_DATABASE_URL_ENCODED_EXPORT)
     )
     assert package_section.index(package_env_tmp) < package_section.index(package_persist_target)
@@ -1512,6 +1524,62 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         assert section.index("cp .env.example .env") < section.index(setup_command), (
             f"{label} must create root .env before setup"
         )
+
+
+def test_getting_started_package_first_run_url_encodes_custom_postgres_password(
+    tmp_path: Path,
+) -> None:
+    """Assert Getting Started package first-run env matches Quickstart escaping."""
+    from awf.service.environment import compose_env_file_values
+
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
+        encoding="utf-8",
+    )
+    startup_section = getting_started_text.split(
+        "### Recommended First-Run Sequence",
+        maxsplit=1,
+    )[1].split("### Configure Environment", maxsplit=1)[0]
+    package_section = startup_section.split(
+        "For package-manager or virtualenv installs:",
+        maxsplit=1,
+    )[1].split(
+        "For a source checkout with a global `awf` executable, run from the checkout:",
+        maxsplit=1,
+    )[0]
+    bash_fences = [
+        fence
+        for fence in _markdown_fences("docs/GETTING_STARTED.md", package_section)
+        if fence.language == "bash" and "AWF_DATABASE_URL" in fence.body
+    ]
+    assert len(bash_fences) == 1
+    env_persist_script = bash_fences[0].body.split("\nawf setup\n", maxsplit=1)[0]
+    custom_password = 'p@ss/word:with $dollar #hash "quote" \\path'
+    expected_url = f"postgresql+asyncpg://awf:{quote(custom_password, safe='')}@localhost:5433/awf"
+    expected_dotenv_password = (
+        '"' + custom_password.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+    )
+    script = "\n".join(
+        (
+            f"export AWF_POSTGRES_PASSWORD={shlex.quote(custom_password)}",
+            env_persist_script,
+        )
+    )
+
+    result = subprocess.run(  # noqa: S602
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    env_file = tmp_path / ".env"
+    env_text = env_file.read_text(encoding="utf-8")
+    assert f"AWF_POSTGRES_PASSWORD={expected_dotenv_password}\n" in env_text
+    assert f"AWF_DATABASE_URL={expected_url}\n" in env_text
+    assert compose_env_file_values(env_file, environ={})["AWF_POSTGRES_PASSWORD"] == custom_password
+    assert custom_password not in env_text.split("AWF_DATABASE_URL=", maxsplit=1)[1]
 
 
 def test_getting_started_package_first_run_uses_generated_root_env() -> None:
@@ -1533,6 +1601,7 @@ def test_getting_started_package_first_run_uses_generated_root_env() -> None:
 
     assert "cp .env.example .env" not in package_section
     assert 'awf_env_tmp="$(mktemp)"' in package_section
+    assert 'awf_postgres_password_dotenv="$(' in package_section
     assert "if [ -f .env ]; then" in package_section
     assert "AWF_API_TOKEN[[:space:]]*=/d" in package_section
     assert "AWF_POSTGRES_PASSWORD[[:space:]]*=/d" in package_section
@@ -1767,6 +1836,13 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         "Core stack still holds them"
     )
     no_stop_guidance = "Editing `~/.awf/config.yml` remains the no-stop option"
+    no_global_wrapper_guidance = (
+        "The introductory refresh example uses the no-global source-checkout wrapper"
+    )
+    global_tool_equivalent_guidance = (
+        "Global source-checkout installs use the equivalent bare "
+        "`awf setup --source-checkout ...` form"
+    )
     checkout_cd_line = "cd /path/to/aira-agent-workspace-fabric"
     source_cases = (
         (
@@ -1794,6 +1870,8 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
     assert core_stop_guidance in intro_words
     assert port_block_guidance in intro_words
     assert no_stop_guidance in intro_words
+    assert no_global_wrapper_guidance in intro_words
+    assert global_tool_equivalent_guidance in intro_words
     intro_setup_line = (
         "uv run --python 3.12 --extra dev awf setup "
         "--source-checkout /path/to/replacement/aira-agent-workspace-fabric"
