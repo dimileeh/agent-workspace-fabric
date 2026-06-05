@@ -1342,9 +1342,12 @@ def _client_source_checkout_blocked_payload_with_explicit_command(
         "command": command,
         "next_steps": (f"Fix the reported --source-checkout path above, then re-run {command}.",),
     }
+    issue_command = command
+    if source_checkout is not None:
+        issue_command = _setup_source_checkout_command(source_checkout)
     if payload.issues:
         update["issues"] = tuple(
-            _client_source_checkout_issue_with_command(issue, command=command)
+            _client_source_checkout_issue_with_command(issue, command=issue_command)
             for issue in payload.issues
         )
     return payload.model_copy(

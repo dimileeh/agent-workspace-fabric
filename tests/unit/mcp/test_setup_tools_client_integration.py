@@ -146,6 +146,7 @@ async def test_client_integration_instructions_source_checkout_failure_preserves
     )
     payload = _payload(result)
     expected_command = f"awf setup --client claude --client codex --source-checkout '{checkout}'"
+    expected_remediation = f"awf setup --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
@@ -154,7 +155,7 @@ async def test_client_integration_instructions_source_checkout_failure_preserves
     assert payload["next_steps"] == [
         f"Fix the reported --source-checkout path above, then re-run {expected_command}.",
     ]
-    assert payload["issues"][0]["remediation"]["related_command"] == expected_command
+    assert payload["issues"][0]["remediation"]["related_command"] == expected_remediation
     assert payload["issues"][0]["details"]["root"] == str(checkout)
     assert payload["issues"][0]["details"]["missing_markers"] == ["pyproject.toml"]
 
@@ -187,6 +188,7 @@ async def test_client_integration_instructions_persisted_source_checkout_failure
     )
     payload = _payload(result)
     expected_command = f"awf setup --client claude --client codex --source-checkout '{checkout}'"
+    expected_remediation = f"awf setup --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
@@ -195,7 +197,7 @@ async def test_client_integration_instructions_persisted_source_checkout_failure
     assert payload["next_steps"] == [
         f"Fix the reported --source-checkout path above, then re-run {expected_command}.",
     ]
-    assert payload["issues"][0]["remediation"]["related_command"] == expected_command
+    assert payload["issues"][0]["remediation"]["related_command"] == expected_remediation
     assert payload["issues"][0]["details"]["root"] == str(checkout)
     assert payload["issues"][0]["details"]["missing_markers"] == ["uv.lock"]
 
