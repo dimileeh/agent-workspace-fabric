@@ -231,6 +231,20 @@ Add concise behavior-neutral docstrings to those tests only, re-run the
 focused audit, and run narrow Ruff plus the affected targeted MCP artifact
 tests.
 
+### Iteration 16 Update
+
+Later compose env-file parsing commits expanded the PR's Python diff and the
+focused added-line audit now reports three PR-added definitions without
+docstrings:
+
+- `src/awf/service/environment.py::_parse_compose_quoted_env_start`
+- `src/awf/service/environment.py::_consume_compose_quoted_multiline_value`
+- `tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values`
+
+Add concise behavior-neutral docstrings to those definitions only, re-run the
+focused audit, and run narrow Ruff plus the affected targeted environment
+test.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

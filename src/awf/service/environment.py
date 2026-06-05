@@ -241,6 +241,7 @@ def compose_env_file_quoted_multiline_values(
 
 
 def _parse_compose_quoted_env_start(line: str) -> tuple[str, str, str] | None:
+    """Parse the first line of a quoted compose env-file assignment."""
     stripped = line.lstrip()
     if not stripped or stripped.startswith("#"):
         return None
@@ -254,6 +255,7 @@ def _parse_compose_quoted_env_start(line: str) -> tuple[str, str, str] | None:
 
 
 def _consume_compose_quoted_multiline_value(raw_value: str, quote: str) -> tuple[str, bool]:
+    """Consume a compose quoted value, returning decoded text and close status."""
     chars: list[str] = []
     escaped = False
     for char in raw_value[1:]:

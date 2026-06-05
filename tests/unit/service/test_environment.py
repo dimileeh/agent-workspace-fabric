@@ -441,6 +441,7 @@ def test_compose_env_file_values_allows_empty_plain_mandatory_interpolation(
 def test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values(
     tmp_path,
 ) -> None:
+    """Parse only fully closed quoted multiline compose env-file values."""
     from awf.service.environment import compose_env_file_quoted_multiline_values
 
     env_file = tmp_path / ".env"
