@@ -308,6 +308,11 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
     try:
         await self._retry_pending_terminal_auth_overlay_unmounts(limit=limit)
     except asyncio.CancelledError:
+        # Cooperative shutdown. Any pending ``resume_failure`` captured above is
+        # intentionally dropped here rather than re-raised: a resume-scan failure is
+        # transient and idempotently retried on the next worker start, so propagating
+        # the ``CancelledError`` promptly (instead of swapping in ``resume_failure``)
+        # honours the teardown signal without masking it and loses nothing durable.
         raise
     except Exception as exc:
         # The per-candidate loop already handles individual umount failures, so an

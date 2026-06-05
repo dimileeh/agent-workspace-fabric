@@ -274,8 +274,17 @@ async def _retry_pending_terminal_auth_overlay_unmount_for_candidate(
     # agent container then holds the overlay bind again, so unmounting now would tear
     # the auth overlay out from under still-running orphan containers, exactly the
     # revoked-release state the candidate query avoids. The marker-write guards below
-    # already skip after a revoke, but only *after* the umount has run; this gates the
-    # umount itself, leaving the retry owed for a later genuine release.
+    # already skip after a revoke, but only *after* the umount has run; gating here
+    # narrows that window to the moment the umount fires, leaving the retry owed for a
+    # later genuine release.
+    #
+    # This narrows but does not fully close the window: the guard releases the row lock
+    # when its transaction commits, *before* the umount syscall runs, so a revoke that
+    # lands in that residual gap is not serialized against the umount. The impact stays
+    # benign — orphan containers actively hold the bind in that state, so the umount
+    # fails with ``EBUSY`` (recorded ``False``), and the marker-write guards below then
+    # observe the revoke and skip their write, leaving the ``pending`` marker intact for
+    # a later genuine release. No overlay leak results.
     guard = await self._terminal_auth_overlay_unmount_effective_release_guard(candidate)
     if guard == "revoked":
         _log_terminal_auth_overlay_unmount_release_revoked(candidate, marker="teardown")
