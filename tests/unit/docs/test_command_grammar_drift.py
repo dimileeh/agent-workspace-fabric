@@ -180,6 +180,12 @@ class SmokeInvocation:
     has_project: bool
     has_mocked_local: bool
     positional_path: bool
+    # Whether the example references a project path at all — a bare positional path
+    # or a `--demo-path <value>` (the CLI's "fallback project path"). R4's
+    # missing-`--project` check is conditional on this: a project-free proof such
+    # as `awf smoke run --mocked-local --format pretty` references no project path
+    # (the CLI defaults `--project` to the cwd), so it must not be flagged.
+    references_project_path: bool = False
 
 
 def _read(rel_path: str) -> str:
@@ -467,6 +473,7 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
     # set `has_project`, and must not swallow that following flag as if it were
     # the value — otherwise R4 would wave through invalid mocked smoke guidance.
     has_project = False
+    has_demo_path = False
     positional_path = False
     skip_next = False
     for index, token in enumerate(tokens):
@@ -483,6 +490,18 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
                 has_project = True
                 skip_next = True
             continue
+        # `--demo-path` is the CLI's "fallback project path", so its presence means
+        # the example references a project path even without `--project`.
+        if token.startswith("--demo-path="):
+            if token[len("--demo-path=") :]:
+                has_demo_path = True
+            continue
+        if token == "--demo-path":
+            nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+            if nxt is not None and not nxt.startswith("-"):
+                has_demo_path = True
+                skip_next = True
+            continue
         if token.startswith("-"):
             if token in VALUE_FLAGS:
                 skip_next = True
@@ -495,6 +514,7 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
         has_project=has_project,
         has_mocked_local=has_mocked_local,
         positional_path=positional_path,
+        references_project_path=positional_path or has_demo_path,
     )
 
 
@@ -504,14 +524,24 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
     R4 requires a project-targeting `awf smoke run` example to pair
     `--project <path>` *with* `--mocked-local`. Enforcement is symmetric so a
     regression in either direction is caught: a bare positional path, a
-    `--mocked-local` example that dropped `--project`, and a `--project` example
-    that dropped `--mocked-local` are each offenders. Without the last branch a
+    `--mocked-local` example that *references a project path* yet dropped
+    `--project`, and a `--project` example that dropped `--mocked-local` are each
+    offenders. The missing-`--project` check is conditional on a project path
+    actually being referenced (`references_project_path`): per the plan's
+    contract it rejects "omits `--project` *when a project path is referenced in
+    that example*", so a project-free proof like
+    `awf smoke run --mocked-local --format pretty` (the CLI defaults `--project`
+    to the cwd) is valid usage and is not flagged. Without the last branch a
     first-run doc could keep its project target but silently lose the no-token
     `--mocked-local` grammar.
     """
     if invocation.positional_path:
         return "bare positional path"
-    if invocation.has_mocked_local and not invocation.has_project:
+    if (
+        invocation.has_mocked_local
+        and not invocation.has_project
+        and invocation.references_project_path
+    ):
         return "mocked smoke missing --project"
     if invocation.has_project and not invocation.has_mocked_local:
         return "project smoke missing --mocked-local"
@@ -538,17 +568,22 @@ def _bootstrap_offenders(text: str) -> list[str]:
     # happens to hit it — otherwise the R3 failure message lists the same line
     # twice. Genuinely distinct offenses sit at non-overlapping spans, so they are
     # each still reported.
+    #
+    # Scan with ``re.finditer`` (not ``re.search``) so *every* match of a pattern
+    # is collected, not just the first: a doc with two non-overlapping violations
+    # of the same pattern (two paragraphs each framing a no-path `awf init` as
+    # bootstrap) surfaces both, giving the full repair surface rather than masking
+    # the second behind the first. The span-deduplication above still collapses
+    # overlapping cross-pattern hits to a single snippet.
     offenders: list[str] = []
     seen_spans: list[tuple[int, int]] = []
     for pattern in INIT_AS_BOOTSTRAP_PATTERNS:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match is None:
-            continue
-        start, end = match.span()
-        if any(start < seen_end and seen_start < end for seen_start, seen_end in seen_spans):
-            continue
-        seen_spans.append((start, end))
-        offenders.append(match.group(0))
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            start, end = match.span()
+            if any(start < seen_end and seen_start < end for seen_start, seen_end in seen_spans):
+                continue
+            seen_spans.append((start, end))
+            offenders.append(match.group(0))
     return offenders
 
 
@@ -652,15 +687,40 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
         positional_path=False,
     )
 
+    # The canonical example references no project path (it goes through `--project`,
+    # not a bare positional), so `references_project_path` stays False.
+    assert mocked is not None
+    assert mocked.references_project_path is False
+
     bare_path = _parse_smoke_invocation('awf smoke run "$HOME/awf-eval-project" --mocked-local')
     assert bare_path is not None
     assert bare_path.has_project is False
     assert bare_path.positional_path is True
+    # A bare positional path is itself a project-path reference.
+    assert bare_path.references_project_path is True
 
     no_project_proof = _parse_smoke_invocation("awf smoke run --format pretty")
     assert no_project_proof is not None
     assert no_project_proof.positional_path is False
     assert no_project_proof.has_project is False
+    # A project-free proof references no project path at all.
+    assert no_project_proof.references_project_path is False
+
+    # `--demo-path` (the CLI's fallback project path) references a project path even
+    # without `--project` — both the spaced and `=`-glued forms.
+    demo_only = _parse_smoke_invocation("awf smoke run --mocked-local --demo-path /tmp/demo")
+    assert demo_only is not None
+    assert demo_only.has_project is False
+    assert demo_only.references_project_path is True
+    glued_demo = _parse_smoke_invocation("awf smoke run --mocked-local --demo-path=/tmp/demo")
+    assert glued_demo is not None
+    assert glued_demo.references_project_path is True
+    # A `--demo-path` that dropped its value (next token is another flag) is not a
+    # project-path reference and does not swallow the following flag as its value.
+    dropped_demo = _parse_smoke_invocation("awf smoke run --demo-path --mocked-local")
+    assert dropped_demo is not None
+    assert dropped_demo.references_project_path is False
+    assert dropped_demo.has_mocked_local is True
 
     # A `--project` flag that drops its path value (the next token is another
     # flag) must not count as a satisfied `--project`, and must not swallow that
@@ -708,9 +768,16 @@ def test_helper_flags_smoke_invocation_offenses() -> None:
     assert offense('awf smoke run --project "$HOME/p" --mocked-local --format pretty') is None
     # A bare positional path is rejected regardless of the other flags.
     assert offense('awf smoke run "$HOME/p" --mocked-local') == "bare positional path"
-    # A `--mocked-local` proof that dropped `--project` is rejected.
+    # A project-free `--mocked-local` proof references no project path (the CLI
+    # defaults `--project` to the cwd), so it is valid usage and not an offender —
+    # R4 is a conditional pairing rule, not an absolute one.
+    assert offense("awf smoke run --mocked-local --format pretty") is None
+    # But a `--mocked-local` example that *does* reference a project path — here via
+    # `--demo-path`, the CLI's fallback project path — while dropping `--project` is
+    # still rejected: a referenced project path must go through `--project`.
     assert (
-        offense("awf smoke run --mocked-local --format pretty") == "mocked smoke missing --project"
+        offense("awf smoke run --mocked-local --demo-path /tmp/demo")
+        == "mocked smoke missing --project"
     )
     # The reverse direction the reviewer flagged: a `--project` example that
     # quietly drops `--mocked-local` must also be rejected so R4 enforces the
@@ -904,6 +971,14 @@ def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
         "Run `awf init` without a path here. Later try `awf init` (no path) there."
     )
     assert len(two_offenses) == 2
+    # Two violations of the *same* pattern (both the "without a path" form, in
+    # separate sentences) are each surfaced — the scan uses `re.finditer`, so the
+    # second is not masked behind the first, giving the full repair surface.
+    same_pattern = _bootstrap_offenders(
+        "Run `awf init` without a path here. Then `awf init` without a path again."
+    )
+    assert len(same_pattern) == 2
+    assert all(snippet == "`awf init` without a path" for snippet in same_pattern)
     # `awf service bootstrap` as a command must never be flagged.
     assert _bootstrap_offenders("Run `awf service bootstrap` to start Postgres.") == []
     assert _bootstrap_offenders("awf init .") == []
