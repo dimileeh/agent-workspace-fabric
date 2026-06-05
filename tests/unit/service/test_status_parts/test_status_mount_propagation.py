@@ -118,3 +118,37 @@ def test_mount_propagation_partial_environ_falls_back_to_env_file(tmp_path: Path
     )
     assert payload["propagation"] == "rshared"
     assert payload["force_copy"] is True
+
+
+@pytest.mark.unit
+def test_mount_propagation_check_corrupt_env_file_falls_back_to_unknown(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"\xff\xfe INVALID UTF-8")
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={},
+        compose_env_file=env_file,
+    )
+    assert payload["ok"] is True
+    assert payload["status"] == "unknown"
+    assert payload["reason"] == "MOUNT_PROPAGATION_UNKNOWN"
+    assert payload["propagation"] is None
+    assert payload["force_copy"] is None
+
+
+@pytest.mark.unit
+def test_mount_propagation_check_unreadable_env_file(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o000)
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={},
+        compose_env_file=env_file,
+    )
+    assert payload["ok"] is True
+    assert payload["status"] == "unknown"
+    assert payload["propagation"] is None
