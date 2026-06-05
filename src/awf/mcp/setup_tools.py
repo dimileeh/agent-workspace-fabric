@@ -476,6 +476,7 @@ async def _start_local_service_result(
             timeout_seconds=timeout_seconds,
             source_checkout=source_path,
         ),
+        extra_secrets=_selected_start_secret_values(inputs),
     )
 
 
@@ -1293,7 +1294,7 @@ def _client_env_file_missing_source_checkout(
         return source_checkout
     try:
         config = read_host_setup_config()
-    except HostSetupConfigError:
+    except (HostSetupConfigError, OSError):
         return None
     if config.source_checkout is None:
         return None

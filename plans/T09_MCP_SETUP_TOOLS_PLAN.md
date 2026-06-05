@@ -84,6 +84,60 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Start Redaction And Client Env Hint Errors
+
+### Problem Statement And Scope
+
+The review reports two first-run MCP edge cases:
+
+- `awf_start_local_service` passes selected service/start secrets to
+  `safe_result` on `ServiceBootstrapError`, but not on the success path.
+- `awf_get_client_integration_instructions` calls the best-effort
+  `_client_env_file_missing_source_checkout` hint helper from its
+  `_ClientEnvFileMissingError` handler, but that helper only catches
+  `HostSetupConfigError` and can let config-read `OSError` escape.
+
+Scope is limited to preserving the existing payload shapes while making start
+success redaction symmetric with the bootstrap-error path and making the missing
+client env-file hint lookup best-effort for unreadable host setup config.
+
+### Requirements Checklist
+
+- Preserve existing successful `awf_start_local_service` payload behavior and
+  command rewriting.
+- Pass selected start settings and service-env secret values to `safe_result`
+  on the start success path.
+- Preserve existing missing client env-file blocked payload behavior when no
+  persisted source checkout can be safely inferred.
+- Treat `OSError` while reading host setup config for the missing-env hint as a
+  best-effort miss, not an unhandled MCP exception.
+- Add focused regressions for both review issues.
+
+### Implementation Steps
+
+1. Add a focused failing start-success regression proving selected start
+   settings and service-env secrets are redacted from a serialized success
+   payload field.
+2. Add a focused failing client-integration regression proving unreadable host
+   setup config does not escape the missing-env handler.
+3. Pass `_selected_start_secret_values(inputs)` to `_first_run_result` on the
+   start success path.
+4. Catch `OSError` in `_client_env_file_missing_source_checkout` and fall back
+   to `None`.
+5. Run the targeted regressions and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_selected_start_environment_secret_from_success_payload tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_env_config_oserror_keeps_default_remediation -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_start.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: python-coverage-shards (8) Setup Tools Line Limit
 
 ### Problem Statement And Scope

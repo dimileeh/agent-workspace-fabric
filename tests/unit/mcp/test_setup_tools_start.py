@@ -451,6 +451,56 @@ async def test_start_local_service_redacts_selected_start_environment_secret_fro
 
 
 @pytest.mark.unit
+async def test_start_local_service_redacts_selected_start_environment_secret_from_success_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    settings_secret = "opaque-selected-settings-secret"
+    env_secret = "opaque-selected-env-secret"
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(
+            api_base_url="http://localhost:8000",
+            console_url=None,
+            api_token=settings_secret,
+            github_token=None,
+        ),
+        compose_file=tmp_path / "compose.yml",
+        compose_env_file=tmp_path / ".env",
+        asset_root=tmp_path,
+        service_env={"CUSTOM_API_TOKEN": env_secret},
+        env_migration=None,
+    )
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={
+                "status": f"ready {settings_secret} {env_secret}",
+                "checks": {},
+            },
+        )
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {"source_checkout": str(tmp_path)})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is False
+    assert payload["status"] == "success"
+    assert settings_secret not in rendered
+    assert env_secret not in rendered
+    assert payload["details"]["health"] == (
+        f"ready {TEXT_REDACTION_MARKER} {TEXT_REDACTION_MARKER}"
+    )
+
+
+@pytest.mark.unit
 async def test_start_local_service_preserves_explicit_source_checkout_bootstrap_failure_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

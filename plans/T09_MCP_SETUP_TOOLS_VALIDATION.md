@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Start Redaction And Client Env Hint Errors
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve existing successful `awf_start_local_service` payload behavior and
+  command rewriting: Complete.
+- Pass selected start settings and service-env secret values to `safe_result`
+  on the start success path: Complete.
+- Preserve existing missing client env-file blocked payload behavior when no
+  persisted source checkout can be safely inferred: Complete.
+- Treat `OSError` while reading host setup config for the missing-env hint as a
+  best-effort miss, not an unhandled MCP exception: Complete.
+- Add focused regressions for both review issues: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_start.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_selected_start_environment_secret_from_success_payload tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_env_config_oserror_keeps_default_remediation -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_start.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Targeted regressions failed before the implementation change because the
+  start success response contained selected start secrets and the missing-env
+  client integration path surfaced `ToolError` from `PermissionError`.
+- Targeted regressions after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: python-coverage-shards (8) Setup Tools Line Limit
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
