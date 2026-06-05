@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523
+
+### Requirement Status
+
+- Preserve `SetupCheckError` and `SourceCheckoutError` handling exactly:
+  Complete.
+- Map planning-phase `OSError`, `RuntimeError`, and `ValueError` to
+  `SETUP_READINESS_FAILED` instead of `CLIENT_CONFIG_CONFLICT`: Complete.
+- Keep details generic and redacted with only the exception type surfaced:
+  Complete.
+- Preserve the command/next-step rewriting for the selected clients and
+  explicit `source_checkout`: Complete.
+- Add focused regression coverage for the system-level client-integration
+  failure path: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_codex_invalid_home_override_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["reason_code"]` was `CLIENT_CONFIG_CONFLICT` for the invalid
+  `CODEX_HOME`/home-expansion `RuntimeError` path.
+- Regression test after the implementation change: 1 passed.
+- Focused client-integration test file: 13 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HQd4E
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

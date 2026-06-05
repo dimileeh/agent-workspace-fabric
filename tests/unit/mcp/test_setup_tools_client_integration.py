@@ -10,7 +10,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from awf.common.audit import REDACTION_MARKER
-from awf.host_setup.rendering import CLIENT_CONFIG_CONFLICT, SETUP_CLIENT_UNKNOWN
+from awf.host_setup.rendering import (
+    CLIENT_CONFIG_CONFLICT,
+    SETUP_CLIENT_UNKNOWN,
+    SETUP_READINESS_FAILED,
+)
 from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from tests.unit.mcp.setup_tools_test_helpers import _json_text, _payload, _settings
@@ -235,7 +239,7 @@ async def test_client_integration_instructions_planning_setup_error_is_structure
 
 
 @pytest.mark.unit
-async def test_client_integration_instructions_planning_oserror_is_generic(
+async def test_client_integration_instructions_planning_oserror_is_readiness_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -263,9 +267,9 @@ async def test_client_integration_instructions_planning_oserror_is_generic(
 
     assert result.isError is True
     assert payload["status"] == "blocked"
-    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["command"] == expected_command
-    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["summary"] == "could not inspect local client integration environment"
     assert payload["issues"][0]["details"] == {"error_type": "OSError"}
     assert payload["next_steps"] == [
         f"Fix the reported issue above, then re-run {expected_command}.",
@@ -301,14 +305,14 @@ async def test_client_integration_instructions_codex_invalid_home_override_is_st
 
     assert result.isError is True
     assert payload["status"] == "blocked"
-    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
-    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["summary"] == "could not inspect local client integration environment"
     assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
     assert "Could not determine home directory" not in rendered
 
 
 @pytest.mark.unit
-async def test_client_integration_instructions_planning_value_error_is_generic(
+async def test_client_integration_instructions_planning_value_error_is_readiness_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -332,8 +336,8 @@ async def test_client_integration_instructions_planning_value_error_is_generic(
 
     assert result.isError is True
     assert payload["status"] == "blocked"
-    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
-    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["summary"] == "could not inspect local client integration environment"
     assert payload["issues"][0]["details"] == {"error_type": "ValueError"}
     assert leaked_detail not in rendered
     assert raw_token not in rendered

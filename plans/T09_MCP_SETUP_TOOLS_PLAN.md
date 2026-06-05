@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523
+
+### Problem Statement And Scope
+
+The PR review reports that the `awf_get_client_integration_instructions`
+planning path maps OS/runtime failures, such as home-directory resolution
+errors, to `CLIENT_CONFIG_CONFLICT`. That gives MCP clients conflict-oriented
+guidance even when the operator needs to fix the local environment.
+
+Scope is limited to the client-integration instructions planning error mapping
+and focused regression coverage. Existing redaction behavior and true
+client-config conflict behavior must remain unchanged.
+
+### Requirements Checklist
+
+- Preserve `SetupCheckError` and `SourceCheckoutError` handling exactly.
+- Map planning-phase `OSError`, `RuntimeError`, and `ValueError` to
+  `SETUP_READINESS_FAILED` instead of `CLIENT_CONFIG_CONFLICT`.
+- Keep details generic and redacted with only the exception type surfaced.
+- Preserve the command/next-step rewriting for the selected clients and
+  explicit `source_checkout`.
+- Add focused regression coverage for the system-level client-integration
+  failure path.
+
+### Implementation Steps
+
+1. Update the focused client-integration regression expectation to require
+   `SETUP_READINESS_FAILED` for a system-level planning failure.
+2. Add a dedicated planning-phase handler before the catch-all in
+   `_client_integration_instructions_result`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_codex_invalid_home_override_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HQd4E
 
 ### Problem Statement And Scope
