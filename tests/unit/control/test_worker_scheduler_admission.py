@@ -623,6 +623,64 @@ async def test_safely_provision_claimed_heartbeat_fence_cancels_provision(
     assert claimed_by == "control-worker-newer"
 
 
+class _BlockUntilCancelledProvisioner:
+    """Signals once provisioning starts, then blocks until cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+@pytest.mark.unit
+async def test_safely_provision_claimed_propagates_external_cancellation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An external cancel of *this* task (e.g. worker shutdown cancelling
+    # run_once's gather) must propagate, not be misread as a heartbeat fence and
+    # swallowed. The epoch unchanged means the heartbeat CAS keeps succeeding, so
+    # the only cancellation is the external one we issue.
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    provisioner = _BlockUntilCancelledProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            execution_claim_lease_seconds=3.0,
+        ),
+    )
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    task = asyncio.create_task(
+        worker._safely_provision_claimed(workspace_id),  # noqa: SLF001
+    )
+    await asyncio.wait_for(provisioner.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    # The provision was aborted and the fenced-swallow path was not taken; the
+    # finally still ran its cleanup so no epoch is left dangling.
+    assert provisioner.cancelled is True
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
+
+
 @pytest.mark.unit
 async def test_refresh_execution_claim_loop_cancels_provision_on_fence(
     session_factory: async_sessionmaker[AsyncSession],

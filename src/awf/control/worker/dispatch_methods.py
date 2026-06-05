@@ -247,6 +247,18 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
     try:
         await provision_task
     except asyncio.CancelledError:
+        # Two cancellations land here: the heartbeat fence (``on_claim_lost``
+        # cancels ``provision_task``) and an external cancel of *this* task —
+        # e.g. worker shutdown cancelling ``run_once``'s ``gather``. Only the
+        # fence is ours to abort quietly; an external cancel must propagate so
+        # cooperative cancellation is never suppressed (D7's CAS leaves the row
+        # untouched either way). ``current_task().cancelling()`` is the
+        # discriminator: cancelling this task increments its own request count
+        # even though the cancel is delegated to the awaited ``provision_task``,
+        # whereas a pure heartbeat fence never touches this task's count.
+        outer = cast("asyncio.Task[None]", asyncio.current_task())
+        if outer.cancelling() > 0:
+            raise
         # Heartbeat-cancel fired: we were fenced mid-provision. The provisioner
         # leaves the row untouched (D7 CAS), so just abort this attempt.
         _log.warning(
