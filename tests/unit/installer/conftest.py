@@ -392,18 +392,36 @@ class InstallerHarness:
         the non-interactive decision path is exercised regardless of how pytest
         was launched.
         """
-        # Keep system coreutils on PATH but drop any directory that already ships
-        # a real ``awf``/``uv``/``pipx`` (e.g. the dev virtualenv or /usr/local/bin)
-        # so a test that omits ``add_uv``/``add_pipx`` sees that tool as genuinely
-        # missing and reachability/uninstall tests see only the stub binaries this
-        # harness places. Tests that need the tool present add their own stub,
-        # which sits first on ``PATH`` and shadows the real one regardless.
+        # Make a real ``awf``/``uv``/``pipx`` read as genuinely missing so a test
+        # that omits ``add_uv``/``add_pipx`` (or the ``awf`` stub) exercises the
+        # tool-absent path, while keeping every *other* system tool reachable.
+        # We cannot drop the whole directory that ships a managed tool: under
+        # Homebrew ``uv``/``pipx`` co-locate with coreutils in
+        # ``/usr/local/bin`` (Intel) or ``/opt/homebrew/bin`` (Apple Silicon),
+        # so excluding the directory would silently strip ``sha256sum``/
+        # ``shasum``/``awk`` that the installer's checksum step relies on. Instead
+        # we keep directories that ship no managed tool as-is and, for those that
+        # do, symlink their non-managed executables into a shadow dir — so the
+        # managed tool alone disappears. Tests that need a managed tool present
+        # add their own stub, which sits first on ``PATH`` and shadows it.
         managed_tools = ("awf", "uv", "pipx")
-        system_path = os.pathsep.join(
-            entry
-            for entry in os.environ.get("PATH", "").split(os.pathsep)
-            if entry and not any((Path(entry) / tool).exists() for tool in managed_tools)
-        )
+        shadow_dir = self.root / "syspath-shadow"
+        kept: list[str] = []
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            directory = Path(entry)
+            if not any((directory / tool).exists() for tool in managed_tools):
+                kept.append(entry)
+                continue
+            shadow_dir.mkdir(parents=True, exist_ok=True)
+            for child in directory.iterdir():
+                link = shadow_dir / child.name
+                if child.name not in managed_tools and not link.exists():
+                    link.symlink_to(child)
+        if shadow_dir.exists():
+            kept.append(str(shadow_dir))
+        system_path = os.pathsep.join(kept)
         env: dict[str, str] = {
             "PATH": f"{self.bin_dir}{os.pathsep}{system_path}",
             "HOME": str(self.home),
