@@ -245,6 +245,18 @@ Add concise behavior-neutral docstrings to those definitions only, re-run the
 focused audit, and run narrow Ruff plus the affected targeted environment
 test.
 
+### Iteration 17 Update
+
+Later service-log test split commits expanded the PR's Python diff and the
+focused added-line audit now reports two PR-added test helpers without
+docstrings:
+
+- `tests/unit/service/test_logs_parts/test_logs_part_003.py::_default_local_service_compose_file`
+- `tests/unit/service/test_logs_parts/test_logs_part_003.py::_write_compose_file`
+
+Add concise behavior-neutral docstrings to those helpers only, re-run the
+focused audit, and run narrow Ruff plus the affected service-log test module.
+
 ## Verification Commands and Pass Criteria
 
 - Added-line AST docstring audit over `origin/development...HEAD` reports

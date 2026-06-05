@@ -393,6 +393,30 @@ Evidence after Iteration 16:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values -q`
   passed: `1 passed in 0.43s`.
 
+## Iteration 17
+
+Later service-log test split commits expanded the PR's Python diff again. The
+focused added-line AST audit reported two PR-added test helpers without
+docstrings in `tests/unit/service/test_logs_parts/test_logs_part_003.py`. This
+iteration added concise behavior-neutral docstrings only.
+
+Evidence after Iteration 17:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=32`, `added_defs=309`,
+  `missing_docstrings_on_added_defs=2`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=32`, `added_defs=309`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/service/test_logs_parts/test_logs_part_003.py`
+  passed.
+- `git diff --check -- plans/COMMENT_4620110496_DOCSTRING_COVERAGE_PLAN.md plans/COMMENT_4620110496_DOCSTRING_COVERAGE_VALIDATION.md tests/unit/service/test_logs_parts/test_logs_part_003.py`
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_003.py -q`
+  passed: `16 passed in 0.50s`.
+
 ## Gaps
 
 None for the planned diff-scoped remediation. The broad external docstring

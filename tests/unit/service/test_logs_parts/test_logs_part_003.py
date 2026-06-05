@@ -24,12 +24,14 @@ def _default_local_service_compose_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Create the default local-service compose file in the test cwd."""
     compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}")
     monkeypatch.chdir(tmp_path)
 
 
 def _write_compose_file(tmp_path: Path, contents: str) -> Path:
+    """Write a test compose file and return its path."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(contents, encoding="utf-8")
     return compose_file
