@@ -130,7 +130,7 @@ def _fenced_command_lines(text: str) -> list[str]:
     Only shell-tagged (or untagged) fences contribute lines; ``yaml``/``json``/
     ``toml``/``text`` fences carry config or sample output, so their lines are
     skipped to avoid manufacturing false offenders in the grammar classifiers.
-    The ``$ ``/``> `` prompt prefix is stripped from each collected line.
+    The ``$ ``/``> ``/``% `` prompt prefix is stripped from each collected line.
     """
     lines: list[str] = []
     inside = False
@@ -147,7 +147,7 @@ def _fenced_command_lines(text: str) -> list[str]:
         if not collecting:
             continue
         stripped = raw_line.strip()
-        if stripped.startswith(("$ ", "> ")):
+        if stripped.startswith(("$ ", "> ", "% ")):
             stripped = stripped[2:].strip()
         if stripped:
             lines.append(stripped)
@@ -429,6 +429,14 @@ def test_helper_flags_smoke_invocation_offenses() -> None:
 
 def test_helper_extracts_fenced_command_lines() -> None:
     text = "intro\n\n```bash\n$ awf setup\nawf start\n```\nprose `awf init` mention\n"
+    assert _fenced_command_lines(text) == ["awf setup", "awf start"]
+
+
+def test_helper_strips_zsh_prompt_in_zsh_fence() -> None:
+    # ``zsh`` is a declared shell fence, so a ``%``-prefixed zsh prompt must be
+    # stripped just like ``$ ``/``> `` — otherwise ``% awf setup`` would reach the
+    # R1 classifier as a non-standalone literal and trip a false drift failure.
+    text = "```zsh\n% awf setup\n% awf start\n```\n"
     assert _fenced_command_lines(text) == ["awf setup", "awf start"]
 
 
