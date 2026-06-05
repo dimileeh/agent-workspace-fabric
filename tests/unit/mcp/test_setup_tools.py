@@ -542,16 +542,25 @@ async def test_get_setup_status_host_config_error_without_source_checkout_is_str
             details={"error_type": "ParserError"},
         )
 
-    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    def fake_run_setup(**kwargs: Any) -> Any:
+        assert kwargs["providers"] == ["github"]
+        assert kwargs["dry_run"] is True
+        return readiness
+
+    monkeypatch.setattr(setup_tools, "_run_setup", fake_run_setup)
     monkeypatch.setattr(setup_tools, "read_host_setup_config", fail_read_config)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
-    result = await mcp.call_tool("awf_get_setup_status", {})
+    result = await mcp.call_tool("awf_get_setup_status", {"providers": ["github"]})
     payload = _payload(result)
 
     assert result.isError is True
     assert payload["status"] == "blocked"
+    assert payload["command"] == "awf setup --dry-run --provider github"
     assert payload["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
+    assert payload["next_steps"] == [
+        "Fix the reported issue above, then re-run awf setup --dry-run."
+    ]
     assert payload["issues"][0]["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
     assert payload["issues"][0]["severity"] == "blocked"
     assert payload["issues"][0]["details"] == {

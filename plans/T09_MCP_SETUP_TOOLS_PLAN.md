@@ -84,6 +84,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HPsBt
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` still returns the generic
+`_reason_coded_payload(...)` unchanged when host setup config parsing fails
+after the dry-run readiness probe. That payload renders the mutating
+`awf setup` command, so an MCP operator copying it can run setup instead of the
+matching read-only `awf setup --dry-run ...` status check.
+
+Scope is limited to the setup-status `HostSetupConfigError` branch and focused
+regression coverage for the returned command.
+
+### Requirements Checklist
+
+- Preserve the existing structured host-config error payload, sanitized details,
+  reason code, issue data, and MCP error behavior.
+- Render the setup-status `HostSetupConfigError` command as
+  `awf setup --dry-run` with the original provider selectors.
+- Keep the top-level next step aligned with the setup-status dry-run command.
+- Add a focused regression proving the host-config error path returns the
+  matching dry-run status command.
+
+### Implementation Steps
+
+1. Update the existing setup-status host-config-error regression to assert the
+   returned command and next-step guidance.
+2. Wrap the existing `HostSetupConfigError` payload in the setup-status
+   reason-coded helper before returning it from `_get_setup_status_result`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HPbkf
 
 ### Problem Statement And Scope

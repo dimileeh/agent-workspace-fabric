@@ -260,7 +260,13 @@ def _get_setup_status_result(
     except HostSetupConfigError as exc:
         return _first_run_result(
             safe_result,
-            _reason_coded_payload(exc.reason_code, exc.message, _config_error_details(exc)),
+            _setup_status_reason_coded_payload(
+                exc.reason_code,
+                exc.message,
+                _config_error_details(exc),
+                providers=providers,
+                source_checkout=source_path,
+            ),
             is_error=True,
         )
     except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
