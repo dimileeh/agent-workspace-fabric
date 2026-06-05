@@ -16,7 +16,8 @@ import asyncio
 import inspect
 import json
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
@@ -29,14 +30,19 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
 )
 from awf.common.config import Settings, get_settings
+from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.environment import (
+    compose_env_file_quoted_multiline_secret_context,
+    compose_env_file_values,
+)
 from awf.service.local_capacity import detect_local_capacity
 from awf.service.orphan_resources import OrphanResourceSummary
-from awf.service.provider_readiness import ProviderName
+from awf.service.provider_readiness import ProviderName, is_secret_env_key
 from awf.service.resource_capacity import LocalCapacityLimits
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import (
@@ -106,6 +112,7 @@ def build_mcp_server(
     name: str = "awf",
     instructions: str | None = None,
     settings: Settings | None = None,
+    compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
     disk_check_provider: DiskCheckProvider | None = None,
     local_capacity_provider: LocalCapacityProvider | None = None,
     orphan_resource_summary_provider: OrphanResourceSummaryProvider | None = None,
@@ -130,10 +137,21 @@ def build_mcp_server(
         ),
     )
     settings_value = _resolve_settings(settings)
+    service_settings_value = service_config.resolve_service_settings(settings_value)
+    extra_secret_values = _mcp_secret_values(
+        settings_value,
+        service_settings_value,
+        compose_env_file=compose_env_file,
+    )
 
     def _safe_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
         """Redact sensitive data from *payload* and wrap in a ``CallToolResult``."""
-        redacted = _redact_sensitive_payload(payload, settings_value)
+        redacted = _redact_sensitive_payload(
+            payload,
+            settings_value,
+            service_settings=service_settings_value,
+            extra_secrets=extra_secret_values,
+        )
         return _tool_result(redacted, is_error=is_error)
 
     from awf.mcp.control_tools import register_control_tools
@@ -147,6 +165,7 @@ def build_mcp_server(
         safe_result=_safe_result,
         settings_value=settings_value,
         disk_check_provider=disk_check_provider,
+        extra_secrets=extra_secret_values,
     )
     register_metrics_tools(
         mcp=mcp,
@@ -159,6 +178,9 @@ def build_mcp_server(
         runtime_health_summary_provider=runtime_health_summary_provider,
         readiness_provider=readiness_provider,
         health_provider=health_provider,
+        compose_env_file=compose_env_file,
+        service_settings=service_settings_value,
+        extra_secrets=extra_secret_values,
     )
     register_control_tools(
         mcp=mcp,
@@ -508,10 +530,94 @@ async def _provided_health(
     return response.model_dump(mode="json")
 
 
-def _redact_sensitive_payload(payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
+def _mcp_secret_values(
+    settings: Settings,
+    service_settings: ServiceSettings,
+    *,
+    compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
+) -> tuple[str, ...]:
+    """Return exact secret values that MCP payloads and artifacts must redact."""
+    resolved_compose_env_file = _resolve_mcp_compose_env_file(compose_env_file)
+    resolved_secret_env_file = _resolve_mcp_compose_env_secret_file(resolved_compose_env_file)
+    provider_environ = service_config.resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ=os.environ,
+        compose_file=service_config.LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file=resolved_compose_env_file,
+    )
+    values: list[str | None] = [
+        settings.api_token,
+        settings.github_token,
+        service_settings.api_token,
+        service_settings.github_token,
+    ]
+    values.extend(_mcp_compose_env_file_secret_values(resolved_secret_env_file))
+    _, quoted_multiline_first_line_values = compose_env_file_quoted_multiline_secret_context(
+        resolved_secret_env_file,
+        is_secret_key=is_secret_env_key,
+    )
+    values.extend(
+        value
+        for key, value in provider_environ.items()
+        if is_secret_env_key(key) and (key, value) not in quoted_multiline_first_line_values
+    )
+    return tuple(dict.fromkeys(value for value in values if value and len(value) >= 4))
+
+
+def _resolve_mcp_compose_env_file(
+    compose_env_file: service_config.ComposeEnvFileInput,
+) -> Path | None:
+    """Resolve omitted MCP env-file input to the local service default."""
+    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
+        return service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    return compose_env_file
+
+
+def _resolve_mcp_compose_env_secret_file(compose_env_file: Path | None) -> Path | None:
+    """Resolve the Compose env file used for MCP exact-secret collection."""
+    if compose_env_file is None:
+        return None
+    return service_config.resolve_local_service_compose_env_file(compose_env_file)
+
+
+def _mcp_compose_env_file_secret_values(compose_env_file: Path | None) -> tuple[str, ...]:
+    """Return raw selected Compose env-file secret values for exact redaction."""
+    (
+        quoted_multiline_values,
+        quoted_multiline_first_line_values,
+    ) = compose_env_file_quoted_multiline_secret_context(
+        compose_env_file,
+        is_secret_key=is_secret_env_key,
+    )
+    values = [
+        value
+        for key, value in compose_env_file_values(compose_env_file).items()
+        if value
+        and len(value) >= 4
+        and is_secret_env_key(key)
+        and (key, value) not in quoted_multiline_first_line_values
+    ]
+    values.extend(quoted_multiline_values)
+    return tuple(dict.fromkeys(values))
+
+
+def _redact_sensitive_payload(
+    payload: dict[str, Any],
+    settings: Settings,
+    *,
+    service_settings: ServiceSettings | None = None,
+    extra_secrets: Iterable[str] = (),
+) -> dict[str, Any]:
     """Redact secrets from a JSON payload dict using application settings."""
-    service_settings = service_config.resolve_service_settings(settings)
-    redacted = _redact_sensitive_value(payload, settings, service_settings=service_settings)
+    resolved_service_settings = service_settings or service_config.resolve_service_settings(
+        settings
+    )
+    redacted = _redact_sensitive_value(
+        payload,
+        settings,
+        service_settings=resolved_service_settings,
+        extra_secrets=tuple(extra_secrets),
+    )
     return redacted if isinstance(redacted, dict) else {}
 
 
@@ -520,20 +626,42 @@ def _redact_sensitive_value(
     settings: Settings,
     *,
     service_settings: ServiceSettings,
+    extra_secrets: Iterable[str] = (),
 ) -> Any:
     """Recursively redact secrets from an arbitrary value (dict, list, or string)."""
+    extra_secret_values = tuple(extra_secrets)
     if isinstance(value, str):
-        return _redact_sensitive_text(value, settings, service_settings=service_settings)
+        return _redact_sensitive_text(
+            value,
+            settings,
+            service_settings=service_settings,
+            extra_secrets=extra_secret_values,
+        )
     if isinstance(value, list):
         return [
-            _redact_sensitive_value(item, settings, service_settings=service_settings)
+            _redact_sensitive_value(
+                item,
+                settings,
+                service_settings=service_settings,
+                extra_secrets=extra_secret_values,
+            )
             for item in value
         ]
     if isinstance(value, dict):
         return {
-            _redact_sensitive_text(key, settings, service_settings=service_settings)
+            _redact_sensitive_text(
+                key,
+                settings,
+                service_settings=service_settings,
+                extra_secrets=extra_secret_values,
+            )
             if isinstance(key, str)
-            else key: _redact_sensitive_value(item, settings, service_settings=service_settings)
+            else key: _redact_sensitive_value(
+                item,
+                settings,
+                service_settings=service_settings,
+                extra_secrets=extra_secret_values,
+            )
             for key, item in value.items()
         }
     return value
@@ -544,9 +672,16 @@ def _contains_secret_bytes(
     settings: Settings,
     *,
     service_settings: ServiceSettings,
+    extra_secrets: Iterable[str] = (),
 ) -> bool:
     """Check whether binary content contains configured secrets or recognizable token patterns."""
-    for secret in (settings.api_token, settings.github_token, service_settings.github_token):
+    extra_secret_values = tuple(extra_secrets)
+    for secret in (
+        settings.api_token,
+        settings.github_token,
+        service_settings.github_token,
+        *extra_secret_values,
+    ):
         if secret and len(secret) >= 4 and secret.encode() in content:
             return True
     for key, value in os.environ.items():
@@ -560,10 +695,36 @@ def _contains_secret_bytes(
     # patterns (e.g. ghp_..., github_pat_..., sk-proj-...) even when the
     # exact value is not present in current settings or environment.
     decoded = content.decode("latin-1")
+    if redact_secrets(decoded, extra_secrets=extra_secret_values) != decoded:
+        return True
+    # Retain service preflight patterns for edge cases the shared redaction
+    # patterns intentionally do not cover, such as tokens adjacent to "_" and
+    # URL credentials without a word-boundary prefix.
     if provider_readiness_service.TOKEN_RE.search(decoded) is not None:
         return True
     # Additionally block URL credentials that the text path would redact.
     return provider_readiness_service.URL_CREDENTIAL_RE.search(decoded) is not None
+
+
+def _redact_exact_secret_bytes(
+    content: bytes,
+    settings: Settings,
+    service_settings: ServiceSettings,
+    extra_secrets: Iterable[str],
+) -> bytes:
+    """Redact exact configured secret byte sequences before text decoding."""
+    secrets = (
+        secret
+        for secret in (
+            settings.api_token,
+            settings.github_token,
+            service_settings.api_token,
+            service_settings.github_token,
+            *extra_secrets,
+        )
+        if secret and len(secret) >= 4
+    )
+    return redact_exact_secret_bytes(content, extra_secrets=secrets)
 
 
 def _check_and_redact_artifact_content(
@@ -572,6 +733,7 @@ def _check_and_redact_artifact_content(
     settings: Settings,
     service_settings: ServiceSettings,
     is_likely_text: bool,
+    extra_secrets: Iterable[str] = (),
 ) -> tuple[bytes, CallToolResult | None]:
     """Apply BOM blocking, text redaction, binary secret detection, and size recheck.
 
@@ -579,6 +741,7 @@ def _check_and_redact_artifact_content(
     Returns ``(content, error_result)`` where ``error_result`` is non-None when
     the artifact must be blocked or is oversized after redaction.
     """
+    extra_secret_values = tuple(extra_secrets)
     # Block any artifact that carries a common multibyte text encoding BOM.
     # This must happen before the text-vs-binary dispatch so MIME-less files
     # (e.g. .env, .log, extensionless text) that happen to be UTF-16/UTF-32
@@ -592,10 +755,26 @@ def _check_and_redact_artifact_content(
             ),
         )
     if is_likely_text:
+        content = _redact_exact_secret_bytes(
+            content,
+            settings,
+            service_settings,
+            extra_secret_values,
+        )
         text = content.decode("latin-1")
-        redacted_text = _redact_sensitive_text(text, settings, service_settings=service_settings)
+        redacted_text = _redact_sensitive_text(
+            text,
+            settings,
+            service_settings=service_settings,
+            extra_secrets=extra_secret_values,
+        )
         content = redacted_text.encode("latin-1")
-    elif _contains_secret_bytes(content, settings, service_settings=service_settings):
+    elif _contains_secret_bytes(
+        content,
+        settings,
+        service_settings=service_settings,
+        extra_secrets=extra_secret_values,
+    ):
         return (
             b"",
             _error_result(
@@ -623,13 +802,26 @@ def _redact_sensitive_text(
     settings: Settings,
     *,
     service_settings: ServiceSettings,
+    extra_secrets: Iterable[str] = (),
 ) -> str:
     """Redact known secrets and provider tokens from a text string."""
-    redacted = value
-    for secret in (settings.api_token, settings.github_token):
-        if secret and len(secret) >= 4:
-            redacted = redacted.replace(secret, "<redacted>")
-    return provider_readiness_service.redact_launch_preflight_text(service_settings, redacted)
+    extra_secret_values = tuple(extra_secrets)
+    exact_secret_values = tuple(
+        dict.fromkeys(
+            secret
+            for secret in (
+                settings.api_token,
+                settings.github_token,
+                service_settings.api_token,
+                service_settings.github_token,
+                *extra_secret_values,
+            )
+            if secret and len(secret) >= 4
+        )
+    )
+    redacted = redact_secrets(value, extra_secrets=exact_secret_values)
+    redacted = provider_readiness_service.redact_launch_preflight_text(service_settings, redacted)
+    return redact_secrets(redacted, extra_secrets=exact_secret_values)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:

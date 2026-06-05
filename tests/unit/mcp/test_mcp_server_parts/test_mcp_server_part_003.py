@@ -28,6 +28,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.mcp import metrics_tools as metrics_tools_mod
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
@@ -68,6 +69,14 @@ _CREATE_ARGS: dict[str, object] = {
     "provider_readiness_override": True,
     "provider_readiness_override_reason": "mcp default create fixture",
 }
+
+
+class _RejectWholeEncodeStr(str):
+    """String sentinel that catches accidental full-buffer encoding."""
+
+    def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+        """Reject full-buffer encoding in byte-offset fragment tests."""
+        raise AssertionError("whole expanded log text must not be encoded")
 
 
 def _operation_response() -> OperationResponse:
@@ -116,6 +125,101 @@ def _ok_disk_check(settings: Settings) -> DiskCheck:
         status="ok",
         reason="SUFFICIENT_DISK",
         detail=None,
+    )
+
+
+@pytest.mark.unit
+def test_unknown_leading_log_value_fragment_end_peeks_before_encoding_expanded_text() -> None:
+    """Avoid encoding an expanded log window when the first byte is a delimiter."""
+    assert (
+        metrics_tools_mod._unknown_leading_log_value_fragment_end(
+            _RejectWholeEncodeStr(" already-delimited"),
+            result_offset=10,
+        )
+        == 0
+    )
+
+
+@pytest.mark.unit
+def test_unknown_leading_log_value_fragment_end_counts_utf8_bytes_to_delimiter() -> None:
+    """Keep leading-fragment offsets in bytes when scanning multibyte text."""
+    assert metrics_tools_mod._unknown_leading_log_value_fragment_end(
+        "αβ done",
+        result_offset=10,
+    ) == len("αβ".encode())
+
+
+@pytest.mark.unit
+def test_workspace_log_assignment_value_covers_byte_ignores_out_of_range_context() -> None:
+    """Only visible assignment values covering the requested byte can redact it."""
+    assert not metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        "ordinary SERVICE_TOKEN=value",
+        -1,
+    )
+    assert not metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        "ordinary SERVICE_TOKEN=value",
+        0,
+    )
+
+
+@pytest.mark.unit
+def test_workspace_log_assignment_value_covers_byte_inside_multiline_private_key() -> None:
+    """Treat bytes inside a PEM private-key body as covered by assignment context."""
+    text = (
+        "prefix SSH_PRIVATE_KEY=-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n"
+        "-----END OPENSSH PRIVATE KEY----- suffix"
+    )
+    body_offset = len(text[: text.index("b3BlbnNzaC1rZXktdjE")].encode())
+
+    assert metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        text,
+        body_offset,
+    )
+
+
+@pytest.mark.unit
+def test_workspace_log_assignment_value_covers_byte_breaks_using_byte_offsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop before later assignments when byte offsets prove the value is after start."""
+    text = "é SERVICE_TOKEN=value OTHER_TOKEN=secret"
+    value_start_chars = text.index("value")
+    value_start_bytes = len(text[:value_start_chars].encode())
+    requested_byte = value_start_bytes - 1
+
+    class _FakeMatch:
+        """Expose the match methods used by the byte-offset helper."""
+
+        def __init__(self, value_start: int, value: str) -> None:
+            """Capture the synthetic value span for the fake regex match."""
+            self._value_start = value_start
+            self._value = value
+
+        def start(self, group: str) -> int:
+            """Return the synthetic value start index."""
+            assert group == "value"
+            return self._value_start
+
+        def group(self, group: str) -> str:
+            """Return the synthetic value text."""
+            assert group == "value"
+            return self._value
+
+    class _FakeTokenAssignmentRe:
+        """Yield one fake token assignment before the expected early break."""
+
+        def finditer(self, candidate: str):  # type: ignore[no-untyped-def]
+            """Yield the first assignment and fail if scanning continues."""
+            assert candidate == text
+            yield _FakeMatch(value_start_chars, "value")
+            raise AssertionError("byte-aware early break should skip later matches")
+
+    monkeypatch.setattr(metrics_tools_mod, "_LOG_TOKEN_ASSIGNMENT_RE", _FakeTokenAssignmentRe())
+
+    assert not metrics_tools_mod._workspace_log_assignment_value_covers_byte(
+        text,
+        requested_byte,
     )
 
 
@@ -461,6 +565,62 @@ class TestWorkspaceEvents:
             assert item["event_type"] == "workspace.phase_started"
 
     @pytest.mark.unit
+    async def test_workspace_events_redact_exact_compose_secret_before_provider_rewrites(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Redact whole Compose-only secrets before provider token regex rewrites."""
+        env_key = "ANTHROPIC_AUTH_TOKEN"
+        secret = "prefix-ghp_mcpStructuredSecret123456-suffix"
+        monkeypatch.delenv(env_key, raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"{env_key}={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        ws_id = _workspace_id(created)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type="test.workspace_events.compose_secret",
+                reason_code="COMPOSE_SECRET",
+                payload={
+                    "line": f"provider emitted {secret}",
+                    "nested": {"secret": secret},
+                },
+            )
+            await session.commit()
+
+        result = await mcp.call_tool(
+            "awf_list_workspace_events",
+            {
+                "workspace_id": ws_id,
+                "event_type": "test.workspace_events.compose_secret",
+                "limit": 50,
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        payload = result.structuredContent
+        assert payload is not None
+        event_payload = payload["items"][0]["payload"]
+        assert event_payload["line"] == "provider emitted <redacted>"
+        assert event_payload["nested"]["secret"] == "<redacted>"
+        assert secret not in str(payload)
+        assert "prefix-<redacted>-suffix" not in str(payload)
+
+    @pytest.mark.unit
     async def test_workspace_events_event_type_validation_bounds(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = {tool.name: tool for tool in await mcp.list_tools()}
         props = tools["awf_list_workspace_events"].inputSchema["properties"]
@@ -684,6 +844,88 @@ class TestGlobalEvents:
         string_schema = next(s for s in props["event_type"]["anyOf"] if s.get("type") == "string")
         assert string_schema["minLength"] == 1
         assert string_schema["maxLength"] == 64
+
+
+class TestWorkspaceLogs:
+    """Coverage for MCP workspace log listing and chunk reads."""
+
+    @pytest.mark.unit
+    async def test_lists_and_reads_indexed_log_streams(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """List an indexed stream and read a requested byte window from it."""
+        service = WorkspaceService(factory, log_root=tmp_path / "logs")
+        mcp = build_mcp_server(service=service)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe logs",
+                task_prompt="Write logs.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        sink = await store.open_stream(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+            source="agent",
+            name="Agent stdout",
+            kind="stdout",
+        )
+        await sink.write("alpha\nbeta\n")
+        await sink.close()
+
+        listed = await _call(
+            mcp,
+            "awf_list_workspace_logs",
+            {"workspace_id": workspace.id},
+        )
+        assert isinstance(listed, dict)
+        assert [stream["stream_id"] for stream in listed["items"]] == ["agent.stdout"]
+        assert listed["items"][0]["byte_count"] == len("alpha\nbeta\n")
+        assert listed["items"][0]["line_count"] == 2
+        assert listed["limit"] == 1
+
+        chunk = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": 6,
+                "limit_bytes": 4,
+            },
+        )
+        assert chunk == {
+            "stream_id": "agent.stdout",
+            "offset": 6,
+            "next_offset": 10,
+            "eof": False,
+            "data": "beta",
+        }
+
+        eof = await _call(
+            mcp,
+            "awf_read_workspace_log",
+            {
+                "workspace_id": workspace.id,
+                "stream_id": "agent.stdout",
+                "offset": len("alpha\nbeta\n"),
+                "limit_bytes": 16,
+            },
+        )
+        assert eof == {
+            "stream_id": "agent.stdout",
+            "offset": len("alpha\nbeta\n"),
+            "next_offset": len("alpha\nbeta\n"),
+            "eof": True,
+            "data": "",
+        }
 
 
 class TestWorkspaceRuntime:
@@ -946,115 +1188,3 @@ class TestWorkspaceOperations:
             "message": "Invalid operation list cursor.",
             "detail": None,
         }
-
-
-class TestWorkspaceLogs:
-    @pytest.mark.unit
-    async def test_lists_and_reads_indexed_log_streams(
-        self,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        service = WorkspaceService(factory, log_root=tmp_path / "logs")
-        mcp = build_mcp_server(service=service)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/app.git",
-                branch_base="main",
-                task_title="Observe logs",
-                task_prompt="Write logs.",
-                agent="codex",
-                test_commands=[],
-            )
-            await session.commit()
-
-        store = LogStore(root=tmp_path / "logs", session_factory=factory)
-        sink = await store.open_stream(
-            workspace_id=workspace.id,
-            stream_id="agent.stdout",
-            source="agent",
-            name="Agent stdout",
-            kind="stdout",
-        )
-        await sink.write("alpha\nbeta\n")
-        await sink.close()
-
-        listed = await _call(
-            mcp,
-            "awf_list_workspace_logs",
-            {"workspace_id": workspace.id},
-        )
-        assert isinstance(listed, dict)
-        assert [stream["stream_id"] for stream in listed["items"]] == ["agent.stdout"]
-        assert listed["items"][0]["byte_count"] == len("alpha\nbeta\n")
-        assert listed["items"][0]["line_count"] == 2
-        assert listed["limit"] == 1
-
-        chunk = await _call(
-            mcp,
-            "awf_read_workspace_log",
-            {
-                "workspace_id": workspace.id,
-                "stream_id": "agent.stdout",
-                "offset": 6,
-                "limit_bytes": 4,
-            },
-        )
-        assert chunk == {
-            "stream_id": "agent.stdout",
-            "offset": 6,
-            "next_offset": 10,
-            "eof": False,
-            "data": "beta",
-        }
-
-        eof = await _call(
-            mcp,
-            "awf_read_workspace_log",
-            {
-                "workspace_id": workspace.id,
-                "stream_id": "agent.stdout",
-                "offset": len("alpha\nbeta\n"),
-                "limit_bytes": 16,
-            },
-        )
-        assert eof == {
-            "stream_id": "agent.stdout",
-            "offset": len("alpha\nbeta\n"),
-            "next_offset": len("alpha\nbeta\n"),
-            "eof": True,
-            "data": "",
-        }
-
-    @pytest.mark.unit
-    async def test_missing_workspace_or_stream_returns_none(
-        self,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        service = WorkspaceService(factory, log_root=tmp_path / "logs")
-        mcp = build_mcp_server(service=service)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/app.git",
-                branch_base="main",
-                task_title="Observe logs",
-                task_prompt="Write logs.",
-                agent="codex",
-                test_commands=[],
-            )
-            await session.commit()
-
-        missing_workspace = await _call(
-            mcp,
-            "awf_list_workspace_logs",
-            {"workspace_id": "ws_missing"},
-        )
-        missing_stream = await _call(
-            mcp,
-            "awf_read_workspace_log",
-            {"workspace_id": workspace.id, "stream_id": "agent.stderr"},
-        )
-
-        assert missing_workspace is None
-        assert missing_stream is None

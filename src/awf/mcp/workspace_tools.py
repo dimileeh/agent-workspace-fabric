@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
@@ -171,10 +171,12 @@ def register_workspace_tools(
     safe_result: SafeResult,
     settings_value: Settings,
     disk_check_provider: DiskCheckProvider | None,
+    extra_secrets: Iterable[str] = (),
 ) -> None:
     """Register all AWF workspace MCP tools on the given FastMCP server."""
 
     _safe_result = safe_result
+    extra_secret_values = tuple(extra_secrets)
 
     @mcp.tool(name="awf_create_workspace")
     async def awf_create_workspace(
@@ -964,7 +966,10 @@ def register_workspace_tools(
             return _error_result(
                 "INVALID_ARTIFACT_PATH",
                 _redact_sensitive_text(
-                    str(exc), settings_value, service_settings=_service_settings
+                    str(exc),
+                    settings_value,
+                    service_settings=_service_settings,
+                    extra_secrets=extra_secret_values,
                 ),
             )
         except ArtifactNotFoundError:
@@ -974,6 +979,7 @@ def register_workspace_tools(
                     f"No artifact at path {relative_path}",
                     settings_value,
                     service_settings=_service_settings,
+                    extra_secrets=extra_secret_values,
                 ),
             )
         except ArtifactOversizedError as exc:
@@ -983,6 +989,7 @@ def register_workspace_tools(
                     str(exc),
                     settings_value,
                     service_settings=_service_settings,
+                    extra_secrets=extra_secret_values,
                 ),
                 detail=exc.detail,
             )
@@ -1027,6 +1034,7 @@ def register_workspace_tools(
             settings_value,
             _service_settings,
             is_likely_text,
+            extra_secret_values,
         )
         if error_result is not None:
             return error_result
@@ -1040,6 +1048,11 @@ def register_workspace_tools(
         )
         payload = response.model_dump(mode="json")
         encoded_content = payload.pop("content")
-        redacted_payload = _redact_sensitive_payload(payload, settings_value)
+        redacted_payload = _redact_sensitive_payload(
+            payload,
+            settings_value,
+            service_settings=_service_settings,
+            extra_secrets=extra_secret_values,
+        )
         redacted_payload["content"] = encoded_content
         return _tool_result(redacted_payload)

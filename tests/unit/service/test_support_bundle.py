@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from awf.host_setup.config import (
+    ClientIntegrationConfig,
+    ConsentConfig,
+    HostSetupConfig,
+    HostSetupConfigError,
+    ProviderConfig,
+)
+from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS,
+    SourceCheckoutAssetMetadata,
+)
 from awf.service import support_bundle as support_bundle_mod
 from awf.service.config import ServiceSettings
 from awf.service.support_bundle import (
@@ -25,6 +39,7 @@ def _settings(
     *,
     database_url: str = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
     api_token: str | None = None,
+    work_dir: str | None = None,
 ) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
@@ -33,7 +48,7 @@ def _settings(
         database_url=database_url,
         docker_host=f"unix://{tmp_path / 'docker.sock'}",
         agent_runtime_image="awf-agent-runtime:latest",
-        work_dir=str(tmp_path / "work"),
+        work_dir=str(tmp_path / "work") if work_dir is None else work_dir,
         api_token=api_token,
         github_token=None,
         worker_poll_interval_seconds=0.1,
@@ -202,6 +217,49 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
     assert "log_pointers" in bundle
     assert "issue_template_pointer" in bundle
     assert bundle["issue_template_pointer"] == ISSUE_TEMPLATE_PATH
+
+
+@pytest.mark.unit
+def test_support_bundle_log_pointers_omit_work_dir_path(tmp_path: Path) -> None:
+    """Keep host work_dir paths out of operator-facing support-bundle pointers."""
+    raw_work_dir = "/home/alice/client/.awf/service"
+    settings = _settings(tmp_path, work_dir=raw_work_dir)
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return green service status for log-pointer collection."""
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a green doctor report for log-pointer collection."""
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return a minimal failure summary for log-pointer collection."""
+        return _mock_failure_summary()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=lambda: HostSetupConfig(work_dir=raw_work_dir),
+        )
+    )
+
+    assert bundle["log_pointers"] == [
+        "Service logs: run `awf service logs --tail 100`",
+        "Worker logs: run `awf service logs --service worker --tail 100`",
+        "State directory: configured",
+    ]
+    config_fingerprint = bundle["config_fingerprint"]
+    assert isinstance(config_fingerprint, dict)
+    assert config_fingerprint["work_dir_configured"] is True
+    assert "work_dir" not in config_fingerprint
+    assert raw_work_dir not in json.dumps(bundle, sort_keys=True)
 
 
 @pytest.mark.unit
@@ -421,6 +479,414 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
         assert secret not in written
     assert "<redacted>" in serialized
     assert "<redacted>" in written
+
+
+@pytest.mark.unit
+def test_support_bundle_includes_redacted_setup_state_for_credential_backends(
+    tmp_path: Path,
+) -> None:
+    """Include setup-state metadata without leaking credential references."""
+    settings = _settings(tmp_path)
+    raw_refs = (
+        "keyring://awf/github/default",
+        "env://OPENAI_API_KEY",
+        "plain-file:///home/user/.awf/secrets/codex.default",
+    )
+    source_root = tmp_path / "private" / "source-checkout"
+    config = HostSetupConfig(
+        providers={
+            "github": ProviderConfig(
+                credential_ref=raw_refs[0],
+                backend="keyring",
+                source="gh",
+                status="ready",
+            ),
+            "openai": ProviderConfig(
+                credential_ref=raw_refs[1],
+                backend="env_ref",
+                source="environment",
+                status="ready",
+            ),
+            "codex": ProviderConfig(
+                credential_ref=raw_refs[2],
+                backend="plain_file",
+                source="setup",
+                status="ready",
+            ),
+        },
+        clients={
+            "codex": ClientIntegrationConfig(
+                status="configured",
+                updated_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+            )
+        },
+        consent=ConsentConfig(
+            plain_file_secrets=True,
+            source_checkout_assets=True,
+        ),
+        source_checkout=SourceCheckoutAssetMetadata(
+            root=source_root,
+            verified_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+        ),
+    )
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return healthy service status for setup-state bundle collection."""
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a healthy doctor report for setup-state bundle collection."""
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return an empty recent-failure summary for setup-state tests."""
+        return _mock_failure_summary()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=lambda: config,
+        )
+    )
+
+    setup_state = bundle["setup_state"]
+    assert isinstance(setup_state, dict)
+    assert setup_state["status"] == "loaded"
+    assert setup_state["providers"] == {
+        "github": {
+            "status": "ready",
+            "backend": "keyring",
+            "source": "gh",
+            "credential_ref_present": True,
+            "credential_ref_kind": "keyring",
+        },
+        "openai": {
+            "status": "ready",
+            "backend": "env_ref",
+            "source": "environment",
+            "credential_ref_present": True,
+            "credential_ref_kind": "env_ref",
+        },
+        "codex": {
+            "status": "ready",
+            "backend": "plain_file",
+            "source": "setup",
+            "credential_ref_present": True,
+            "credential_ref_kind": "plain_file",
+        },
+    }
+    assert setup_state["clients"] == {
+        "codex": {
+            "status": "configured",
+            "updated_at": "2026-05-28T12:00:00Z",
+        }
+    }
+    assert setup_state["consent"] == {
+        "plain_file_secrets": True,
+        "source_checkout_assets": True,
+    }
+    assert setup_state["source_checkout"] == {
+        "configured": True,
+        "verified_at": "2026-05-28T12:00:00Z",
+        "marker_count": len(SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS),
+    }
+
+    serialized = json.dumps(bundle, sort_keys=True)
+    bundle_path = write_support_bundle(bundle, directory=tmp_path / "bundles")
+    written = bundle_path.read_text()
+    for raw_ref in raw_refs:
+        assert raw_ref not in serialized
+        assert raw_ref not in written
+    assert "/home/user/.awf/secrets/codex.default" not in serialized
+    assert "/home/user/.awf/secrets/codex.default" not in written
+    assert str(source_root) not in serialized
+    assert str(source_root) not in written
+
+
+@pytest.mark.unit
+def test_support_bundle_setup_state_preserves_redacted_name_collisions() -> None:
+    """Preserve setup-state entries whose names redact to the same marker."""
+    provider_secret_one = "opaque-provider-name-one"
+    provider_secret_two = "opaque-provider-name-two"
+    client_secret_one = "opaque-client-name-one"
+    client_secret_two = "opaque-client-name-two"
+    config = HostSetupConfig(
+        providers={
+            provider_secret_one: ProviderConfig(status="ready-one"),
+            provider_secret_two: ProviderConfig(status="ready-two"),
+        },
+        clients={
+            client_secret_one: ClientIntegrationConfig(status="configured-one"),
+            client_secret_two: ClientIntegrationConfig(status="configured-two"),
+        },
+    )
+    secrets = frozenset(
+        {
+            provider_secret_one,
+            provider_secret_two,
+            client_secret_one,
+            client_secret_two,
+        }
+    )
+
+    setup_state = support_bundle_mod._setup_state(lambda: config, secrets=secrets)
+
+    assert setup_state["status"] == "loaded"
+    assert setup_state["providers"] == {
+        "<redacted>": {
+            "status": "ready-one",
+            "backend": None,
+            "source": None,
+            "credential_ref_present": False,
+            "credential_ref_kind": None,
+        },
+        "<redacted>#2": {
+            "status": "ready-two",
+            "backend": None,
+            "source": None,
+            "credential_ref_present": False,
+            "credential_ref_kind": None,
+        },
+    }
+    assert setup_state["clients"] == {
+        "<redacted>": {
+            "status": "configured-one",
+            "updated_at": None,
+        },
+        "<redacted>#2": {
+            "status": "configured-two",
+            "updated_at": None,
+        },
+    }
+    serialized = json.dumps(setup_state, sort_keys=True)
+    for raw_name in secrets:
+        assert raw_name not in serialized
+
+
+@pytest.mark.unit
+def test_isoformat_treats_naive_datetime_as_utc() -> None:
+    """Treat naive support-bundle timestamps as UTC rather than host-local time."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("tzset is required to exercise host-local timezone conversion")
+    original_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        assert support_bundle_mod._isoformat(datetime(2026, 5, 28, 12, 0)) == (
+            "2026-05-28T12:00:00Z"
+        )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
+
+
+@pytest.mark.unit
+def test_support_bundle_setup_state_redacts_config_load_errors(tmp_path: Path) -> None:
+    """Redact host setup config read errors embedded in support bundles."""
+    settings = _settings(tmp_path)
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return healthy service status for config-error bundle collection."""
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a healthy doctor report for config-error bundle collection."""
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return an empty recent-failure summary for config-error tests."""
+        return _mock_failure_summary()
+
+    def _config_reader() -> HostSetupConfig:
+        """Raise a setup config error containing a credential reference."""
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message=f"bad credential ref {plain_ref}",
+            path=tmp_path / "home" / ".awf" / "config.yml",
+            details={"credential_ref": plain_ref},
+        )
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=_config_reader,
+        )
+    )
+
+    setup_state = bundle["setup_state"]
+    assert isinstance(setup_state, dict)
+    assert setup_state["status"] == "failed"
+    assert setup_state["reason_code"] == "HOST_SETUP_CONFIG_CORRUPT"
+    serialized = json.dumps(bundle, sort_keys=True)
+    assert plain_ref not in serialized
+    assert "/home/user/.awf/secrets/github.default" not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_support_bundle_setup_state_degrades_unexpected_config_reader_errors(
+    tmp_path: Path,
+) -> None:
+    """Record unexpected setup config reader failures without leaking refs."""
+    settings = _settings(tmp_path)
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+
+    class ConfigReaderError(RuntimeError):
+        """Synthetic config reader exception carrying redacted details."""
+
+        reason_code = "CONFIG_READER_FAILED"
+
+        def __init__(self) -> None:
+            """Populate the synthetic exception with secret-bearing details."""
+            super().__init__(f"reader failed for {plain_ref}")
+            self.details = {"credential_ref": plain_ref}
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return healthy service status for unexpected-error bundle collection."""
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a healthy doctor report for unexpected-error bundle collection."""
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return an empty recent-failure summary for unexpected-error tests."""
+        return _mock_failure_summary()
+
+    def _config_reader() -> HostSetupConfig:
+        """Raise an unexpected setup reader error with secret-bearing details."""
+        raise ConfigReaderError()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=_config_reader,
+        )
+    )
+
+    setup_state = bundle["setup_state"]
+    assert isinstance(setup_state, dict)
+    assert setup_state["status"] == "failed"
+    assert setup_state["reason_code"] == "CONFIG_READER_FAILED"
+    assert setup_state["message"] == "reader failed for <redacted>"
+    assert setup_state["details"] == {"credential_ref": "<redacted>"}
+    assert bundle["service_status"] == _green_status()
+    recent_failure_summary = bundle["recent_failure_summary"]
+    assert isinstance(recent_failure_summary, dict)
+    assert recent_failure_summary["since_hours"] == 24
+    assert recent_failure_summary["total_failed_workspaces"] == 0
+    assert recent_failure_summary["failure_groups"] == []
+    serialized = json.dumps(bundle, sort_keys=True)
+    assert plain_ref not in serialized
+    assert "/home/user/.awf/secrets/github.default" not in serialized
+
+
+@pytest.mark.unit
+def test_support_bundle_setup_state_degrades_unexpected_config_reader_errors_without_reason_code() -> (
+    None
+):
+    """Use the shared generic reader reason when unexpected errors lack one."""
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+
+    def _config_reader() -> HostSetupConfig:
+        """Raise an unexpected reader error without a reason code."""
+        raise RuntimeError(f"reader failed for {plain_ref}")
+
+    setup_state = support_bundle_mod._setup_state(
+        _config_reader,
+        secrets=frozenset({plain_ref}),
+    )
+
+    assert setup_state["status"] == "failed"
+    assert (
+        setup_state["reason_code"] == support_bundle_mod._HOST_SETUP_CONFIG_READ_FAILED_REASON_CODE
+    )
+    assert setup_state["message"] == "reader failed for <redacted>"
+
+
+@pytest.mark.unit
+def test_support_bundle_setup_state_degrades_loaded_config_summary_errors(
+    tmp_path: Path,
+) -> None:
+    """Record loaded setup-state summary failures without leaking refs."""
+    settings = _settings(tmp_path)
+    plain_ref = "plain-file:///home/user/.awf/secrets/github.default"
+
+    class ExplodingMarkers:
+        """Synthetic malformed marker container for loaded config summaries."""
+
+        def __len__(self) -> int:
+            """Raise a secret-bearing error while summarizing marker count."""
+            raise RuntimeError(f"marker summary failed for {plain_ref}")
+
+    config = HostSetupConfig.model_construct(
+        source_checkout=SimpleNamespace(
+            verified_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+            markers=ExplodingMarkers(),
+        )
+    )
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        """Return healthy service status for summary-error bundle collection."""
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        """Return a healthy doctor report for summary-error bundle collection."""
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        """Return an empty recent-failure summary for summary-error tests."""
+        return _mock_failure_summary()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+            setup_config_reader=lambda: config,
+        )
+    )
+
+    setup_state = bundle["setup_state"]
+    assert isinstance(setup_state, dict)
+    assert setup_state["status"] == "failed"
+    assert setup_state["reason_code"] == "HOST_SETUP_CONFIG_SUMMARY_FAILED"
+    assert setup_state["message"] == "marker summary failed for <redacted>"
+    assert bundle["service_status"] == _green_status()
+    recent_failure_summary = bundle["recent_failure_summary"]
+    assert isinstance(recent_failure_summary, dict)
+    assert recent_failure_summary["since_hours"] == 24
+    assert recent_failure_summary["total_failed_workspaces"] == 0
+    assert recent_failure_summary["failure_groups"] == []
+    serialized = json.dumps(bundle, sort_keys=True)
+    assert plain_ref not in serialized
+    assert "/home/user/.awf/secrets/github.default" not in serialized
 
 
 @pytest.mark.unit

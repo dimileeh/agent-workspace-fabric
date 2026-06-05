@@ -388,6 +388,7 @@ def test_parity_matrix_matches_real_surfaces() -> None:
 
     from awf.api.app import create_app
     from awf.cli.main import app as cli_app
+    from awf.common.config import Settings
     from awf.mcp.server import build_mcp_server
 
     # 1. Load real REST routes
@@ -417,7 +418,7 @@ def test_parity_matrix_matches_real_surfaces() -> None:
     import asyncio
 
     # 3. Load real MCP tools
-    mcp = build_mcp_server(service=MagicMock(), settings=MagicMock())
+    mcp = build_mcp_server(service=MagicMock(), settings=Settings(_env_file=None))
     real_mcp_tools = {t.name for t in asyncio.run(mcp.list_tools())}
 
     # 4. Iterate over rows
