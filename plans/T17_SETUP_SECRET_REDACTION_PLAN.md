@@ -385,6 +385,60 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
 
+## Review-Level Comment `issue:4620175517` Duplication Follow-Up Plan
+
+### Problem Statement And Scope
+
+The current review-level comment reports three residual cleanup issues in the
+T17 secret-redaction implementation:
+
+- service-log PEM streaming keeps a hand-copied assignment-key regex fragment
+  that can drift from `TOKEN_ASSIGNMENT_PATTERN`;
+- MCP artifact byte redaction re-implements exact-secret span finding and span
+  merge/rendering already owned by `awf.common.redaction`;
+- MCP secret collection can derive quoted-multiline first-line filtering from a
+  shallow env-file path while compose env-file exact secrets are read from the
+  fully resolved path.
+
+This repair is limited to those shared redaction helpers, MCP secret collection,
+focused tests, and this plan/validation evidence. It does not change branch
+management, pushing, broad validation, full coverage, frontend validation, or
+unrelated service behavior.
+
+### Requirements Checklist
+
+- Service-log PEM assignment detection must compile from a shared
+  `TOKEN_ASSIGNMENT_KEY_PATTERN` source.
+- MCP exact byte-secret redaction must delegate exact-secret byte span
+  collection and rendering to `awf.common.redaction`.
+- MCP compose env-file exact-secret collection and provider-env first-line
+  filtering must use the same fully resolved env-file path.
+- Existing multiline Compose env-file and service API token redaction behavior
+  must remain covered.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused regressions for the shared assignment key pattern, overlapping
+   exact byte-secret redaction, and resolved-path MCP first-line filtering.
+2. Export the assignment-key pattern from `awf.common.token_patterns` and use it
+   in `TOKEN_ASSIGNMENT_PATTERN` plus service-log PEM regexes.
+3. Add byte-domain exact-secret span/render helpers to `awf.common.redaction`
+   and call them from MCP artifact byte redaction.
+4. Resolve the MCP compose env-file path once and pass that path through
+   compose env-file secret collection and provider-env filtering.
+5. Run focused regressions and narrow ruff/mypy checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_service_log_pem_patterns_use_shared_assignment_key_pattern tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_merges_overlapping_configured_secrets tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_delegates_to_common_byte_helper tests/unit/mcp/test_mcp_multiline_compose_redaction.py::test_mcp_secret_values_filters_first_line_fragments_from_resolved_env_file -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_service_log_pem_patterns_use_shared_assignment_key_pattern tests/unit/mcp/test_mcp_server_redaction_helpers.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py src/awf/common/redaction.py src/awf/service/logs.py src/awf/mcp/server.py tests/unit/common/test_token_patterns.py tests/unit/mcp/test_mcp_server_redaction_helpers.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/common/token_patterns.py src/awf/common/redaction.py src/awf/service/logs.py src/awf/mcp/server.py
+```
+
 ## Inline Review Thread `PRRT_kwDOSJAM6s6HXEIw` Service Log Env-File Interpolation Plan
 
 ### Problem Statement And Scope

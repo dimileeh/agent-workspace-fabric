@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from awf.common import audit, redaction
+from awf.common import audit, redaction, token_patterns
 from awf.common.token_patterns import (
     KNOWN_TOKEN_PATTERN,
     PROVIDER_REF_KEY_PATTERN,
@@ -16,6 +16,7 @@ from awf.common.token_patterns import (
     compile_token_assignment_re,
 )
 from awf.host_setup import rendering
+from awf.service import logs as service_logs
 
 
 @pytest.mark.unit
@@ -128,6 +129,21 @@ def test_token_assignment_pattern_guards_multiline_private_key_branch() -> None:
     assert "(?=-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----)" in assignment_re.pattern
     assert match is not None
     assert match.group("value") == "-----BEGIN"
+
+
+@pytest.mark.unit
+def test_service_log_pem_patterns_use_shared_assignment_key_pattern() -> None:
+    """Keep service-log PEM assignment guards compiled from the shared key source."""
+    assert hasattr(token_patterns, "TOKEN_ASSIGNMENT_KEY_PATTERN")
+    assert service_logs._TOKEN_ASSIGNMENT_KEY_PATTERN == token_patterns.TOKEN_ASSIGNMENT_KEY_PATTERN  # noqa: SLF001
+    assert (
+        token_patterns.TOKEN_ASSIGNMENT_KEY_PATTERN
+        in service_logs._MULTILINE_PEM_ASSIGNMENT_START_RE.pattern
+    )  # noqa: SLF001
+    assert (
+        token_patterns.TOKEN_ASSIGNMENT_KEY_PATTERN
+        in service_logs._PENDING_PEM_ASSIGNMENT_PREFIX_RE.pattern
+    )  # noqa: SLF001
 
 
 @pytest.mark.unit

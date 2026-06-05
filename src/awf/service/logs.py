@@ -18,7 +18,7 @@ from typing import IO, Literal, Protocol
 import yaml
 
 from awf.common.redaction import redact_secrets
-from awf.common.token_patterns import compile_token_assignment_re
+from awf.common.token_patterns import TOKEN_ASSIGNMENT_KEY_PATTERN, compile_token_assignment_re
 from awf.service.config import (
     COMPOSE_ENV_FILE_OMITTED,
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
@@ -47,12 +47,7 @@ _STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS = 0.05
 _STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS = 0.05
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
 _TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
-_TOKEN_ASSIGNMENT_KEY_PATTERN = (
-    r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
-    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)"
-    r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
-    r"|PASSWORD|PASSWD|SECRET"
-)
+_TOKEN_ASSIGNMENT_KEY_PATTERN = TOKEN_ASSIGNMENT_KEY_PATTERN
 _MULTILINE_PEM_ASSIGNMENT_START_RE = re.compile(
     rf"\b(?:{_TOKEN_ASSIGNMENT_KEY_PATTERN})\b"
     r"\s*[:=]\s*"

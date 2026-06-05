@@ -14,8 +14,10 @@ from awf.common.config import Settings
 from awf.common.redaction import REDACTION_MARKER
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.mcp import server as mcp_server_mod
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.logs import LogStore
+from awf.service import config as service_config
 from awf.service.provider_readiness import KNOWN_SECRET_ENV_KEYS
 from tests.postgres import postgres_test_engine
 
@@ -220,3 +222,33 @@ async def test_read_workspace_log_does_not_redact_multiline_first_line_fragment_
     for fragment in secret.splitlines()[1:]:
         assert fragment not in data
     assert data == f"public mention {first_line}\nprovider emitted\n{REDACTION_MARKER}\ndone\n"
+
+
+@pytest.mark.unit
+def test_mcp_secret_values_filters_first_line_fragments_from_resolved_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Filter provider env first-line fragments using the fully resolved env file."""
+    _clear_known_secret_env(monkeypatch)
+    first_line = "resolved-first-fragment"
+    secret = f"{first_line}\nresolved-second-fragment\nresolved-third-fragment"
+    resolved_env_file = _write_multiline_secret_env_file(tmp_path, secret)
+    shallow_env_file = tmp_path / "missing-compose.env"
+
+    monkeypatch.setattr(
+        mcp_server_mod.service_config,
+        "resolve_local_service_compose_env_file",
+        lambda _env_file=service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE: resolved_env_file,
+    )
+    settings = Settings(_env_file=None, work_dir=str(tmp_path))
+    service_settings = service_config.resolve_service_settings(settings, environ={})
+
+    values = mcp_server_mod._mcp_secret_values(  # noqa: SLF001
+        settings,
+        service_settings,
+        compose_env_file=shallow_env_file,
+    )
+
+    assert secret in values
+    assert first_line not in values

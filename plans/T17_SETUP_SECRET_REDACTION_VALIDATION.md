@@ -481,6 +481,61 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
 ```
 
+## Review-Level Comment `issue:4620175517` Duplication Follow-Up Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: service-log PEM assignment detection now imports the shared
+  `TOKEN_ASSIGNMENT_KEY_PATTERN` source from `awf.common.token_patterns`.
+- Complete: MCP exact byte-secret redaction now delegates configured exact
+  byte-secret span collection, merge, and rendering to
+  `awf.common.redaction.redact_exact_secret_bytes()`.
+- Complete: MCP compose env-file exact-secret collection and provider-env
+  first-line filtering now use the same fully resolved env-file path.
+- Complete: existing multiline Compose env-file redaction and service API token
+  byte redaction remain covered by adjacent focused tests.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/common/token_patterns.py`
+- `src/awf/common/redaction.py`
+- `src/awf/service/logs.py`
+- `src/awf/mcp/server.py`
+- `tests/unit/common/test_token_patterns.py`
+- `tests/unit/mcp/test_mcp_server_redaction_helpers.py`
+- `tests/unit/mcp/test_mcp_multiline_compose_redaction.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_service_log_pem_patterns_use_shared_assignment_key_pattern tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_delegates_to_common_byte_helper tests/unit/mcp/test_mcp_multiline_compose_redaction.py::test_mcp_secret_values_filters_first_line_fragments_from_resolved_env_file -q --tb=short -ra
+# 3 failed: missing shared key constant, missing MCP common byte helper import,
+# and unresolved first-line filtering used the shallow env-file path.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_service_log_pem_patterns_use_shared_assignment_key_pattern tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_merges_overlapping_configured_secrets tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_delegates_to_common_byte_helper tests/unit/mcp/test_mcp_multiline_compose_redaction.py::test_mcp_secret_values_filters_first_line_fragments_from_resolved_env_file -q --tb=short -ra
+# 4 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_service_log_pem_patterns_use_shared_assignment_key_pattern tests/unit/mcp/test_mcp_server_redaction_helpers.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+# 9 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py src/awf/common/redaction.py src/awf/service/logs.py src/awf/mcp/server.py tests/unit/common/test_token_patterns.py tests/unit/mcp/test_mcp_server_redaction_helpers.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/common/token_patterns.py src/awf/common/redaction.py src/awf/service/logs.py src/awf/mcp/server.py
+# Success: no issues found in 4 source files
+```
+
 ## Inline Review Thread `PRRT_kwDOSJAM6s6HXEIw` Service Log Env-File Interpolation Validation
 
 Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`

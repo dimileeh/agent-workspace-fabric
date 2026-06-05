@@ -30,7 +30,7 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.common.redaction import REDACTION_MARKER, redact_secrets
+from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
@@ -532,6 +532,7 @@ def _mcp_secret_values(
 ) -> tuple[str, ...]:
     """Return exact secret values that MCP payloads and artifacts must redact."""
     resolved_compose_env_file = _resolve_mcp_compose_env_file(compose_env_file)
+    resolved_secret_env_file = _resolve_mcp_compose_env_secret_file(resolved_compose_env_file)
     provider_environ = service_config.resolve_local_service_provider_environ(
         provider_environ=None,
         environ=os.environ,
@@ -544,9 +545,9 @@ def _mcp_secret_values(
         service_settings.api_token,
         service_settings.github_token,
     ]
-    values.extend(_mcp_compose_env_file_secret_values(resolved_compose_env_file))
+    values.extend(_mcp_compose_env_file_secret_values(resolved_secret_env_file))
     _, quoted_multiline_first_line_values = _mcp_quoted_multiline_secret_context(
-        resolved_compose_env_file
+        resolved_secret_env_file
     )
     values.extend(
         value
@@ -565,20 +566,22 @@ def _resolve_mcp_compose_env_file(
     return compose_env_file
 
 
+def _resolve_mcp_compose_env_secret_file(compose_env_file: Path | None) -> Path | None:
+    """Resolve the Compose env file used for MCP exact-secret collection."""
+    if compose_env_file is None:
+        return None
+    return service_config.resolve_local_service_compose_env_file(compose_env_file)
+
+
 def _mcp_compose_env_file_secret_values(compose_env_file: Path | None) -> tuple[str, ...]:
     """Return raw selected Compose env-file secret values for exact redaction."""
-    resolved_env_file = (
-        service_config.resolve_local_service_compose_env_file(compose_env_file)
-        if compose_env_file is not None
-        else None
-    )
     (
         quoted_multiline_values,
         quoted_multiline_first_line_values,
-    ) = _mcp_quoted_multiline_secret_context(resolved_env_file)
+    ) = _mcp_quoted_multiline_secret_context(compose_env_file)
     values = [
         value
-        for key, value in compose_env_file_values(resolved_env_file).items()
+        for key, value in compose_env_file_values(compose_env_file).items()
         if value
         and len(value) >= 4
         and is_secret_env_key(key)
@@ -715,8 +718,8 @@ def _redact_exact_secret_bytes(
     extra_secrets: Iterable[str],
 ) -> bytes:
     """Redact exact configured secret byte sequences before text decoding."""
-    secrets = {
-        secret.encode("utf-8")
+    secrets = (
+        secret
         for secret in (
             settings.api_token,
             settings.github_token,
@@ -725,37 +728,8 @@ def _redact_exact_secret_bytes(
             *extra_secrets,
         )
         if secret and len(secret) >= 4
-    }
-    spans: list[tuple[int, int]] = []
-    for secret in secrets:
-        cursor = 0
-        while True:
-            start = content.find(secret, cursor)
-            if start == -1:
-                break
-            spans.append((start, start + len(secret)))
-            cursor = start + 1
-    if not spans:
-        return content
-
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(spans):
-        if not merged or start > merged[-1][1]:
-            merged.append((start, end))
-            continue
-        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-
-    marker = REDACTION_MARKER.encode("ascii")
-    pieces: list[bytes] = []
-    cursor = 0
-    for start, end in merged:
-        if cursor < start:
-            pieces.append(content[cursor:start])
-        pieces.append(marker)
-        cursor = end
-    if cursor < len(content):
-        pieces.append(content[cursor:])
-    return b"".join(pieces)
+    )
+    return redact_exact_secret_bytes(content, extra_secrets=secrets)
 
 
 def _check_and_redact_artifact_content(

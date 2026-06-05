@@ -20,12 +20,15 @@ KNOWN_TOKEN_PATTERN: Final = (
     r"xox[baprs]-[A-Za-z0-9-]*"
     r")(?![A-Za-z0-9_])"
 )
-TOKEN_ASSIGNMENT_PATTERN: Final = (
-    r"\b(?P<key>"
+TOKEN_ASSIGNMENT_KEY_PATTERN: Final = (
     r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
     r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)"
     r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
     r"|PASSWORD|PASSWD|SECRET"
+)
+TOKEN_ASSIGNMENT_PATTERN: Final = (
+    r"\b(?P<key>"
+    f"{TOKEN_ASSIGNMENT_KEY_PATTERN}"
     r")\b"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<quote>[\"'])?"

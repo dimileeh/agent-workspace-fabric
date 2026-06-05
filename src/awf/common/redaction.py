@@ -97,6 +97,21 @@ def redact_secrets_byte_slice(
     return _render_redacted_byte_slice(text_bytes, safe_start, safe_end, byte_spans)
 
 
+def redact_exact_secret_bytes(
+    content: bytes,
+    *,
+    extra_secrets: Iterable[str] = (),
+) -> bytes:
+    """Replace exact caller-supplied secret byte sequences with the stable marker."""
+    if not content:
+        return content
+
+    spans = _exact_secret_byte_redaction_spans(content, extra_secrets)
+    if not spans:
+        return content
+    return _render_redacted_bytes(content, 0, len(content), spans)
+
+
 def _secret_redaction_spans(
     text: str,
     *,
@@ -136,6 +151,25 @@ def _exact_secret_redaction_spans(
     return spans
 
 
+def _exact_secret_byte_redaction_spans(
+    content: bytes,
+    extra_secrets: Iterable[str],
+) -> list[_RedactionSpan]:
+    """Find exact caller-supplied secret byte values in content."""
+    spans: list[_RedactionSpan] = []
+    for secret in sorted({secret for secret in extra_secrets if len(secret) >= 4}, key=len):
+        secret_bytes = secret.encode("utf-8")
+        cursor = 0
+        while True:
+            start = content.find(secret_bytes, cursor)
+            if start == -1:
+                break
+            end = start + len(secret_bytes)
+            spans.append((start, end))
+            cursor = start + 1
+    return _merge_redaction_spans(spans)
+
+
 def _merge_redaction_spans(spans: Iterable[_RedactionSpan]) -> list[_RedactionSpan]:
     """Coalesce overlapping or adjacent redaction spans."""
     merged: list[_RedactionSpan] = []
@@ -169,6 +203,31 @@ def _render_redacted_slice(
     if cursor < end:
         pieces.append(text[cursor:end])
     return "".join(pieces)
+
+
+def _render_redacted_bytes(
+    content: bytes,
+    start: int,
+    end: int,
+    spans: list[_RedactionSpan],
+) -> bytes:
+    """Render requested bytes while masking intersecting secret spans."""
+    pieces: list[bytes] = []
+    cursor = start
+    marker = REDACTION_MARKER.encode("ascii")
+    for span_start, span_end in spans:
+        if span_end <= cursor:
+            continue
+        if span_start >= end:
+            break
+        literal_end = min(max(span_start, cursor), end)
+        if cursor < literal_end:
+            pieces.append(content[cursor:literal_end])
+        pieces.append(marker)
+        cursor = max(cursor, min(span_end, end))
+    if cursor < end:
+        pieces.append(content[cursor:end])
+    return b"".join(pieces)
 
 
 def _utf8_byte_offsets_for_text_indices(
