@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HPThr
+
+### Requirement Status
+
+- Preserve the existing source-checkout validation failure payload shape,
+  reason code, redaction, and MCP error behavior: Complete.
+- When `source_checkout` is provided and validation raises
+  `SourceCheckoutError`, render `payload["command"]` as
+  `awf start --source-checkout <resolved path>`: Complete.
+- Preserve the generic `awf start` command when no explicit `source_checkout`
+  is supplied: Complete by construction; the command override helper is a no-op
+  for `source_checkout=None`.
+- Add a focused regression proving the validation-failure path preserves the
+  explicit source checkout command: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_success_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["command"]` was `awf start` on explicit source-checkout validation
+  failure.
+- Regression test after the implementation change: 1 passed.
+- Focused source-checkout command preservation tests: 3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Empty Client Command
 
 ### Requirement Status

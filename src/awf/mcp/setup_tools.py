@@ -335,7 +335,10 @@ async def _start_local_service_result(
     except SourceCheckoutError as exc:
         return _first_run_result(
             safe_result,
-            _source_checkout_failure_payload(exc),
+            _start_payload_with_source_checkout_command(
+                _source_checkout_failure_payload(exc),
+                source_path,
+            ),
             is_error=True,
         )
     except (CalledProcessError, HostSetupConfigError, OSError, RuntimeError, ValueError) as exc:

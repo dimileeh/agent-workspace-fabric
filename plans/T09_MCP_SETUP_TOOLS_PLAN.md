@@ -84,6 +84,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HPThr
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_start_local_service` drops the explicit
+`source_checkout` command override when checkout validation fails inside
+`_resolve_start_bootstrap_inputs_for_mcp`. The returned source-checkout failure
+payload still renders the generic `awf start` command, so copying it retries a
+different startup context from the one the MCP caller requested.
+
+Scope is limited to preserving the explicit source checkout command on the
+source-checkout validation failure path for `awf_start_local_service`.
+
+### Requirements Checklist
+
+- Preserve the existing source-checkout validation failure payload shape,
+  reason code, redaction, and MCP error behavior.
+- When `source_checkout` is provided and validation raises
+  `SourceCheckoutError`, render `payload["command"]` as
+  `awf start --source-checkout <resolved path>`.
+- Preserve the generic `awf start` command when no explicit `source_checkout`
+  is supplied.
+- Add a focused regression proving the validation-failure path preserves the
+  explicit source checkout command.
+
+### Implementation Steps
+
+1. Add the focused failing regression for `awf_start_local_service` explicit
+   source-checkout validation failure.
+2. Wrap `_source_checkout_failure_payload(exc)` with the existing
+   `_start_payload_with_source_checkout_command(..., source_path)` helper in
+   the `SourceCheckoutError` branch.
+3. Run the targeted regression and focused lint for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_success_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Empty Client Command
 
 ### Problem Statement And Scope

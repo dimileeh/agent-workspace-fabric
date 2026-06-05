@@ -27,7 +27,12 @@ from awf.host_setup.rendering import (
     first_run_failure_payload,
     first_run_success_payload,
 )
-from awf.host_setup.source_assets import SOURCE_CHECKOUT_ASSETS_STALE, SourceCheckoutAssetMetadata
+from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_ASSETS_STALE,
+    SOURCE_CHECKOUT_INVALID,
+    SourceCheckoutAssetMetadata,
+    SourceCheckoutError,
+)
 from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from awf.service.bootstrap import (
@@ -1028,6 +1033,45 @@ async def test_start_local_service_preserves_explicit_source_checkout_success_co
 
     assert payload["status"] == "success"
     assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+
+
+@pytest.mark.unit
+async def test_start_local_service_preserves_explicit_source_checkout_validation_failure_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    checkout.mkdir()
+    bootstrap_calls: list[bool] = []
+
+    def fail_source_checkout(source_path: Path | None) -> object:
+        assert source_path == checkout
+        raise SourceCheckoutError(
+            reason_code=SOURCE_CHECKOUT_INVALID,
+            message="AWF source checkout is missing required assets.",
+            root=checkout,
+            missing_markers=("pyproject.toml",),
+        )
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", fail_source_checkout)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {"source_checkout": str(checkout)})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == SOURCE_CHECKOUT_INVALID
+    assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+    assert payload["issues"][0]["details"]["missing_markers"] == ["pyproject.toml"]
+    assert bootstrap_calls == []
 
 
 @pytest.mark.unit
