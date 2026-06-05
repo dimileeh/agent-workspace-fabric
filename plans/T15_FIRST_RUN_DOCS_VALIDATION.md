@@ -2626,6 +2626,61 @@ git diff --check
 # no output
 ```
 
+## CI Repair for PR #390 Docs Helper Tests
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: The repair is scoped to docs tests/helpers plus this T15
+  plan/validation record.
+- Complete: Existing imports from `tests.unit.docs.public_docs_status_helpers`
+  continue to work through explicit compatibility re-exports/wrappers.
+- Complete: Tests that monkeypatch `REPO_ROOT` and `README_PATH` remain covered;
+  the wrapper syncs those patched values into the moved Markdown helper module.
+- Complete: `tests/unit/docs/public_docs_status_helpers.py` is now 1,462 lines
+  and `tests/unit/docs/public_docs_markdown_helpers.py` is 335 lines, both
+  below the 1,500-line maintainability guard.
+- Complete: The stale package-upgrade negative fixtures now include the current
+  `AWF_DATABASE_URL` restore block before exercising their intended shell
+  parsing failures.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `tests/unit/docs/public_docs_markdown_helpers.py`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 pytest tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/test_core_decomposition_maintainability.py -q
+# Reproduced before fix: 3 failed, 45 passed in 8.01s
+# Final result after fix: 48 passed in 7.57s
+
+uv run --python 3.12 pytest tests/unit/docs tests/unit/test_core_decomposition_maintainability.py -q
+# 118 passed in 9.99s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/public_docs_markdown_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/public_docs_markdown_helpers.py
+# 3 files already formatted
+
+wc -l tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/public_docs_markdown_helpers.py tests/unit/docs/test_public_docs_lifecycle_status.py
+# 1462 tests/unit/docs/public_docs_status_helpers.py
+#  335 tests/unit/docs/public_docs_markdown_helpers.py
+# 1391 tests/unit/docs/test_public_docs_lifecycle_status.py
+
+git diff --check
+# no output
+```
+
 ## Post-Review Repair for Review-Level Comment `issue:4620140358`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.

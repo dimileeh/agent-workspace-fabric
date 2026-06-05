@@ -28,6 +28,24 @@ from tests.unit.docs.public_docs_status_helpers import (
 )
 
 
+def _package_database_url_restore_lines(lifecycle: str = "upgrading") -> tuple[str, ...]:
+    """Return the package-lane database URL restore block used by negative fixtures."""
+    return (
+        PACKAGE_ENV_READ_LINES["AWF_DATABASE_URL"],
+        PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_DATABASE_URL"],
+        *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_DATABASE_URL"],
+        'if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then',
+        '  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"',
+        "else",
+        (
+            '  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for '
+            f'the running local Core or persist it in .env before {lifecycle}}}"'
+        ),
+        "  export AWF_DATABASE_URL",
+        "fi",
+    )
+
+
 def test_source_checkout_stop_helper_allows_root_guard_without_legacy_when_optional() -> None:
     """Assert optional legacy fallback permits a guarded root-only stop."""
     section = "\n".join(
@@ -996,6 +1014,7 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
                 ),
                 "  export AWF_POSTGRES_PASSWORD",
                 "  # awf_config_file fallback stays outside persisted .env",
+                *_package_database_url_restore_lines(),
                 "fi",
                 "fi",
                 "awf start",
@@ -1040,6 +1059,7 @@ def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
             ),
             "  export AWF_POSTGRES_PASSWORD",
             "fi",
+            *_package_database_url_restore_lines(),
             "Before running awf start, inspect the saved environment.",
         ]
     )

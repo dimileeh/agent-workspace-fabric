@@ -867,3 +867,53 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
 git diff --check
 ```
+
+## CI Repair for PR #390 Docs Helper Tests
+
+Problem statement and scope:
+the latest reproduced CI failures are limited to docs test helper structure and
+two stale negative lifecycle fixtures. `tests/unit/docs/public_docs_status_helpers.py`
+exceeds the 1,500-line first-party maintainability guard, and two package
+upgrade negative tests no longer reach their intended shell-keyword/restart
+assertions because their synthetic snippets omit the newer `AWF_DATABASE_URL`
+restore block.
+
+Requirements checklist:
+
+- Keep the repair scoped to docs tests/helpers and this T15 plan/validation.
+- Preserve existing public imports from `tests.unit.docs.public_docs_status_helpers`.
+- Preserve tests that monkeypatch `REPO_ROOT` and `README_PATH`.
+- Bring every first-party file touched or added under the 1,500-line guard.
+- Update the stale package-upgrade negative fixtures to satisfy current service
+  env prerequisites before exercising their intended failure.
+- Do not run full AWF/GitHub-owned validation, full coverage, full frontend
+  builds, or push/rebase/branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Move Markdown, public-doc discovery, command-mention, and snippet-syntax
+   helper implementations from `public_docs_status_helpers.py` into a focused
+   docs helper module.
+2. Re-export the moved dataclasses/functions through
+   `public_docs_status_helpers.py` with small compatibility wrappers that sync
+   monkeypatched `REPO_ROOT` and `README_PATH` before delegating.
+3. Add the missing synthetic `AWF_DATABASE_URL` restore lines to the two stale
+   package upgrade negative tests so they reach their intended assertions.
+4. Run targeted pytest for the reproduced failures, a focused ruff check, file
+   length evidence, and `git diff --check`.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 pytest tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/test_core_decomposition_maintainability.py -q
+# Passes the reproduced CI failures.
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/public_docs_markdown_helpers.py
+# All checks passed.
+
+wc -l tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/public_docs_markdown_helpers.py
+# Both files are at or below 1,500 lines.
+
+git diff --check
+# No whitespace errors.
+```
