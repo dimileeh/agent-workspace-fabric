@@ -53,6 +53,55 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Project Profile Message And Bridge Smoke Test
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve the existing `PROJECT_PROFILE_EXISTS` error code, MCP error status,
+  and safe detail fields: Complete.
+- Keep the current "pass force=true" guidance when `force` is false: Complete.
+- Return non-contradictory prose when `force` is true and the write still
+  raises `FileExistsError`: Complete.
+- Add a focused smoke test that imports `awf.cli.first_run_mcp_bridge` and
+  verifies the public re-export names resolve: Complete.
+- Do not edit unrelated setup/start/client behavior: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_project_profile.py`
+- `tests/unit/mcp/test_setup_tools_import_contract.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_file_exists_with_force_has_non_contradictory_message tests/unit/mcp/test_setup_tools_import_contract.py::test_first_run_mcp_bridge_public_exports_import -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_file_exists_is_structured_mcp_error tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_file_exists_with_force_has_non_contradictory_message tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py tests/unit/mcp/test_setup_tools_import_contract.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- The new `force=True` regression failed before implementation because the
+  payload still said `project profile already exists; pass force=true to
+  overwrite`.
+- The direct bridge import/export smoke test passed and now guards the bridge
+  re-export surface in focused MCP tests.
+- Targeted regressions after implementation: 4 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HRklw
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

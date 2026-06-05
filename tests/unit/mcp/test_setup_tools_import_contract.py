@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -26,3 +27,12 @@ def test_setup_tools_imports_public_cli_bridge_symbols() -> None:
 
     assert uses_bridge is True
     assert private_cli_imports == []
+
+
+def test_first_run_mcp_bridge_public_exports_import() -> None:
+    """Catch CLI private-symbol drift before MCP server startup."""
+    bridge = importlib.import_module("awf.cli.first_run_mcp_bridge")
+
+    assert bridge.__all__
+    for export_name in bridge.__all__:
+        assert hasattr(bridge, export_name), export_name

@@ -84,6 +84,55 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Project Profile Message And Bridge Smoke Test
+
+### Problem Statement And Scope
+
+The review reports two remaining first-run MCP setup tool concerns:
+
+- `awf_initialize_project_profile` returns contradictory prose if
+  `write_workspace_profile(..., force=True)` still raises `FileExistsError`.
+- The public first-run MCP bridge re-exports private CLI helper symbols, but no
+  focused smoke test imports the bridge and verifies that the exported surface
+  is currently available.
+
+Scope is limited to the project-profile `FileExistsError` message branch and a
+focused bridge import/export smoke test. The bridge module implementation,
+tool schemas, payload shapes, and existing redaction behavior stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the existing `PROJECT_PROFILE_EXISTS` error code, MCP error status,
+  and safe detail fields.
+- Keep the current "pass force=true" guidance when `force` is false.
+- Return non-contradictory prose when `force` is true and the write still
+  raises `FileExistsError`.
+- Add a focused smoke test that imports `awf.cli.first_run_mcp_bridge` and
+  verifies the public re-export names resolve.
+- Do not edit unrelated setup/start/client behavior.
+
+### Implementation Steps
+
+1. Add or update focused regressions for the false-force and true-force
+   `FileExistsError` message branches.
+2. Add a focused bridge import/export smoke test beside the existing MCP import
+   contract test.
+3. Change only the `FileExistsError` message selection in
+   `_initialize_project_profile_result`.
+4. Run the targeted project-profile and import-contract tests plus focused
+   lint/type checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_file_exists_is_structured_mcp_error tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_file_exists_with_force_has_non_contradictory_message tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py tests/unit/mcp/test_setup_tools_import_contract.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HRklw
 
 ### Problem Statement And Scope

@@ -621,10 +621,15 @@ def _initialize_project_profile_result(
         try:
             written_path = write_workspace_profile(preview, force=force)
         except FileExistsError:
+            message = (
+                "project profile already exists; pass force=true to overwrite"
+                if not force
+                else "project profile already exists and could not be overwritten"
+            )
             return _error_result(
                 safe_result,
                 PROJECT_PROFILE_EXISTS,
-                "project profile already exists; pass force=true to overwrite",
+                message,
                 detail={"project_path": str(repository), "force": force},
             )
         except (OSError, RuntimeError, ValueError) as exc:

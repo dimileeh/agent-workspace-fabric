@@ -121,6 +121,52 @@ async def test_initialize_project_profile_file_exists_is_structured_mcp_error(
 
 
 @pytest.mark.unit
+async def test_initialize_project_profile_file_exists_with_force_has_non_contradictory_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    preview = SimpleNamespace(
+        path=project,
+        draft=SimpleNamespace(template="generic"),
+        to_dict=lambda: {
+            "path": str(project),
+            "inspection": {"detected_template": "generic"},
+            "draft": {"template": "generic", "yaml": "name: generic\n"},
+            "diagnostics": {},
+        },
+    )
+    monkeypatch.setattr(setup_tools, "preview_project_onboarding", lambda *_a, **_k: preview)
+
+    def fail_write(_preview: Any, *, force: bool) -> Path:
+        assert force is True
+        raise FileExistsError(17, "File exists", project / ".awf" / "workspace.yml")
+
+    monkeypatch.setattr(setup_tools, "write_workspace_profile", fail_write)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "write_profile": True, "force": True},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_PROFILE_EXISTS"
+    assert payload["message"] == "project profile already exists and could not be overwritten"
+    assert payload["detail"] == {
+        "project_path": str(project.resolve()),
+        "force": True,
+    }
+    assert "pass force=true" not in rendered
+    assert "[Errno" not in rendered
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("exc_type", [RuntimeError, ValueError])
 async def test_initialize_project_profile_write_runtime_and_value_errors_are_structured(
     exc_type: type[Exception],
