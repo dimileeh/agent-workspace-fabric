@@ -165,6 +165,58 @@ async def test_reparent_fix_pass_commit_rev_parse_failures_are_reparent_failed(
 
 
 @pytest.mark.unit
+async def test_reparent_fix_pass_commit_blank_stdout_warning_carries_diagnostics(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An exit-0 rev-parse with blank stdout logs ``ok``/``stdout`` for diagnosis.
+
+    Without these fields the warning would carry an empty ``stderr`` (the command
+    succeeded) and be indistinguishable from a genuine non-zero exit.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="  \n", stderr="")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        head, no_net_change, failure_reason = await pre_push_validation._reparent_fix_pass_commit(
+            runner,
+            workspace_id="workspace",
+            worktree_path=worktree,
+            fix_start_head="1" * 40,
+            current_head="2" * 40,
+            pass_number=1,
+        )
+
+    assert head is None
+    assert no_net_change is False
+    assert failure_reason == pre_push_validation.PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
+    warnings = [
+        event
+        for event in captured
+        if event["event"] == "monitor.pre_push_validation_fix_reparent_failed"
+    ]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning["git_step"] == "rev-parse current tree"
+    # ``ok`` is True and ``stdout`` is preserved (truncated) so the blank-output
+    # path is distinguishable from a non-zero exit despite the empty ``stderr``.
+    assert warning["ok"] is True
+    assert warning["stdout"] == "  \n"
+    assert warning["stderr"] == ""
+
+
+@pytest.mark.unit
 async def test_reparent_fix_pass_commit_no_net_change_signals_no_commit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

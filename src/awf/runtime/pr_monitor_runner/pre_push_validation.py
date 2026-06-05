@@ -580,12 +580,19 @@ async def _reparent_fix_pass_commit(
     """
 
     def _warn(git_step: str, result: Any) -> None:
-        """Warn on a re-parent git step failure without logging secrets."""
+        """Warn on a re-parent git step failure without logging secrets.
+
+        Logs both ``ok`` and a truncated ``stdout`` alongside ``stderr`` so the
+        "exit 0 but blank/whitespace-only output" path (where ``stderr`` is
+        typically empty) is distinguishable from a genuine non-zero exit.
+        """
         _log.warning(
             "monitor.pre_push_validation_fix_reparent_failed",
             workspace_id=workspace_id,
             pass_number=pass_number,
             git_step=git_step,
+            ok=result.ok,
+            stdout=(result.stdout or "")[:400],
             stderr=(result.stderr or "")[:400],
         )
 
