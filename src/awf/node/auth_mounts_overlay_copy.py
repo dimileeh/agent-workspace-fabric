@@ -222,9 +222,13 @@ def _safe_agent_file_equal_content(agent_root: Path, rel: Path, trusted_file: Pa
     :func:`_safe_overlay_copy` uses for its agent-controlled source — and the leaf is
     opened relative to its parent ``dir_fd`` with ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK``
     plus an ``S_ISREG`` ``fstat`` guard: ``O_NOFOLLOW`` rejects a swapped symlink at the
-    leaf *or any descended parent* (``ELOOP``), ``O_NONBLOCK`` makes a reader-less FIFO
-    fail (``ENXIO``) instead of blocking, and the ``S_ISREG`` guard refuses any other
-    non-regular leaf (e.g. a FIFO with a live reader) before a byte is read.
+    leaf *or any descended parent* (``ELOOP``), ``O_NONBLOCK`` guarantees the open
+    itself never blocks on a special leaf (a device/FIFO open can otherwise wait), and
+    the ``S_ISREG`` ``fstat`` guard is what actually refuses any non-regular leaf — a
+    FIFO (reader-less *or* with a live reader), device, or socket — before a byte is
+    read. (A read-only FIFO open succeeds regardless of whether a writer is attached;
+    ``ENXIO`` only applies to a *write*-side open of a reader-less FIFO, so
+    ``O_NONBLOCK`` is a non-blocking safeguard here, not the FIFO rejection itself.)
     ``trusted_file`` is the live host ``~/.claude`` copy (non-agent), so it keeps the
     plain streamed read.
 
