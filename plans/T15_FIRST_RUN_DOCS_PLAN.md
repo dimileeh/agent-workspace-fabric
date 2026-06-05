@@ -930,6 +930,57 @@ git diff --check
 # No whitespace errors.
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbuNN`
+
+Problem statement and scope:
+Getting Started package/virtualenv first-run instructions URL-encode the
+host-side `AWF_DATABASE_URL`, but they still persist the raw
+`AWF_POSTGRES_PASSWORD` for Compose. `docker/compose/local-service.yml` embeds
+that raw password in the Core container database URL, so URL syntax characters
+such as `/`, `#`, or `@` can break startup. Quickstart already rejects those
+package-lane passwords. Keep this repair scoped to mirroring that Quickstart
+guard in `docs/GETTING_STARTED.md`, the focused Getting Started docs
+regression, and these T15 artifacts.
+
+Requirements checklist:
+
+- Getting Started must tell package-manager and virtualenv users that custom
+  `AWF_POSTGRES_PASSWORD` values are limited to URL-safe unreserved characters
+  while the Compose Core URL embeds the raw password.
+- The package/virtualenv first-run snippet must reject non-URL-safe passwords
+  before persisting `.env`.
+- URL-safe custom passwords must continue to persist the API token, Postgres
+  password, host port, and URL-encoded host-side database URL.
+- Do not edit unowned protected Compose configuration, run full AWF/GitHub-owned
+  validation, full coverage, frontend builds, pushes, rebases, or
+  branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Update the focused Getting Started package-lane regression so URL-safe
+   passwords pass and Compose-unsafe URL characters fail before `.env` is
+   written.
+2. Add the Quickstart-style URL-safe preflight and matching prose to
+   `docs/GETTING_STARTED.md`.
+3. Run the targeted Getting Started docs regression, copy-paste snippet syntax
+   check, focused ruff check for the touched test file, and `git diff --check`.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_getting_started_package_first_run_rejects_compose_url_unsafe_password -q
+# Red phase fails before the Getting Started update; final result passes.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_guides_status.py::test_getting_started_package_first_run_rejects_compose_url_unsafe_password tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# Focused docs checks pass.
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_guides_status.py
+# All checks pass.
+
+git diff --check
+# No whitespace errors.
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbUIQ`
 
 Problem statement and scope:

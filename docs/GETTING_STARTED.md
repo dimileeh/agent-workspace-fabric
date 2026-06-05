@@ -97,12 +97,32 @@ For package-manager or virtualenv installs:
 Run from the directory where AWF should keep the package-lane `.env`.
 `.env.example` stays inside the installed package assets, so create `.env` from
 generated local service values. Persist an escaped dotenv copy of the Postgres
-password for Compose, while `AWF_DATABASE_URL` receives a URL-encoded copy:
+password for Compose, while `AWF_DATABASE_URL` receives a URL-encoded copy. If
+you override `AWF_POSTGRES_PASSWORD` in this lane, use only URL-safe unreserved
+characters: letters, digits, `.`, `_`, `-`, and `~`. The snippet rejects values
+such as `/`, `#`, or `@` before writing `.env` because the current Compose
+service URL also embeds that password:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+if ! python3 - <<'PY'
+from os import environ
+from urllib.parse import quote
+
+value = environ["AWF_POSTGRES_PASSWORD"]
+if "\n" in value or "\r" in value:
+    raise SystemExit("AWF_POSTGRES_PASSWORD cannot contain newlines")
+if quote(value, safe="") != value:
+    raise SystemExit(
+        "AWF_POSTGRES_PASSWORD must be URL-safe for package-lane Compose database URLs; "
+        "use only letters, digits, '.', '_', '-', or '~'"
+    )
+PY
+then
+  exit 1
+fi
 awf_postgres_password_urlencoded="$(python3 -c 'from os import environ; from urllib.parse import quote; print(quote(environ["AWF_POSTGRES_PASSWORD"], safe=""))')"
 awf_postgres_password_dotenv="$(
   python3 - <<'PY'

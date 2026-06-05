@@ -2626,6 +2626,49 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbuNN`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/GETTING_STARTED.md` package/virtualenv first-run prose now
+  limits custom `AWF_POSTGRES_PASSWORD` values to URL-safe unreserved
+  characters while the Compose Core URL embeds the raw password.
+- Complete: The package/virtualenv first-run snippet now rejects password
+  values such as `/`, `#`, or `@` before URL generation or `.env` persistence,
+  mirroring the Quickstart preflight.
+- Complete: URL-safe custom passwords still persist `AWF_API_TOKEN`,
+  `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and the URL-encoded
+  host-side `AWF_DATABASE_URL`.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/GETTING_STARTED.md`
+- `tests/unit/docs/test_public_docs_guides_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_getting_started_package_first_run_rejects_compose_url_unsafe_password -q
+# Red phase before docs update: failed because the unsafe password path returned
+# 0 and wrote `.env`.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_guides_status.py::test_getting_started_package_first_run_rejects_compose_url_unsafe_password tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 3 passed in 0.93s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_guides_status.py
+# All checks passed!
+
+git diff --check
+# no output
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbUIQ`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.

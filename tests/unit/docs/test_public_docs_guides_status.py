@@ -76,6 +76,7 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     package_api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
     package_password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     package_host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
+    package_password_urlsafe_check = "AWF_POSTGRES_PASSWORD must be URL-safe"
     package_password_dotenv_export = 'awf_postgres_password_dotenv="$('
     package_env_tmp = 'awf_env_tmp="$(mktemp)"'
     package_password_persist = (
@@ -88,6 +89,7 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     assert package_api_export in package_section
     assert package_password_export in package_section
     assert package_host_port_export in package_section
+    assert package_password_urlsafe_check in package_section
     assert PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE in package_section
     assert package_password_dotenv_export in package_section
     assert "AWF_POSTGRES_PASSWORD cannot contain newlines" in package_section
@@ -104,6 +106,9 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     assert package_persist_target in package_section
     assert package_section.index(package_api_export) < package_section.index(package_env_tmp)
     assert package_section.index(package_password_export) < package_section.index(
+        package_password_urlsafe_check,
+    )
+    assert package_section.index(package_password_urlsafe_check) < package_section.index(
         PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE,
     )
     assert package_section.index(PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE) < (
@@ -126,10 +131,10 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         ), f"{label} must create root .env before setup"
 
 
-def test_getting_started_package_first_run_url_encodes_custom_postgres_password(
+def test_getting_started_package_first_run_rejects_compose_url_unsafe_password(
     tmp_path: Path,
 ) -> None:
-    """Assert Getting Started package first-run env matches Quickstart escaping."""
+    """Assert Getting Started rejects passwords unsafe for Compose URL parsing."""
     from awf.service.environment import compose_env_file_values
 
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
@@ -154,33 +159,56 @@ def test_getting_started_package_first_run_url_encodes_custom_postgres_password(
     ]
     assert len(bash_fences) == 1
     env_persist_script = bash_fences[0].body.split("\nawf setup\n", maxsplit=1)[0]
-    custom_password = 'p@ss/word:with $dollar #hash "quote" \\path'
-    expected_url = f"postgresql+asyncpg://awf:{quote(custom_password, safe='')}@localhost:5433/awf"
+    safe_password = "safe.Password_123-~"
+    expected_url = f"postgresql+asyncpg://awf:{quote(safe_password, safe='')}@localhost:5433/awf"
     expected_dotenv_password = (
-        '"' + custom_password.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+        '"' + safe_password.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
     )
     script = "\n".join(
         (
-            f"export AWF_POSTGRES_PASSWORD={shlex.quote(custom_password)}",
+            f"export AWF_POSTGRES_PASSWORD={shlex.quote(safe_password)}",
             env_persist_script,
         )
     )
+    safe_dir = tmp_path / "safe"
+    safe_dir.mkdir()
 
     result = subprocess.run(  # noqa: S602
         ["bash", "-c", script],
-        cwd=tmp_path,
+        cwd=safe_dir,
         check=False,
         capture_output=True,
         text=True,
     )
 
     assert result.returncode == 0, result.stderr
-    env_file = tmp_path / ".env"
+    env_file = safe_dir / ".env"
     env_text = env_file.read_text(encoding="utf-8")
     assert f"AWF_POSTGRES_PASSWORD={expected_dotenv_password}\n" in env_text
     assert f"AWF_DATABASE_URL={expected_url}\n" in env_text
-    assert compose_env_file_values(env_file, environ={})["AWF_POSTGRES_PASSWORD"] == custom_password
-    assert custom_password not in env_text.split("AWF_DATABASE_URL=", maxsplit=1)[1]
+    assert compose_env_file_values(env_file, environ={})["AWF_POSTGRES_PASSWORD"] == safe_password
+
+    unsafe_password = 'p@ss/word:with $dollar #hash "quote" \\path'
+    unsafe_script = "\n".join(
+        (
+            f"export AWF_POSTGRES_PASSWORD={shlex.quote(unsafe_password)}",
+            env_persist_script,
+        )
+    )
+    unsafe_dir = tmp_path / "unsafe"
+    unsafe_dir.mkdir()
+
+    unsafe_result = subprocess.run(  # noqa: S602
+        ["bash", "-c", unsafe_script],
+        cwd=unsafe_dir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert unsafe_result.returncode != 0
+    assert "AWF_POSTGRES_PASSWORD must be URL-safe" in unsafe_result.stderr
+    assert not (unsafe_dir / ".env").exists()
 
 
 def test_getting_started_package_first_run_uses_generated_root_env() -> None:
