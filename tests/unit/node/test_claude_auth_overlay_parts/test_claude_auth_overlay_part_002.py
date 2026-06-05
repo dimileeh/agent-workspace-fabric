@@ -49,22 +49,31 @@ from .test_claude_auth_overlay_part_001 import (
 
 @pytest.mark.unit
 def test_prepin_upper_mount_failure_does_not_pin_guessed_base(tmp_path: Path) -> None:
+    # #405 owner decision (supersedes the original "preserve the surviving upper" encoding
+    # of this test): a pre-pin non-empty upper with no ``base.signature`` is *unverifiable*,
+    # and at the decision point — before any mount is attempted — it is indistinguishable
+    # from the reboot-without-pin case. The owner ruled wrong-base-correctness WINS over
+    # credential-preservation for unverifiable bases, so the unpinned upper is DISCARDED and
+    # rebuilt rather than remounted over a guessed base. The mount then fails (modelling a
+    # transient fault), so provisioning still degrades to the legacy full copy AND still
+    # writes no post-mount pin (point 5: no durable pre-mount pin). The discard is made loud
+    # via ``CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT``; no operator-visible
+    # credential loss because ~/.claude is re-derived from the current host.
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
     _seed_host_claude(host_home)
 
     # A pre-pin overlay left by an older build: ``upper``/``work`` survive but no
     # ``base.signature`` marker was ever recorded, so the original base the
-    # surviving ``upper`` was built against is unknowable.
+    # surviving ``upper`` was built against is unknowable (unverifiable).
     claude_root = work_dir / "auth" / "ws_prepin" / "claude"
     (claude_root / "upper").mkdir(parents=True)
     (claude_root / "work").mkdir(parents=True)
     surviving = claude_root / "upper" / "settings.json"
     surviving.write_text('{"theme": "agent-edited"}\n')
 
-    # The mount fails (the surviving upper does not line up with the freshly
-    # hashed host base) and ``merged`` never goes live.
-    mounter = FakeOverlayMounter(supported=True, mount_error=OSError("upper/base mismatch"))
+    # The mount fails (transient fault) and ``merged`` never goes live.
+    mounter = FakeOverlayMounter(supported=True, mount_error=OSError("transient mount failure"))
 
     with capture_logs() as logs:
         mounts = resolve_service_auth_mounts(
@@ -76,15 +85,18 @@ def test_prepin_upper_mount_failure_does_not_pin_guessed_base(tmp_path: Path) ->
         )
 
     by_target = {m.target: m for m in mounts}
-    # Degraded to the legacy full copy; the surviving upper is preserved for a
-    # future retry to recover.
+    # Degraded to the legacy full copy (the mount failed).
     assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
-    assert surviving.read_text() == '{"theme": "agent-edited"}\n'
     assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
-    # The signature marker must NOT be left pinning a base the mount never
-    # validated against. The recorded signature was only a guess from the current
-    # host hash; persisting it would lock every later retry to the wrong lowerdir
-    # so the surviving upper could never remount (even after the host reverts).
+    # The unverifiable upper was discarded (its agent edit is gone) rather than preserved
+    # to be remounted over a guessed base later — and the discard is loud and auditable.
+    assert not surviving.exists()
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
+        for entry in logs
+    )
+    # The signature marker must NOT be written: the mount never established the overlay,
+    # so no post-mount pin exists (point 5 — no durable pre-mount pin).
     assert not (claude_root / "base.signature").exists()
 
 
