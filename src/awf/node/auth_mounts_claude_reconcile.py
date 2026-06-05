@@ -1,0 +1,587 @@
+"""Fallback-edit/deletion reconciliation for the Claude auth overlay (#381/#402/#404).
+
+Split out of :mod:`awf.node.auth_mounts_claude` as a dependency-free leaf (it
+imports only the capability probes and the symlink-safe overlay copy/stat
+helpers, never the orchestrator module) to keep that module under the first-party
+line limit. When a transient remount failure degrades a provision to the legacy
+full copy, the agent may mutate Claude auth/config in that copy; once the overlay
+later remounts, ``merged`` (``upper`` over ``base``) shadows the legacy copy and
+the caller reaps it. These passes forward the fallback-era *edits* and confident
+*deletions* into the overlay ``upper`` first, so they survive the remount.
+
+:mod:`awf.node.auth_mounts_claude` re-exports the public reconcile entry point and
+:mod:`awf.node.auth_mounts` re-exports it in turn, so
+``awf.node.auth_mounts.<name>`` stays the stable import surface for callers/tests.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+from pathlib import Path
+
+from awf.common.logging import get_logger
+from awf.node.auth_mounts_caps import _has_cap_mknod
+from awf.node.auth_mounts_overlay_copy import (
+    _legacy_path_confidently_absent as _legacy_path_confidently_absent,
+)
+from awf.node.auth_mounts_overlay_copy import (
+    _safe_agent_file_equal_content as _safe_agent_file_equal_content,
+)
+from awf.node.auth_mounts_overlay_copy import _safe_files_equal_content as _safe_files_equal_content
+from awf.node.auth_mounts_overlay_copy import _safe_mtime_ns as _safe_mtime_ns
+from awf.node.auth_mounts_overlay_copy import _safe_overlay_copy as _safe_overlay_copy
+from awf.node.auth_mounts_overlay_copy import _safe_overlay_whiteout as _safe_overlay_whiteout
+from awf.node.auth_mounts_overlay_copy import _safe_stat as _safe_stat
+
+_log = get_logger(__name__)
+
+# Per-workspace Claude/Gemini auth copies must exclude historical usage/transcript
+# dirs. Otherwise ``ccusage`` (which reads these local files) would attribute the
+# host's prior usage to the workspace run; baseline/delta still guards totals, but
+# excluding the copy keeps the workspace from seeing unrelated host transcripts and
+# avoids copying potentially large history trees.
+_CLAUDE_USAGE_HISTORY_DIRS = ("projects", "todos", "shell-snapshots", "statsig")
+# Logged once per reconcile when a fallback-era deletion *could* be forwarded as an
+# overlayfs whiteout (host confirms the base copy is unchanged, so the legacy
+# absence is a confident agent deletion) but the worker lacks ``CAP_MKNOD`` to create
+# the whiteout device. The deletion is simply not forwarded — the credential stays
+# visible (fail-safe) — but the gap is surfaced so a capability misconfiguration on a
+# host that should hold ``CAP_MKNOD`` is diagnosable rather than silent.
+_CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE = "CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE"
+# Logged once per reconcile when a fallback-era deletion *could* be forwarded and
+# ``CAP_MKNOD`` is present, yet the ``mknod`` is still refused at the filesystem level
+# (e.g. an ``upper`` tmpfs/filesystem without char-device support). Distinct from the
+# capability-missing case above: here the probe passed, so the failure would otherwise
+# be silent. The deletion is not forwarded — the credential stays visible (fail-safe) —
+# but the gap is surfaced so the un-forwarded deletion is diagnosable. Reserved for a
+# genuine *filesystem* refusal: an agent-planted intermediate symlink in ``upper`` that
+# would block :func:`_safe_overlay_whiteout`'s ``O_NOFOLLOW`` descent (``ELOOP``) is
+# instead caught earlier by the symlink-safe upper-entry guard and deferred to as agent
+# overlay state, so it never reaches — and never mis-fires — this signal.
+_CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED = "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED"
+# Logged once when the fallback-era *deletion* pass is skipped because the reused
+# legacy ``.claude`` copy carries no completeness marker — it may be a *partial*
+# pre-atomic-staging copy whose never-copied files would otherwise read as confident
+# agent deletions and whiteout still-valid lower credentials. Skipping forwards no
+# deletions (the credential stays visible — fail-safe); the edit pass still runs. The
+# gap is surfaced so a copy that *should* have been marked complete is diagnosable.
+_CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY = (
+    "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
+)
+
+
+def _legacy_is_unedited_host_copy(
+    legacy: Path, rel: Path, legacy_stat: os.stat_result, host_file: Path
+) -> bool:
+    """True when ``legacy / rel`` is byte/mtime-identical to the live host ``host_file``.
+
+    The legacy ``~/.claude`` copy is materialized via ``copytree(symlinks=False)``
+    using ``copy2``, which preserves the host's ``st_mtime_ns`` and ``st_size``. So a
+    legacy file whose mtime *and* size still match the live host **and** whose bytes are
+    identical to it is an **unedited** host-origin copy the agent never touched; one that
+    diverges (different mtime, size, *or* content) is an agent fallback-era edit. #404
+    uses this to refuse overwriting an agent's overlay-era ``upper`` edit with an unedited
+    copy of a host that merely changed *after* the edit — the reviewer's case, where the
+    fallback copy carries a newer host mtime yet the agent never edited it.
+
+    The byte compare is not redundant with mtime + size: a same-length agent fallback
+    edit whose timestamp aligns with the live host (a ``touch -r`` or a coincidental ns
+    match on a fixed-width token rewrite) would otherwise read as "unedited" and be
+    *skipped* for forwarding — the legacy copy is then reaped and the agent's newer
+    credential never reaches ``upper``. Comparing content against the live host closes
+    that window, symmetric with the #402 deletion pass's
+    :func:`_safe_files_equal_content` guard.
+
+    Returns ``False`` when the host file is absent, unstattable, or unreadable, or when
+    either side cannot be read byte-for-byte: divergence then cannot be *disproven*, so
+    the caller treats the legacy file as an agent edit (eligible to forward, preserving
+    the tested fallback re-edit forwarding). The fail-safe that protects the agent's
+    ``upper`` edit fires only on a *positive* host match — it never hides or drops a
+    credential, it only declines to clobber a provably-unedited file over an existing
+    overlay-era edit.
+    """
+
+    host_stat = _safe_stat(host_file)
+    if host_stat is None:
+        return False
+    if host_stat.st_mtime_ns != legacy_stat.st_mtime_ns or host_stat.st_size != legacy_stat.st_size:
+        return False
+    # mtime + size match, but that is not proof of byte-identity (see docstring): a
+    # same-length agent edit with an aligned timestamp would slip through. Only a
+    # byte-for-byte match with the live host proves the legacy file is unedited and may
+    # protect the existing ``upper`` edit; any divergence (or an unreadable side, which
+    # fails safe to ``False``) leaves it eligible to forward.
+    #
+    # ``legacy / rel`` lives under the agent-writable legacy copy, and the caller's
+    # ``is_file()`` pre-check is not atomic with this read: an agent can swap the file —
+    # *or any of its parent directories* — for a symlink or a reader-less FIFO in the
+    # window, which a plain ``open("rb")`` would follow out of tree or block on forever.
+    # Pass the trusted ``legacy`` root + ``rel`` so the agent path is descended
+    # component-by-component with fd-anchored ``O_NOFOLLOW`` (the same descent
+    # :func:`_safe_overlay_copy` uses) rather than opened by full path, where
+    # ``O_NOFOLLOW`` would guard only the leaf and a swapped parent could redirect the
+    # read out of tree; ``host_file`` is the trusted live host.
+    return _safe_agent_file_equal_content(legacy, rel, host_file)
+
+
+def _forward_fallback_deletions_as_whiteouts(
+    *, legacy: Path, upper: Path, base: Path, host_claude: Path
+) -> None:
+    """Forward fallback-era *deletions* into the overlay ``upper`` as whiteouts (#402).
+
+    The edit/addition walk in :func:`_reconcile_fallback_edits_into_upper` only sees
+    files that still *exist* under ``legacy``; a Claude auth/config file the agent
+    *removed* during a transient-fallback session is invisible there, and after the
+    overlay remounts the lower ``base`` re-exposes it. This second pass walks ``base``
+    for entries the legacy copy no longer holds and, when the removal can be
+    **confidently** attributed to the agent, records an overlayfs whiteout in
+    ``upper`` so the deletion survives the remount.
+
+    This rests on the legacy copy being *complete*: ``base``-present/``legacy``-absent
+    is read as an agent deletion, so a legacy tree truncated by an interrupted copy
+    would falsely flag every never-copied file as deleted and whiteout still-valid
+    lower credentials. Completeness is enforced two ways. (1) The caller materializes
+    *new* legacy copies atomically — ``copytree`` into a staging dir then an atomic
+    ``replace`` into ``.claude`` — so a freshly-built ``.claude`` only ever exists as a
+    whole copy. (2) Atomic staging cannot retroactively complete a ``.claude`` left
+    *partial* by a pre-atomic-staging provision (an interrupted plain ``copytree`` that
+    landed straight in ``.claude``); the ``exists()`` reuse guard adopts such a tree
+    with no completeness check. So this pass runs **only when the caller proves the copy
+    complete** — it passes ``forward_deletions`` to
+    :func:`_reconcile_fallback_edits_into_upper` gated on the completeness marker dropped
+    after an atomic materialization (see the legacy branch of
+    :func:`resolve_service_auth_mounts`). An unmarked copy skips this pass entirely and
+    its absences stay visible (fail-safe). Without that gate the confident-deletion
+    inference below would be unsound for a reused partial tree.
+
+    Credential safety is paramount: a misclassified deletion must never *hide* a
+    still-needed credential, so every ambiguous case fails safe toward leaving the
+    base copy visible. A removal is whiteouted only when *all* hold:
+
+    - ``upper`` has no entry for the path (any type) **and** no agent-planted
+      symlink/non-directory occupies one of the path's parent components in ``upper``
+      (checked symlink-safely via :func:`_legacy_path_confidently_absent`, not a plain
+      ``lstat`` that would follow an intermediate link). The agent's overlay state is
+      otherwise authoritative — defer, never double-handle it; this also keeps an
+      intermediate-symlink case from reaching (and being mis-logged by)
+      :func:`_safe_overlay_whiteout`.
+    - The live host ``~/.claude`` still holds the path **unchanged** from ``base`` —
+      same ``st_mtime_ns`` + ``st_size`` + ``st_mode`` **and** byte-for-byte identical
+      content (see :func:`_safe_files_equal_content`). ``st_mode`` is base-significant
+      (the copy is ``copytree(copy2)``, which preserves permission bits, and
+      :func:`_host_claude_signature` keys on mode too), so a post-build ``chmod`` —
+      which bumps ``ctime`` only, leaving size/mtime/content identical — must read as a
+      host change. That proves the base copy is current, so the
+      legacy copy's absence is a genuine agent deletion — mirroring normal overlay
+      semantics where an agent deletion through ``merged`` hides the lower. The content
+      check is not redundant with mtime + size: a host that rotates a credential to
+      same-length bytes and restores the old timestamp (``touch -r``, or a
+      timestamp-preserving sync) would otherwise read as "unchanged" and have its
+      *new, valid* credential hidden by the whiteout — the content compare closes that
+      window in this credential-hiding direction.
+    - ``CAP_MKNOD`` is available to create the whiteout device.
+
+    Every other shape is ambiguous and **not** whiteouted: the host *lacking* the
+    path (the host may itself have removed it — the legacy absence is then
+    host-explained, not agent-attributable), the host holding a *changed* version
+    (re-added / edited — detected by a differing mtime, size, mode, *or* content), or a
+    missing capability. In each case the deletion is simply not forwarded and the
+    base's copy stays visible — the only safe direction.
+
+    ``os.walk`` here uses the default ``followlinks=False`` and the base tree holds no
+    symlinks (it is built via ``copytree(symlinks=False)``), so no agent-controlled
+    link is ever traversed; the whiteout itself is created with a symlink-safe,
+    ``CAP_MKNOD``-guarded descent in :func:`_safe_overlay_whiteout`. The "present in
+    legacy" check that classifies a base entry as deleted is likewise symlink-safe
+    (:func:`_legacy_path_confidently_absent`): a plain ``lstat`` of ``legacy / rel`` would
+    follow an agent-planted *intermediate* directory symlink and misread files under a
+    redirected subdir as deleted — symmetric now with the edit walk's
+    ``followlinks=False``, so only a leaf absent under a chain of real directories is
+    forwarded. Best-effort: a
+    capability-less worker that *would* have whiteouted at least one confident
+    deletion logs once (``CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE``), and a worker that
+    *has* ``CAP_MKNOD`` yet still has ``mknod`` refused by the filesystem logs once too
+    (``CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED``) so neither gap is silent, but neither ever
+    blocks provisioning.
+
+    Scope — *whole-directory* deletions are not fully hidden. This walks ``base`` for
+    *files* only (``for name in files``) and writes a per-file char-device whiteout for
+    each. When the agent deleted an entire directory during the fallback session (so the
+    directory is absent from ``legacy`` altogether), each contained file is whiteouted
+    individually, which first ``mkdir``s the directory in ``upper``; after the remount
+    overlayfs shows ``merged/dir`` as an *empty* directory rather than hiding it (fully
+    hiding a lower directory needs a char-device ``0,0`` placed *at* ``upper/dir`` itself,
+    replacing the entry). This is fail-safe (it never exposes a credential the agent
+    deleted — at most an empty husk remains) and, for Claude's auth layout — individual
+    credential files, not whole directories, are the deletion target — does not matter in
+    practice. Partial-directory deletions are handled correctly.
+
+    Known limitation (residual TOCTOU between the content check and the whiteout):
+    :func:`_safe_files_equal_content` reads ``base / rel`` and ``host_claude / rel`` to
+    confirm byte-for-byte equality and *then* returns, after which
+    :func:`_safe_overlay_whiteout` creates the ``mknod``. Between that last host byte read
+    and the ``mknod``, the host could complete a credential rotation: the *old* bytes
+    matched (so the rotation-defense content check passed), yet the freshly-written token
+    is what a live agent would now need — and the whiteout will hide it. The content check
+    closes the ``touch -r`` / same-length-rotation window *up to* its own read, not the
+    sub-microsecond gap after it, which is bounded to a scheduled host sync landing exactly
+    inside this per-file window. This is accepted as best-effort: like the other ambiguous
+    cases it biases toward the credential staying visible at decision time, and the
+    base-pin/rebuild mechanism re-detects the stale base and recovers the rotated
+    credential on the next provision rather than trusting it across reboots.
+    """
+
+    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
+    has_cap_mknod = _has_cap_mknod()
+    skipped_for_capability = False
+    whiteout_failed_despite_cap = False
+    for root, dirs, files in os.walk(base):
+        root_path = Path(root)
+        # Mirror the base copy's usage-history exclusion (kept for symmetry: those
+        # dirs are absent from base anyway, so this never prunes a real candidate).
+        dirs[:] = [d for d in dirs if d not in excluded]
+        for name in files:
+            rel = (root_path / name).relative_to(base)
+            # Present in legacy (as anything) → not a deletion; the edit walk owns it.
+            # Use a symlink-safe descent rather than ``_safe_stat(legacy / rel,
+            # follow_symlinks=False)``: ``lstat`` declines to follow only the *leaf*
+            # symlink, while every intermediate component is still resolved by the OS. An
+            # agent-planted directory symlink in the legacy copy (e.g. ``legacy/subdir ->
+            # /empty_dir``) would otherwise make ``subdir/secret.json`` read as absent and
+            # be whiteouted — hiding a credential the agent never explicitly removed,
+            # breaking the ambiguous-→-keep-visible guarantee and inverting the edit walk's
+            # ``os.walk(legacy, followlinks=False)`` protection. Only a leaf genuinely
+            # absent under a chain of *real* directories is a confident deletion.
+            if not _legacy_path_confidently_absent(legacy, rel):
+                continue
+            # ``upper`` already holds an entry (file or whiteout), *or* an agent-planted
+            # symlink/non-directory occupies one of ``rel``'s parent components in
+            # ``upper``: either way the agent's overlay state is authoritative — defer,
+            # never double-handle it. A plain ``_safe_stat(upper / rel,
+            # follow_symlinks=False)`` is *not* enough here: ``lstat`` declines to follow
+            # only the *leaf*, so an agent-planted *intermediate* directory symlink
+            # (``upper/subdir -> /empty``) resolves ``subdir/secret.json`` *through* the
+            # link, sees it absent at the redirect target, and falls through to
+            # :func:`_safe_overlay_whiteout` — whose ``O_NOFOLLOW`` descent then correctly
+            # rejects the symlink (``ELOOP``) and returns ``False``, which would be
+            # *mis*-surfaced as ``CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED`` (a signal reserved
+            # for a genuine filesystem ``mknod`` refusal) and mislead an operator toward a
+            # filesystem problem. The fd-anchored :func:`_legacy_path_confidently_absent`
+            # descends ``upper``'s parents from the trusted root with ``O_NOFOLLOW`` and is
+            # *confidently absent* only when every parent is a real directory and the leaf
+            # is genuinely missing; an intermediate symlink/non-dir reads as "not
+            # confidently absent" → an agent overlay entry to defer to, symmetric with the
+            # legacy-absence guard above. (Its ``legacy`` name reflects only where it was
+            # first needed; it is a generic "absent under a chain of real dirs from a
+            # trusted root" probe.)
+            if not _legacy_path_confidently_absent(upper, rel):
+                continue
+            # Host-divergence disambiguation: only a base still matched byte-for-byte
+            # by the live host proves the legacy absence is a confident agent deletion.
+            base_stat = _safe_stat(base / rel)
+            host_stat = _safe_stat(host_claude / rel)
+            if base_stat is None or host_stat is None:
+                # Base unstattable (raced) or host lacks the path (ambiguous: the host
+                # may have removed it). Fail safe — keep the credential visible.
+                continue
+            if (
+                host_stat.st_mtime_ns != base_stat.st_mtime_ns
+                or host_stat.st_size != base_stat.st_size
+                or host_stat.st_mode != base_stat.st_mode
+            ):
+                # Host changed the path since the base was built (re-added / edited):
+                # the legacy absence is no longer a confident agent deletion. Fail safe.
+                # ``st_mode`` is base-significant: the base copy is built with
+                # ``copytree(copy2)``, which preserves permission bits, and
+                # :func:`_host_claude_signature` already treats a mode change as a fresh
+                # base. A post-build ``chmod`` on the host leaves ``st_mtime_ns`` and
+                # ``st_size`` untouched (it bumps ``ctime`` only) with byte-identical
+                # content, so mtime+size+content alone would read "host == base" and
+                # whiteout a path the host actively modified. Including the mode keeps
+                # this guard symmetric with the signature and biases toward keeping the
+                # live credential visible.
+                continue
+            if not _safe_files_equal_content(base / rel, host_claude / rel):
+                # mtime + size matched but the *bytes* differ: the host rotated the
+                # credential to same-length content while preserving the old timestamp
+                # (e.g. a ``touch -r`` after a same-length rewrite, or a timestamp-
+                # preserving sync). The live host therefore holds a different, currently
+                # valid credential — whiteouting would *hide* it. The legacy absence is
+                # no longer a confident agent deletion. Fail safe — keep it visible.
+                continue
+            if not has_cap_mknod:
+                # A confident agent deletion we cannot forward without ``CAP_MKNOD``.
+                # Leave the credential visible and surface the capability gap once.
+                skipped_for_capability = True
+                continue
+            if not _safe_overlay_whiteout(upper, rel):
+                # ``CAP_MKNOD`` is present but the ``mknod`` was still refused by the
+                # filesystem (e.g. an ``upper`` tmpfs without char-device support). The
+                # deletion is not forwarded — the credential stays visible (fail-safe) —
+                # but, unlike the missing-capability path, this would otherwise be
+                # entirely silent. Flag it for one diagnostic log below so an operator
+                # investigating an un-forwarded deletion has a signal beyond the probe.
+                whiteout_failed_despite_cap = True
+    if skipped_for_capability:
+        _log.info(
+            "claude_auth_overlay_whiteout_incapable",
+            reason_code=_CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE,
+            workspace_auth_root=str(upper.parent),
+        )
+    if whiteout_failed_despite_cap:
+        _log.warning(
+            "claude_auth_overlay_whiteout_failed",
+            reason_code=_CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
+            workspace_auth_root=str(upper.parent),
+        )
+
+
+def _reconcile_fallback_edits_into_upper(
+    *,
+    legacy: Path,
+    merged: Path,
+    upper: Path,
+    base: Path,
+    host_claude: Path,
+    forward_deletions: bool = False,
+) -> None:
+    """Forward fallback-era legacy edits into the overlay before reaping it.
+
+    Closes #381: when a surviving non-empty ``upper`` exists but a transient remount
+    failure degraded a provision to the legacy full copy, the agent may have mutated
+    Claude auth/config in that legacy copy. When the overlay later remounts,
+    ``merged`` (``upper`` over ``base``) shadows the legacy copy and the caller
+    ``rmtree``s it — dropping those fallback edits. This reconciles them first.
+
+    The forwarded copies are written **through the live ``merged`` mount**, never
+    directly into the underlying ``upper`` dir. By the time this runs the overlay is
+    already mounted, and overlayfs treats external writes to the upper/lower trees of
+    a live mount as undefined behavior — files poked straight into ``upper`` can read
+    back stale or invisible through ``merged`` (what the agent actually sees). Writing
+    via ``merged`` lets the kernel perform the copy-up coherently, so the reconciled
+    edit lands in ``upper`` *and* is immediately visible to the agent. The generation
+    comparisons below only *stat* the underlying ``upper``/``base`` (reads are safe);
+    only the copy itself routes through ``merged``.
+
+    Generation/mtime rule, walking every regular file ``rel`` under ``legacy``:
+
+    - It is a **fallback edit** iff ``base[rel]`` is absent OR
+      ``legacy[rel].st_mtime_ns > base[rel].st_mtime_ns``. A *fresh* legacy copy
+      preserves host mtimes via ``copy2``, so an unedited file matches the base and
+      is skipped — this filters the whole baseline tree out, preserving the
+      overlay's disk savings (only the small edited set is ever copied).
+    - A fallback edit is forwarded (via ``merged``) only when ``upper[rel]`` is absent
+      OR ``legacy[rel].st_mtime_ns > upper[rel].st_mtime_ns``. **``upper`` wins ties:**
+      an equal-or-newer upper edit is the agent's authoritative overlay-era change,
+      and only a *strictly newer* legacy edit overwrites it.
+    - **#404 host-divergence guard:** even a strictly-newer legacy file does not
+      overwrite an existing ``upper`` *regular file* unless it provably diverges from
+      the live host ``~/.claude`` (different mtime, size, *or* byte content — see
+      :func:`_legacy_is_unedited_host_copy`). The legacy copy preserves host mtimes via
+      ``copy2``, so a fallback copy that is byte/mtime-identical to a host that merely
+      changed *after* the agent's overlay edit is an *unedited* host copy, not an agent
+      edit; forwarding it would silently drop the agent's overlay-era change. The content
+      compare is not redundant with mtime + size — a same-length agent edit with an
+      aligned timestamp would otherwise read as unedited and be wrongly skipped. The same
+      guard protects an ``upper`` *whiteout* (a char device ``0,0`` recording an agent
+      overlay-era deletion): an unedited host copy must not be forwarded over it either,
+      which would silently un-delete the file (#414). When ``upper[rel]`` is absent, or a
+      symlink/other non-regular non-whiteout entry, there is nothing to protect, so the
+      existing fallback-edit behaviour stands (this preserves the tested fallback-session
+      re-edit forwarding, where the agent-edited legacy diverges).
+
+    ``host_claude`` is the **live** host ``~/.claude`` (the production caller passes
+    ``host_home / ".claude"``); it is the trusted reference for both the #404 guard
+    above and the #402 deletion-forwarding pass below.
+
+    Per-file ``OSError`` is caught and skipped — best-effort, never blocks
+    provisioning. Never logs file contents (no secret leakage). Each copy goes through
+    :func:`_safe_overlay_copy`, which descends with ``O_NOFOLLOW`` file descriptors and
+    opens the leaf relative to the parent ``dir_fd``: ``merged``'s upper layer is
+    agent-controlled, and a name-based copy would follow a planted symlink at any
+    component, so an fd-based descent (no check/use gap) is required to keep this root
+    write inside the ``.claude`` tree.
+
+    *Source* symlinks are likewise refused: a fresh legacy copy is materialized via
+    ``copytree(symlinks=False)`` so it never contains symlinks, but the agent can plant
+    one in its ``rw`` legacy copy during the fallback session. ``copy2`` follows source
+    symlinks by default, which would let this root worker read the link target (possibly
+    outside the ``.claude`` tree) and surface its contents through the agent-visible
+    overlay. Any symlink in the legacy tree is therefore skipped before it is stat'd.
+
+    Known limitation: if the host ``~/.claude`` changed between when the overlay's
+    base was built and when the fallback copy was taken, unedited legacy files may
+    read as "newer than base" and be copied. There is still no data loss (an
+    equal/newer ``upper`` always wins, and the copy is bounded to the differing
+    set); the mtime comparison is intentionally conservative toward preserving edits.
+
+    Fallback-era *deletions* (#402): a separate pass,
+    :func:`_forward_fallback_deletions_as_whiteouts`, runs after this edit walk **only
+    when** ``forward_deletions`` is true. It diffs ``base`` against ``legacy`` and
+    synthesizes an overlayfs whiteout in ``upper`` for each file the agent confidently
+    removed (the live host still matches ``base`` by mtime, size, *and* content), so the
+    removal survives the next remount instead of the lower re-exposing it. Ambiguous
+    removals (host lacks the path, or host changed it — including a same-length,
+    timestamp-preserving credential rotation) and a missing ``CAP_MKNOD`` fail safe
+    toward keeping the credential visible — a misclassified deletion can never *hide* a
+    still-needed credential.
+
+    ``forward_deletions`` is the caller's proof that ``legacy`` is a *complete* copy.
+    It **defaults to ``False``** so the destructive whiteout pass is strictly opt-in:
+    a caller (or future test/utility) that omits the flag gets only the always-safe
+    edit/addition forwarding and never hides a lower credential — the dangerous path
+    must be requested explicitly, matching the fail-safe defaults pervasive elsewhere
+    in this module. A base-present / legacy-absent file is read as a confident agent
+    deletion, which is sound only when every host file was copied into ``legacy`` to
+    begin with. The caller passes ``False`` for a reused legacy copy whose completeness
+    it cannot prove (a
+    partial tree left by a pre-atomic-staging provision and adopted by the ``exists()``
+    reuse guard): the deletion pass is then skipped — its never-copied files would
+    otherwise read as deletions and whiteout still-valid credentials — and only the
+    always-safe edit/addition forwarding above runs. The skip is logged once
+    (``CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY``) so an unexpectedly
+    unmarked copy is diagnosable. Edits never hide a lower credential, so they are
+    forwarded unconditionally.
+
+    Known limitation (edits inside an agent-planted directory symlink are not
+    forwarded): ``os.walk`` runs with the default ``followlinks=False``, so if the
+    agent replaced a subdirectory with a symlink (e.g. ``legacy/.config ->
+    /other/dir``) during the fallback session, the walk lists it in ``_dirs`` but
+    never descends, and files reachable only *through* that link are not yielded or
+    forwarded. This is deliberate, not a regression: descending (``followlinks=True``)
+    would let this root worker read content at the link target — possibly outside the
+    ``.claude`` tree — and surface it through the agent-visible overlay, the same
+    arbitrary root-read primitive the per-file source-symlink skip above guards
+    against. The only "lost" data is content that never lived in the ``.claude`` copy
+    to begin with (it lives at the link target); genuine edits to files in *real*
+    subdirectories are walked and forwarded normally.
+
+    Whiteout un-delete protection (#414): an overlay-era deletion is recorded in
+    ``upper`` as a whiteout character device (``0,0``), and ``_safe_stat`` returns
+    that whiteout's *creation* mtime (when the agent deleted the file). The "upper
+    wins ties" rule only guards equal mtimes, so if the host updates the same path
+    *after* the deletion and the legacy copy inherits that newer mtime,
+    ``legacy_mtime_ns > upper_mtime_ns`` holds. The #404 host-origin guard above is
+    extended to whiteouts, so a legacy file that is a provably-unedited copy of the
+    live host is *not* forwarded over the whiteout — restoring it would silently
+    un-delete what the agent removed. Only a legacy file that diverges from the live
+    host (a genuine fallback-era re-creation, or one whose unedited-ness cannot be
+    disproven) is forwarded over the whiteout — the conservative direction, biased
+    toward keeping a credential visible exactly as the other ambiguous cases are.
+    """
+
+    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
+    for root, dirs, files in os.walk(legacy):
+        root_path = Path(root)
+        # Mirror the base copy's ``ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS)``: the
+        # shared base never holds these usage-history subtrees, so every file in one
+        # reads as ``base_mtime_ns is None`` (an unconditional "fallback edit") and would
+        # be forwarded whole. A long fallback session that filled ``projects/`` with
+        # multi-GB transcripts would otherwise materialise all of it in the overlay upper,
+        # negating the shared-base disk-savings goal. Prune them in place so the walk does
+        # not descend, bounding reconcile to the same scope as the base itself.
+        dirs[:] = [d for d in dirs if d not in excluded]
+        for name in files:
+            legacy_file = root_path / name
+            if legacy_file.is_symlink():
+                # A fresh legacy copy is materialized via ``copytree(symlinks=False)`` and
+                # so never holds symlinks; any symlink here was planted by the (untrusted)
+                # agent in the fallback session (the legacy copy is mounted ``rw`` for it).
+                # ``shutil.copy2`` follows *source* symlinks by default, so the root worker
+                # would read the link target — possibly outside the ``.claude`` tree — and
+                # write its contents into the agent-visible overlay, an arbitrary root-read
+                # primitive. The destination guard below only blocks writes *through* a
+                # dest link, so a source link must be skipped here. Best-effort: drop just
+                # this entry, never block provisioning.
+                continue
+            if not legacy_file.is_file():
+                # Not a regular file: the agent can ``mkfifo`` (or plant a socket/device)
+                # in the ``rw`` legacy copy during the fallback session. ``_safe_mtime_ns``
+                # ``stat``s a FIFO fine, so it would otherwise slip through — but
+                # ``shutil.copy2`` then ``open``s the source for reading, and a FIFO with no
+                # peer writer blocks the root worker *indefinitely*, hanging provisioning
+                # rather than completing the copy. (Not a symlink here — that is skipped
+                # above.) Best-effort: drop just this entry.
+                continue
+            legacy_stat = _safe_stat(legacy_file)
+            if legacy_stat is None:
+                continue
+            legacy_mtime_ns = legacy_stat.st_mtime_ns
+            rel = legacy_file.relative_to(legacy)
+            base_mtime_ns = _safe_mtime_ns(base / rel)
+            is_fallback_edit = base_mtime_ns is None or legacy_mtime_ns > base_mtime_ns
+            if not is_fallback_edit:
+                continue
+            upper_file = upper / rel
+            # ``lstat`` the overlay entry: ``upper`` is agent-controlled and may hold a
+            # planted symlink. Comparing the symlink's *own* mtime (not its target's)
+            # is the semantically correct generation for the "upper wins ties" rule.
+            upper_stat = _safe_stat(upper_file, follow_symlinks=False)
+            if upper_stat is not None:
+                if legacy_mtime_ns <= upper_stat.st_mtime_ns:
+                    # ``upper`` wins ties: an equal-or-newer overlay-era edit stands.
+                    continue
+                # An ``upper`` regular file records an agent overlay-era *edit*; an
+                # overlayfs whiteout (a char device ``0,0``) records an agent overlay-era
+                # *deletion*. Both are agent overlay state the #404 host-origin guard must
+                # protect (#414): the whiteout's ``st_mtime_ns`` is its *creation* mtime,
+                # so a host that changed the path after the deletion can leave the legacy
+                # copy strictly newer and fall through here.
+                upper_is_whiteout = stat.S_ISCHR(
+                    upper_stat.st_mode
+                ) and upper_stat.st_rdev == os.makedev(0, 0)
+                if (
+                    stat.S_ISREG(upper_stat.st_mode) or upper_is_whiteout
+                ) and _legacy_is_unedited_host_copy(legacy, rel, legacy_stat, host_claude / rel):
+                    # The strictly-newer legacy file is byte/mtime-identical to the live
+                    # host, so it is an *unedited* copy of a host that changed after the
+                    # agent's overlay edit/deletion — not an agent fallback-era edit.
+                    # Forwarding it would silently drop the agent's overlay-era ``upper``
+                    # edit, or replace the whiteout through ``merged`` and un-delete the
+                    # file, so fail safe and keep the agent's overlay state. (A symlink or
+                    # other non-regular/non-whiteout ``upper`` entry has nothing to protect
+                    # and falls through to the existing forwarding, preserving the tested
+                    # fallback-session re-edit case.)
+                    continue
+            # Copy via :func:`_safe_overlay_copy`, which descends *both* the destination
+            # (under ``merged``) and the source (under the trusted ``legacy`` root) with
+            # ``O_NOFOLLOW`` file descriptors and opens each leaf relative to its parent
+            # ``dir_fd`` — so an agent-planted symlink at *any* component of either path
+            # cannot redirect this root copy outside the ``.claude`` tree (no name-based
+            # check/use gap). Passing ``legacy`` (not ``legacy_file``) lets the source be
+            # descended component-by-component from a trusted anchor. Best-effort: it
+            # swallows any structural conflict or ``OSError`` and drops just this file.
+            _safe_overlay_copy(merged, rel, legacy)
+
+    # Second pass (#402): forward fallback-era *deletions* as overlayfs whiteouts —
+    # but only when the caller proved ``legacy`` is a *complete* copy. For an unproven
+    # (possibly partial) copy, never-copied files would read as confident deletions and
+    # whiteout still-valid lower credentials, so skip the pass and keep them visible.
+    if not forward_deletions:
+        # Surface the "incomplete legacy" diagnostic only when ``base`` actually holds a
+        # file the deletion pass *would* have evaluated. ``forward_deletions=False`` is the
+        # default and the expected state for every legacy copy that pre-dates the
+        # atomic-staging rollout, so an unconditional log fires once per provision for every
+        # such workspace until it is refreshed — including clean, freshly-minted ones that
+        # simply never got the marker. That drowns the signal for the genuinely-unexpected
+        # case. Mirror the deletion pass's own base walk (same usage-history pruning): an
+        # empty or fully-excluded ``base`` yields no deletion candidate regardless of the
+        # marker, so logging there is pure noise.
+        excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
+        has_deletion_candidate = False
+        for _root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in excluded]
+            if files:
+                has_deletion_candidate = True
+                break
+        if has_deletion_candidate:
+            _log.info(
+                "claude_auth_overlay_deletion_reconcile_skipped_incomplete_legacy",
+                reason_code=_CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY,
+                workspace_auth_root=str(upper.parent),
+            )
+        return
+    _forward_fallback_deletions_as_whiteouts(
+        legacy=legacy, upper=upper, base=base, host_claude=host_claude
+    )
