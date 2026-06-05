@@ -165,11 +165,18 @@ class InstallerHarness:
         ``AWF_UV_INSTALLER`` at a non-existent file, without this helper.
         """
         installer = path if path is not None else (self.root / "uv-installer.sh")
+        # First line of either body logs a ``uv-installer`` sentinel into the
+        # absolute ``calls()`` file the moment the script runs. This makes seam
+        # *invocation* observable independently of its filesystem side-effect, so
+        # the dry-run test can prove the bootstrap was planned-not-run via call
+        # absence rather than relying solely on ``~/.local/bin/uv`` not existing.
+        invoke_sentinel = f'printf \'%s\\n\' "uv-installer $*" >> "{self.log_file}"\n'
         if succeeds:
             uv_stub = self._stub_contents("uv", self._uv_behavior())
             body = (
                 "#!/usr/bin/env bash\n"
                 "set -eu\n"
+                f"{invoke_sentinel}"
                 'target="${UV_INSTALL_DIR:?UV_INSTALL_DIR must be set by the bootstrap}"\n'
                 'mkdir -p "$target"\n'
                 "cat > \"$target/uv\" <<'AWF_UV_STUB_EOF'\n"
@@ -181,6 +188,7 @@ class InstallerHarness:
             body = (
                 "#!/usr/bin/env bash\n"
                 "# Fake uv installer that runs cleanly but installs no uv binary.\n"
+                f"{invoke_sentinel}"
                 "exit 0\n"
             )
         installer.write_text(body, encoding="utf-8")

@@ -131,7 +131,9 @@ def test_bootstrap_uv_opt_in_installs_uv_then_awf(harness: InstallerHarness) -> 
 
     assert result.returncode == 0, result.stderr
     assert "Bootstrapped uv" in result.stdout
-    # The bootstrap honored UV_INSTALL_DIR: the uv stub landed in ~/.local/bin...
+    # The seam installer actually ran (its sentinel proves invocation)...
+    assert "uv-installer" in "\n".join(harness.calls())
+    # ...the bootstrap honored UV_INSTALL_DIR: the uv stub landed in ~/.local/bin...
     assert _bootstrapped_uv(harness)
     # ...and the freshly bootstrapped uv carried the real install through.
     assert "uv tool install" in "\n".join(harness.calls())
@@ -155,7 +157,10 @@ def test_bootstrap_uv_dry_run_plans_without_mutation(harness: InstallerHarness) 
     # The bootstrap is planned...
     assert "bootstrap uv" in result.stdout
     assert "Dry run complete" in result.stdout
-    # ...but the seam installer never ran and nothing was installed.
+    # ...but the seam installer never ran (its sentinel is absent, so the proof
+    # holds even if a future helper variant exited before dropping the binary)
+    # and nothing was installed.
+    assert "uv-installer" not in "\n".join(harness.calls())
     assert not _bootstrapped_uv(harness)
     assert "uv tool install" not in "\n".join(harness.calls())
 
