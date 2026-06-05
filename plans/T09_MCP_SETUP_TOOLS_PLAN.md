@@ -84,6 +84,60 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Client Planning Fallback And Start Step Rewrites
+
+### Problem Statement And Scope
+
+The review reports two remaining safety gaps in
+`src/awf/mcp/setup_tools.py`:
+
+- unexpected exceptions raised while building client integration plans can
+  escape the first planning block instead of returning a structured
+  credential-safe MCP error;
+- the setup-status next-step rewrite runs multiple sequential regex
+  substitutions, so later substitutions can rewrite text inside a newly
+  inserted path.
+
+Scope is limited to those two behaviors and focused regressions.
+
+### Requirements Checklist
+
+- Preserve existing structured client-instruction handling for
+  `SetupCheckError`, `SourceCheckoutError`, `OSError`, `RuntimeError`, and
+  `ValueError`.
+- Convert any other unexpected client planning exception into the same
+  sanitized `CLIENT_CONFIG_CONFLICT` response shape used for planning
+  inspection failures.
+- Preserve normal setup-status next-step rewriting for dry-run and start
+  commands.
+- Prevent later command substitutions from rewriting inside command text
+  inserted by an earlier substitution.
+- Add focused regression coverage for both repaired paths.
+
+### Implementation Steps
+
+1. Add a client-integration regression where `build_client_config_plan` raises
+   an unexpected exception such as `KeyError` containing token-like text.
+2. Add a setup-status regression where the explicit replacement
+   `source_checkout` path contains text that matches the bare-start pattern.
+3. Add a final broad `Exception` fallback to the first client planning block
+   that returns sanitized conflict metadata.
+4. Rewrite setup-status commands in a single pass so replacement command text is
+   not scanned by another command pattern.
+5. Run targeted regressions plus focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_unexpected_exception_is_generic tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_next_steps_do_not_rewrite_inserted_start_command_path -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HP6Qv
 
 ### Problem Statement And Scope

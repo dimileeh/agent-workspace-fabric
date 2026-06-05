@@ -908,6 +908,42 @@ async def test_get_setup_status_source_checkout_next_steps_do_not_duplicate_exis
 
 
 @pytest.mark.unit
+async def test_get_setup_status_source_checkout_next_steps_do_not_rewrite_inserted_start_command_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "awf start to source"
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="source checkout ready",
+        details={
+            "selected_providers": [],
+            "checks": [{"name": "docker", "level": "ok"}],
+        },
+        next_steps=("Run awf start --source-checkout '/old/checkout' to start local AWF Core.",),
+    )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", HostSetupConfig)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+    expected_start_command = f"awf start --source-checkout '{checkout}'"
+
+    assert result.isError is False
+    assert payload["next_steps"] == [
+        f"Run {expected_start_command} to start local AWF Core.",
+    ]
+    assert payload["next_steps"][0].count("--source-checkout") == 1
+
+
+@pytest.mark.unit
 async def test_get_setup_status_source_checkout_blocked_next_steps_preserve_explicit_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

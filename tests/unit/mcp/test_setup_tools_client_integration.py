@@ -299,6 +299,38 @@ async def test_client_integration_instructions_planning_value_error_is_generic(
 
 
 @pytest.mark.unit
+async def test_client_integration_instructions_planning_unexpected_exception_is_generic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "g" * 40
+    leaked_detail = f"missing client descriptor {raw_token}"
+
+    def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyError(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["issues"][0]["details"] == {"error_type": "KeyError"}
+    assert leaked_detail not in rendered
+    assert raw_token not in rendered
+
+
+@pytest.mark.unit
 async def test_client_integration_instructions_success_transformation_failure_is_structured_and_redacted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -81,15 +81,13 @@ PROJECT_INIT_INVALID_PATH = "PROJECT_INIT_INVALID_PATH"
 PROJECT_PROFILE_EXISTS = "PROJECT_PROFILE_EXISTS"
 PROJECT_INIT_FAILED = "PROJECT_INIT_FAILED"
 _LOGGER = logging.getLogger(__name__)
-_SETUP_STATUS_DRY_RUN_STEP_PATTERN = re.compile(
-    r"\bawf setup --dry-run(?P<suffix>[.,;):]|$|\s+to\b)"
-)
-_SETUP_STATUS_START_SOURCE_CHECKOUT_STEP_PATTERN = re.compile(
-    r"\bawf start\s+--source-checkout(?:=|\s+)"
+_SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN = re.compile(
+    r"(?P<setup>\bawf setup --dry-run(?P<setup_suffix>[.,;):]|$|\s+to\b))"
+    r"|(?P<start_source>\bawf start\s+--source-checkout(?:=|\s+)"
     r"(?:'[^']*'|\"[^\"]*\"|\S)+?"
-    r"(?P<suffix>[.,;):](?=\s|$)|$|\s+to\b)"
+    r"(?P<start_source_suffix>[.,;):](?=\s|$)|$|\s+to\b))"
+    r"|(?P<start>\bawf start(?P<start_suffix>[.,;):]|$|\s+to\b))"
 )
-_SETUP_STATUS_START_STEP_PATTERN = re.compile(r"\bawf start(?P<suffix>[.,;):]|$|\s+to\b)")
 
 
 class SafeResult(Protocol):
@@ -640,6 +638,16 @@ def _client_integration_instructions_result(
             ),
             is_error=True,
         )
+    except Exception as exc:
+        return _first_run_result(
+            safe_result,
+            _reason_coded_payload(
+                CLIENT_CONFIG_CONFLICT,
+                "could not inspect existing client MCP configuration",
+                {"error_type": type(exc).__name__},
+            ),
+            is_error=True,
+        )
 
     try:
         blocked = [plan for plan in plans if plan.action == "conflict"]
@@ -930,18 +938,14 @@ def _setup_status_next_step_for_source_checkout(
     setup_command: str,
     start_command: str,
 ) -> str:
-    step = _SETUP_STATUS_DRY_RUN_STEP_PATTERN.sub(
-        lambda match: f"{setup_command}{match.group('suffix')}",
-        step,
-    )
-    step = _SETUP_STATUS_START_SOURCE_CHECKOUT_STEP_PATTERN.sub(
-        lambda match: f"{start_command}{match.group('suffix')}",
-        step,
-    )
-    return _SETUP_STATUS_START_STEP_PATTERN.sub(
-        lambda match: f"{start_command}{match.group('suffix')}",
-        step,
-    )
+    def replace_command(match: re.Match[str]) -> str:
+        if match.group("setup") is not None:
+            return f"{setup_command}{match.group('setup_suffix') or ''}"
+        if match.group("start_source") is not None:
+            return f"{start_command}{match.group('start_source_suffix') or ''}"
+        return f"{start_command}{match.group('start_suffix') or ''}"
+
+    return _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN.sub(replace_command, step)
 
 
 def _setup_status_dry_run_command(
