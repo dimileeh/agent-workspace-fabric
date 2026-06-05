@@ -303,6 +303,13 @@ when `docker/compose/.env` does not yet exist. Select `docker/compose/.env`
 first, then root `.env` as the fallback input before creating the Compose env
 file, while still replacing only the AWF-managed local service keys.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HVgpT`: Getting Started's
+package-manager / virtualenv first-run block must not copy `.env.example`
+because package users run from a normal project or evaluation directory where
+that source-tree file is absent. Mirror the Quickstart package-lane persistence
+pattern: generate the AWF service values, preserve unrelated existing `.env`
+entries through a temporary file, then run bare `awf setup`.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.

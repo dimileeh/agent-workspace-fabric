@@ -94,8 +94,31 @@ add a GitHub token later when you create or monitor PRs.
 
 For package-manager or virtualenv installs:
 
+Run from the directory where AWF should keep the package-lane `.env`.
+`.env.example` stays inside the installed package assets, so create `.env` from
+generated local service values:
+
 ```bash
-cp .env.example .env
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
+awf_env_tmp="$(mktemp)"
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
+  if [ -f .env ]; then
+    sed \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
+      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
+      .env
+  fi
+} > "$awf_env_tmp"
+mv "$awf_env_tmp" .env
 awf setup
 awf start
 awf service status --format pretty

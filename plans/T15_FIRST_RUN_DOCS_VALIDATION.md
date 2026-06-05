@@ -2220,6 +2220,41 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HVgpT`:
+
+- `docs/GETTING_STARTED.md` no longer copies source-checkout `.env.example` in
+  the package-manager / virtualenv first-run lane.
+- That lane now tells package users to run from the directory where AWF should
+  keep package-lane `.env`, then generates `AWF_API_TOKEN`,
+  `AWF_POSTGRES_PASSWORD`, `AWF_POSTGRES_HOST_PORT`, and `AWF_DATABASE_URL`
+  before `awf setup`.
+- Existing unrelated `.env` entries are preserved through the same portable
+  temp-file pattern used by Quickstart's package lane.
+- `tests/unit/docs/test_public_docs_status.py` now rejects Getting Started
+  package/virtualenv first-run snippets that copy `.env.example` and requires
+  generated root `.env` persistence before setup.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env -q
+```
+
+Red-phase result after updating the focused assertions: failed because Getting
+Started still copied `.env.example` in the package/virtualenv first-run block.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env tests/unit/docs/test_public_docs_status.py::test_getting_started_uses_runnable_startup_path tests/unit/docs/test_public_docs_status.py::test_getting_started_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `2 passed in 0.68s`; `5 passed in 0.84s`;
+`All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

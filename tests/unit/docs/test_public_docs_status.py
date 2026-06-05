@@ -1215,15 +1215,11 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     assert package_heading in startup_section
     assert source_global_heading in startup_section
     assert source_no_global_heading in startup_section
-    cases = (
-        (
-            "package-manager or virtualenv installs",
-            startup_section.split(package_heading, maxsplit=1)[1].split(
-                source_global_heading,
-                maxsplit=1,
-            )[0],
-            "\nawf setup\n",
-        ),
+    package_section = startup_section.split(package_heading, maxsplit=1)[1].split(
+        source_global_heading,
+        maxsplit=1,
+    )[0]
+    source_cases = (
         (
             "source checkout with global executable",
             startup_section.split(source_global_heading, maxsplit=1)[1].split(
@@ -1241,8 +1237,35 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
             '\nuv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"\n',
         ),
     )
+    package_api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
+    package_password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
+    package_host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
+    package_database_url_export = (
+        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}'
+        '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+    )
+    package_env_tmp = 'awf_env_tmp="$(mktemp)"'
+    package_persist_target = 'mv "$awf_env_tmp" .env'
+    package_setup_command = "\nawf setup\n"
 
-    for label, section, setup_command in cases:
+    assert "cp .env.example .env" not in package_section
+    assert package_api_export in package_section
+    assert package_password_export in package_section
+    assert package_host_port_export in package_section
+    assert package_database_url_export in package_section
+    assert package_env_tmp in package_section
+    assert "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\"" in package_section
+    assert "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\"" in package_section
+    assert "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\"" in package_section
+    assert "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\"" in package_section
+    assert package_persist_target in package_section
+    assert package_section.index(package_api_export) < package_section.index(package_env_tmp)
+    assert package_section.index(package_env_tmp) < package_section.index(package_persist_target)
+    assert package_section.index(package_persist_target) < package_section.index(
+        package_setup_command,
+    )
+
+    for label, section, setup_command in source_cases:
         assert "cp .env.example .env" in section, f"{label} must create root .env"
         assert "awf_env_tmp" not in section, f"{label} should not use legacy env rewrite"
         assert "docker/compose/.env" not in section, f"{label} should not write compose env"
@@ -1251,8 +1274,8 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         )
 
 
-def test_getting_started_package_first_run_uses_root_env_template() -> None:
-    """Assert Getting Started package first run uses the root `.env` template."""
+def test_getting_started_package_first_run_uses_generated_root_env() -> None:
+    """Assert Getting Started package first run does not copy source-only assets."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
@@ -1268,10 +1291,18 @@ def test_getting_started_package_first_run_uses_root_env_template() -> None:
         maxsplit=1,
     )[0]
 
-    assert "cp .env.example .env" in package_section
-    assert "awf_env_tmp" not in package_section
+    assert "cp .env.example .env" not in package_section
+    assert 'awf_env_tmp="$(mktemp)"' in package_section
+    assert "if [ -f .env ]; then" in package_section
+    assert "AWF_API_TOKEN[[:space:]]*=/d" in package_section
+    assert "AWF_POSTGRES_PASSWORD[[:space:]]*=/d" in package_section
+    assert "AWF_POSTGRES_HOST_PORT[[:space:]]*=/d" in package_section
+    assert "AWF_DATABASE_URL[[:space:]]*=/d" in package_section
     assert "docker/compose/.env" not in package_section
-    assert package_section.index("cp .env.example .env") < package_section.index("\nawf setup\n")
+    assert 'mv "$awf_env_tmp" .env' in package_section
+    assert package_section.index('mv "$awf_env_tmp" .env') < package_section.index(
+        "\nawf setup\n",
+    )
 
 
 def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
