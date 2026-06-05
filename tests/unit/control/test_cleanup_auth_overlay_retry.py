@@ -696,6 +696,59 @@ async def _event_types(session: AsyncSession, workspace_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+async def _mark_runtime_released(repo: WorkspaceRepository, ws: Workspace) -> None:
+    """Write the ``terminal_runtime_released`` event a deferred candidate always carries.
+
+    A ``pending`` overlay marker is co-written with ``terminal_runtime_released`` in the
+    same transaction, so every deferred candidate is effectively released. The marker-write
+    helpers re-check that under the row lock, so the precondition must hold for a write to
+    land — mirror it here.
+    """
+    await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    )
+
+
+async def _mark_runtime_release_revoked(
+    session: AsyncSession, repo: WorkspaceRepository, ws: Workspace
+) -> None:
+    """Make the latest release/revoke event a revocation → not effectively released.
+
+    Models the race the marker-write recheck guards: the candidate was effectively
+    released when listed, then the provisioner superseded the release with a
+    ``terminal_runtime_release_revoked`` (orphan containers still hold the overlay bind)
+    before the deferred retry's marker write runs.
+    """
+    await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    )
+    released_ev = (
+        await session.execute(
+            sa.select(WorkspaceEvent)
+            .where(WorkspaceEvent.workspace_id == ws.id)
+            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        )
+    ).scalar_one()
+    released_ev.occurred_at = datetime(2026, 5, 31, 12, 0, 0, tzinfo=UTC)
+    await repo.add_event(
+        ws,
+        event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    )
+    revoked_ev = (
+        await session.execute(
+            sa.select(WorkspaceEvent)
+            .where(WorkspaceEvent.workspace_id == ws.id)
+            .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE)
+        )
+    ).scalar_one()
+    revoked_ev.occurred_at = datetime(2026, 5, 31, 12, 0, 1, tzinfo=UTC)
+
+
 @pytest.mark.asyncio
 async def test_pending_candidate_query_excludes_resolved_and_exhausted(
     factory: async_sessionmaker[AsyncSession],
@@ -861,6 +914,7 @@ async def test_record_resolved_writes_event_and_dedupes(
     async with factory() as session:
         repo = WorkspaceRepository(session)
         ws = await _make_workspace(session, repo)
+        await _mark_runtime_released(repo, ws)
         ws_id = ws.id
         await session.commit()
 
@@ -886,6 +940,7 @@ async def test_record_exhausted_writes_event_and_dedupes(
     async with factory() as session:
         repo = WorkspaceRepository(session)
         ws = await _make_workspace(session, repo)
+        await _mark_runtime_released(repo, ws)
         ws_id = ws.id
         await session.commit()
 
@@ -909,6 +964,7 @@ async def test_append_pending_writes_event_but_not_after_terminal_marker(
     async with factory() as session:
         repo = WorkspaceRepository(session)
         ws = await _make_workspace(session, repo)
+        await _mark_runtime_released(repo, ws)
         ws_id = ws.id
         await session.commit()
 
@@ -961,6 +1017,7 @@ async def test_has_terminal_marker_detects_resolved(
     async with factory() as session:
         repo = WorkspaceRepository(session)
         ws = await _make_workspace(session, repo)
+        await _mark_runtime_released(repo, ws)
         ws_id = ws.id
         await session.commit()
 
@@ -976,3 +1033,131 @@ async def test_has_terminal_marker_detects_resolved(
         assert (
             await sweeper._has_terminal_auth_overlay_unmount_terminal_event(session, ws_id)  # noqa: SLF001
         ) is True
+
+
+# --------------------------------------------------------------------------- #
+# 8. Marker writes re-check effective release under the row lock (revoke race)
+# --------------------------------------------------------------------------- #
+#
+# The candidate query gates on effective release, but a candidate can go stale: the
+# provisioner can write ``terminal_runtime_release_revoked`` (under ``get_for_update``)
+# after the candidate is listed and before the deferred retry's marker write runs. A
+# terminal ``resolved``/``exhausted`` marker (or a fresh ``pending``) written in that
+# window would suppress / burn the umount retry still owed once the runtime is genuinely
+# released, leaking the overlay mount. Each marker write therefore re-checks effective
+# release under the same row lock and skips (loudly) when the release was revoked.
+
+
+@pytest.mark.asyncio
+async def test_record_resolved_skips_when_release_revoked(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``resolved`` marker is NOT written when the release was revoked after listing —
+    the retry stays owed and the skip is surfaced under its own reason code."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await _mark_runtime_release_revoked(session, repo, ws)
+        await session.commit()
+
+    await sweeper._record_terminal_auth_overlay_unmount_resolved(  # noqa: SLF001
+        _candidate(ws_id), auth_overlay_unmounted=True
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    assert worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE not in types
+    revoked = [
+        fields
+        for event, fields in log.warnings
+        if event == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+    ]
+    assert len(revoked) == 1
+    assert revoked[0]["marker"] == "resolved"
+    assert (
+        revoked[0]["reason_code"]
+        == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_REASON_CODE
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_exhausted_skips_when_release_revoked(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``exhausted`` marker is NOT written when the release was revoked after listing,
+    so a temporary revoke cannot permanently suppress the retry."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await _mark_runtime_release_revoked(session, repo, ws)
+        await session.commit()
+
+    await sweeper._record_terminal_auth_overlay_unmount_exhausted(  # noqa: SLF001
+        _candidate(ws_id), attempts=5
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    assert worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE not in types
+    revoked = [
+        fields
+        for event, fields in log.warnings
+        if event == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+    ]
+    assert len(revoked) == 1
+    assert revoked[0]["marker"] == "exhausted"
+
+
+@pytest.mark.asyncio
+async def test_append_pending_skips_when_release_revoked(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh ``pending`` marker is NOT appended when the release was revoked after
+    listing, so the revoke window cannot burn one of the bounded deferred attempts."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await _mark_runtime_release_revoked(session, repo, ws)
+        # An original pending marker already exists (co-written at release time); the
+        # revoke superseded the release before this deferred sweep ran.
+        await repo.add_event(
+            ws,
+            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            payload={"attempt": 1},
+        )
+        await session.commit()
+
+    await sweeper._append_terminal_auth_overlay_unmount_pending(  # noqa: SLF001
+        _candidate(ws_id), attempt=2
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    # The original pending marker survives, but no second one is appended.
+    assert types.count(worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE) == 1
+    revoked = [
+        fields
+        for event, fields in log.warnings
+        if event == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+    ]
+    assert len(revoked) == 1
+    assert revoked[0]["marker"] == "pending"

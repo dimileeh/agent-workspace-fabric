@@ -165,6 +165,26 @@ Kept distinct from ``TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING`` (a normal lifecycle
 operators filtering structured logs on this reason code see only error events, not markers.
 """
 
+_TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE = (
+    "worker.terminal_auth_overlay_unmount_release_revoked"
+)
+"""Structured-log event for a deferred-sweep marker write skipped because the
+terminal-runtime release was revoked between candidate listing and the write."""
+
+_TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_REASON_CODE = (
+    "TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED"
+)
+"""Reason code for a deferred overlay-umount marker write skipped under the row lock.
+
+The candidate query gates on *effective release*, but the provisioner can write a
+``terminal_runtime_release_revoked`` event (also under ``get_for_update``) after the
+candidate is listed and before the deferred retry's marker write runs. Writing a
+``resolved``/``exhausted`` marker (or burning an attempt via a fresh ``pending``) in that
+window would suppress the umount retry still owed once the runtime is genuinely released,
+leaking the overlay mount. The write is skipped under the row lock and surfaced with this
+reason code so the deferred retry stays owed and the skip stays diagnosable.
+"""
+
 
 async def _maybe_expire_due_secret_leases(self: Any) -> None:
     """Periodically expire due secret leases, respecting the scan interval."""
@@ -1388,6 +1408,27 @@ async def _has_terminal_auth_overlay_unmount_terminal_event(
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
+def _log_terminal_auth_overlay_unmount_release_revoked(
+    candidate: _TerminalRuntimeCandidate,
+    *,
+    marker: str,
+) -> None:
+    """Surface a deferred-sweep marker write that was skipped because release was revoked.
+
+    The skip keeps the umount retry owed once the runtime is genuinely released; logging
+    it (rather than returning silently like the dedup/missing-row skips) keeps the
+    revoke-race observable under its own reason code.
+    """
+    _log.warning(
+        _TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE,
+        workspace_id=candidate.workspace_id,
+        status=candidate.status.value,
+        compose_project_name=candidate.compose_project_name,
+        reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_REASON_CODE,
+        marker=marker,
+    )
+
+
 async def _record_terminal_auth_overlay_unmount_resolved(
     self: Any,
     candidate: _TerminalRuntimeCandidate,
@@ -1401,33 +1442,43 @@ async def _record_terminal_auth_overlay_unmount_resolved(
         "auth_overlay_unmounted": auth_overlay_unmounted,
     }
 
-    async def _operation(session: AsyncSession) -> bool:
+    async def _operation(session: AsyncSession) -> str:
         repo = WorkspaceRepository(session)
         # ``SELECT FOR UPDATE SKIP LOCKED`` + the terminal-marker guard make the
         # write idempotent under the NULL-``node_id`` multi-worker race: the loser
         # exits without double-writing a ``resolved``/``exhausted`` pair.
         ws = await repo.get_for_update(candidate.workspace_id, skip_locked=True)
         if ws is None:
-            return False
+            return "skipped"
         if await self._has_terminal_auth_overlay_unmount_terminal_event(
             session, candidate.workspace_id
         ):
-            return False
+            return "skipped"
+        # Re-check effective release under the same row lock the provisioner takes to
+        # write ``terminal_runtime_release_revoked``. The candidate query gated on
+        # effective release, but a revoke can land between listing and this write; a
+        # ``resolved`` marker recorded then would permanently suppress the umount retry
+        # still owed once the runtime is genuinely released, leaking the overlay mount.
+        if not await has_terminal_runtime_released_event(session, candidate.workspace_id):
+            return "revoked"
         await repo.add_event(
             ws,
             event_type=_TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
             reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
             payload=payload,
         )
-        return True
+        return "recorded"
 
-    recorded = await run_db_operation_with_retry(
+    outcome = await run_db_operation_with_retry(
         self._session_factory,
         _operation,
         commit=True,
         on_retry=self._log_transient_db_retry,
     )
-    if not recorded:
+    if outcome == "revoked":
+        _log_terminal_auth_overlay_unmount_release_revoked(candidate, marker="resolved")
+        return
+    if outcome != "recorded":
         return
     _log.info(
         _TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
@@ -1457,30 +1508,39 @@ async def _record_terminal_auth_overlay_unmount_exhausted(
         "attempts": attempts,
     }
 
-    async def _operation(session: AsyncSession) -> bool:
+    async def _operation(session: AsyncSession) -> str:
         repo = WorkspaceRepository(session)
         ws = await repo.get_for_update(candidate.workspace_id, skip_locked=True)
         if ws is None:
-            return False
+            return "skipped"
         if await self._has_terminal_auth_overlay_unmount_terminal_event(
             session, candidate.workspace_id
         ):
-            return False
+            return "skipped"
+        # Re-check effective release under the row lock (see the matching note in
+        # ``_record_terminal_auth_overlay_unmount_resolved``): an ``exhausted`` marker
+        # written during a post-listing revoke window would permanently suppress the
+        # retry still owed once the runtime is genuinely released.
+        if not await has_terminal_runtime_released_event(session, candidate.workspace_id):
+            return "revoked"
         await repo.add_event(
             ws,
             event_type=_TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
             reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_REASON_CODE,
             payload=payload,
         )
-        return True
+        return "recorded"
 
-    recorded = await run_db_operation_with_retry(
+    outcome = await run_db_operation_with_retry(
         self._session_factory,
         _operation,
         commit=True,
         on_retry=self._log_transient_db_retry,
     )
-    if not recorded:
+    if outcome == "revoked":
+        _log_terminal_auth_overlay_unmount_release_revoked(candidate, marker="exhausted")
+        return
+    if outcome != "recorded":
         return
     _log.error(
         _TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
@@ -1505,32 +1565,42 @@ async def _append_terminal_auth_overlay_unmount_pending(
         "attempt": attempt,
     }
 
-    async def _operation(session: AsyncSession) -> bool:
+    async def _operation(session: AsyncSession) -> str:
         repo = WorkspaceRepository(session)
         ws = await repo.get_for_update(candidate.workspace_id, skip_locked=True)
         if ws is None:
-            return False
+            return "skipped"
         # If a concurrent worker already resolved/exhausted this workspace, do not
         # append a new ``pending`` that would resurrect it as a deferred candidate.
         if await self._has_terminal_auth_overlay_unmount_terminal_event(
             session, candidate.workspace_id
         ):
-            return False
+            return "skipped"
+        # Re-check effective release under the row lock (see the matching note in
+        # ``_record_terminal_auth_overlay_unmount_resolved``): appending a fresh
+        # ``pending`` during a post-listing revoke window burns one of the bounded
+        # deferred attempts on a futile umount (the overlay bind is held again), pushing
+        # the workspace toward a premature ``exhausted`` once it is genuinely released.
+        if not await has_terminal_runtime_released_event(session, candidate.workspace_id):
+            return "revoked"
         await repo.add_event(
             ws,
             event_type=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
             reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
             payload=payload,
         )
-        return True
+        return "recorded"
 
-    recorded = await run_db_operation_with_retry(
+    outcome = await run_db_operation_with_retry(
         self._session_factory,
         _operation,
         commit=True,
         on_retry=self._log_transient_db_retry,
     )
-    if not recorded:
+    if outcome == "revoked":
+        _log_terminal_auth_overlay_unmount_release_revoked(candidate, marker="pending")
+        return
+    if outcome != "recorded":
         return
     _log.warning(
         _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
