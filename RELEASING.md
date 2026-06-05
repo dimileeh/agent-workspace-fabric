@@ -12,6 +12,11 @@ Use this checklist before tagging an AWF Core alpha release.
   `uv tool install agent-workspace-fabric`, `pipx install
   agent-workspace-fabric`, virtualenv-scoped `pip install
   agent-workspace-fabric`, and contributor `uv tool install . --force`.
+- Confirm the public curl installer lane is advertised only for releases whose
+  hosted installer URL, manifest, checksums, and release artifacts are published
+  and verified. Before that gate, README and Quickstart must route evaluators to
+  `uv tool` / `pipx` or source-checkout lanes instead of a remote shell
+  pipeline.
 - The repository URL still points at
   `https://github.com/dimileeh/aira-agent-workspace-fabric` until the GitHub
   repository is renamed.
@@ -142,6 +147,11 @@ GitHub Releases is the canonical artifact source for the v1 installer trust
 chain. `aira.pro` may serve or redirect `install.sh`, but v1 installers must
 consume `awf-install-manifest.json` and verify a manifest-pinned `sha256`
 before installing a wheel.
+
+Do not add a copy-paste public curl install command to README or Quickstart
+until the release artifacts and hosted installer endpoint for that exact
+release are live. Before that point, document the curl lane as release-gated and
+keep the release-installed `uv tool` / `pipx` lanes first-class.
 
 The manifest is generated from the built `dist/*` files and the existing
 `python-distribution-sha256.txt` checksum artifact:

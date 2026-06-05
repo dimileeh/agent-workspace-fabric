@@ -1,48 +1,74 @@
 # Upgrade Guide
 
-Use this guide when moving an existing local AWF checkout or installed CLI to a
-newer version.
+Use the upgrade path that matches the lane you used for first run. Keep the
+same project path for mocked smoke; the examples below use
+`$HOME/awf-eval-project`.
 
-## Local CLI Install
+Do not generate replacement service secrets during upgrade. Reuse the `.env`
+created during first run, or export the same `AWF_API_TOKEN`,
+`AWF_POSTGRES_PASSWORD`, and related local service values used by the running
+Core.
 
-For a released install:
+The public curl installer lane is release-gated until the hosted installer URL,
+manifest, checksums, and release artifacts are published and verified.
+
+## uv tool
 
 ```bash
 uv tool upgrade agent-workspace-fabric
+awf start
+awf service status --format pretty
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
-For `pipx` installs:
+## pipx
 
 ```bash
 pipx upgrade agent-workspace-fabric
+awf start
+awf service status --format pretty
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
-For virtualenv installs (activate your existing venv first):
+## Virtualenv / pip
+
+Activate the virtualenv that owns `awf`, then upgrade the package:
 
 ```bash
 . .venv/bin/activate
 pip install --upgrade agent-workspace-fabric
+awf start
+awf service status --format pretty
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
-For a source checkout:
+## Source Checkout With Global Tool Install
+
+Run from the AWF checkout:
 
 ```bash
-git pull
+git pull --ff-only
 uv tool install . --force
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
+awf service status --format pretty
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
-Homebrew is planned after stable tagged artifacts and formula audit coverage;
-there is no supported `brew` upgrade path yet.
+## Source Checkout With No Global Install
+
+Run from the AWF checkout:
+
+```bash
+git pull --ff-only
+uv sync --extra dev
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf service status --format pretty
+uv run --python 3.12 --extra dev awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
+```
 
 ## Local Service Stack
-
-After upgrading the CLI or source checkout, rebuild and verify the local stack:
-
-```bash
-awf service bootstrap --timeout-seconds 300
-awf service status --format pretty
-awf smoke run --mocked-local --format pretty
-```
 
 Before upgrading a service stack with live control-plane data, follow the
 [Local Service Upgrade](CONCEPTS.md#local-service-upgrade) runbook. It captures a
@@ -60,10 +86,10 @@ when local health is green.
 
 If a local upgrade blocks development:
 
-1. Return to the previous Git revision or reinstall the previous package
-   version.
-2. Run `awf service bootstrap --timeout-seconds 300`.
+1. Return to the previous package version or Git revision for the lane you use.
+2. Run the matching `awf start` command from the sections above.
 3. Check `awf service status --format pretty`.
+4. Rerun `awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty`.
 
 AWF service bootstrap is designed to be idempotent for local development. Do not
 delete `.awf` state or Docker volumes unless a specific troubleshooting step
