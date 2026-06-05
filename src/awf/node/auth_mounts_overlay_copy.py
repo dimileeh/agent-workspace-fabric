@@ -66,6 +66,41 @@ def _safe_mtime_ns(path: Path, *, follow_symlinks: bool = True) -> int | None:
         return None
 
 
+def _safe_files_equal_content(a: Path, b: Path) -> bool:
+    """True iff ``a`` and ``b`` are both readable and byte-for-byte identical.
+
+    Used by the #402 deletion-forwarding pass to confirm — *beyond* a matching
+    ``st_mtime_ns`` + ``st_size`` — that the live host copy is genuinely unchanged
+    from ``base`` before a whiteout *hides* it. mtime + size alone can collide when a
+    host rotates a credential to same-length bytes and restores the old timestamp
+    (e.g. a ``touch -r`` after a same-length token rewrite, or a copy/sync that
+    preserves mtimes): the stat-only check would then read "host == base" and
+    whiteout a path the host has since re-populated with a *different, currently
+    valid* credential — hiding it. Comparing content closes that window in this
+    safety-sensitive, credential-hiding direction.
+
+    Both arguments are *non-agent* trees — the read-only overlay ``base`` lower
+    (materialized via ``copytree(symlinks=False)``, so no symlinks) and the trusted
+    live host ``~/.claude`` — so a plain streamed read is sufficient here; the
+    fd-based symlink-safe descent that :func:`_safe_overlay_copy` needs for the
+    agent-controlled ``merged``/``legacy`` trees is unnecessary. Any read error (a
+    racing unlink, a permission failure) fails safe to ``False`` — "not provably
+    equal", so the caller declines the whiteout and the credential stays visible.
+    """
+
+    try:
+        with a.open("rb") as fa, b.open("rb") as fb:
+            while True:
+                chunk_a = fa.read(65536)
+                chunk_b = fb.read(65536)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return False
+
+
 def _safe_overlay_copy(merged: Path, rel: Path, src_root: Path) -> None:
     """Copy ``src_root / rel`` into ``merged / rel`` as root, never following an
     agent-planted symlink at *any* component of *either* path — closing a TOCTOU

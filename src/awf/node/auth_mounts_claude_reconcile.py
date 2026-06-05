@@ -22,6 +22,7 @@ from pathlib import Path
 
 from awf.common.logging import get_logger
 from awf.node.auth_mounts_caps import _has_cap_mknod
+from awf.node.auth_mounts_overlay_copy import _safe_files_equal_content as _safe_files_equal_content
 from awf.node.auth_mounts_overlay_copy import _safe_mtime_ns as _safe_mtime_ns
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_copy as _safe_overlay_copy
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_whiteout as _safe_overlay_whiteout
@@ -99,17 +100,24 @@ def _forward_fallback_deletions_as_whiteouts(
 
     - ``upper`` has no entry for the path (any type). The agent's overlay state is
       otherwise authoritative — never double-handle it.
-    - The live host ``~/.claude`` still holds the path **unchanged** from ``base``
-      (same ``st_mtime_ns`` + ``st_size``). That proves the base copy is current, so
-      the legacy copy's absence is a genuine agent deletion — mirroring normal
-      overlay semantics where an agent deletion through ``merged`` hides the lower.
+    - The live host ``~/.claude`` still holds the path **unchanged** from ``base`` —
+      same ``st_mtime_ns`` + ``st_size`` **and** byte-for-byte identical content (see
+      :func:`_safe_files_equal_content`). That proves the base copy is current, so the
+      legacy copy's absence is a genuine agent deletion — mirroring normal overlay
+      semantics where an agent deletion through ``merged`` hides the lower. The content
+      check is not redundant with mtime + size: a host that rotates a credential to
+      same-length bytes and restores the old timestamp (``touch -r``, or a
+      timestamp-preserving sync) would otherwise read as "unchanged" and have its
+      *new, valid* credential hidden by the whiteout — the content compare closes that
+      window in this credential-hiding direction.
     - ``CAP_MKNOD`` is available to create the whiteout device.
 
     Every other shape is ambiguous and **not** whiteouted: the host *lacking* the
     path (the host may itself have removed it — the legacy absence is then
     host-explained, not agent-attributable), the host holding a *changed* version
-    (re-added / edited), or a missing capability. In each case the deletion is simply
-    not forwarded and the base's copy stays visible — the only safe direction.
+    (re-added / edited — detected by a differing mtime, size, *or* content), or a
+    missing capability. In each case the deletion is simply not forwarded and the
+    base's copy stays visible — the only safe direction.
 
     ``os.walk`` here uses the default ``followlinks=False`` and the base tree holds no
     symlinks (it is built via ``copytree(symlinks=False)``), so no agent-controlled
@@ -166,6 +174,14 @@ def _forward_fallback_deletions_as_whiteouts(
             ):
                 # Host changed the path since the base was built (re-added / edited):
                 # the legacy absence is no longer a confident agent deletion. Fail safe.
+                continue
+            if not _safe_files_equal_content(base / rel, host_claude / rel):
+                # mtime + size matched but the *bytes* differ: the host rotated the
+                # credential to same-length content while preserving the old timestamp
+                # (e.g. a ``touch -r`` after a same-length rewrite, or a timestamp-
+                # preserving sync). The live host therefore holds a different, currently
+                # valid credential — whiteouting would *hide* it. The legacy absence is
+                # no longer a confident agent deletion. Fail safe — keep it visible.
                 continue
             if not has_cap_mknod:
                 # A confident agent deletion we cannot forward without ``CAP_MKNOD``.
@@ -266,10 +282,11 @@ def _reconcile_fallback_edits_into_upper(
     :func:`_forward_fallback_deletions_as_whiteouts`, runs after this edit walk. It
     diffs ``base`` against ``legacy`` and synthesizes an overlayfs whiteout in
     ``upper`` for each file the agent confidently removed (the live host still matches
-    ``base``), so the removal survives the next remount instead of the lower
-    re-exposing it. Ambiguous removals (host lacks the path, or host changed it) and a
-    missing ``CAP_MKNOD`` fail safe toward keeping the credential visible — a
-    misclassified deletion can never *hide* a still-needed credential.
+    ``base`` by mtime, size, *and* content), so the removal survives the next remount
+    instead of the lower re-exposing it. Ambiguous removals (host lacks the path, or
+    host changed it — including a same-length, timestamp-preserving credential
+    rotation) and a missing ``CAP_MKNOD`` fail safe toward keeping the credential
+    visible — a misclassified deletion can never *hide* a still-needed credential.
 
     Known limitation (edits inside an agent-planted directory symlink are not
     forwarded): ``os.walk`` runs with the default ``followlinks=False``, so if the

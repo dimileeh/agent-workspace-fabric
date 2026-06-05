@@ -1035,6 +1035,61 @@ def test_reconcile_ambiguous_host_changed_file_is_not_whiteouted(
 
 
 @pytest.mark.unit
+def test_reconcile_same_size_mtime_but_changed_content_is_not_whiteouted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host rotated the credential to *different bytes* of the *same length* and
+    # restored the original mtime (e.g. a ``touch -r`` after a same-length token
+    # rewrite, or a timestamp-preserving sync). mtime + size alone read "host ==
+    # base", but the live host now holds a different, currently valid credential.
+    # Whiteouting would HIDE it — so the content compare must catch the divergence and
+    # fail safe (never whiteout). This is the reviewer's #414 case.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (base / "secret.json").write_text("token-aaaa\n")
+    base_stat = (base / "secret.json").stat()
+    # Same byte length, different content, and the same mtime/size as base.
+    (host / "secret.json").write_text("token-bbbb\n")
+    assert (host / "secret.json").stat().st_size == base_stat.st_size
+    os.utime(host / "secret.json", ns=(base_stat.st_atime_ns, base_stat.st_mtime_ns))
+    # ``legacy`` LACKS ``secret.json`` -> looks like an agent deletion by stat alone.
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    assert recorded == []
+    assert not (upper / "secret.json").exists()
+
+
+@pytest.mark.unit
+def test_safe_files_equal_content_compares_bytes_and_fails_safe(tmp_path: Path) -> None:
+    # Direct coverage for the content-equality primitive backing the whiteout guard:
+    # byte-identical files compare equal; same-length-different-bytes do not; and an
+    # unreadable/absent path fails safe to ``False`` ("not provably equal" -> keep the
+    # credential visible) rather than raising.
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.write_bytes(b"token-aaaa\n")
+    b.write_bytes(b"token-aaaa\n")
+    assert overlay_copy_mod._safe_files_equal_content(a, b) is True
+
+    b.write_bytes(b"token-bbbb\n")  # same length, different bytes
+    assert overlay_copy_mod._safe_files_equal_content(a, b) is False
+
+    # Absent path -> ``OSError`` on open -> fail safe to ``False``.
+    assert overlay_copy_mod._safe_files_equal_content(a, tmp_path / "missing") is False
+
+
+@pytest.mark.unit
 def test_reconcile_deletion_not_whiteouted_without_cap_mknod(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
