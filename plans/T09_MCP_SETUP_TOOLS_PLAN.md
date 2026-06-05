@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HYot6
+
+### Problem Statement And Scope
+
+The PR review reports that `_start_payload_with_command` now rewrites every
+issue remediation command matching `awf start...` to the exact failed MCP start
+command. For `START_COMPOSE_ASSETS_MISSING`, the reason catalog intentionally
+uses `awf start --source-checkout .` when the caller did not pass an explicit
+source checkout, because that is the structured recovery command for package or
+install lanes that lack Compose assets.
+
+Scope is limited to preserving that asset-missing source-checkout remediation
+while keeping the existing contextual rewrite for ordinary start retry commands.
+
+### Requirements Checklist
+
+- Preserve the top-level contextual MCP start command.
+- Preserve `START_COMPOSE_ASSETS_MISSING` remediation commands when no explicit
+  source checkout was provided by the caller.
+- Continue rewriting ordinary start retry remediations, including explicit
+  source-checkout start invocations.
+- Add a focused regression for the asset-missing package/install lane.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression where bootstrap raises
+   `SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND` without a caller `source_checkout`.
+2. Pass the explicit source-checkout context into the start issue remediation
+   rewrite helper.
+3. Skip the rewrite only for `START_COMPOSE_ASSETS_MISSING` when the caller did
+   not provide `source_checkout`.
+4. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_asset_missing_source_checkout_remediation_without_source_checkout -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_rewrites_reason_coded_bootstrap_remediation_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_asset_missing_source_checkout_remediation_without_source_checkout -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Write Exception Guard
 
 ### Problem Statement And Scope

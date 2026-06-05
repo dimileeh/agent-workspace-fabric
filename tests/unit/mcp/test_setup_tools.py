@@ -24,6 +24,7 @@ from awf.host_setup.config import (
 from awf.host_setup.rendering import (
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
+    START_COMPOSE_ASSETS_MISSING,
     START_HEALTH_TIMEOUT,
     START_PORT_CONFLICT,
     first_run_failure_payload,
@@ -38,6 +39,7 @@ from awf.host_setup.source_assets import (
 from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from awf.service.bootstrap import (
+    SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND,
     SERVICE_BOOTSTRAP_STAGE_FAILED,
     SERVICE_BOOTSTRAP_TIMEOUT,
     ServiceBootstrapError,
@@ -1082,6 +1084,45 @@ async def test_start_local_service_rewrites_reason_coded_bootstrap_remediation_c
     assert payload["reason_code"] == START_PORT_CONFLICT
     assert payload["command"] == expected_command
     assert payload["issues"][0]["remediation"]["related_command"] == expected_command
+
+
+@pytest.mark.unit
+async def test_start_local_service_preserves_asset_missing_source_checkout_remediation_without_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+        compose_file=tmp_path / "missing-compose.yml",
+        compose_env_file=None,
+        asset_root=None,
+        service_env={},
+        env_migration=None,
+    )
+
+    async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        raise ServiceBootstrapError(
+            reason_code=SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND,
+            message="compose assets missing",
+        )
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: None)
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fail_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {"rebuild": True})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == START_COMPOSE_ASSETS_MISSING
+    assert payload["command"] == "awf start --rebuild"
+    assert payload["issues"][0]["remediation"]["related_command"] == (
+        "awf start --source-checkout ."
+    )
 
 
 @pytest.mark.unit

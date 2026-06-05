@@ -38,6 +38,7 @@ from awf.host_setup.rendering import (
     SETUP_CLIENT_UNKNOWN,
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
+    START_COMPOSE_ASSETS_MISSING,
     FirstRunIssue,
     FirstRunPayload,
     FirstRunRemediation,
@@ -561,7 +562,11 @@ def _start_payload_with_command(
     if payload.command == "awf setup":
         update["next_steps"] = _start_reason_coded_next_steps(payload.next_steps, command=command)
     if payload.issues:
-        update["issues"] = _start_issues_with_command(payload.issues, command=command)
+        update["issues"] = _start_issues_with_command(
+            payload.issues,
+            command=command,
+            source_checkout=source_checkout,
+        )
     return payload.model_copy(update=update)
 
 
@@ -569,12 +574,23 @@ def _start_issues_with_command(
     issues: tuple[FirstRunIssue, ...],
     *,
     command: str,
+    source_checkout: Path | None,
 ) -> tuple[FirstRunIssue, ...]:
-    return tuple(_start_issue_with_command(issue, command=command) for issue in issues)
+    return tuple(
+        _start_issue_with_command(issue, command=command, source_checkout=source_checkout)
+        for issue in issues
+    )
 
 
-def _start_issue_with_command(issue: FirstRunIssue, *, command: str) -> FirstRunIssue:
+def _start_issue_with_command(
+    issue: FirstRunIssue,
+    *,
+    command: str,
+    source_checkout: Path | None,
+) -> FirstRunIssue:
     remediation = issue.remediation
+    if issue.reason_code == START_COMPOSE_ASSETS_MISSING and source_checkout is None:
+        return issue
     if not _is_start_remediation_command(remediation.related_command):
         return issue
     return issue.model_copy(
