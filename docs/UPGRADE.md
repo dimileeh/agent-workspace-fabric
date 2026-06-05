@@ -335,6 +335,18 @@ uv run --python 3.12 --extra dev awf service status --format pretty
 uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty
 ```
 
+Before upgrading a service stack with live control-plane data, follow the
+[Local Service Upgrade](CONCEPTS.md#local-service-upgrade) runbook. It captures a
+pre-upgrade Postgres backup, runs migrations through `awf service bootstrap`,
+and points migration failures at the migrate logs before changing volumes or
+state. Treat rollback after data migrations as a restore from that backup, as
+covered in [Local Service Rollback](CONCEPTS.md#local-service-rollback).
+
+Use `awf service readiness --format pretty` or
+`awf service release-readiness --format pretty` only when you need the Core
+release gate. That gate checks historical PRD SLO evidence and can fail even
+when local health is green.
+
 ## Rollback
 
 If a local upgrade blocks development:

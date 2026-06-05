@@ -1775,6 +1775,7 @@ def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None
 def test_changelog_upgrade_and_uninstall_guides_are_discoverable() -> None:
     """Assert release lifecycle docs are linked from the public README."""
     readme_text = README_PATH.read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
 
     assert (REPO_ROOT / "CHANGELOG.md").exists()
     assert (REPO_ROOT / "docs" / "UPGRADE.md").exists()
@@ -1784,6 +1785,9 @@ def test_changelog_upgrade_and_uninstall_guides_are_discoverable() -> None:
     assert "[Upgrade Guide](docs/UPGRADE.md)" in readme_text
     assert "[Uninstall Guide](docs/UNINSTALL.md)" in readme_text
     assert "[Release Checklist](RELEASING.md)" in readme_text
+    assert "[Local Service Upgrade](CONCEPTS.md#local-service-upgrade)" in upgrade_text
+    assert "[Local Service Rollback](CONCEPTS.md#local-service-rollback)" in upgrade_text
+    assert "pre-upgrade Postgres backup" in upgrade_text
 
 
 def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
