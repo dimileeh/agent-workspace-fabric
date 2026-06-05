@@ -79,6 +79,15 @@ INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 # Flags that consume the following token as their value; everything else that
 # starts with "-" is treated as a valueless flag.
 VALUE_FLAGS = frozenset({"--project", "--format"})
+# `awf init`'s own value-taking options (src/awf/cli/main.py). Tracked separately
+# so `_init_arg_status` does not misread an option's value token as the required
+# path: a no-path example like `awf init --template python --yes` must classify
+# as "flag-only", not "ok". Covers the public `--template`/`--format` plus the
+# hidden legacy bootstrap flags (`--provider`, `--timeout-seconds`,
+# `--poll-interval-seconds`) that still consume a following token.
+INIT_VALUE_FLAGS = VALUE_FLAGS | frozenset(
+    {"--template", "--provider", "--timeout-seconds", "--poll-interval-seconds"}
+)
 # Help flags are always allowed after `awf init` even though they carry no path.
 HELP_FLAGS = frozenset({"--help", "-h"})
 
@@ -213,7 +222,9 @@ def _init_arg_status(line: str) -> str | None:
 
     # Scan every token (not just the first) so a path that follows leading flags
     # — e.g. ``awf init --yes .`` — is still recognised. Skip flags and the value
-    # of any value-taking flag, mirroring ``_parse_smoke_invocation``.
+    # of any value-taking flag (``INIT_VALUE_FLAGS``, not just the smoke subset)
+    # so an option value such as the ``python`` in ``awf init --template python``
+    # is never miscounted as the required path.
     has_path = False
     skip_next = False
     for token in tokens:
@@ -221,7 +232,7 @@ def _init_arg_status(line: str) -> str | None:
             skip_next = False
             continue
         if token.startswith("-"):
-            if token in VALUE_FLAGS:
+            if token in INIT_VALUE_FLAGS:
                 skip_next = True
             continue
         has_path = True
@@ -279,7 +290,13 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("awf init") == "bare"
     assert _init_arg_status("awf init  # bootstrap the service") == "bare"
     assert _init_arg_status("awf init --write-profile --yes") == "flag-only"
+    # An option value (the `python` after `--template`) is not a path: a no-path
+    # init written with a value-taking flag is still flag-only, not "ok".
+    assert _init_arg_status("awf init --template python --write-profile --yes") == "flag-only"
+    assert _init_arg_status("awf init --provider openai --yes") == "flag-only"
     assert _init_arg_status("awf init .") == "ok"
+    # A real path that follows a value-taking flag and its value is still a path.
+    assert _init_arg_status("awf init --template python .") == "ok"
     # A path that follows leading flags is still a path, not a flag-only line.
     assert _init_arg_status("awf init --yes .") == "ok"
     assert _init_arg_status("awf init --write-profile --yes <path>") == "ok"
