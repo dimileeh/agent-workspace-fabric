@@ -923,7 +923,7 @@ def _client_integration_instructions_result(
             safe_result,
             _client_instruction_reason_coded_payload(
                 SETUP_READINESS_FAILED,
-                "could not inspect existing client MCP configuration",
+                "could not plan client integration instructions",
                 {"error_type": type(exc).__name__},
                 requested_clients=clients,
                 selected_clients=selected,

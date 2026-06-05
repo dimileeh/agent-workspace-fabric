@@ -538,7 +538,7 @@ async def test_client_integration_instructions_planning_value_error_is_readiness
 
 
 @pytest.mark.unit
-async def test_client_integration_instructions_planning_unexpected_exception_is_generic(
+async def test_client_integration_instructions_planning_unexpected_exception_has_planning_summary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -565,7 +565,7 @@ async def test_client_integration_instructions_planning_unexpected_exception_is_
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == SETUP_READINESS_FAILED
-    assert payload["summary"] == "could not inspect existing client MCP configuration"
+    assert payload["summary"] == "could not plan client integration instructions"
     assert payload["issues"][0]["details"] == {"error_type": "KeyError"}
     assert leaked_detail not in rendered
     assert raw_token not in rendered

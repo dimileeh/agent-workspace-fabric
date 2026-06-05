@@ -84,6 +84,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HcTJa
+
+### Problem Statement And Scope
+
+The review reports that unexpected exceptions while planning MCP client
+integration instructions return `SETUP_READINESS_FAILED` with stale summary
+text about inspecting existing client MCP configuration. This can mislead
+operators because plan construction failures are not the same as local client
+configuration inspection conflicts.
+
+Scope is limited to the generic planning exception branch in
+`_client_integration_instructions_result` and its focused regression.
+
+### Requirements Checklist
+
+- Preserve the existing reason-coded blocked payload shape, command rendering,
+  `SETUP_READINESS_FAILED` reason code, and redacted `error_type` detail.
+- Return a planning-specific summary for unexpected exceptions raised while
+  building client config plans.
+- Keep the later payload-transformation failure summary unchanged.
+- Update the focused client-integration regression for the planning exception
+  branch.
+
+### Implementation Steps
+
+1. Update the existing planning exception regression to expect the
+   planning-specific summary and confirm it fails before implementation.
+2. Change only the generic planning exception summary in
+   `src/awf/mcp/setup_tools.py`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_unexpected_exception_has_planning_summary -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HZ6Wt Missing Env Remediation Command
 
 ### Problem Statement And Scope
