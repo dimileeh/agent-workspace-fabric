@@ -80,7 +80,7 @@ def _make_source_checkout(root: Path) -> Path:
 
 
 @pytest.mark.unit
-async def test_client_integration_instructions_are_secret_free(
+async def test_client_integration_instructions_are_secret_free_and_payload_correct(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
