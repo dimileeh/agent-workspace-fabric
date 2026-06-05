@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import re
 import shutil
@@ -354,8 +355,6 @@ def _persist_work_dir_propagation_result(
             raise
     except Exception as exc:
         redacted = redact_audit_text(str(exc))
-        import logging
-
         logging.getLogger(__name__).warning(
             "best-effort persist of work-dir propagation posture failed: %s",
             redacted,
