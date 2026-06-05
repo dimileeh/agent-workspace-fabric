@@ -628,19 +628,6 @@ def _client_integration_instructions_result(
             blocked_payload,
             is_error=True,
         )
-    except (OSError, RuntimeError, ValueError) as exc:
-        return _first_run_result(
-            safe_result,
-            _client_instruction_reason_coded_payload(
-                CLIENT_CONFIG_CONFLICT,
-                "could not inspect existing client MCP configuration",
-                {"error_type": type(exc).__name__},
-                requested_clients=clients,
-                selected_clients=selected,
-                source_checkout=source_path,
-            ),
-            is_error=True,
-        )
     except Exception as exc:
         return _first_run_result(
             safe_result,
