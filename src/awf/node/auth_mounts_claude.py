@@ -1051,18 +1051,34 @@ def _prepare_claude_overlay_mount(
             upper.exists()
             and _overlay_upper_has_data(upper)
             and not _pin_matches_signature(sig_marker, fresh_signature)
+            # Broad guard: do not discard an overlay that is already live.
+            and not overlay_mounter.is_mounted(merged)
+            # Re-observe the live mount as the *last* thing before the destructive
+            # ``rmtree`` below (which runs as the first body statement, so nothing
+            # sits between this check and the delete). Two provisions for the same
+            # workspace can race: a concurrent caller can win the mount in the window
+            # after the broad guard above observed ``merged`` unmounted, mounting this
+            # very ``upper``/``work`` as the live overlay's backing layers. The
+            # ``rmtree`` would then yank a running overlay's upperdir/workdir and
+            # destroy the active workspace's Claude edits — and the EBUSY/live-mount
+            # reuse branch below cannot protect it, because the delete happens before
+            # any mount attempt. If it went live in that window, skip the discard so
+            # the ``is_mounted(merged)`` reuse branch below adopts the live overlay
+            # instead of clobbering it.
             and not overlay_mounter.is_mounted(merged)
         ):
+            # Drop the unverifiable upper/work so the dirs are recreated empty below
+            # and a fresh empty upper is mounted over the current-host base.
+            # ``ignore_errors`` mirrors the sibling reaps: a stuck cleanup must not
+            # fail provisioning. The delete runs first — before the log — so nothing
+            # widens the recheck-to-delete window above.
+            shutil.rmtree(upper, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
             _log.warning(
                 "claude_auth_overlay_unpinned_upper_discarded_rebuilt",
                 reason_code=_CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT,
                 workspace_auth_root=str(claude_root),
             )
-            # Drop the unverifiable upper/work so the dirs are recreated empty below and
-            # a fresh empty upper is mounted over the current-host base. ``ignore_errors``
-            # mirrors the sibling reaps: a stuck cleanup must not fail provisioning.
-            shutil.rmtree(upper, ignore_errors=True)
-            shutil.rmtree(work, ignore_errors=True)
         try:
             base = _ensure_shared_claude_base(
                 host_home=host_home,

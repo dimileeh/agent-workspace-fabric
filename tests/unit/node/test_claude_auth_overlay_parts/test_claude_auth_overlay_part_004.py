@@ -725,3 +725,73 @@ def test_empty_surviving_upper_does_not_shadow_mutated_legacy_copy(tmp_path: Pat
     assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
     assert mounter.mounts == []
     assert legacy_copy.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
+def test_unpinned_upper_discard_skipped_when_mount_races_live(tmp_path: Path) -> None:
+    # #405 discard TOCTOU: the unpinned-upper discard observes ``merged`` unmounted
+    # at its guard, but a concurrent provision for the same workspace can win the
+    # mount in the window before the destructive ``rmtree``, making this very
+    # ``upper``/``work`` the live overlay's backing layers. Deleting them then yanks
+    # a running overlay's upperdir/workdir and destroys the active workspace's Claude
+    # edits. The discard must re-check the live mount immediately before deleting and,
+    # if it went live, defer to the live-mount reuse branch instead of discarding.
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    claude_root = work_dir / "auth" / "ws_discard_race" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    (claude_root / "work").mkdir(parents=True)
+    # A non-empty, unpinned (no ``base.signature``) upper — the discard candidate.
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    merged = claude_root / "merged"
+
+    class ConcurrentMountDuringDiscardMounter(FakeOverlayMounter):
+        """``is_mounted(merged)`` is False at the discard guard, then True at the
+        recheck just before ``rmtree`` — the racing winner's overlay went live,
+        backed by this very ``upper``/``work``, in the TOCTOU window."""
+
+        def __init__(self, *, race_merged: Path, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            self._race_merged = Path(race_merged)
+            self._race_checks = 0
+
+        def is_mounted(self, target: Path) -> bool:
+            if Path(target) == self._race_merged:
+                self._race_checks += 1
+                if self._race_checks == 1:
+                    return False
+                # The concurrent provision has now mounted ``merged`` over the same
+                # backing layers; it stays live for the reuse branch below.
+                self.mounted.add(self._race_merged)
+                return True
+            return Path(target) in self.mounted
+
+    mounter = ConcurrentMountDuringDiscardMounter(supported=True, race_merged=merged)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_discard_race",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    # The live overlay is reused rather than discarded ...
+    assert by_target["/home/agent/.claude"].source == str(merged)
+    assert by_target["/home/agent/.claude"].mode == "rw"
+    # ... so the racing winner's backing upper/work — and the agent's edits — survive.
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+    assert (claude_root / "work").is_dir()
+    # No fresh mount was attempted (the live overlay was adopted) ...
+    assert mounter.mounts == []
+    # ... and the destructive-discard reason code is NOT emitted, because the discard
+    # was abandoned the moment the overlay went live.
+    assert not any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
+        for entry in logs
+    )
