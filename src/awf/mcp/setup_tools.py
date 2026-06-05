@@ -539,7 +539,24 @@ def _start_payload_with_command(
         timeout_seconds=timeout_seconds,
         source_checkout=source_checkout,
     )
-    return payload.model_copy(update={"command": command})
+    update: dict[str, Any] = {"command": command}
+    if payload.command == "awf setup":
+        update["next_steps"] = _start_reason_coded_next_steps(payload.next_steps, command=command)
+    return payload.model_copy(update=update)
+
+
+def _start_reason_coded_next_steps(
+    next_steps: tuple[str, ...],
+    *,
+    command: str,
+) -> tuple[str, ...]:
+    return tuple(_start_reason_coded_next_step(step, command=command) for step in next_steps)
+
+
+def _start_reason_coded_next_step(step: str, *, command: str) -> str:
+    if "awf setup --dry-run" in step:
+        return step.replace("awf setup --dry-run", command, 1)
+    return step.replace("awf setup", command, 1)
 
 
 def _start_command(

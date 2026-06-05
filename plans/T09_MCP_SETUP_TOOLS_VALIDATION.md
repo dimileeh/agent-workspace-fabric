@@ -53,6 +53,50 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HR9IF
+
+### Requirement Status
+
+- Preserve the existing reason-coded issue, details, redaction, and MCP error
+  behavior for start input-resolution `SetupCheckError` failures: Complete.
+- Keep top-level start command rendering for bare and explicit-checkout start
+  retries: Complete.
+- Rewrite copied reason-coded `next_steps` so the retry command matches the
+  start-tool command and preserves explicit `source_checkout`: Complete.
+- Add focused regression coverage for the bare and explicit-checkout
+  `next_steps` paths: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_setup_check_input_resolution_failure_is_reason_coded tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_setup_check_input_resolution_failure_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression tests failed before the implementation change because
+  `payload["next_steps"]` still told operators to re-run
+  `awf setup --dry-run` on both bare and explicit-checkout start
+  input-resolution `SetupCheckError` paths.
+- Regression tests after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Onboarding Payload Guard
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

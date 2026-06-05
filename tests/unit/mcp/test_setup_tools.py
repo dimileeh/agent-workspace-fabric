@@ -1242,6 +1242,9 @@ async def test_start_local_service_setup_check_input_resolution_failure_is_reaso
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["command"] == "awf start"
+    assert payload["next_steps"] == [
+        "Fix the reported issue above, then re-run awf start.",
+    ]
     assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["issues"][0]["reason_code"] == SETUP_READINESS_FAILED
     assert payload["issues"][0]["details"]["check"] == "docker"
@@ -1288,6 +1291,9 @@ async def test_start_local_service_preserves_explicit_source_checkout_setup_chec
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+    assert payload["next_steps"] == [
+        f"Fix the reported issue above, then re-run awf start --source-checkout '{checkout}'.",
+    ]
     assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["issues"][0]["details"]["check"] == "docker"
     assert bootstrap_calls == []
