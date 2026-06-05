@@ -390,10 +390,11 @@ def test_safe_overlay_whiteout_refuses_symlinked_parent_component(tmp_path: Path
 def test_safe_overlay_whiteout_returns_false_on_mknod_oserror(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Even with the capability probe satisfied, a ``mknod`` that raises (e.g. ``EPERM``
-    # on a hardened filesystem, ``EEXIST`` on a planted leaf) must fail safe: return
-    # False without raising, so the deletion simply is not forwarded and the credential
-    # stays visible.
+    # Even with the capability probe satisfied, a ``mknod`` that raises a genuine
+    # filesystem refusal (e.g. ``EPERM`` on a hardened filesystem) must fail safe:
+    # return False without raising, so the deletion simply is not forwarded and the
+    # credential stays visible. (``EEXIST`` is handled separately below — it means the
+    # whiteout already exists, the goal, so it returns True.)
     upper = tmp_path / "upper"
     upper.mkdir()
 
@@ -404,6 +405,29 @@ def test_safe_overlay_whiteout_returns_false_on_mknod_oserror(
 
     assert _safe_overlay_whiteout(upper, Path("secret.json")) is False
     assert not (upper / "secret.json").exists()
+
+
+@pytest.mark.unit
+def test_safe_overlay_whiteout_returns_true_when_leaf_already_a_whiteout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An ``EEXIST`` from the leaf ``mknod`` means the whiteout is already present.
+    # The caller proves ``upper`` confidently absent for ``rel`` immediately before
+    # this runs and the reconcile executes *before* the agent attaches, so the only
+    # writer that can have created the leaf in the gap is a *concurrent* reconcile of
+    # the same workspace, which independently classified the same confident deletion
+    # and created the identical char-device ``0,0`` whiteout. The deletion is therefore
+    # already forwarded (the credential is hidden) — return True, not a filesystem
+    # refusal that would spuriously raise ``CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED``.
+    upper = tmp_path / "upper"
+    upper.mkdir()
+
+    def _mknod_eexist(*args: object, **kwargs: object) -> None:
+        raise FileExistsError("File exists")
+
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _mknod_eexist)
+
+    assert _safe_overlay_whiteout(upper, Path("secret.json")) is True
 
 
 @pytest.mark.unit

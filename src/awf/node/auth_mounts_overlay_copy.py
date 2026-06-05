@@ -443,11 +443,13 @@ def _safe_overlay_whiteout(upper: Path, rel: Path) -> bool:
 
     Requires ``CAP_MKNOD``. **Fail-safe toward keeping the credential visible:** any
     ``OSError`` — a missing capability or unsupported filesystem (``EPERM`` /
-    ``ENOSYS``), a symlinked/non-dir component (``ELOOP`` / ``ENOTDIR``), or an
-    already-present leaf (``EEXIST``) — skips the whiteout and returns ``False``
-    without raising. A deletion that cannot be safely forwarded therefore degrades
-    to "the lower's copy stays visible", never to "a still-needed credential is
-    hidden". Returns ``True`` only when the whiteout device was actually created.
+    ``ENOSYS``) or a symlinked/non-dir component (``ELOOP`` / ``ENOTDIR``) — skips the
+    whiteout and returns ``False`` without raising. A deletion that cannot be safely
+    forwarded therefore degrades to "the lower's copy stays visible", never to "a
+    still-needed credential is hidden". The one ``OSError`` that does *not* fail to
+    ``False`` is ``EEXIST`` on the leaf ``mknod``: the whiteout is already present, so
+    the goal is met and it returns ``True`` (see the handler below). Otherwise returns
+    ``True`` only when the whiteout device was actually created.
     """
 
     fds: list[int] = []
@@ -464,18 +466,31 @@ def _safe_overlay_whiteout(upper: Path, rel: Path) -> bool:
             fds.append(dir_fd)
         # The overlayfs whiteout marker: a char device 0,0 with no permission bits.
         # Created relative to the validated parent ``dir_fd`` so a name swapped for a
-        # symlink mid-descent cannot redirect it. ``EEXIST`` (a leaf the agent already
-        # planted) is part of the fail-safe ``OSError`` catch — never clobber it.
+        # symlink mid-descent cannot redirect it. ``EEXIST`` is handled below: it means
+        # the whiteout is already there, so the device is never clobbered.
         os.mknod(
             rel.name,
             mode=stat.S_IFCHR | 0o000,
             device=os.makedev(0, 0),
             dir_fd=dir_fd,
         )
+    except FileExistsError:
+        # ``EEXIST`` on the leaf ``mknod``: the entry already exists. The caller proves
+        # ``upper`` confidently absent for ``rel`` immediately before this runs (no
+        # entry, every parent a real directory) and the reconcile executes *before* the
+        # agent attaches, so the only writer that can have created the leaf in the gap
+        # is a *concurrent* reconcile of the same workspace — which, seeing the identical
+        # confident deletion, created the same char-device ``0,0`` whiteout. The goal
+        # (the credential is hidden in ``upper``) is therefore already achieved, so
+        # report success. Treating this as a filesystem refusal (``False``) would
+        # spuriously raise ``CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED`` — a signal reserved for
+        # a genuine ``mknod`` refusal — on a benign, correct-outcome race (#414 review).
+        # (The parent-``mkdir`` ``EEXIST`` cannot reach here: it is suppressed in-loop.)
+        return True
     except OSError:
         # Best-effort fail-safe: a missing ``CAP_MKNOD`` (``EPERM``), an unsupported
-        # filesystem (``ENOSYS``), a symlinked/non-dir component (``ELOOP`` /
-        # ``ENOTDIR``), or an existing leaf (``EEXIST``) all degrade to "not hidden".
+        # filesystem (``ENOSYS``), or a symlinked/non-dir component (``ELOOP`` /
+        # ``ENOTDIR``) all degrade to "not hidden".
         return False
     finally:
         for fd in fds:
