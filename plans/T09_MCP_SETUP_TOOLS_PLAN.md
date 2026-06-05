@@ -84,6 +84,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HPbkf
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` runs setup readiness in
+dry-run mode but, when no `source_checkout` is supplied, returns the rendered
+`_run_setup` command unchanged. That command can be `awf setup`, so an MCP
+operator copying the read-only status payload can run the mutating setup flow
+instead of the matching dry-run status check.
+
+Scope is limited to rendering the setup-status `command` field with the dry-run
+setup command helper for both no-checkout and explicit-checkout calls.
+
+### Requirements Checklist
+
+- Preserve setup-status payload shape and existing safe metadata.
+- When no `source_checkout` is supplied, render `command` as
+  `awf setup --dry-run` plus any selected providers.
+- When explicit `source_checkout` is supplied, preserve the existing
+  `awf setup --dry-run --source-checkout <path>` rendering.
+- Add or update a focused regression for selected provider preservation.
+
+### Implementation Steps
+
+1. Update the existing no-checkout setup-status regression so it expects the
+   returned command to be the selected-provider dry-run command.
+2. Extend `_setup_status_dry_run_command` to omit `--source-checkout` when no
+   checkout path is present, and have `_setup_status_command` use it for every
+   setup-status payload.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Success Path Safe Result
 
 ### Problem Statement And Scope

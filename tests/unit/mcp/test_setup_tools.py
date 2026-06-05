@@ -373,7 +373,7 @@ async def test_get_setup_status_returns_only_status_and_safe_refs(
         }
     ]
     assert payload["status"] == "success"
-    assert payload["command"] == "awf setup"
+    assert payload["command"] == "awf setup --dry-run --provider github"
     assert payload["next_steps"] == ["Run awf start."]
     assert payload["setup"]["checks"] == [{"name": "docker", "level": "ok"}]
     assert payload["providers"]["github"] == {

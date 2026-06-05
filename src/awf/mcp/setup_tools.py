@@ -795,13 +795,11 @@ def _setup_status_issues(value: Any) -> list[dict[str, Any]]:
 
 
 def _setup_status_command(
-    value: Any,
+    _value: Any,
     *,
     selected_providers: list[str],
     source_checkout: Path | None,
 ) -> str:
-    if source_checkout is None:
-        return value if isinstance(value, str) else "awf setup"
     return _setup_status_dry_run_command(
         selected_providers=selected_providers,
         source_checkout=source_checkout,
@@ -856,12 +854,13 @@ def _setup_status_next_step_for_source_checkout(
 def _setup_status_dry_run_command(
     *,
     selected_providers: list[str],
-    source_checkout: Path,
+    source_checkout: Path | None,
 ) -> str:
     command = ["awf", "setup", "--dry-run"]
     for provider in selected_providers:
         command.extend(["--provider", provider])
-    command.extend(["--source-checkout", str(source_checkout)])
+    if source_checkout is not None:
+        command.extend(["--source-checkout", str(source_checkout)])
     return shlex.join(command)
 
 
