@@ -30,6 +30,9 @@ Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
 - Complete: MCP workspace log exact-secret redaction honors the explicitly
   selected MCP Compose env file when the service is started with a custom
   `--env-file`.
+- Complete: MCP exact-secret redaction reconstructs quoted multiline provider
+  secrets from the selected Compose env file for text artifacts and workspace
+  log reads.
 - Complete: Captured and followed service-log output redact exact provider
   credential values loaded from the selected Compose env file when the log emits
   the bare value without an assignment or bearer prefix.
@@ -429,6 +432,52 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/s
 # All checks passed
 
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HWEFg` MCP Multiline Compose Env Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP exact-secret collection now adds full quoted multiline secret
+  values from the selected Compose env file for secret-like keys.
+- Complete: MCP text artifact reads redact every fragment of a bare multiline
+  provider secret loaded only from the selected Compose env file.
+- Complete: MCP workspace log reads redact every fragment of the same bare
+  multiline provider secret.
+- Complete: existing single-line Compose env-file redaction remains on the
+  existing `compose_env_file_values()` path, with the new helper only
+  supplementing quoted multiline values.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `tests/unit/mcp/test_mcp_multiline_compose_redaction.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+# 2 failed: later multiline secret fragments remained in MCP artifact and workspace-log output.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+# 2 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
 ```
 

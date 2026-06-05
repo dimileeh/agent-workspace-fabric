@@ -334,6 +334,57 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/s
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
 
+## Inline Review Thread `PRRT_kwDOSJAM6s6HWEFg` MCP Multiline Compose Env Secret Plan
+
+### Problem Statement And Scope
+
+The review reports that MCP exact-secret collection reads the selected Compose
+env file through `compose_env_file_values()`, whose current line-by-line parser
+does not reconstruct Docker Compose quoted multiline env-file values. A
+single-quoted provider secret such as a PEM body can therefore enter MCP text
+artifacts or durable log reads with only the first physical line collected for
+exact redaction.
+
+This repair is limited to the MCP exact-secret collector, focused MCP
+regressions, and this plan/validation evidence. It does not change branch
+management, pushing, broad validation, full coverage, or unrelated Compose
+parsing behavior.
+
+### Requirements Checklist
+
+- MCP exact-secret collection must reconstruct supported quoted multiline
+  values from the selected Compose env file when the key is secret-like.
+- MCP text artifact redaction must redact every line of a bare multiline
+  Compose env-file provider secret.
+- MCP workspace log reads must redact every line of the same bare multiline
+  Compose env-file provider secret.
+- Existing single-line Compose env-file redaction behavior must remain
+  compatible.
+- Run only focused MCP tests and narrow lint/type checks for touched files;
+  leave broad AWF/GitHub validation and full coverage to AWF after agent
+  completion.
+
+### Implementation Steps
+
+1. Add focused MCP artifact and workspace-log regressions in a new MCP test
+   module proving a single-quoted multiline provider secret from the selected
+   Compose env file is redacted in full.
+2. Extend the MCP exact-secret collector with a small quoted multiline
+   Compose-env reader that contributes only secret-key values and preserves the
+   existing single-line parser path.
+3. Deduplicate collected secrets through the existing `_mcp_secret_values()`
+   return path.
+4. Run the focused MCP regressions plus narrow lint/type checks for touched
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```
+
 ## Review-Level Comment `issue:4620175517` Followed Service Logs Final Join Plan
 
 ### Problem Statement And Scope
