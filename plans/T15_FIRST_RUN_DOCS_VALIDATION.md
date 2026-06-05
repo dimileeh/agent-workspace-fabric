@@ -123,6 +123,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   dotenv-safe Postgres password persistence as Quickstart, and by clarifying
   that the Uninstall intro metadata-refresh command uses Lane 3/no-global
   grammar with a Lane 2/global-tool equivalent documented below.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HXY0N` by making
+  `docs/UPGRADE.md` upgrade and rollback restore snippets strip unquoted dotenv
+  inline comments before exporting persisted `AWF_API_TOKEN` or
+  `AWF_POSTGRES_PASSWORD`, while preserving existing quoted dotenv decoding.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -2524,6 +2528,44 @@ git diff --check
 Final focused repair result: targeted docs regressions `4 passed in 0.88s`;
 copy-paste snippet syntax check `1 passed in 0.77s`; `ruff check` passed;
 `ruff format --check` reported `1 file already formatted`; `git diff --check`
+reported no whitespace errors.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HXY0N`:
+
+- `docs/UPGRADE.md` now defines
+  `awf_strip_unquoted_dotenv_inline_comment` in each standalone upgrade and
+  rollback restore block.
+- Each UPGRADE restore block applies that helper immediately after reading
+  persisted `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD`, before existing
+  quoted-value stripping and double-quoted dotenv decoding.
+- `tests/unit/docs/test_public_docs_status.py` now executes all package,
+  source-checkout, and rollback UPGRADE restore snippets against unquoted
+  values such as `AWF_POSTGRES_PASSWORD=awf_dev # local` and requires the
+  exported value to match Compose dotenv parsing.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments -q
+```
+
+Red-phase result after adding the focused regression: failed as expected; the
+`uv tool` package snippet exported `token-from-env # local token` and
+`awf_dev # local password`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_decodes_quoted_dotenv_entries -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+git diff --check
+```
+
+Final focused repair result: targeted restore regressions `5 passed in 1.98s`;
+focused public docs file `75 passed in 4.25s`; `ruff check` passed; `ruff
+format --check` reported `1 file already formatted`; `git diff --check`
 reported no whitespace errors.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend

@@ -662,3 +662,18 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HXY0N`: `docs/UPGRADE.md`
+restore snippets must strip valid unquoted dotenv inline comments before
+exporting persisted `AWF_API_TOKEN` or `AWF_POSTGRES_PASSWORD`. Preserve the
+existing quoted dotenv decoding behavior, and apply the fix to the repeated
+upgrade and rollback restore patterns in this guide.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HXY0N`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_decodes_quoted_dotenv_entries -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+git diff --check
+```
