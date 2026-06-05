@@ -383,35 +383,21 @@ class InstallerHarness:
 
     # -- runner --------------------------------------------------------
 
-    def run(
-        self,
-        args: list[str],
-        *,
-        manifest: Path | None = None,
-        extra_env: dict[str, str] | None = None,
-        stdin: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        """Run the installer with a hermetic env and captured output.
+    def shadowed_system_path(self) -> str:
+        """Build a ``PATH`` where ``awf``/``uv``/``pipx`` read as genuinely missing.
 
-        ``stdin`` feeds the process standard input (used to confirm/decline the
-        interactive uv-bootstrap prompt under the
-        ``AWF_INSTALL_FORCE_INTERACTIVE`` seam). When it is ``None`` the child's
-        stdin is ``/dev/null`` so ``[ -t 0 ]`` is deterministically non-TTY and
-        the non-interactive decision path is exercised regardless of how pytest
-        was launched.
+        A test that omits ``add_uv``/``add_pipx`` (or the ``awf`` stub) must
+        exercise the tool-absent path, while keeping every *other* system tool
+        reachable. We cannot drop the whole directory that ships a managed tool:
+        under Homebrew ``uv``/``pipx`` co-locate with coreutils in
+        ``/usr/local/bin`` (Intel) or ``/opt/homebrew/bin`` (Apple Silicon), so
+        excluding the directory would silently strip ``sha256sum``/``shasum``/
+        ``awk`` that the installer's checksum step relies on. Instead we keep
+        directories that ship no managed tool as-is and, for those that do,
+        symlink their non-managed executables into a shadow dir — so the managed
+        tool alone disappears. Tests that need a managed tool present add their
+        own stub, which sits first on ``PATH`` and shadows it.
         """
-        # Make a real ``awf``/``uv``/``pipx`` read as genuinely missing so a test
-        # that omits ``add_uv``/``add_pipx`` (or the ``awf`` stub) exercises the
-        # tool-absent path, while keeping every *other* system tool reachable.
-        # We cannot drop the whole directory that ships a managed tool: under
-        # Homebrew ``uv``/``pipx`` co-locate with coreutils in
-        # ``/usr/local/bin`` (Intel) or ``/opt/homebrew/bin`` (Apple Silicon),
-        # so excluding the directory would silently strip ``sha256sum``/
-        # ``shasum``/``awk`` that the installer's checksum step relies on. Instead
-        # we keep directories that ship no managed tool as-is and, for those that
-        # do, symlink their non-managed executables into a shadow dir — so the
-        # managed tool alone disappears. Tests that need a managed tool present
-        # add their own stub, which sits first on ``PATH`` and shadows it.
         managed_tools = ("awf", "uv", "pipx")
         shadow_dir = self.root / "syspath-shadow"
         kept: list[str] = []
@@ -435,11 +421,36 @@ class InstallerHarness:
             shadow_dir.mkdir(parents=True, exist_ok=True)
             for child in directory.iterdir():
                 link = shadow_dir / child.name
-                if child.name not in managed_tools and not link.exists():
+                # ``follow_symlinks=False`` so an already-shadowed name is
+                # detected even when it points at a *broken* symlink. The naive
+                # ``link.exists()`` follows the link, reports a dangling target as
+                # absent, and re-attempts ``symlink_to`` on the next managed-tool
+                # directory that ships a same-named entry — raising
+                # ``FileExistsError``. First-on-PATH still wins.
+                if child.name not in managed_tools and not link.exists(follow_symlinks=False):
                     link.symlink_to(child)
         if shadow_insert_at is not None:
             kept.insert(shadow_insert_at, str(shadow_dir))
-        system_path = os.pathsep.join(kept)
+        return os.pathsep.join(kept)
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        manifest: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+        stdin: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the installer with a hermetic env and captured output.
+
+        ``stdin`` feeds the process standard input (used to confirm/decline the
+        interactive uv-bootstrap prompt under the
+        ``AWF_INSTALL_FORCE_INTERACTIVE`` seam). When it is ``None`` the child's
+        stdin is ``/dev/null`` so ``[ -t 0 ]`` is deterministically non-TTY and
+        the non-interactive decision path is exercised regardless of how pytest
+        was launched.
+        """
+        system_path = self.shadowed_system_path()
         env: dict[str, str] = {
             "PATH": f"{self.bin_dir}{os.pathsep}{system_path}",
             "HOME": str(self.home),
