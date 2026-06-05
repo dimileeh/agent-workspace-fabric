@@ -481,6 +481,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
 ```
 
+## Inline Review Thread `PRRT_kwDOSJAM6s6HXEIw` Service Log Env-File Interpolation Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: service-log exact-secret collection now parses the selected Compose
+  env file with `os.environ` overlaid by `service_environ`, so service-supplied
+  interpolation values win while inherited caller values remain available.
+- Complete: captured service-log output redacts a bare interpolated env-file
+  provider secret when caller `os.environ` contains a stale interpolation value.
+- Complete: adjacent explicit service-environment secret redaction and
+  non-secret env-file visibility remain covered by the focused neighboring
+  captured-output regression.
+- Complete: focused pytest, ruff, and mypy checks passed. Broad AWF/GitHub
+  validation, full coverage, OpenAPI drift, and frontend builds were not run
+  locally; AWF owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_secret_interpolated_from_service_environ -q --tb=short -ra
+# 1 failed: captured service-log stdout returned the raw "provider-service-current-suffix" value.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_secret_interpolated_from_service_environ -q --tb=short -ra
+# 1 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_secret_interpolated_from_service_environ tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_provider_secret_from_captured_output -q --tb=short -ra
+# 2 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
+
 Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend builds
 were not run in the agent phase; AWF owns those gates after completion.
 

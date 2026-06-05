@@ -600,9 +600,10 @@ def _service_log_secret_values(
         quoted_multiline_values,
         quoted_multiline_first_line_values,
     ) = _service_log_quoted_multiline_secret_context(compose_env_file)
+    compose_environ = None if environ is None else {**os.environ, **environ}
     secret_values = [
         value
-        for key, value in compose_env_file_values(compose_env_file).items()
+        for key, value in compose_env_file_values(compose_env_file, environ=compose_environ).items()
         if value
         and len(value) >= 4
         and is_secret_env_key(key)

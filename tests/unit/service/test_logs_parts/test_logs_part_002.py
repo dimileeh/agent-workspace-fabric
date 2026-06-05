@@ -826,6 +826,59 @@ def test_service_logs_redacts_compose_env_provider_secret_from_captured_output(
     assert "<redacted>" in rendered
 
 
+@pytest.mark.unit
+def test_service_logs_redacts_compose_env_secret_interpolated_from_service_environ(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Parse env-file exact secrets with the same interpolation env passed to Compose."""
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      VALUE_SUFFIX: "${VALUE_SUFFIX:?set VALUE_SUFFIX}"
+""",
+    )
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        "ANTHROPIC_AUTH_TOKEN=provider-${VALUE_SUFFIX}\n",
+        encoding="utf-8",
+    )
+    service_environ = {"VALUE_SUFFIX": "service-current-suffix"}
+    stale_secret = "provider-caller-stale-suffix"
+    current_secret = "provider-service-current-suffix"
+    calls: list[dict[str, object]] = []
+
+    def success_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return captured output containing the service-interpolated secret."""
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(
+            args,
+            returncode=0,
+            stdout=f"stdout bare {current_secret}\n",
+            stderr="",
+        )
+
+    monkeypatch.setenv("VALUE_SUFFIX", "caller-stale-suffix")
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+        service_environ=service_environ,
+        run_subprocess=success_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["VALUE_SUFFIX"] == "service-current-suffix"
+    assert current_secret not in result.stdout
+    assert stale_secret not in result.stdout
+    assert "<redacted>" in result.stdout
+
+
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output(

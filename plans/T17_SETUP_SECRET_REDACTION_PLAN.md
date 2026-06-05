@@ -385,6 +385,54 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
 
+## Inline Review Thread `PRRT_kwDOSJAM6s6HXEIw` Service Log Env-File Interpolation Plan
+
+### Problem Statement And Scope
+
+The review reports that service-log exact-secret collection parses the selected
+Compose env file with the process environment, even though Docker Compose logs
+may run with selected interpolation values supplied from `service_environ`.
+When an env-file secret value is built from interpolation, a stale or absent
+caller environment can make the collected exact-secret value differ from the
+secret emitted by the service logs.
+
+This repair is limited to service-log Compose env-file exact-secret collection,
+a focused captured-output regression, and this plan/validation evidence. It
+does not change branch management, pushing, broad validation, full coverage,
+OpenAPI drift, frontend validation, or unrelated Compose parsing behavior.
+
+### Requirements Checklist
+
+- Service-log exact-secret collection must parse unquoted and double-quoted
+  Compose env-file secret values with the same `service_environ` interpolation
+  context used for Docker Compose logs.
+- Captured service-log output must redact a bare interpolated env-file provider
+  secret when the caller `os.environ` contains a stale interpolation value.
+- Existing explicit service-environment secret redaction and non-secret env-file
+  visibility must remain compatible.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused service-log regression where `ANTHROPIC_AUTH_TOKEN` in the
+   Compose env file interpolates `${VALUE_SUFFIX}`, `service_environ` provides
+   the current suffix, and `os.environ` contains a stale suffix.
+2. Update `_service_log_secret_values()` to pass the caller environment overlaid
+   with `service_environ` into `compose_env_file_values()` while preserving
+   inherited environment exact secrets.
+3. Run the focused regression and adjacent service-log Compose env secret test,
+   plus narrow lint/type checks for the touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_secret_interpolated_from_service_environ -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_secret_interpolated_from_service_environ tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_provider_secret_from_captured_output -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```
+
 ## Review-Level Comment `issue:4620175517` Followed Service Logs Final Join Plan
 
 ### Problem Statement And Scope
