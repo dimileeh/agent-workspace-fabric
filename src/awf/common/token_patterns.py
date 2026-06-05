@@ -30,6 +30,7 @@ TOKEN_ASSIGNMENT_PATTERN: Final = (
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<quote>[\"']?)"
     r"(?P<value>"
+    r"(?=-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----)"
     r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]*?"
     r"-----END [A-Z0-9 -]*PRIVATE KEY-----"
     r"|[^\s\"'`,;)}\]]+"

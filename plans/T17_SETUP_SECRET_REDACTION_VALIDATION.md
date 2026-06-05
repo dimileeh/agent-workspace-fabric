@@ -2249,3 +2249,47 @@ uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts
 wc -l tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 # 1425 tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 ```
+
+## Review-Level Comment `issue:4620175517` PEM Assignment Guard Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `_service_log_secret_values()` was verified as already narrowed to
+  `Path | None`; it does not internally re-resolve the Compose env-file in this
+  checkout, so no service-log code change was needed.
+- Complete: the shared token-assignment regex now explicitly gates the
+  multiline PEM private-key branch with a header lookahead.
+- Complete: multiline PEM private-key assignment redaction and ordinary
+  single-token assignment redaction remain covered by focused tests.
+- Complete: focused verification passed. Broad AWF/GitHub validation, full
+  coverage, OpenAPI drift, and frontend builds were not run locally; AWF owns
+  those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/common/token_patterns.py`
+- `tests/unit/common/test_token_patterns.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_token_assignment_pattern_guards_multiline_private_key_branch -q --tb=short -ra
+# failed: expected PEM private-key branch lookahead was absent
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_token_assignment_pattern_guards_multiline_private_key_branch tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values -q --tb=short -ra
+# 18 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py -q --tb=short -ra
+# 16 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py tests/unit/common/test_token_patterns.py
+# All checks passed!
+```

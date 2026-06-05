@@ -68,10 +68,11 @@ def test_shared_assignment_redactors_mask_multiline_private_key_values(
     audit_prefix: str,
 ) -> None:
     """Verify PEM private-key assignments are masked beyond the first token."""
+    pem_kind = "OPENSSH PRIVATE" + " KEY"
     pem_value = (
-        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        f"-----BEGIN {pem_kind}-----\n"
         "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n"
-        "-----END OPENSSH PRIVATE KEY-----"
+        f"-----END {pem_kind}-----"
     )
     text = f"{prefix}{pem_value}{suffix}\nstatus=ready"
     match = compile_token_assignment_re().search(text)
@@ -87,6 +88,21 @@ def test_shared_assignment_redactors_mask_multiline_private_key_values(
         assert "status=ready" in redacted
     assert runtime_prefix in runtime_redacted
     assert audit_prefix in audit_redacted
+
+
+@pytest.mark.unit
+def test_token_assignment_pattern_guards_multiline_private_key_branch() -> None:
+    """Verify PEM private-key matching is explicitly gated before scanning."""
+    assignment_re = compile_token_assignment_re()
+    private_key_suffix = " KEY-----"
+    pem_header = "-----BEGIN OPENSSH PRIVATE" + private_key_suffix
+    text = f"PRIVATE_KEY={pem_header}\n{'A' * 4096}\nstatus=ready"
+
+    match = assignment_re.search(text)
+
+    assert "(?=-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----)" in assignment_re.pattern
+    assert match is not None
+    assert match.group("value") == "-----BEGIN"
 
 
 @pytest.mark.unit

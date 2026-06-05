@@ -1842,3 +1842,48 @@ support bundles, branch management, pushing, or broad validation ownership.
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py -q -k 'truncated_multibyte_eof_window or requested_window_starts_inside_multibyte_character' --tb=short -ra
 uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 ```
+
+## Review-Level Comment `issue:4620175517` PEM Assignment Guard Plan
+
+### Problem Statement And Scope
+
+The review-level comment includes two service/redaction follow-ups. The
+service-log helper contract is already narrowed in this checkout:
+`_service_log_secret_values()` accepts `Path | None` and no longer resolves the
+Compose env-file internally. The remaining actionable item is the shared
+assignment regex's PEM private-key value branch, which should be explicitly
+guarded so the multiline branch is only selected for values that start with a
+PEM private-key header.
+
+This repair is limited to `src/awf/common/token_patterns.py`, focused common
+token-pattern tests, and this plan/validation evidence. It does not change
+service-log subprocess behavior, MCP log projection, support bundles, branch
+management, pushing, or broad validation ownership.
+
+### Requirements Checklist
+
+- Leave `_service_log_secret_values()` unchanged because it already accepts a
+  resolved `Path | None` and has no internal re-resolution.
+- Add an explicit lookahead guard to the PEM private-key value branch of the
+  shared token-assignment regex.
+- Preserve full multiline PEM private-key redaction and ordinary assignment
+  redaction behavior.
+- Run only focused tests and narrow lint for touched files; leave broad
+  AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing test that locks the PEM branch guard and verifies
+   malformed PEM-like assignments still fall back to ordinary assignment
+   matching without consuming following log text.
+2. Add the lookahead guard to the PEM private-key branch in
+   `TOKEN_ASSIGNMENT_PATTERN`.
+3. Run the focused token-pattern tests and narrow ruff check for touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_token_assignment_pattern_guards_multiline_private_key_branch -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_token_assignment_pattern_guards_multiline_private_key_branch tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py tests/unit/common/test_token_patterns.py
+```
