@@ -285,7 +285,7 @@ replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "
 print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
 }
 AWF_PERSISTED_API_TOKEN=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -303,14 +303,14 @@ for env_file in .env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
-elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env 2>/dev/null; then
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
   export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -329,11 +329,11 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
 AWF_PERSISTED_DATABASE_URL=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_DATABASE_URL" in
@@ -352,10 +352,16 @@ done
 if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
   export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
 else
-  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_DATABASE_URL
 fi
-docker compose --env-file .env -f docker/compose/local-service.yml stop
+if [ -f .env ]; then
+  docker compose --env-file .env -f docker/compose/local-service.yml stop
+elif [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 git pull
 uv tool install . --force
 awf setup --source-checkout "$PWD"
@@ -491,7 +497,7 @@ replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "
 print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
 }
 AWF_PERSISTED_API_TOKEN=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -509,14 +515,14 @@ for env_file in .env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
-elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env 2>/dev/null; then
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
   export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -535,11 +541,11 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
 AWF_PERSISTED_DATABASE_URL=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_DATABASE_URL" in
@@ -558,10 +564,16 @@ done
 if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
   export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
 else
-  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_DATABASE_URL
 fi
-docker compose --env-file .env -f docker/compose/local-service.yml stop
+if [ -f .env ]; then
+  docker compose --env-file .env -f docker/compose/local-service.yml stop
+elif [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 git pull
 uv sync --extra dev
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"

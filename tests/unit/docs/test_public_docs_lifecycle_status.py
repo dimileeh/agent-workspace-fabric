@@ -120,8 +120,13 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     )
 
     for label, section, refresh_prereq, setup_line, start_line in cases:
+        root_then_legacy_env_loop = "for env_file in .env docker/compose/.env; do"
         assert checkout_refresh_line in section, f"{label} is missing checkout refresh"
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
+        assert section.count(root_then_legacy_env_loop) == 3, (
+            f"{label} must restore API token, Postgres password, and database URL "
+            "from root .env before legacy docker/compose/.env"
+        )
         (
             env_restore_start_index,
             env_restore_end_index,
@@ -132,7 +137,7 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
             section,
             "upgrading",
             require_database_url_restore=True,
-            require_legacy_fallback=not label.startswith("Quickstart"),
+            require_legacy_fallback=True,
         )
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"

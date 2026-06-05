@@ -2626,6 +2626,55 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HYi_o`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/QUICKSTART.md` source-checkout upgrade snippets now restore
+  `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and `AWF_DATABASE_URL` from root
+  `.env` first, then legacy `docker/compose/.env`, before stopping local Core.
+- Complete: The same Quickstart upgrade snippets now stop Compose with root
+  `.env` first, legacy `docker/compose/.env` second, and a no-env-file fallback
+  last.
+- Complete: `tests/unit/docs/test_public_docs_lifecycle_status.py` now rejects
+  source-checkout upgrade docs that omit the root-then-legacy env lookup or
+  legacy stop fallback.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+# Red phase after tightening the focused assertion: failed because Quickstart Lane 2 had zero root-then-legacy env restore loops
+# Final result: 1 passed in 0.57s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell -q
+# 1 passed in 1.13s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 1 passed in 0.60s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py
+# 1 file already formatted
+
+git diff --check
+# no output
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HYgyo`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
