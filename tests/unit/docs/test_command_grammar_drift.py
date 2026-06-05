@@ -110,6 +110,21 @@ AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE = re.compile(
     r"(?P<qualifier>\s+(?:without a path|no[- ]path))",
     re.IGNORECASE,
 )
+# The R4 analog of the init prohibition above: a prose prohibition that backticks
+# an `awf smoke run` span as the *disallowed* shape (e.g. a TROUBLESHOOTING note
+# "Do not run `awf smoke run <path>` — pass `--project <path>` instead"). Because
+# `_parse_smoke_invocation` anchors on a span that *begins with* `awf smoke run`,
+# such a cautionary span would otherwise be read as a real bare-positional-path
+# invocation and flagged as a spurious R4 offender. It is gated on the same
+# `do not`/`don't`/`never`/`avoid` lead-in kept within the clause (the `[^.`\n]`
+# bridge stops it crossing a sentence break), so a *positive* example such as
+# "Run `awf smoke run --project <p> --mocked-local`" carries no lead-in, keeps its
+# backticks, and is still scanned.
+SMOKE_RUN_PROHIBITION_RE = re.compile(
+    r"(?P<lead>do not|don't|never|avoid)(?P<between>[^.`\n]*?)"
+    r"`(?P<span>awf smoke run[^`\n]*)`",
+    re.IGNORECASE,
+)
 # Flags that consume the following token as their value; everything else that
 # starts with "-" is treated as a valueless flag. Covers every value-taking
 # `awf smoke run` option (src/awf/cli/profile_smoke_commands.py): `--project`,
@@ -278,6 +293,19 @@ def _without_init_prohibitions(text: str) -> str:
     """
     text = NO_PATH_INIT_PROHIBITION_RE.sub(r"\g<qualifier> awf init", text)
     return _strip_after_span_init_prohibition(text)
+
+
+def _without_smoke_prohibitions(text: str) -> str:
+    """Unwrap the backticks of a prohibited ``awf smoke run`` span.
+
+    Mirrors :func:`_without_init_prohibitions` for R4: a prohibition such as "Do
+    not run ``awf smoke run <path>`` directly" documents the *disallowed* shape, so
+    stripping only the inner backticks (leaving the lead-in and prose intact) keeps
+    the warning readable while stopping R4's inline scan from extracting the span
+    and parsing it as a real bare-positional-path invocation. A positive example
+    carries no prohibition lead-in, keeps its backticks, and is still scanned.
+    """
+    return SMOKE_RUN_PROHIBITION_RE.sub(r"\g<lead>\g<between>\g<span>", text)
 
 
 def _inline_command_mentions(text: str) -> list[str]:
@@ -502,11 +530,25 @@ def _bootstrap_offenders(text: str) -> list[str]:
     # pattern, so an R3 failure message names the offending text a developer can
     # grep for instead of an opaque pattern string they would have to re-search
     # by hand.
+    #
+    # Several patterns overlap on purpose (e.g. the "without a path" form (0) and
+    # the broader "...bootstraps the local service" form (7) both fire on "Run
+    # `awf init` without a path to bootstrap Core."). Deduplicate by matched span
+    # so one offending sentence yields one snippet, not one per pattern that
+    # happens to hit it — otherwise the R3 failure message lists the same line
+    # twice. Genuinely distinct offenses sit at non-overlapping spans, so they are
+    # each still reported.
     offenders: list[str] = []
+    seen_spans: list[tuple[int, int]] = []
     for pattern in INIT_AS_BOOTSTRAP_PATTERNS:
         match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            offenders.append(match.group(0))
+        if match is None:
+            continue
+        start, end = match.span()
+        if any(start < seen_end and seen_start < end for seen_start, seen_end in seen_spans):
+            continue
+        seen_spans.append((start, end))
+        offenders.append(match.group(0))
     return offenders
 
 
@@ -777,6 +819,54 @@ def test_helper_excludes_no_path_init_prohibition_from_inline_scan() -> None:
     assert "awf init" in _inline_command_mentions(_without_init_prohibitions(plain))
 
 
+def test_helper_excludes_smoke_run_prohibition_from_inline_scan() -> None:
+    # The R4 analog of the init prohibition handling: a doc that *warns against* a
+    # bare-positional `awf smoke run <path>` (e.g. a TROUBLESHOOTING negation
+    # example) must not have that warning parsed as a real invocation. The
+    # prohibited span is unwrapped before the inline scan, so it never reaches
+    # `_parse_smoke_invocation` as a spurious "bare positional path" offender,
+    # while the positive `--project ... --mocked-local` example survives intact.
+    text = (
+        "Do not run `awf smoke run /tmp/proj` directly; instead run\n"
+        "`awf smoke run --project /tmp/proj --mocked-local` so the stack is mocked.\n"
+    )
+    mentions = _inline_command_mentions(_without_smoke_prohibitions(text))
+    offenders = [
+        offense
+        for line in mentions
+        if (invocation := _parse_smoke_invocation(line)) is not None
+        and (offense := _smoke_invocation_offense(invocation)) is not None
+    ]
+    assert offenders == []
+    # The positive example is still scanned and recognised as a conforming
+    # invocation, so the strip never blinds R4 to a real example.
+    assert any(
+        (invocation := _parse_smoke_invocation(line)) is not None and invocation.has_mocked_local
+        for line in mentions
+    )
+    # Without the strip the cautionary span is misread as a bare-positional-path
+    # offender — this is the spurious failure the guard prevents.
+    raw_mentions = _inline_command_mentions(text)
+    raw_offenders = [
+        offense
+        for line in raw_mentions
+        if (invocation := _parse_smoke_invocation(line)) is not None
+        and (offense := _smoke_invocation_offense(invocation)) is not None
+    ]
+    assert "bare positional path" in raw_offenders
+    # An *unqualified* bare-positional example (no prohibition lead-in) keeps its
+    # backticks and is still flagged, so the strip never weakens R4's core check.
+    plain = "Run `awf smoke run /tmp/proj` to verify.\n"
+    plain_mentions = _inline_command_mentions(_without_smoke_prohibitions(plain))
+    plain_offenders = [
+        offense
+        for line in plain_mentions
+        if (invocation := _parse_smoke_invocation(line)) is not None
+        and (offense := _smoke_invocation_offense(invocation)) is not None
+    ]
+    assert "bare positional path" in plain_offenders
+
+
 def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     # Offenders are the *matched snippet*, not the raw regex pattern, so an R3
     # failure message names the offending text (a developer can grep for it)
@@ -801,6 +891,19 @@ def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     # a `do not` from an earlier sentence cannot smuggle a reintroduction through.
     assert _bootstrap_offenders("Run `awf init` without a path to bootstrap Core.")
     assert _bootstrap_offenders("Do not panic. Run `awf init` without a path to bootstrap.")
+    # A single offending sentence is matched by several overlapping patterns (here
+    # the "without a path" form and the broader "...bootstraps Core" form), but the
+    # overlapping spans are deduplicated so it yields exactly one snippet rather
+    # than one per pattern — the R3 failure message must not list the same line
+    # twice.
+    double_match = _bootstrap_offenders("Run `awf init` without a path to bootstrap Core.")
+    assert len(double_match) == 1
+    # Two genuinely distinct offenses sit at non-overlapping spans, so both are
+    # still surfaced.
+    two_offenses = _bootstrap_offenders(
+        "Run `awf init` without a path here. Later try `awf init` (no path) there."
+    )
+    assert len(two_offenses) == 2
     # `awf service bootstrap` as a command must never be flagged.
     assert _bootstrap_offenders("Run `awf service bootstrap` to start Postgres.") == []
     assert _bootstrap_offenders("awf init .") == []
@@ -904,7 +1007,12 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
     mocked_examples_seen = 0
     for rel_path in FIRST_RUN_DOCS:
         text = _read(rel_path)
-        for line in _fenced_command_lines(text) + _inline_command_mentions(text):
+        # Inline mentions are scanned with smoke-run prohibitions unwrapped so a
+        # doc that *warns against* a bare-positional `awf smoke run <path>` (e.g. a
+        # TROUBLESHOOTING negation example) is not itself read as an offending
+        # invocation, mirroring R2's no-path init prohibition handling.
+        inline = _inline_command_mentions(_without_smoke_prohibitions(text))
+        for line in _fenced_command_lines(text) + inline:
             invocation = _parse_smoke_invocation(line)
             if invocation is None:
                 continue
