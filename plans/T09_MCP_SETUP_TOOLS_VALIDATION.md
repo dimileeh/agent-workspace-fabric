@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HdUce
+
+### Requirement Status
+
+- Preserve the `SourceCheckoutError` reason code, issue details, and MCP error
+  response shape: Complete.
+- Preserve existing explicit `source_checkout` command rendering: Complete.
+- When no explicit `source_checkout` is supplied but `SourceCheckoutError.root`
+  identifies the persisted checkout, render source-checkout remediation against
+  that persisted checkout instead of `.`: Complete.
+- Add a focused regression proving
+  `issues[].remediation.related_command` targets the persisted checkout:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_persisted_source_checkout_failure_uses_persisted_remediation_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_persisted_source_checkout_failure_uses_persisted_remediation_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["issues"][0]["remediation"]["related_command"]` was
+  `awf setup --source-checkout .` instead of the persisted checkout from
+  `SourceCheckoutError.root`.
+- Regression plus existing explicit-checkout regression after the
+  implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6Hc2bA
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

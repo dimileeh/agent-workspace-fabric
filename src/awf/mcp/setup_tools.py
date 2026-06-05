@@ -417,6 +417,7 @@ async def _start_local_service_result(
                 skip_agent_runtime_build=skip_agent_runtime_build,
                 timeout_seconds=timeout_seconds,
                 source_checkout=source_path,
+                remediation_source_checkout=exc.root,
             ),
             is_error=True,
         )
@@ -592,6 +593,7 @@ def _start_payload_with_command(
     skip_agent_runtime_build: bool,
     timeout_seconds: float,
     source_checkout: Path | None,
+    remediation_source_checkout: Path | None = None,
 ) -> FirstRunPayload:
     command = _start_command(
         rebuild=rebuild,
@@ -602,11 +604,14 @@ def _start_payload_with_command(
     update: dict[str, Any] = {"command": command}
     if payload.command == "awf setup":
         update["next_steps"] = _start_reason_coded_next_steps(payload.next_steps, command=command)
+    issue_source_checkout = (
+        source_checkout if remediation_source_checkout is None else remediation_source_checkout
+    )
     if payload.issues:
         update["issues"] = _start_issues_with_command(
             payload.issues,
             command=command,
-            source_checkout=source_checkout,
+            source_checkout=issue_source_checkout,
         )
     return payload.model_copy(update=update)
 

@@ -883,6 +883,50 @@ async def test_start_local_service_preserves_explicit_source_checkout_validation
 
 
 @pytest.mark.unit
+async def test_start_local_service_persisted_source_checkout_failure_uses_persisted_remediation_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "stale source checkout"
+    checkout.mkdir()
+    bootstrap_calls: list[bool] = []
+
+    def fail_source_checkout(source_path: Path | None) -> object:
+        assert source_path is None
+        raise SourceCheckoutError(
+            reason_code=SOURCE_CHECKOUT_ASSETS_STALE,
+            message="Stored AWF source checkout metadata is no longer valid.",
+            root=checkout,
+            missing_markers=("uv.lock",),
+        )
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", fail_source_checkout)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == SOURCE_CHECKOUT_ASSETS_STALE
+    assert payload["command"] == "awf start"
+    assert (
+        payload["issues"][0]["remediation"]["related_command"]
+        == f"awf setup --source-checkout '{checkout}'"
+    )
+    assert payload["issues"][0]["details"]["root"] == str(checkout)
+    assert payload["issues"][0]["details"]["missing_markers"] == ["uv.lock"]
+    assert bootstrap_calls == []
+
+
+@pytest.mark.unit
 async def test_start_local_service_reports_structured_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

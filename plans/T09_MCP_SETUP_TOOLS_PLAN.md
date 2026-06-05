@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HdUce
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_start_local_service` loses the persisted
+source-checkout root when no explicit `source_checkout` argument is supplied and
+`_resolve_start_source_checkout(None)` raises `SourceCheckoutError`. The
+exception still carries the stale persisted checkout in `exc.root`, but the MCP
+start error path passes `source_path=None` into remediation rewriting, leaving
+the issue's catalog default `awf setup --source-checkout .`.
+
+Scope is limited to the start-tool `SourceCheckoutError` branch and its focused
+regression. Existing explicit `source_checkout` behavior and unrelated start
+failure payloads remain unchanged.
+
+### Requirements Checklist
+
+- Preserve the `SourceCheckoutError` reason code, issue details, and MCP error
+  response shape.
+- Preserve existing explicit `source_checkout` command rendering.
+- When no explicit `source_checkout` is supplied but `SourceCheckoutError.root`
+  identifies the persisted checkout, render source-checkout remediation against
+  that persisted checkout instead of `.`.
+- Add a focused regression proving
+  `issues[].remediation.related_command` targets the persisted checkout.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for persisted source-checkout start
+   validation failure.
+2. In the start-tool `SourceCheckoutError` branch, use `exc.root` as the
+   remediation checkout when no explicit source path is available.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_persisted_source_checkout_failure_uses_persisted_remediation_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6Hc2bA Persisted Stale Checkout Remediation
 
 ### Problem Statement And Scope
