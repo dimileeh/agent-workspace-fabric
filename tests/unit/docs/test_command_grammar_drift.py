@@ -175,11 +175,22 @@ def _inline_command_mentions(text: str) -> list[str]:
     return mentions
 
 
+_SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", "&"})
+
+
 def _split_tail(tail: str) -> list[str]:
     try:
-        return shlex.split(tail, comments=True)
+        tokens = shlex.split(tail, comments=True)
     except ValueError:
-        return tail.split()
+        tokens = tail.split()
+    # Stop at the first shell operator so chained commands (e.g. `awf init &&
+    # awf start`) don't contribute their continuation tokens to the argument
+    # scan — `shlex.split` keeps `&&`/`|`/`;` as ordinary words, and a bare `&&`
+    # would otherwise be mistaken for a positional path/argument.
+    for index, token in enumerate(tokens):
+        if token in _SHELL_OPERATORS:
+            return tokens[:index]
+    return tokens
 
 
 def _is_standalone(line: str, command: str) -> bool:
@@ -305,6 +316,11 @@ def _bootstrap_offenders(text: str) -> list[str]:
 def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("awf init") == "bare"
     assert _init_arg_status("awf init  # bootstrap the service") == "bare"
+    # A no-path init chained with another command stays "bare": the shell
+    # operator and the continuation command must not be read as a path argument.
+    assert _init_arg_status("awf init && awf start") == "bare"
+    assert _init_arg_status("awf init ; awf start") == "bare"
+    assert _init_arg_status("awf init | tee log") == "bare"
     assert _init_arg_status("awf init --write-profile --yes") == "flag-only"
     # An option value (the `python` after `--template`) is not a path: a no-path
     # init written with a value-taking flag is still flag-only, not "ok".
@@ -356,6 +372,14 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     assert dropped_value.has_project is False
     assert dropped_value.has_mocked_local is True
     assert dropped_value.positional_path is False
+
+    # A mocked smoke run chained with a follow-up command must not read the
+    # shell operator (or the continuation command) as a positional path, which
+    # would otherwise produce a spurious R4 failure.
+    chained = _parse_smoke_invocation("awf smoke run --mocked-local && awf setup")
+    assert chained is not None
+    assert chained.has_mocked_local is True
+    assert chained.positional_path is False
 
     assert _parse_smoke_invocation("awf service status --format pretty") is None
 
@@ -550,7 +574,7 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
             for expected in markers
             if expected not in text
         )
-        if "curl -fsSL" in text or "curl | bash" in text:
+        if "curl -fsSL" in text or "curl | bash" in text or "curl | sh" in text:
             curl_offenders.append(f"{rel_path}: documents an ungated curl installer lane")
 
     assert not missing, missing
