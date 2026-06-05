@@ -671,6 +671,8 @@ def _force_copy_already_requested(environ: Mapping[str, str]) -> bool:
 def _apply_work_dir_propagation_env(
     environ: Mapping[str, str],
     result: WorkDirPropagationResult,
+    *,
+    compose_env_file: Path | None = None,
 ) -> dict[str, str]:
     """Return ``environ`` with the propagation + force-copy vars folded in.
 
@@ -680,11 +682,27 @@ def _apply_work_dir_propagation_env(
     env file), since ``auth_mounts`` treats that variable as an operator
     force-copy request that wins over overlay capability. So the effective value
     is the preflight's result OR any pre-existing operator request.
+
+    Stale guard: when *compose_env_file* is provided and already carries a
+    co-persisted ``AWF_WORK_DIR_PROPAGATION_TIMESTAMP``, any
+    ``AWF_CLAUDE_AUTH_FORCE_COPY`` in *environ* is assumed to have been loaded
+    from that stale env-file (not set by the operator), and is not treated as
+    an override (#413).
     """
 
+    stale_generated = False
+    if compose_env_file is not None and compose_env_file.exists():
+        try:
+            pre_existing_env = compose_env_file_values(compose_env_file)
+            stale_generated = AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV in pre_existing_env
+        except (OSError, UnicodeDecodeError):
+            pass
+    environ_force_copy_is_operator_override = not stale_generated and _force_copy_already_requested(
+        environ
+    )
     updated = dict(environ)
     updated[AWF_WORK_DIR_BIND_PROPAGATION_ENV] = result.propagation
-    force_copy = result.force_copy or _force_copy_already_requested(environ)
+    force_copy = result.force_copy or environ_force_copy_is_operator_override
     updated[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = "true" if force_copy else "false"
     return updated
 
@@ -753,8 +771,12 @@ async def run_service_bootstrap(
             environ=subprocess_env,
         )
         completed.append(propagation.to_stage_result())
-        subprocess_env = _apply_work_dir_propagation_env(subprocess_env, propagation)
-        service_env = _apply_work_dir_propagation_env(service_env, propagation)
+        subprocess_env = _apply_work_dir_propagation_env(
+            subprocess_env, propagation, compose_env_file=resolved_env_file
+        )
+        service_env = _apply_work_dir_propagation_env(
+            service_env, propagation, compose_env_file=resolved_env_file
+        )
         if resolved_env_file is not None:
             await asyncio.to_thread(
                 _persist_work_dir_propagation_result, resolved_env_file, propagation, subprocess_env

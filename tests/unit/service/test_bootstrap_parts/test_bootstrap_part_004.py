@@ -762,6 +762,59 @@ def test_apply_propagation_env_raises_force_copy_but_never_lowers_it() -> None:
     )
 
 
+@pytest.mark.unit
+def test_apply_propagation_env_ignores_stale_force_copy_when_env_file_stale(
+    tmp_path: Path,
+) -> None:
+    """When the compose env-file has a stale bootstrap-generated
+    AWF_CLAUDE_AUTH_FORCE_COPY=true plus AWF_WORK_DIR_PROPAGATION_TIMESTAMP,
+    _apply_work_dir_propagation_env must not treat the stale value in environ
+    as an operator override — otherwise a fresh preflight returning
+    force_copy=False gets the wrong in-memory posture for the rest of
+    bootstrap (#413)."""
+    apply = bootstrap._apply_work_dir_propagation_env  # noqa: SLF001
+    shared = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\n"
+        "AWF_CLAUDE_AUTH_FORCE_COPY=true\n"
+        "AWF_WORK_DIR_PROPAGATION_TIMESTAMP=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    environ_with_stale_force_copy = {"AWF_CLAUDE_AUTH_FORCE_COPY": "true"}
+
+    result = apply(
+        environ_with_stale_force_copy,
+        shared,
+        compose_env_file=env_file,
+    )
+    assert result["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
+
+    # Without compose_env_file, the stale guard is absent (backward compat).
+    result_no_file = apply(environ_with_stale_force_copy, shared)
+    assert result_no_file["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+    # When the env-file lacks a timestamp, FORCE_COPY is an operator override.
+    env_file_no_timestamp = tmp_path / ".env2"
+    env_file_no_timestamp.write_text(
+        "AWF_CLAUDE_AUTH_FORCE_COPY=true\n",
+        encoding="utf-8",
+    )
+    result_operator = apply(
+        environ_with_stale_force_copy,
+        shared,
+        compose_env_file=env_file_no_timestamp,
+    )
+    assert result_operator["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+
 # ---------------------------------------------------------------------------
 # Persist work-dir propagation posture to compose env-file (#398)
 # ---------------------------------------------------------------------------
