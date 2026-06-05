@@ -874,6 +874,10 @@ async def test_start_local_service_preserves_explicit_source_checkout_validation
     assert payload["status"] == "failed"
     assert payload["reason_code"] == SOURCE_CHECKOUT_INVALID
     assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+    assert (
+        payload["issues"][0]["remediation"]["related_command"]
+        == f"awf start --source-checkout '{checkout}'"
+    )
     assert payload["issues"][0]["details"]["missing_markers"] == ["pyproject.toml"]
     assert bootstrap_calls == []
 

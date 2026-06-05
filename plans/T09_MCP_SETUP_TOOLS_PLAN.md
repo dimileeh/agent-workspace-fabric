@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HZuDL
+
+### Problem Statement And Scope
+
+The review reports that `awf_start_local_service` preserves an explicit
+`source_checkout` in the top-level retry command when source-checkout
+validation fails, but leaves the issue remediation catalog command at
+`awf setup --source-checkout .`. MCP clients that follow the structured issue
+remediation would validate the current directory instead of the checkout that
+just failed.
+
+Scope is limited to source-checkout validation failures returned through
+`awf_start_local_service` and the helper that decides which issue remediation
+commands may be rewritten. Unrelated remediation commands such as service status
+must stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the top-level `awf start` command rendering for explicit
+  `source_checkout`.
+- Rewrite source-checkout setup remediation commands to the resolved explicit
+  `awf start --source-checkout ...` command.
+- Continue preserving unrelated remediation commands and the
+  `START_COMPOSE_ASSETS_MISSING` no-source-checkout exception.
+- Add a focused regression for the structured issue remediation command.
+
+### Implementation Steps
+
+1. Extend the existing explicit source-checkout validation-failure regression
+   to assert the structured issue remediation command.
+2. Update the remediation rewrite predicate so source-checkout catalog setup
+   commands are eligible when an explicit checkout path is present.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: python-coverage-shards (2) Stale MCP Coverage Node
 
 ### Problem Statement And Scope

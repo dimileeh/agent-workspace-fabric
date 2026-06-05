@@ -53,6 +53,52 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HZuDL
+
+### Requirement Status
+
+- Preserve the top-level `awf start` command rendering for explicit
+  `source_checkout`: Complete.
+- Rewrite source-checkout setup remediation commands to the resolved explicit
+  `awf start --source-checkout ...` command: Complete.
+- Continue preserving unrelated remediation commands and the
+  `START_COMPOSE_ASSETS_MISSING` no-source-checkout exception: Complete.
+- Add a focused regression for the structured issue remediation command:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_rewrites_reason_coded_bootstrap_remediation_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_asset_missing_source_checkout_remediation_without_source_checkout -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["issues"][0]["remediation"]["related_command"]` remained
+  `awf setup --source-checkout .`.
+- Regression test after the implementation change: 1 passed.
+- Adjacent focused tests for reason-coded bootstrap rewrites and the
+  no-source-checkout compose-assets exception: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: python-coverage-shards (2) Stale MCP Coverage Node
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

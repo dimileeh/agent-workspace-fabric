@@ -44,7 +44,11 @@ from awf.host_setup.rendering import (
     FirstRunRemediation,
     render_first_run_json,
 )
-from awf.host_setup.source_assets import SourceCheckoutError
+from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_ASSETS_STALE,
+    SOURCE_CHECKOUT_INVALID,
+    SourceCheckoutError,
+)
 from awf.host_setup.system_checks import SetupCheckError
 from awf.profiles.onboarding import preview_project_onboarding, write_workspace_profile
 from awf.service.bootstrap import (
@@ -100,6 +104,12 @@ _START_REASON_CODED_SETUP_COMMAND_PATTERN = re.compile(
     rf")?"
 )
 _START_REMEDIATION_COMMAND_PATTERN = re.compile(r"^awf start(?:\s|$)")
+_SOURCE_CHECKOUT_REMEDIATION_COMMAND_PATTERN = re.compile(
+    r"^awf setup\s+--source-checkout(?:\s|=|$)"
+)
+_SOURCE_CHECKOUT_REMEDIATION_REASON_CODES = frozenset(
+    {SOURCE_CHECKOUT_INVALID, SOURCE_CHECKOUT_ASSETS_STALE}
+)
 _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN = re.compile(
     r"(?P<setup>\bawf setup --dry-run(?P<setup_suffix>[.,;):]|$|\s+to\b))"
     r"|(?P<start_source>\bawf start\s+--source-checkout(?:=|\s+)"
@@ -622,15 +632,37 @@ def _start_issue_with_command(
     remediation = issue.remediation
     if issue.reason_code == START_COMPOSE_ASSETS_MISSING and source_checkout is None:
         return issue
-    if not _is_start_remediation_command(remediation.related_command):
+    if not _should_rewrite_start_issue_remediation(issue, source_checkout=source_checkout):
         return issue
     return issue.model_copy(
         update={"remediation": remediation.model_copy(update={"related_command": command})}
     )
 
 
+def _should_rewrite_start_issue_remediation(
+    issue: FirstRunIssue,
+    *,
+    source_checkout: Path | None,
+) -> bool:
+    related_command = issue.remediation.related_command
+    if _is_start_remediation_command(related_command):
+        return True
+    return (
+        source_checkout is not None
+        and issue.reason_code in _SOURCE_CHECKOUT_REMEDIATION_REASON_CODES
+        and _is_source_checkout_remediation_command(related_command)
+    )
+
+
 def _is_start_remediation_command(command: str | None) -> bool:
     return command is not None and _START_REMEDIATION_COMMAND_PATTERN.match(command) is not None
+
+
+def _is_source_checkout_remediation_command(command: str | None) -> bool:
+    return (
+        command is not None
+        and _SOURCE_CHECKOUT_REMEDIATION_COMMAND_PATTERN.match(command) is not None
+    )
 
 
 def _start_reason_coded_next_steps(
