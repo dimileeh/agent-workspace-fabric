@@ -14,14 +14,15 @@ tests.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from awf.common.logging import get_logger
 from awf.node.auth_mounts_caps import _has_cap_mknod as _has_cap_mknod
@@ -102,6 +103,39 @@ _CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE
 _CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT = (
     "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
 )
+# Per-workspace advisory ``flock`` marker that serializes the unpinned-upper
+# discard (#405) against a concurrent same-workspace provision's overlay mount
+# (#418/#419). The #405 discard re-checks ``is_mounted(merged)`` and then
+# ``rmtree``s ``upper``/``work`` — a TOCTOU window in which a racing provision can
+# mount the overlay over those very layers, so the discard then deletes the live
+# overlay's backing dirs and destroys the active workspace's Claude edits. The
+# DB-CAS provisioning claim already bars concurrent same-workspace provisions
+# *except* in the stale-lease-recovery window; this exclusive ``flock`` is the
+# same-host backstop for exactly that window, taken across *both* the discard and
+# the mount so the ``is_mounted``-recheck + ``rmtree`` is atomic against any other
+# provision's ``mount()`` (which must also hold this lock). It lives beside
+# ``upper``/``work``/``merged`` and is left intact by the discard's targeted
+# ``rmtree`` (only the scratch dirs are removed); GC/teardown reap ``target_root``
+# wholesale and take it with them. The kernel frees the lock on ``close``/process
+# death, mirroring the shared-base build lock's crash semantics.
+_OVERLAY_PROVISION_LOCK_NAME = ".overlay.lock"
+# Logged when the unpinned-upper discard *and* a fresh off-lock mount are both
+# skipped because a concurrent same-workspace provision holds the overlay lock
+# (the narrow stale-lease window). The racing duplicate either reuses the holder's
+# live overlay or defers to a later provision — it never ``rmtree``s the in-use
+# upper and never issues an unserialized mount that would reopen the race.
+_CLAUDE_AUTH_OVERLAY_DISCARD_LOCK_CONTENDED = "CLAUDE_AUTH_OVERLAY_DISCARD_LOCK_CONTENDED"
+# Logged when the unpinned-upper discard is skipped because ``merged`` was observed
+# live at the (under-lock) broad guard or the last-moment recheck — the #416
+# defense-in-depth whose TOCTOU the overlay lock now closes. Kept observable so an
+# operator can see the discard was abandoned in favor of reusing the live overlay.
+_CLAUDE_AUTH_OVERLAY_DISCARD_SKIPPED_LIVE_MOUNT = "CLAUDE_AUTH_OVERLAY_DISCARD_SKIPPED_LIVE_MOUNT"
+# Logged once when the per-workspace overlay lock file could not be created/locked
+# (an FS fault: ENOSPC, EROFS, EPERM). Provisioning proceeds best-effort without
+# serialization; the discard-vs-mount race reopens only under the double fault of
+# (lock-file-uncreatable AND a concurrent provision), which the DB-CAS claim still
+# guards against — so behavior is no worse than before the lock and is audited here.
+_CLAUDE_AUTH_OVERLAY_PROVISION_LOCK_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_PROVISION_LOCK_UNAVAILABLE"
 # Logged when a reused live overlay's real lowerdir could not be recovered, so the
 # host-recomputed base is untrustworthy: the fallback-edit reconcile (#381) and the
 # legacy-copy reap are both deferred to a later provision that can pin the true base,
@@ -812,6 +846,65 @@ def _live_overlay_pin_signature(
     return signature
 
 
+_OverlayLockState = Literal["acquired", "contended", "unavailable"]
+
+
+@contextlib.contextmanager
+def _overlay_provision_lock(claude_root: Path) -> Iterator[_OverlayLockState]:
+    """Hold the per-workspace overlay ``flock`` for the discard + mount span.
+
+    Yields one of:
+
+    - ``"acquired"`` — this provision exclusively holds ``<claude_root>/.overlay.
+      lock`` for the duration of the ``with`` block, so its unpinned-upper discard
+      (``is_mounted``-recheck + ``rmtree``) is atomic against any other
+      same-workspace provision's overlay ``mount()`` (which must also take this lock).
+    - ``"contended"`` — a concurrent same-workspace provision already holds the lock
+      (``EWOULDBLOCK``/``EAGAIN`` from a non-blocking ``flock``). This is the narrow
+      stale-lease-recovery window the DB-CAS claim does not cover; the caller must
+      neither ``rmtree`` the (in-use) upper nor issue a fresh off-lock mount.
+    - ``"unavailable"`` — the lock file could not be created/locked (an FS fault:
+      ENOSPC, EROFS, EPERM). The caller proceeds best-effort without serialization.
+
+    Acquisition is strictly non-blocking (``LOCK_NB``) so it never wedges the worker;
+    the kernel releases the lock on ``close``/process death, matching the shared-base
+    build lock's crash semantics (:func:`_ensure_shared_claude_base`). Only ``OSError``
+    /``BlockingIOError`` are caught — never a bare ``Exception`` (AGENTS.md rule).
+    """
+
+    lock_path = claude_root / _OVERLAY_PROVISION_LOCK_NAME
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    except OSError as exc:
+        # The FS could not host the lock file (ENOSPC, EROFS, EPERM). There is no fd
+        # to release, so yield ``unavailable`` directly — the caller logs once and
+        # proceeds unserialized.
+        _log.warning(
+            "claude_auth_overlay_provision_lock_unavailable",
+            reason_code=_CLAUDE_AUTH_OVERLAY_PROVISION_LOCK_UNAVAILABLE,
+            workspace_auth_root=str(claude_root),
+            error=str(exc),
+        )
+        yield "unavailable"
+        return
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # ``EWOULDBLOCK``/``EAGAIN`` (``BlockingIOError``): a concurrent
+            # same-workspace provision holds the lock — the stale-lease window.
+            yield "contended"
+            return
+        yield "acquired"
+    finally:
+        # Release explicitly when held (a no-op under ``contended``, suppressed if the
+        # fd's lock state is already gone), then close — the kernel also frees the
+        # lock on this ``close`` and on process death.
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def _prepare_claude_overlay_mount(
     *,
     host_home: Path,
@@ -837,6 +930,14 @@ def _prepare_claude_overlay_mount(
     against it (a wrong base copies baseline noise into the live overlay or skips a
     real edit before the legacy copy is reaped). The caller defers both the
     reconcile and the legacy reap to a later provision that can recover/pin the base.
+
+    This thin wrapper keeps the host-level copy-fallback guards (``supported()`` and
+    the reserved-char check) *before* any lock so copy-fallback hosts never create a
+    ``.overlay.lock``, then takes the per-workspace overlay ``flock`` across the
+    discard **and** the mount (:func:`_overlay_provision_lock`) and delegates to
+    :func:`_prepare_claude_overlay_mount_locked`. Serializing both sides closes the
+    #418/#419 discard-vs-concurrent-mount TOCTOU race; see that helper for the
+    per-lock-state behavior.
     """
 
     if not overlay_mounter.supported():
@@ -864,11 +965,89 @@ def _prepare_claude_overlay_mount(
         )
         return None
 
+    # The lock file needs its parent dir to exist; idempotent and harmless — the
+    # locked body and the legacy fallback both ``mkdir`` ``claude_root`` anyway.
+    claude_root.mkdir(parents=True, exist_ok=True)
+    with _overlay_provision_lock(claude_root) as lock_state:
+        return _prepare_claude_overlay_mount_locked(
+            host_home=host_home,
+            claude_root=claude_root,
+            work_dir=work_dir,
+            overlay_mounter=overlay_mounter,
+            workspace_owner_uid=workspace_owner_uid,
+            workspace_owner_gid=workspace_owner_gid,
+            lock_state=lock_state,
+        )
+
+
+def _prepare_claude_overlay_mount_locked(
+    *,
+    host_home: Path,
+    claude_root: Path,
+    work_dir: Path,
+    overlay_mounter: OverlayMounter,
+    workspace_owner_uid: int | None,
+    workspace_owner_gid: int | None,
+    lock_state: _OverlayLockState,
+) -> tuple[AuthMount, Path, Path, Path | None] | None:
+    """Overlay discard + mount body, run under the per-workspace overlay lock.
+
+    ``lock_state`` selects how the #418/#419 race is handled (see
+    :func:`_overlay_provision_lock`):
+
+    - ``"contended"`` — a concurrent same-workspace provision owns the real
+      provision (and the lock). This racing duplicate never ``rmtree``s the in-use
+      upper and never issues a fresh off-lock mount (which would reopen the race):
+      it reuses the holder's live overlay if ``merged`` is mounted (returning
+      ``base=None`` and writing no pin — the holder owns pinning), else returns
+      ``None`` so this provision degrades to the legacy copy for the round.
+    - ``"acquired"`` — the common path; the discard's ``is_mounted``-recheck +
+      ``rmtree`` is atomic against any other provision's ``mount()`` because both
+      take this lock. The #416 discard decision and its double ``is_mounted`` guard
+      are preserved, restructured into explicit branches so a skip is observable.
+    - ``"unavailable"`` — the lock file could not be hosted; proceed best-effort
+      exactly as the ``acquired`` path but unserialized (already logged once).
+    """
+
     upper = claude_root / "upper"
     work = claude_root / "work"
     merged = claude_root / "merged"
     sig_marker = claude_root / "base.signature"
 
+    if lock_state == "contended":
+        # A concurrent same-workspace provision holds the overlay lock — the narrow
+        # stale-lease window the DB-CAS claim does not cover. We are the racing
+        # duplicate: the lock holder owns the discard/mount/pin. Never ``rmtree``
+        # (the upper may be the holder's live backing layer) and never issue a fresh
+        # off-lock mount (unserialized, it reopens the very race the lock closes).
+        _log.info(
+            "claude_auth_overlay_discard_lock_contended",
+            reason_code=_CLAUDE_AUTH_OVERLAY_DISCARD_LOCK_CONTENDED,
+            workspace_auth_root=str(claude_root),
+        )
+        if overlay_mounter.is_mounted(merged):
+            # The holder already mounted the overlay: reuse it read-through. Return
+            # ``base=None`` and write no pin — the holder owns pinning, and a
+            # ``None`` base makes the caller defer reconcile/reap (the existing safe
+            # path), so this duplicate touches nothing the holder is managing.
+            return (
+                AuthMount(source=str(merged), target=_CLAUDE_DIR_TARGET, mode="rw"),
+                upper,
+                work,
+                None,
+            )
+        # No live overlay yet: degrade to the legacy copy this round (``upper`` left
+        # intact). A later provision, after the holder releases, pins/mounts correctly.
+        return None
+
+    # ``lock_state`` is now ``"acquired"`` (the common, DB-CAS-serialized path) or
+    # ``"unavailable"`` (the lock file could not be hosted; ``_overlay_provision_lock``
+    # already logged ``PROVISION_LOCK_UNAVAILABLE``). Both provision through the same
+    # discard + mount body below: ``acquired`` serializes the discard's recheck +
+    # ``rmtree`` against any concurrent mount, while ``unavailable`` proceeds
+    # best-effort unserialized — the race reopens only under the double fault of
+    # (lock-uncreatable AND a concurrent provision), which the DB-CAS claim still guards.
+    #
     # Pin the lowerdir for retries over an existing overlay. If ``upper``/``work``
     # survived a torn-down mount (e.g. a host reboot) they must be remounted over
     # the *original* base they were created against. Recomputing the base from a
@@ -898,38 +1077,53 @@ def _prepare_claude_overlay_mount(
         # so ~/.claude (credentials included) is re-derived fresh — the owner ruling that
         # wrong-base-correctness wins over credential-preservation. Made LOUD so it is
         # auditable and never a silent discard.
-        if (
+        #
+        # Restructured from #416's single ``and`` chain into explicit branches so the
+        # "skipped because live" outcome is observable, *without* reopening the #416
+        # decision: the broad guard and the last-moment recheck are retained as
+        # defense-in-depth. Their TOCTOU window (a mount landing between the recheck
+        # and the ``rmtree``) is now closed by the overlay lock — under ``acquired``
+        # the discard is atomic against any other provision's ``mount()`` — but the
+        # double check is kept so the existing #416 race-flip test stays meaningful
+        # and the ``unavailable``/best-effort path keeps its mitigation.
+        wants_discard = (
             upper.exists()
             and _overlay_upper_has_data(upper)
             and not _pin_matches_signature(sig_marker, fresh_signature)
-            # Broad guard: do not discard an overlay that is already live.
-            and not overlay_mounter.is_mounted(merged)
-            # Re-observe the live mount as the *last* thing before the destructive
-            # ``rmtree`` below (which runs as the first body statement, so nothing
-            # sits between this check and the delete). Two provisions for the same
-            # workspace can race: a concurrent caller can win the mount in the window
-            # after the broad guard above observed ``merged`` unmounted, mounting this
-            # very ``upper``/``work`` as the live overlay's backing layers. The
-            # ``rmtree`` would then yank a running overlay's upperdir/workdir and
-            # destroy the active workspace's Claude edits — and the EBUSY/live-mount
-            # reuse branch below cannot protect it, because the delete happens before
-            # any mount attempt. If it went live in that window, skip the discard so
-            # the ``is_mounted(merged)`` reuse branch below adopts the live overlay
-            # instead of clobbering it.
-            and not overlay_mounter.is_mounted(merged)
-        ):
-            # Drop the unverifiable upper/work so the dirs are recreated empty below
-            # and a fresh empty upper is mounted over the current-host base.
-            # ``ignore_errors`` mirrors the sibling reaps: a stuck cleanup must not
-            # fail provisioning. The delete runs first — before the log — so nothing
-            # widens the recheck-to-delete window above.
-            shutil.rmtree(upper, ignore_errors=True)
-            shutil.rmtree(work, ignore_errors=True)
-            _log.warning(
-                "claude_auth_overlay_unpinned_upper_discarded_rebuilt",
-                reason_code=_CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT,
-                workspace_auth_root=str(claude_root),
-            )
+        )
+        if wants_discard:
+            if overlay_mounter.is_mounted(merged):
+                # Broad guard (#416): the overlay is already live — reuse it via the
+                # ``is_mounted`` branch below rather than discard its backing layers.
+                _log.info(
+                    "claude_auth_overlay_discard_skipped_live_mount",
+                    reason_code=_CLAUDE_AUTH_OVERLAY_DISCARD_SKIPPED_LIVE_MOUNT,
+                    workspace_auth_root=str(claude_root),
+                )
+            elif overlay_mounter.is_mounted(merged):
+                # Last-moment recheck (#416 defense-in-depth): ``merged`` went live in
+                # the window after the broad guard. Under ``acquired`` the lock makes
+                # this unreachable-by-a-mount (no other provision can mount mid-span);
+                # it remains the safety net for the ``unavailable`` best-effort path.
+                _log.info(
+                    "claude_auth_overlay_discard_skipped_live_mount",
+                    reason_code=_CLAUDE_AUTH_OVERLAY_DISCARD_SKIPPED_LIVE_MOUNT,
+                    workspace_auth_root=str(claude_root),
+                )
+            else:
+                # Drop the unverifiable upper/work so the dirs are recreated empty
+                # below and a fresh empty upper is mounted over the current-host base.
+                # ``ignore_errors`` mirrors the sibling reaps: a stuck cleanup must not
+                # fail provisioning. Under the held lock this ``rmtree`` is atomic vs
+                # any other provision's ``mount()`` (which must also take the lock), so
+                # it can never yank a now-live overlay's backing layers (#418/#419).
+                shutil.rmtree(upper, ignore_errors=True)
+                shutil.rmtree(work, ignore_errors=True)
+                _log.warning(
+                    "claude_auth_overlay_unpinned_upper_discarded_rebuilt",
+                    reason_code=_CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT,
+                    workspace_auth_root=str(claude_root),
+                )
         try:
             base = _ensure_shared_claude_base(
                 host_home=host_home,
