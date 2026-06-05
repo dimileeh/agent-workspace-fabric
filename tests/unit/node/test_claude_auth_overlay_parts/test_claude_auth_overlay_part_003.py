@@ -1109,6 +1109,126 @@ def test_legacy_is_unedited_host_copy_refuses_fifo_swapped_after_caller_check(
     assert stat.S_ISFIFO(os.lstat(legacy).st_mode)
 
 
+# --- #414: host-origin guard also protects an ``upper`` whiteout (agent deletion) -----
+
+
+def _whiteout_stat(mtime_ns: int):
+    """A synthetic ``stat`` for an overlayfs whiteout (char device ``0,0``).
+
+    A real whiteout can only be created with ``CAP_MKNOD``/root (unavailable in unit
+    tests), so model the ``upper`` entry the #404/#414 guard inspects: a char-device
+    ``0,0`` carrying the whiteout's creation mtime. Only the fields the reconcile reads
+    on the ``upper`` entry are populated.
+    """
+
+    import types
+
+    return types.SimpleNamespace(
+        st_mode=stat.S_IFCHR,
+        st_rdev=os.makedev(0, 0),
+        st_mtime_ns=mtime_ns,
+        st_size=0,
+    )
+
+
+def _patch_upper_whiteout_stat(
+    monkeypatch: pytest.MonkeyPatch, upper_path: Path, mtime_ns: int
+) -> None:
+    """Make ``reconcile_mod._safe_stat(upper_path, follow_symlinks=False)`` read a whiteout.
+
+    Delegates every other call (the real legacy/host stats) to the genuine helper so
+    only the agent-controlled ``upper`` leaf reports as a char-device ``0,0``.
+    """
+
+    real_safe_stat = reconcile_mod._safe_stat
+
+    def _fake(path: Path, *, follow_symlinks: bool = True):
+        if not follow_symlinks and Path(path) == upper_path:
+            return _whiteout_stat(mtime_ns)
+        return real_safe_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(reconcile_mod, "_safe_stat", _fake)
+
+
+@pytest.mark.unit
+def test_reconcile_keeps_whiteout_over_unedited_host_changed_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #414: the agent deleted a file in the overlay era (whiteout char device ``0,0`` in
+    # ``upper``), then the host changed that path *after* the deletion and a transient
+    # remount created a legacy copy *from the changed host*. The legacy copy is an
+    # unedited, byte/mtime-identical copy of the live host and carries a newer mtime than
+    # the whiteout's creation mtime. The mtime-only rule plus the old ``S_ISREG``-gated
+    # #404 guard would skip the whiteout and forward the legacy file through ``merged``,
+    # silently un-deleting what the agent removed. The host-origin guard now protects the
+    # whiteout too: an unedited host copy is recognised and the deletion is preserved.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    # The agent's overlay-era deletion whiteout, older than the (later) host change.
+    whiteout_mtime_ns = 1_000_000_000_000_000_000
+    # The host changed after that deletion (newer mtime) ...
+    (host / "settings.json").write_text('{"theme": "host-changed-after-delete"}\n')
+    os.utime(
+        host / "settings.json",
+        ns=(whiteout_mtime_ns + 5_000_000, whiteout_mtime_ns + 5_000_000),
+    )
+    host_stat = (host / "settings.json").stat()
+    # ... and the legacy copy is a byte/mtime-identical, unedited copy of that new host.
+    (legacy / "settings.json").write_text('{"theme": "host-changed-after-delete"}\n')
+    os.utime(legacy / "settings.json", ns=(host_stat.st_mtime_ns, host_stat.st_mtime_ns))
+    _patch_upper_whiteout_stat(monkeypatch, upper / "settings.json", whiteout_mtime_ns)
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The whiteout (agent deletion) stands; the unedited host copy was not forwarded, so
+    # nothing was un-deleted through ``merged``.
+    assert not (merged / "settings.json").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_forwards_agent_recreated_legacy_over_whiteout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #414 must not over-protect: when the legacy file actually *diverges* from the live
+    # host (the agent re-created the file during the fallback session), it is a genuine
+    # fallback-era edit and is forwarded over the whiteout — correctly un-deleting it,
+    # exactly as before. Only a provably-unedited host copy is held back.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    whiteout_mtime_ns = 1_000_000_000_000_000_000
+    # The live host holds one version ...
+    (host / "settings.json").write_text('{"theme": "host"}\n')
+    os.utime(
+        host / "settings.json",
+        ns=(whiteout_mtime_ns + 5_000_000, whiteout_mtime_ns + 5_000_000),
+    )
+    # ... but the agent re-created the legacy copy to something else, strictly newer.
+    (legacy / "settings.json").write_text('{"theme": "agent-recreated"}\n')
+    os.utime(
+        legacy / "settings.json",
+        ns=(whiteout_mtime_ns + 9_000_000, whiteout_mtime_ns + 9_000_000),
+    )
+    _patch_upper_whiteout_stat(monkeypatch, upper / "settings.json", whiteout_mtime_ns)
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The legacy bytes diverge from the host, so the agent's fallback re-creation is
+    # forwarded over the whiteout (the deletion is un-done, as intended for a real edit).
+    assert (merged / "settings.json").read_text() == '{"theme": "agent-recreated"}\n'
+
+
 # --- #402: forward fallback-era deletions as overlayfs whiteouts ----------------------
 
 

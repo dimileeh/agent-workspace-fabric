@@ -383,10 +383,13 @@ def _reconcile_fallback_edits_into_upper(
       changed *after* the agent's overlay edit is an *unedited* host copy, not an agent
       edit; forwarding it would silently drop the agent's overlay-era change. The content
       compare is not redundant with mtime + size — a same-length agent edit with an
-      aligned timestamp would otherwise read as unedited and be wrongly skipped. When
-      ``upper[rel]`` is absent, a whiteout, or any non-regular entry there is nothing to
-      protect, so the existing fallback-edit behaviour stands (this preserves the tested
-      fallback-session re-edit forwarding, where the agent-edited legacy diverges).
+      aligned timestamp would otherwise read as unedited and be wrongly skipped. The same
+      guard protects an ``upper`` *whiteout* (a char device ``0,0`` recording an agent
+      overlay-era deletion): an unedited host copy must not be forwarded over it either,
+      which would silently un-delete the file (#414). When ``upper[rel]`` is absent, or a
+      symlink/other non-regular non-whiteout entry, there is nothing to protect, so the
+      existing fallback-edit behaviour stands (this preserves the tested fallback-session
+      re-edit forwarding, where the agent-edited legacy diverges).
 
     ``host_claude`` is the **live** host ``~/.claude`` (the production caller passes
     ``host_home / ".claude"``); it is the trusted reference for both the #404 guard
@@ -449,16 +452,18 @@ def _reconcile_fallback_edits_into_upper(
     to begin with (it lives at the link target); genuine edits to files in *real*
     subdirectories are walked and forwarded normally.
 
-    Known limitation (a newer host write can un-delete an overlay deletion): an
-    overlay-era deletion is recorded in ``upper`` as a whiteout character device,
-    and ``_safe_mtime_ns`` returns that whiteout's *creation* mtime (when the agent
-    deleted the file). The "upper wins ties" rule only guards equal mtimes, so if
-    the host updates the same path *after* teardown and bumps the legacy copy's
-    mtime strictly past the whiteout's creation mtime, ``legacy_mtime_ns >
-    upper_mtime_ns`` holds and ``copy2`` replaces the whiteout with a regular file —
-    silently restoring what the agent had intentionally removed. This is an inherent
-    edge of the mtime-only approach (whiteouts carry no "deleted at" semantics stat
-    can read) and is accepted as best-effort.
+    Whiteout un-delete protection (#414): an overlay-era deletion is recorded in
+    ``upper`` as a whiteout character device (``0,0``), and ``_safe_stat`` returns
+    that whiteout's *creation* mtime (when the agent deleted the file). The "upper
+    wins ties" rule only guards equal mtimes, so if the host updates the same path
+    *after* the deletion and the legacy copy inherits that newer mtime,
+    ``legacy_mtime_ns > upper_mtime_ns`` holds. The #404 host-origin guard above is
+    extended to whiteouts, so a legacy file that is a provably-unedited copy of the
+    live host is *not* forwarded over the whiteout — restoring it would silently
+    un-delete what the agent removed. Only a legacy file that diverges from the live
+    host (a genuine fallback-era re-creation, or one whose unedited-ness cannot be
+    disproven) is forwarded over the whiteout — the conservative direction, biased
+    toward keeping a credential visible exactly as the other ambiguous cases are.
     """
 
     excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
@@ -512,16 +517,27 @@ def _reconcile_fallback_edits_into_upper(
                 if legacy_mtime_ns <= upper_stat.st_mtime_ns:
                     # ``upper`` wins ties: an equal-or-newer overlay-era edit stands.
                     continue
-                if stat.S_ISREG(upper_stat.st_mode) and _legacy_is_unedited_host_copy(
-                    legacy, rel, legacy_stat, host_claude / rel
-                ):
-                    # #404: the strictly-newer legacy file is byte/mtime-identical to
-                    # the live host, so it is an *unedited* copy of a host that changed
-                    # after the agent's overlay edit — not an agent fallback-era edit.
+                # An ``upper`` regular file records an agent overlay-era *edit*; an
+                # overlayfs whiteout (a char device ``0,0``) records an agent overlay-era
+                # *deletion*. Both are agent overlay state the #404 host-origin guard must
+                # protect (#414): the whiteout's ``st_mtime_ns`` is its *creation* mtime,
+                # so a host that changed the path after the deletion can leave the legacy
+                # copy strictly newer and fall through here.
+                upper_is_whiteout = stat.S_ISCHR(
+                    upper_stat.st_mode
+                ) and upper_stat.st_rdev == os.makedev(0, 0)
+                if (
+                    stat.S_ISREG(upper_stat.st_mode) or upper_is_whiteout
+                ) and _legacy_is_unedited_host_copy(legacy, rel, legacy_stat, host_claude / rel):
+                    # The strictly-newer legacy file is byte/mtime-identical to the live
+                    # host, so it is an *unedited* copy of a host that changed after the
+                    # agent's overlay edit/deletion — not an agent fallback-era edit.
                     # Forwarding it would silently drop the agent's overlay-era ``upper``
-                    # edit, so fail safe and keep that edit. (A non-regular ``upper``
-                    # entry — symlink/whiteout — has nothing to protect and falls through
-                    # to the existing forwarding, preserving the tested re-edit case.)
+                    # edit, or replace the whiteout through ``merged`` and un-delete the
+                    # file, so fail safe and keep the agent's overlay state. (A symlink or
+                    # other non-regular/non-whiteout ``upper`` entry has nothing to protect
+                    # and falls through to the existing forwarding, preserving the tested
+                    # fallback-session re-edit case.)
                     continue
             # Copy via :func:`_safe_overlay_copy`, which descends *both* the destination
             # (under ``merged``) and the source (under the trusted ``legacy`` root) with
