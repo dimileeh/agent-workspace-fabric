@@ -17,7 +17,9 @@ gone. Refreshing through `awf setup --source-checkout ...` is not metadata-only.
 Stop local Core before refreshing source-checkout metadata; `awf setup` checks
 the API and Postgres host ports and blocks while the previous Core stack still
 holds them. Editing `~/.awf/config.yml` remains the no-stop option. Before
-deleting a recorded checkout, either refresh the persisted path. The
+deleting a recorded checkout, either refresh the persisted path via
+`awf setup --source-checkout` (stop Core first) or edit `~/.awf/config.yml`
+directly (the no-stop option). The
 introductory refresh example uses the no-global source-checkout wrapper
 (`uv run --python 3.12 --extra dev awf ...`) so it still works when no global
 `awf` executable remains. Global source-checkout installs use the equivalent

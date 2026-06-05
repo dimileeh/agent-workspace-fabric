@@ -427,6 +427,19 @@ def test_upgrade_and_uninstall_docs_cover_all_first_run_lanes() -> None:
     assert "does not delete local AWF service state" in uninstall_text
 
 
+def test_uninstall_source_checkout_intro_names_refresh_or_config_edit_options() -> None:
+    """Assert the intro gives both options before deleting a recorded checkout."""
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+    intro_words = " ".join(uninstall_text.split("## uv tool", maxsplit=1)[0].split())
+
+    assert "either refresh the persisted path. The" not in intro_words
+    assert (
+        "Before deleting a recorded checkout, either refresh the persisted path via "
+        "`awf setup --source-checkout` (stop Core first) or edit `~/.awf/config.yml` "
+        "directly (the no-stop option)."
+    ) in intro_words
+
+
 def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None:
     """Assert uninstall refresh docs do not leave Core holding checked ports."""
     uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
