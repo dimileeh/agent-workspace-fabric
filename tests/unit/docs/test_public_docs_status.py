@@ -51,6 +51,19 @@ PACKAGE_ENV_GUARD_LINES = {
         "2>/dev/null; then"
     ),
 }
+PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE = (
+    "awf_postgres_password_urlencoded=\"$(python3 -c 'from os import environ; "
+    'from urllib.parse import quote; print(quote(environ["AWF_POSTGRES_PASSWORD"], '
+    'safe=""))\')"'
+)
+PACKAGE_DATABASE_URL_ENCODED_EXPORT = (
+    'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${awf_postgres_password_urlencoded}'
+    '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+)
+PACKAGE_DATABASE_URL_RAW_PASSWORD_EXPORT = (
+    'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}'
+    '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+)
 SOURCE_CHECKOUT_ENV_READ_LINES = {
     "AWF_API_TOKEN": (
         "  AWF_PERSISTED_API_TOKEN=\"$(sed -n 's/^[[:space:]]*"
@@ -296,10 +309,6 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
     password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
-    database_url_export = (
-        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}'
-        '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
-    )
     api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
     password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
     host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
@@ -327,7 +336,9 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     assert api_export in first_run_section
     assert password_export in first_run_section
     assert host_port_export in first_run_section
-    assert database_url_export in first_run_section
+    assert PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE in first_run_section
+    assert PACKAGE_DATABASE_URL_ENCODED_EXPORT in first_run_section
+    assert PACKAGE_DATABASE_URL_RAW_PASSWORD_EXPORT not in first_run_section
     assert env_tmp in first_run_section
     assert api_persist in first_run_section
     assert password_persist in first_run_section
@@ -342,7 +353,8 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
         ("API token export", api_export),
         ("Postgres password export", password_export),
         ("Postgres host port export", host_port_export),
-        ("database URL export", database_url_export),
+        ("Postgres password URL encoding", PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE),
+        ("database URL export", PACKAGE_DATABASE_URL_ENCODED_EXPORT),
         ("temporary env file creation", env_tmp),
         ("API token persist", api_persist),
         ("Postgres password persist", password_persist),
@@ -363,6 +375,44 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
             "Quickstart package first-run service env steps are out of order: "
             f"{previous_label} at {previous_index} must precede {next_label} at {next_index}"
         )
+
+
+def test_quickstart_package_first_run_url_encodes_custom_postgres_password(
+    tmp_path: Path,
+) -> None:
+    """Assert custom Postgres passwords are encoded only inside AWF_DATABASE_URL."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lane_section = _markdown_section(quickstart_text, "## Lane 1: uv tool or pipx")
+    first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
+    bash_fences = [
+        fence
+        for fence in _markdown_fences("docs/QUICKSTART.md", first_run_section)
+        if fence.language == "bash" and "AWF_DATABASE_URL" in fence.body
+    ]
+    assert len(bash_fences) == 1
+    env_persist_script = bash_fences[0].body.split("\nawf setup\n", maxsplit=1)[0]
+    custom_password = "p@ss/word:with#reserved"
+    expected_url = "postgresql+asyncpg://awf:p%40ss%2Fword%3Awith%23reserved@localhost:5433/awf"
+    script = "\n".join(
+        (
+            f"export AWF_POSTGRES_PASSWORD={shlex.quote(custom_password)}",
+            env_persist_script,
+        )
+    )
+
+    result = subprocess.run(  # noqa: S602
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert f"AWF_POSTGRES_PASSWORD={custom_password}\n" in env_text
+    assert f"AWF_DATABASE_URL={expected_url}\n" in env_text
+    assert custom_password not in env_text.split("AWF_DATABASE_URL=", maxsplit=1)[1]
 
 
 def test_quickstart_package_first_run_strips_exported_awf_env_entries(
@@ -1321,10 +1371,6 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     package_api_export = 'export AWF_API_TOKEN="$(openssl rand -hex 32)"'
     package_password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     package_host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
-    package_database_url_export = (
-        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}'
-        '@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
-    )
     package_env_tmp = 'awf_env_tmp="$(mktemp)"'
     package_persist_target = 'mv "$awf_env_tmp" .env'
     package_setup_command = "\nawf setup\n"
@@ -1333,7 +1379,9 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     assert package_api_export in package_section
     assert package_password_export in package_section
     assert package_host_port_export in package_section
-    assert package_database_url_export in package_section
+    assert PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE in package_section
+    assert PACKAGE_DATABASE_URL_ENCODED_EXPORT in package_section
+    assert PACKAGE_DATABASE_URL_RAW_PASSWORD_EXPORT not in package_section
     assert package_env_tmp in package_section
     assert "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\"" in package_section
     assert "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\"" in package_section
@@ -1341,6 +1389,12 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     assert "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\"" in package_section
     assert package_persist_target in package_section
     assert package_section.index(package_api_export) < package_section.index(package_env_tmp)
+    assert package_section.index(package_password_export) < package_section.index(
+        PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE,
+    )
+    assert package_section.index(PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE) < (
+        package_section.index(PACKAGE_DATABASE_URL_ENCODED_EXPORT)
+    )
     assert package_section.index(package_env_tmp) < package_section.index(package_persist_target)
     assert package_section.index(package_persist_target) < package_section.index(
         package_setup_command,

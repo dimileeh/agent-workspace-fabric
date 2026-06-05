@@ -96,13 +96,15 @@ For package-manager or virtualenv installs:
 
 Run from the directory where AWF should keep the package-lane `.env`.
 `.env.example` stays inside the installed package assets, so create `.env` from
-generated local service values:
+generated local service values. The raw Postgres password is persisted for
+Compose, while `AWF_DATABASE_URL` receives a URL-encoded copy:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
+awf_postgres_password_urlencoded="$(python3 -c 'from os import environ; from urllib.parse import quote; print(quote(environ["AWF_POSTGRES_PASSWORD"], safe=""))')"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:${awf_postgres_password_urlencoded}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 awf_env_tmp="$(mktemp)"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"

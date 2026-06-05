@@ -562,6 +562,22 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HWIlO`: package-lane
+first-run snippets must URL-encode `AWF_POSTGRES_PASSWORD` before embedding it
+in the derived `AWF_DATABASE_URL`. Persist the raw password separately for
+Compose and later upgrade restore, but persist only the encoded password copy in
+the database URL so passwords containing URL-reserved characters such as `@`,
+`/`, `:`, or `#` do not break host-side URL parsing. Apply the same correction
+to the mirrored Getting Started package/virtualenv first-run snippet.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HWIlO`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_url_encodes_custom_postgres_password tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

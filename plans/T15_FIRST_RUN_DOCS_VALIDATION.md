@@ -2296,6 +2296,41 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HWIlO`:
+
+- `docs/QUICKSTART.md` Lane 1 now URL-encodes `AWF_POSTGRES_PASSWORD` before
+  embedding it in the derived `AWF_DATABASE_URL`.
+- `docs/GETTING_STARTED.md` applies the same correction to the mirrored
+  package-manager / virtualenv first-run snippet.
+- Both snippets still persist the raw `AWF_POSTGRES_PASSWORD` separately so
+  Compose and later upgrade restore use the original password, while
+  `AWF_DATABASE_URL` stores the encoded URL component.
+- `tests/unit/docs/test_public_docs_status.py` now rejects the raw-password URL
+  interpolation and executes the Quickstart first-run env-persistence snippet
+  with `@`, `/`, `:`, and `#` in the custom password.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_url_encodes_custom_postgres_password tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env -q
+```
+
+Red-phase result after updating the focused assertions: failed as expected with
+`3 failed, 1 passed`; the executable Quickstart snippet persisted
+`AWF_DATABASE_URL=postgresql+asyncpg://awf:p@ss/word:with#reserved@localhost:5433/awf`
+instead of the encoded password URL.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_url_encodes_custom_postgres_password tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_getting_started_package_first_run_uses_generated_root_env tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `5 passed in 0.93s`; `ruff check` passed;
+`ruff format --check` reported `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
