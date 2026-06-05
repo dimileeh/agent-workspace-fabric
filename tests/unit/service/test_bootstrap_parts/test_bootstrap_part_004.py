@@ -963,6 +963,33 @@ def test_persist_preserves_operator_force_copy_override(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_persist_clears_stale_generated_force_copy(tmp_path: Path) -> None:
+    """A previous bootstrap wrote AWF_CLAUDE_AUTH_FORCE_COPY=true alongside a
+    timestamp.  When a fresh preflight concludes force_copy is no longer needed
+    (e.g. work dir moved to a shared mount), the stale generated value must not
+    be treated as an operator override — otherwise bootstrap can never return
+    to overlay mode (#413)."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\n"
+        "AWF_CLAUDE_AUTH_FORCE_COPY=true\n"
+        "AWF_WORK_DIR_PROPAGATION_TIMESTAMP=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
+
+
+@pytest.mark.unit
 def test_persist_preserves_operator_force_copy_from_environ(tmp_path: Path) -> None:
     """When the operator sets AWF_CLAUDE_AUTH_FORCE_COPY in the process
     environment (not the env-file) and preflight decides rshared / no
