@@ -729,7 +729,7 @@ def _client_integration_instructions_result(
         return _first_run_result(
             safe_result,
             _client_instruction_reason_coded_payload(
-                CLIENT_CONFIG_CONFLICT,
+                SETUP_READINESS_FAILED,
                 "could not inspect existing client MCP configuration",
                 {"error_type": type(exc).__name__},
                 requested_clients=clients,
@@ -763,7 +763,7 @@ def _client_integration_instructions_result(
         return _first_run_result(
             safe_result,
             _client_instruction_reason_coded_payload(
-                CLIENT_CONFIG_CONFLICT,
+                SETUP_READINESS_FAILED,
                 "could not build client integration instructions",
                 {"error_type": type(exc).__name__},
                 requested_clients=clients,

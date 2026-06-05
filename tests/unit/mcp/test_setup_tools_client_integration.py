@@ -368,7 +368,7 @@ async def test_client_integration_instructions_planning_unexpected_exception_is_
 
     assert result.isError is True
     assert payload["status"] == "blocked"
-    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["summary"] == "could not inspect existing client MCP configuration"
     assert payload["issues"][0]["details"] == {"error_type": "KeyError"}
     assert leaked_detail not in rendered
@@ -409,7 +409,7 @@ async def test_client_integration_instructions_success_transformation_failure_is
 
     assert result.isError is True
     assert payload["status"] == "blocked"
-    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["command"] == expected_command
     assert payload["summary"] == "could not build client integration instructions"
     assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}

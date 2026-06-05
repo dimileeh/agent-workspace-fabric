@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Client Catch-All Reason Codes
+
+### Problem Statement And Scope
+
+The review reports that two generic `except Exception` handlers in
+`_client_integration_instructions_result` classify unexpected internal failures
+as `CLIENT_CONFIG_CONFLICT`. That reason code is reserved for real existing MCP
+client configuration conflicts, so callers can be directed toward the wrong
+diagnostic path.
+
+Scope is limited to the two unexpected client-integration catch-all handlers.
+Dedicated `SetupCheckError`, `SourceCheckoutError`, `OSError`, `RuntimeError`,
+`ValueError`, and actual conflict responses remain unchanged.
+
+### Requirements Checklist
+
+- Preserve existing redaction and generic `error_type` details for unexpected
+  client planning failures.
+- Map unexpected client planning failures to `SETUP_READINESS_FAILED`.
+- Preserve existing redaction, command rewriting, and generic `error_type`
+  details for unexpected response assembly failures.
+- Map unexpected response assembly failures to `SETUP_READINESS_FAILED`.
+- Update focused regression expectations for both paths.
+
+### Implementation Steps
+
+1. Update the two focused client-integration regressions to expect
+   `SETUP_READINESS_FAILED`.
+2. Change both generic `except Exception` handlers in
+   `_client_integration_instructions_result` to use
+   `SETUP_READINESS_FAILED`.
+3. Run the targeted regressions and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_unexpected_exception_is_generic tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_success_transformation_failure_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HQ9mO
 
 ### Problem Statement And Scope
