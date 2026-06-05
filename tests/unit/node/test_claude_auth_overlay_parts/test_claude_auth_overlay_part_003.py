@@ -1050,6 +1050,36 @@ def test_safe_agent_file_equal_content_guards_swapped_parent_component(tmp_path:
 
 
 @pytest.mark.unit
+def test_safe_agent_file_equal_content_closes_fds_on_partial_descent_failure(
+    tmp_path: Path,
+) -> None:
+    # PR #414 review (PRRT_kwDOSJAM6s6HQ6h7): when the agent-path descent fails *after*
+    # opening one or more directory fds (e.g. a swapped-symlink leaf several levels deep),
+    # the early ``return False`` must still close the directory fds already collected. The
+    # cleanup ``finally`` previously covered only the inner read ``try``, so a partial
+    # descent leaked every opened dir fd during #404 reconciliation. Repeatedly forcing a
+    # mid-descent failure must not grow the process fd table.
+    root = tmp_path / "root"
+    (root / "a" / "b").mkdir(parents=True)
+    rel = Path("a") / "b" / "agent"
+    # A symlink leaf: the descent opens the root, ``a`` and ``b`` directory fds, then the
+    # ``O_NOFOLLOW`` leaf open fails (``ELOOP``) -> the first ``except`` returns ``False``
+    # with three directory fds already collected in ``fds``.
+    (root / rel).symlink_to(root / "a" / "b")  # target irrelevant; never followed
+    host = tmp_path / "host"
+    host.write_bytes(b"x\n")
+
+    fd_dir = Path("/proc/self/fd")
+    before = len(list(fd_dir.iterdir()))
+    for _ in range(100):
+        assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
+    after = len(list(fd_dir.iterdir()))
+    # Every directory fd opened during the failed descent was closed: no fd growth. Without
+    # the outer ``try``/``finally`` this leaks three fds per call (~300 over the loop).
+    assert after <= before
+
+
+@pytest.mark.unit
 def test_legacy_is_unedited_host_copy_refuses_fifo_swapped_after_caller_check(
     tmp_path: Path,
 ) -> None:

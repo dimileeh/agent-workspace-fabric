@@ -238,24 +238,25 @@ def _safe_agent_file_equal_content(agent_root: Path, rel: Path, trusted_file: Pa
 
     fds: list[int] = []
     try:
-        dir_fd = os.open(agent_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        fds.append(dir_fd)
-        for part in rel.parent.parts:
-            # No parent is ever created — the agent file must already exist. ``O_NOFOLLOW``
-            # rejects a symlink swapped in for any descended parent component (``ELOOP``),
-            # ``O_DIRECTORY`` rejects a non-directory one (``ENOTDIR``); both atomic, no
-            # check/use gap.
-            dir_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        try:
+            dir_fd = os.open(agent_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             fds.append(dir_fd)
-        agent_fd = os.open(rel.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-        fds.append(agent_fd)
-    except OSError:
-        # A symlinked/non-dir parent component, a swapped symlink leaf (``ELOOP``), a
-        # racing unlink, or a permission failure. (A reader-less FIFO leaf is *not* caught
-        # here — a read-only FIFO open succeeds even with no writer; the ``S_ISREG`` guard
-        # below rejects it.) Fail safe.
-        return False
-    try:
+            for part in rel.parent.parts:
+                # No parent is ever created — the agent file must already exist.
+                # ``O_NOFOLLOW`` rejects a symlink swapped in for any descended parent
+                # component (``ELOOP``), ``O_DIRECTORY`` rejects a non-directory one
+                # (``ENOTDIR``); both atomic, no check/use gap.
+                dir_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+                fds.append(dir_fd)
+            agent_fd = os.open(rel.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+            fds.append(agent_fd)
+        except OSError:
+            # A symlinked/non-dir parent component, a swapped symlink leaf (``ELOOP``), a
+            # racing unlink, or a permission failure. (A reader-less FIFO leaf is *not*
+            # caught here — a read-only FIFO open succeeds even with no writer; the
+            # ``S_ISREG`` guard below rejects it.) Fail safe. The outer ``finally`` still
+            # closes any directory fds opened during a *partial* descent before the error.
+            return False
         if not stat.S_ISREG(os.fstat(agent_fd).st_mode):
             # A FIFO (reader-less or with a live reader), device, socket, or directory the
             # agent swapped in after the caller's ``is_file()`` check: never read it.
