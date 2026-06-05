@@ -845,6 +845,21 @@ def test_persist_is_best_effort_non_fatal(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_persist_is_best_effort_on_unicode_decode_error(tmp_path: Path) -> None:
+    """Non-OSError failures from read_text must not abort bootstrap (#413)."""
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"\xff\xfe")
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_persist_overwrites_stale_posture(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(

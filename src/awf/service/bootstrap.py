@@ -300,7 +300,7 @@ def _persist_work_dir_propagation_result(
             or _force_copy_already_requested(pre_existing_env)
             or (environ is not None and _force_copy_already_requested(environ))
         )
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pre_existing_env = {}
     new_posture = PersistedPropagationPosture(
         propagation=result.propagation,
@@ -352,7 +352,7 @@ def _persist_work_dir_propagation_result(
             with contextlib.suppress(OSError):
                 Path(tmp_path).unlink()
             raise
-    except OSError as exc:
+    except Exception as exc:
         redacted = redact_audit_text(str(exc))
         import logging
 
