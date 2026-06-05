@@ -8,10 +8,11 @@ installer lane is intentionally omitted until its public installer, manifest,
 checksums, and distribution artifacts are published and verified.
 
 Package and virtualenv lanes read `.env` from the current directory when it
-exists. If `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` are not already persisted
-there, restore them in the upgrade shell before `awf start`. Restore the same
-`AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` used by the running local Core; do
-not generate replacement service secrets during upgrade.
+exists. If `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and `AWF_DATABASE_URL` are
+not already persisted there, restore them in the upgrade shell before
+`awf start`. Restore the same `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and
+`AWF_DATABASE_URL` used by the running local Core; do not generate replacement
+service secrets during upgrade.
 
 Source checkout lanes read the checkout root `.env`, with legacy
 `docker/compose/.env` as a read fallback. An empty `AWF_API_TOKEN=` copied from
@@ -77,6 +78,25 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
+case "$AWF_PERSISTED_DATABASE_URL" in
+  \"*\")
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+    AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+    ;;
+esac
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  export AWF_DATABASE_URL
+fi
 awf start
 awf service status --format pretty
 awf smoke run --project <path> --mocked-local --format pretty
@@ -137,6 +157,25 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
+fi
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
+case "$AWF_PERSISTED_DATABASE_URL" in
+  \"*\")
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+    AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+    ;;
+esac
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  export AWF_DATABASE_URL
 fi
 awf start
 awf service status --format pretty
@@ -201,6 +240,25 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
+fi
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
+case "$AWF_PERSISTED_DATABASE_URL" in
+  \"*\")
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+    AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+    ;;
+esac
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  export AWF_DATABASE_URL
 fi
 awf start
 awf service status --format pretty
@@ -453,6 +511,25 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before rollback}"
   export AWF_POSTGRES_PASSWORD
+fi
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
+case "$AWF_PERSISTED_DATABASE_URL" in
+  \"*\")
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+    AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+    ;;
+esac
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before rollback}"
+  export AWF_DATABASE_URL
 fi
 awf start
 awf service status --format pretty

@@ -139,13 +139,15 @@ def test_package_upgrade_docs_restore_service_env_before_start() -> None:
 def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
     tmp_path: Path,
 ) -> None:
-    """Assert package upgrade snippets export persisted service secrets before restart."""
+    """Assert package upgrade snippets export persisted service env before restart."""
     env_file = tmp_path / ".env"
+    persisted_database_url = "postgresql+asyncpg://awf:p%40ss%22quote%5Ctail@localhost:15433/awf"
     env_file.write_text(
         "\n".join(
             [
                 '  export AWF_API_TOKEN="tok\\$en"',
                 'export AWF_POSTGRES_PASSWORD="p@ss\\"quote\\\\tail"',
+                f'AWF_DATABASE_URL="{persisted_database_url}"',
             ]
         )
         + "\n",
@@ -171,13 +173,17 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
         **os.environ,
         "AWF_API_TOKEN": "stale-token-from-shell",
         "AWF_POSTGRES_PASSWORD": "stale-password-from-shell",
+        "AWF_DATABASE_URL": "postgresql+asyncpg://awf:stale@localhost:5433/awf",
     }
 
     for label, section in cases:
         script = "\n".join(
             (
                 _package_env_restore_script(section, label),
-                'printf "%s\\n%s\\n" "$AWF_API_TOKEN" "$AWF_POSTGRES_PASSWORD"',
+                (
+                    'printf "%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                    '"$AWF_POSTGRES_PASSWORD" "$AWF_DATABASE_URL"'
+                ),
             )
         )
         result = subprocess.run(  # noqa: S602
@@ -189,7 +195,7 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
             text=True,
         )
         assert result.returncode == 0, f"{label}: {result.stderr}"
-        assert result.stdout == 'tok$en\np@ss"quote\\tail\n', label
+        assert result.stdout == f'tok$en\np@ss"quote\\tail\n{persisted_database_url}\n', label
 
 
 def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
