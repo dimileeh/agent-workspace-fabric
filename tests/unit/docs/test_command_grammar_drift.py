@@ -124,13 +124,43 @@ def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
 
 
+def _strip_shell_comment(line: str) -> str:
+    """Drop a shell ``#`` comment from ``line``, respecting single/double quotes.
+
+    A ``#`` only opens a comment at the start of a word (line start or after
+    whitespace), matching shell tokenisation, so ``awf init`` arguments such as
+    ``"$HOME/proj#1"`` are preserved. This stops the grammar classifiers from
+    reading ``awf init`` mentioned inside a comment — a comment-only line like
+    ``# use awf init later`` or a trailing ``awf start  # then awf init <path>``
+    — and tokenising the prose after it as a fake path that would falsely count
+    as a valid ``awf init <path>`` example (weakening R2's per-context tally).
+    """
+    in_single = in_double = False
+    for index, char in enumerate(line):
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif (
+            char == "#"
+            and not in_single
+            and not in_double
+            and (index == 0 or line[index - 1].isspace())
+        ):
+            return line[:index].rstrip()
+    return line
+
+
 def _fenced_command_lines(text: str) -> list[str]:
     """Return non-empty command lines inside shell ``` fences, markers removed.
 
     Only shell-tagged (or untagged) fences contribute lines; ``yaml``/``json``/
     ``toml``/``text`` fences carry config or sample output, so their lines are
     skipped to avoid manufacturing false offenders in the grammar classifiers.
-    The ``$ ``/``> ``/``% `` prompt prefix is stripped from each collected line.
+    The ``$ ``/``> ``/``% `` prompt prefix is stripped from each collected line,
+    and any trailing ``#`` shell comment is removed (via :func:`_strip_shell_comment`)
+    so a comment that merely mentions ``awf init``/``awf smoke run`` never reaches
+    the classifiers as a fake command line.
     """
     lines: list[str] = []
     inside = False
@@ -149,6 +179,7 @@ def _fenced_command_lines(text: str) -> list[str]:
         stripped = raw_line.strip()
         if stripped.startswith(("$ ", "> ", "% ")):
             stripped = stripped[2:].strip()
+        stripped = _strip_shell_comment(stripped)
         if stripped:
             lines.append(stripped)
     return lines
@@ -438,6 +469,19 @@ def test_helper_flags_smoke_invocation_offenses() -> None:
 def test_helper_extracts_fenced_command_lines() -> None:
     text = "intro\n\n```bash\n$ awf setup\nawf start\n```\nprose `awf init` mention\n"
     assert _fenced_command_lines(text) == ["awf setup", "awf start"]
+
+
+def test_helper_drops_shell_comments_from_fenced_lines() -> None:
+    # A comment-only line that merely mentions `awf init` in prose, and a trailing
+    # `# ...` comment on a real command, must not reach the grammar classifiers:
+    # otherwise the prose after `awf init` ("later"/"<path>") is tokenised as a
+    # fake path and miscounted as a valid `awf init <path>` example, weakening R2.
+    text = "```bash\n# use awf init later\nawf start  # then run awf init <path>\nawf init .\n```\n"
+    assert _fenced_command_lines(text) == ["awf start", "awf init ."]
+    # A `#` inside quotes is part of the argument, not a comment, so a path
+    # containing `#` survives intact.
+    quoted = '```bash\nawf init "$HOME/proj#1"\n```\n'
+    assert _fenced_command_lines(quoted) == ['awf init "$HOME/proj#1"']
 
 
 def test_helper_strips_zsh_prompt_in_zsh_fence() -> None:
