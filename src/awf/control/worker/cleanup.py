@@ -31,6 +31,13 @@ from awf.control.executor.planning_ops import (
     _record_planning_scope_auto_retry_resume_failed_after_runtime_release,
     _resume_blocked_planning_scope_auto_retry_after_runtime_release,
 )
+from awf.control.worker.cleanup_auth_overlay import (
+    _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+    _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+    _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_EVENT_TYPE,
+    _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_REASON_CODE,
+    _teardown_terminal_auth_overlay,
+)
 from awf.control.worker.config import (
     effective_worker_config_node_id,
 )
@@ -275,19 +282,54 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
                     error=str(exc)[:240],
                 )
             release_errors.append(exc)
+    resume_failure: Exception | None = None
     try:
         await self._resume_pending_planning_scope_auto_retries_after_terminal_release(limit=limit)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        if not release_errors:
-            raise
+        if release_errors:
+            _log.warning(
+                "worker.terminal_runtime_release_resume_scan_failed_after_release_error",
+                reason_code=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+        else:
+            # Defer the re-raise until the independent best-effort overlay sweep below
+            # has run. The sweep mirrors the resume scan but is decoupled from it, so a
+            # resume-scan failure must not skip the deferred overlay umount retries owed
+            # for this interval (they would otherwise be silently dropped until the next).
+            resume_failure = exc
+    # Piggyback the deferred Claude auth-overlay umount re-sweep on the same scan
+    # (mirrors the resume-pending scan above). It is fully guarded: a failure here
+    # is swallowed-and-logged so it never perturbs the release-error aggregation or
+    # the final re-raise below, and ``CancelledError`` still propagates promptly.
+    try:
+        await self._retry_pending_terminal_auth_overlay_unmounts(limit=limit)
+    except asyncio.CancelledError:
+        # Cooperative shutdown. Any pending ``resume_failure`` captured above is
+        # intentionally dropped here rather than re-raised: a resume-scan failure is
+        # transient and idempotently retried on the next worker start, so propagating
+        # the ``CancelledError`` promptly (instead of swapping in ``resume_failure``)
+        # honours the teardown signal without masking it and loses nothing durable.
+        raise
+    except Exception as exc:
+        # The per-candidate loop already handles individual umount failures, so an
+        # exception reaching this scan-level guard is unexpected (e.g. the candidate
+        # listing query). Preserve its full traceback via ``exc_info`` — mirroring the
+        # per-candidate handler — so the swallowed best-effort failure stays diagnosable
+        # rather than masked behind the truncated ``error`` string.
         _log.warning(
-            "worker.terminal_runtime_release_resume_scan_failed_after_release_error",
-            reason_code=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+            _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_EVENT_TYPE,
+            reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_REASON_CODE,
             error_type=type(exc).__name__,
             error=str(exc)[:240],
+            exc_info=True,
         )
+    if resume_failure is not None:
+        # Only set when there were no release errors, so it is the sole pending failure.
+        raise resume_failure
     if len(release_errors) == 1:
         raise release_errors[0]
     if release_errors:
@@ -688,67 +730,6 @@ async def _release_terminal_runtime_for_candidate(
             )
 
 
-async def _teardown_terminal_auth_overlay(
-    self: Any,
-    candidate: _TerminalRuntimeCandidate,
-) -> bool | None:
-    """Unmount a terminal workspace's Claude auth overlay in the worker namespace.
-
-    Returns a three-valued unmount outcome for the release audit:
-
-    - ``True``  — the overlay teardown ran and succeeded.
-    - ``False`` — teardown was attempted but failed (logged); the release still
-      proceeds so port reclaim is not blocked and GC's loud-failure path is the
-      backstop for any residual.
-    - ``None``  — not applicable: no auth-overlay work dir is wired (a
-      copy-fallback workspace never provisioned an overlay), so there was
-      nothing to unmount. Distinguishing this from ``False`` keeps log-based
-      alerting from conflating a healthy no-overlay workspace with a real
-      umount error.
-
-    The worker is the only context that can see the per-workspace overlay mount,
-    so it releases it on the terminal-runtime-release sweep — before GC, running
-    capability-less in the API container, would otherwise fail loudly trying to
-    remove a still-mounted auth dir.
-
-    A worker downgraded from ``CAP_SYS_ADMIN`` (overlay capable → copy fallback)
-    may still hold surviving overlay ``upper`` dirs from a capable past life; in
-    that state ``teardown_workspace_auth_overlay`` raises the capability-less
-    ``OverlayUnmountUnverifiableError`` (a ``RuntimeError``, not an ``OSError``).
-    That must also degrade to ``False`` here, never escape and abort the sweep.
-    """
-
-    work_dir = getattr(self, "_auth_overlay_work_dir", None)
-    if work_dir is None:
-        return None
-
-    from awf.node.auth_mounts import (
-        OverlayUnmountUnverifiableError,
-        teardown_workspace_auth_overlay,
-    )
-
-    try:
-        await asyncio.to_thread(
-            teardown_workspace_auth_overlay,
-            work_dir=work_dir,
-            workspace_id=candidate.workspace_id,
-        )
-    except (OverlayUnmountUnverifiableError, OSError, subprocess.SubprocessError) as exc:
-        _log.warning(
-            "worker.terminal_auth_overlay_unmount_failed",
-            workspace_id=candidate.workspace_id,
-            status=candidate.status.value,
-            compose_project_name=candidate.compose_project_name,
-            reason_code=getattr(exc, "reason_code", "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED"),
-            error=repr(exc)[:400],
-            # ``repr(CalledProcessError)`` drops the ``umount(8)`` stderr (e.g.
-            # "target is busy"); forward it so the EBUSY root cause is greppable.
-            stderr=getattr(exc, "stderr", None),
-        )
-        return False
-    return True
-
-
 async def _record_terminal_runtime_released(
     self: Any,
     candidate: _TerminalRuntimeCandidate,
@@ -799,6 +780,21 @@ async def _record_terminal_runtime_released(
             reason_code=_TERMINAL_RUNTIME_RELEASE_REASON_CODE,
             payload=payload,
         )
+        # The umount was attempted but failed (``False``; ``True``/``None`` need no
+        # follow-up). Record a ``pending`` marker in the *same* transaction as the
+        # release so the port is still reclaimed atomically, yet a later deferred
+        # re-sweep can re-attempt the umount instead of leaking the overlay forever.
+        if auth_overlay_unmounted is False:
+            await repo.add_event(
+                ws,
+                event_type=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                payload={
+                    "compose_project_name": candidate.compose_project_name,
+                    "workspace_status": candidate.status.value,
+                    "attempt": 1,
+                },
+            )
         return True
 
     recorded = await run_db_operation_with_retry(
