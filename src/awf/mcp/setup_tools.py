@@ -664,13 +664,11 @@ def _client_integration_instructions_result(
             is_error=True,
         )
     except SourceCheckoutError as exc:
-        blocked_payload = _client_source_checkout_blocked_payload(exc)
-        if source_checkout is not None and source_path is not None:
-            blocked_payload = _client_source_checkout_blocked_payload_with_explicit_command(
-                blocked_payload,
-                selected_clients=selected,
-                source_checkout=source_path,
-            )
+        blocked_payload = _client_source_checkout_blocked_payload_with_explicit_command(
+            _client_source_checkout_blocked_payload(exc),
+            selected_clients=selected,
+            source_checkout=source_path,
+        )
         return _first_run_result(
             safe_result,
             blocked_payload,
@@ -1076,7 +1074,7 @@ def _client_source_checkout_blocked_payload_with_explicit_command(
     payload: FirstRunPayload,
     *,
     selected_clients: list[str],
-    source_checkout: Path,
+    source_checkout: Path | None,
 ) -> FirstRunPayload:
     command = _client_instruction_command(selected_clients, source_checkout=source_checkout)
     return payload.model_copy(

@@ -84,6 +84,49 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HQoJN
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` preserves
+the selected-client command when an explicit `source_checkout` fails, but leaves
+the CLI helper's generic `awf setup` / `<client>` remediation unchanged when the
+same `SourceCheckoutError` comes from stale persisted source-checkout metadata.
+
+Scope is limited to the MCP client-integration `SourceCheckoutError` response.
+Existing issue details, reason codes, redaction, and explicit checkout behavior
+must remain unchanged.
+
+### Requirements Checklist
+
+- Preserve explicit `source_checkout` blocked responses and command rendering.
+- When persisted checkout metadata fails with no explicit `source_checkout`,
+  render the top-level command with the selected `--client` selectors.
+- Rewrite the remediation next step to use the selected-client command instead
+  of the generic `<client>` placeholder.
+- Add focused regression coverage for the persisted-checkout failure path.
+
+### Implementation Steps
+
+1. Add a focused failing MCP client-integration regression where
+   `_resolve_client_env_file(None, False)` raises `SourceCheckoutError` after
+   client normalization.
+2. Apply the existing selected-client command rewrite for all client
+   `SourceCheckoutError` responses, including when `source_checkout` is absent.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_persisted_source_checkout_failure_preserves_selected_clients -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523
 
 ### Problem Statement And Scope
