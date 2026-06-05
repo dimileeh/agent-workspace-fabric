@@ -320,6 +320,10 @@ def _persist_work_dir_propagation_result(
                     lines.append(raw_line)
                     continue
                 key = stripped[:eq_pos].strip()
+                if key.startswith("export"):
+                    parts = key.split(None, 1)
+                    if len(parts) == 2 and parts[0] == "export":
+                        key = parts[1]
                 if key in (
                     AWF_WORK_DIR_BIND_PROPAGATION_ENV,
                     AWF_CLAUDE_AUTH_FORCE_COPY_ENV,

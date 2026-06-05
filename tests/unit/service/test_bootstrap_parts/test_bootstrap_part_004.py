@@ -827,6 +827,29 @@ def test_persist_preserves_existing_env_file_entries(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_persist_strips_export_prefix_to_avoid_duplicates(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "export AWF_WORK_DIR_BIND_PROPAGATION=rshared\nSOME_OTHER_VAR=bar\n",
+        encoding="utf-8",
+    )
+
+    result = WorkDirPropagationResult(
+        propagation="rprivate",
+        force_copy=True,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+        detail="docker desktop bridge",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
+    assert values["SOME_OTHER_VAR"] == "bar"
+    awf_keys = [k for k in values if k.startswith("AWF_")]
+    assert len(awf_keys) == 3
+
+
+@pytest.mark.unit
 def test_persist_is_best_effort_non_fatal(tmp_path: Path) -> None:
     unwritable = tmp_path / "noperm" / ".env"
     unwritable.parent.mkdir()
