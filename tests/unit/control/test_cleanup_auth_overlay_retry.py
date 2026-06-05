@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import WorkerConfig
 from awf.control.worker import cleanup as worker_cleanup
+from awf.control.worker import cleanup_auth_overlay as worker_overlay
 from awf.control.worker.types import _TerminalRuntimeCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
@@ -97,7 +98,7 @@ async def test_inline_retry_transient_then_success_returns_true(
     second, returns ``True`` after exactly one logged failure carrying its
     ``attempt`` index — no permanent leak from a single-shot failure."""
     log = _RecordingLog()
-    monkeypatch.setattr(worker_cleanup, "_log", log)
+    monkeypatch.setattr(worker_overlay, "_log", log)
     candidate = _candidate("ws_transient")
 
     calls: list[int] = []
@@ -110,7 +111,7 @@ async def test_inline_retry_transient_then_success_returns_true(
     monkeypatch.setattr("awf.node.auth_mounts.teardown_workspace_auth_overlay", _teardown)
 
     worker = SimpleNamespace(_auth_overlay_work_dir=tmp_path / "work")
-    result = await worker_cleanup._teardown_terminal_auth_overlay(worker, candidate)  # noqa: SLF001
+    result = await worker_overlay._teardown_terminal_auth_overlay(worker, candidate)  # noqa: SLF001
 
     assert result is True
     assert len(calls) == 2
@@ -132,7 +133,7 @@ async def test_inline_retry_persistent_failure_returns_false_after_bound(
     """A persistent failure is retried up to the inline bound, logs one warning
     per attempt (each with its index), and returns ``False`` without raising."""
     log = _RecordingLog()
-    monkeypatch.setattr(worker_cleanup, "_log", log)
+    monkeypatch.setattr(worker_overlay, "_log", log)
     candidate = _candidate("ws_persistent")
 
     calls: list[int] = []
@@ -144,17 +145,17 @@ async def test_inline_retry_persistent_failure_returns_false_after_bound(
     monkeypatch.setattr("awf.node.auth_mounts.teardown_workspace_auth_overlay", _teardown)
 
     worker = SimpleNamespace(_auth_overlay_work_dir=tmp_path / "work")
-    result = await worker_cleanup._teardown_terminal_auth_overlay(worker, candidate)  # noqa: SLF001
+    result = await worker_overlay._teardown_terminal_auth_overlay(worker, candidate)  # noqa: SLF001
 
     assert result is False
-    assert len(calls) == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_INLINE_ATTEMPTS
+    assert len(calls) == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_INLINE_ATTEMPTS
     attempts = [
         fields["attempt"]
         for event, fields in log.warnings
         if event == "worker.terminal_auth_overlay_unmount_failed"
     ]
     assert attempts == list(
-        range(1, worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_INLINE_ATTEMPTS + 1)
+        range(1, worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_INLINE_ATTEMPTS + 1)
     )
 
 
@@ -237,7 +238,7 @@ async def test_record_released_with_unmount_failure_adds_pending_marker(
     event_types = [event for event, _payload in added]
     assert event_types == [
         worker_cleanup._TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-        worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+        worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
     ]
     pending_payload = added[1][1]
     assert pending_payload is not None
@@ -326,7 +327,7 @@ async def test_release_resources_swallows_deferred_sweep_failure(
     # ``TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING`` lifecycle marker so log filters don't conflate them.
     assert (
         log.warnings[0][1]["reason_code"]
-        == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_REASON_CODE
+        == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_REASON_CODE
     )
     # The unexpected best-effort scan failure preserves its full traceback so it is
     # diagnosable rather than masked behind the truncated ``error`` string.
@@ -393,7 +394,7 @@ async def test_retry_candidate_records_resolved_on_success(
     async def _teardown(_self: object, _candidate: _TerminalRuntimeCandidate) -> bool | None:
         return teardown_result
 
-    monkeypatch.setattr(worker_cleanup, "_teardown_terminal_auth_overlay", _teardown)
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
 
     async def _count(_workspace_id: str) -> int:  # pragma: no cover - must not run
         raise AssertionError("count must not be consulted on a resolved sweep")
@@ -403,7 +404,7 @@ async def test_retry_candidate_records_resolved_on_success(
         _count_terminal_auth_overlay_unmount_pending_events=_count,
     )
 
-    await worker_cleanup._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
+    await worker_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
         worker,
         _candidate("ws_resolved"),
     )
@@ -422,7 +423,7 @@ async def test_retry_candidate_appends_pending_when_below_bound(
     async def _teardown(_self: object, _candidate: _TerminalRuntimeCandidate) -> bool | None:
         return False
 
-    monkeypatch.setattr(worker_cleanup, "_teardown_terminal_auth_overlay", _teardown)
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
 
     async def _count(_workspace_id: str) -> int:
         return 1
@@ -432,7 +433,7 @@ async def test_retry_candidate_appends_pending_when_below_bound(
         _count_terminal_auth_overlay_unmount_pending_events=_count,
     )
 
-    await worker_cleanup._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
+    await worker_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
         worker,
         _candidate("ws_still_failing"),
     )
@@ -450,17 +451,17 @@ async def test_retry_candidate_records_exhausted_at_bound(
     async def _teardown(_self: object, _candidate: _TerminalRuntimeCandidate) -> bool | None:
         return False
 
-    monkeypatch.setattr(worker_cleanup, "_teardown_terminal_auth_overlay", _teardown)
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
 
     async def _count(_workspace_id: str) -> int:
-        return worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_MAX_DEFERRED_SWEEPS
+        return worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_MAX_DEFERRED_SWEEPS
 
     worker = _retry_candidate_worker(
         False,
         _count_terminal_auth_overlay_unmount_pending_events=_count,
     )
 
-    await worker_cleanup._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
+    await worker_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
         worker,
         _candidate("ws_exhausted"),
     )
@@ -468,7 +469,7 @@ async def test_retry_candidate_records_exhausted_at_bound(
     assert worker.recorded == {
         "exhausted": (
             "ws_exhausted",
-            worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_MAX_DEFERRED_SWEEPS,
+            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_MAX_DEFERRED_SWEEPS,
         )
     }
 
@@ -502,7 +503,7 @@ async def test_retry_scan_routes_per_candidate_failure_to_handler(
         handled.append({"workspace_id": candidate.workspace_id, "exc": exc})
 
     monkeypatch.setattr(
-        worker_cleanup, "_handle_terminal_auth_overlay_unmount_retry_failure", _handle
+        worker_overlay, "_handle_terminal_auth_overlay_unmount_retry_failure", _handle
     )
 
     worker = SimpleNamespace(
@@ -510,7 +511,7 @@ async def test_retry_scan_routes_per_candidate_failure_to_handler(
         _retry_pending_terminal_auth_overlay_unmount_for_candidate=_per_candidate,
     )
 
-    await worker_cleanup._retry_pending_terminal_auth_overlay_unmounts(worker, limit=10)  # noqa: SLF001
+    await worker_overlay._retry_pending_terminal_auth_overlay_unmounts(worker, limit=10)  # noqa: SLF001
 
     assert len(handled) == 1
     assert handled[0]["workspace_id"] == "ws_a"
@@ -538,7 +539,7 @@ async def test_retry_scan_propagates_cancelled_error(
         handled = True
 
     monkeypatch.setattr(
-        worker_cleanup, "_handle_terminal_auth_overlay_unmount_retry_failure", _handle
+        worker_overlay, "_handle_terminal_auth_overlay_unmount_retry_failure", _handle
     )
 
     worker = SimpleNamespace(
@@ -547,7 +548,7 @@ async def test_retry_scan_propagates_cancelled_error(
     )
 
     with pytest.raises(asyncio.CancelledError):
-        await worker_cleanup._retry_pending_terminal_auth_overlay_unmounts(worker, limit=10)  # noqa: SLF001
+        await worker_overlay._retry_pending_terminal_auth_overlay_unmounts(worker, limit=10)  # noqa: SLF001
     assert handled is False
 
 
@@ -558,9 +559,9 @@ async def test_retry_failure_handler_logs_warning(
     """The per-candidate failure handler logs a structured warning with the reason
     code (failures are surfaced, never silently dropped)."""
     log = _RecordingLog()
-    monkeypatch.setattr(worker_cleanup, "_log", log)
+    monkeypatch.setattr(worker_overlay, "_log", log)
 
-    await worker_cleanup._handle_terminal_auth_overlay_unmount_retry_failure(  # noqa: SLF001
+    await worker_overlay._handle_terminal_auth_overlay_unmount_retry_failure(  # noqa: SLF001
         SimpleNamespace(),
         candidate=_candidate("ws_handler"),
         exc=RuntimeError("boom"),
@@ -572,7 +573,7 @@ async def test_retry_failure_handler_logs_warning(
     assert fields["workspace_id"] == "ws_handler"
     assert (
         fields["reason_code"]
-        == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED_REASON_CODE
+        == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED_REASON_CODE
     )
     # The unexpected best-effort failure preserves its full traceback so it is
     # diagnosable rather than masked behind the truncated ``error`` string.
@@ -587,7 +588,7 @@ async def test_retry_failure_handler_logs_warning(
 @pytest.mark.unit
 async def test_list_pending_candidates_empty_for_nonpositive_limit() -> None:
     worker = SimpleNamespace()
-    result = await worker_cleanup._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+    result = await worker_overlay._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
         worker,
         limit=0,
     )
@@ -612,7 +613,7 @@ async def test_list_pending_candidates_skips_rows_without_repo_url(
     async def _run_db_operation_with_retry(*_args: Any, **_kwargs: Any) -> list[Any]:
         return rows
 
-    monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", _run_db_operation_with_retry)
+    monkeypatch.setattr(worker_overlay, "run_db_operation_with_retry", _run_db_operation_with_retry)
 
     worker = SimpleNamespace(
         _config=SimpleNamespace(node_id="node-a"),
@@ -620,7 +621,7 @@ async def test_list_pending_candidates_skips_rows_without_repo_url(
         _log_transient_db_retry=lambda *_a: None,
     )
 
-    candidates = await worker_cleanup._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+    candidates = await worker_overlay._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
         worker,
         limit=10,
     )
@@ -648,22 +649,22 @@ def _sweeper(factory: async_sessionmaker[AsyncSession], node_id: str = "node-1")
             "_session_factory": factory,
             "_log_transient_db_retry": lambda *_: None,
             "_list_pending_terminal_auth_overlay_unmount_candidates": (
-                worker_cleanup._list_pending_terminal_auth_overlay_unmount_candidates
+                worker_overlay._list_pending_terminal_auth_overlay_unmount_candidates
             ),
             "_count_terminal_auth_overlay_unmount_pending_events": (
-                worker_cleanup._count_terminal_auth_overlay_unmount_pending_events
+                worker_overlay._count_terminal_auth_overlay_unmount_pending_events
             ),
             "_has_terminal_auth_overlay_unmount_terminal_event": (
-                worker_cleanup._has_terminal_auth_overlay_unmount_terminal_event
+                worker_overlay._has_terminal_auth_overlay_unmount_terminal_event
             ),
             "_record_terminal_auth_overlay_unmount_resolved": (
-                worker_cleanup._record_terminal_auth_overlay_unmount_resolved
+                worker_overlay._record_terminal_auth_overlay_unmount_resolved
             ),
             "_record_terminal_auth_overlay_unmount_exhausted": (
-                worker_cleanup._record_terminal_auth_overlay_unmount_exhausted
+                worker_overlay._record_terminal_auth_overlay_unmount_exhausted
             ),
             "_append_terminal_auth_overlay_unmount_pending": (
-                worker_cleanup._append_terminal_auth_overlay_unmount_pending
+                worker_overlay._append_terminal_auth_overlay_unmount_pending
             ),
         },
     )()
@@ -792,19 +793,19 @@ async def test_pending_candidate_query_excludes_resolved_and_exhausted(
             )
             await repo.add_event(
                 ws,
-                event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
-                reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
                 payload={"attempt": 1},
             )
         await repo.add_event(
             ws_resolved,
-            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
-            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
         )
         await repo.add_event(
             ws_exhausted,
-            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
-            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_REASON_CODE,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_REASON_CODE,
         )
         await session.commit()
 
@@ -846,8 +847,8 @@ async def test_pending_candidate_query_excludes_revoked_release(
             )
             await repo.add_event(
                 ws,
-                event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
-                reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
                 payload={"attempt": 1},
             )
 
@@ -956,8 +957,8 @@ async def test_pending_candidate_query_uses_reservation_effective_node(
             )
             await repo.add_event(
                 ws,
-                event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
-                reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
                 payload={"attempt": 1},
             )
         await session.commit()
@@ -985,8 +986,8 @@ async def test_count_pending_events_reflects_marker_count(
         for attempt in range(3):
             await repo.add_event(
                 ws,
-                event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
-                reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
                 payload={"attempt": attempt + 1},
             )
         await session.commit()
@@ -1035,21 +1036,21 @@ async def _build_revoked_then_rereleased_cycle(
     for _ in range(cycle1_pending):
         await repo.add_event(
             ws,
-            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
-            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
             payload={"attempt": 1},
         )
     if cycle1_terminal == "resolved":
         await repo.add_event(
             ws,
-            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
-            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
         )
     elif cycle1_terminal == "exhausted":
         await repo.add_event(
             ws,
-            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
-            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_REASON_CODE,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_REASON_CODE,
         )
     revoked = await repo.add_event(
         ws,
@@ -1065,8 +1066,8 @@ async def _build_revoked_then_rereleased_cycle(
     released_2.occurred_at = datetime(2026, 5, 31, 12, 0, 2, tzinfo=UTC)
     await repo.add_event(
         ws,
-        event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
-        reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+        event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+        reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
         payload={"attempt": 1},
     )
 
@@ -1192,7 +1193,7 @@ async def test_record_resolved_writes_event_and_dedupes(
 
     async with factory() as session:
         types = await _event_types(session, ws_id)
-    assert types.count(worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE) == 1
+    assert types.count(worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE) == 1
 
 
 @pytest.mark.asyncio
@@ -1214,7 +1215,7 @@ async def test_record_exhausted_writes_event_and_dedupes(
 
     async with factory() as session:
         types = await _event_types(session, ws_id)
-    assert types.count(worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE) == 1
+    assert types.count(worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE) == 1
 
 
 @pytest.mark.asyncio
@@ -1236,7 +1237,7 @@ async def test_append_pending_writes_event_but_not_after_terminal_marker(
     await sweeper._append_terminal_auth_overlay_unmount_pending(candidate, attempt=2)  # noqa: SLF001
     async with factory() as session:
         assert (await _event_types(session, ws_id)).count(
-            worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE
+            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE
         ) == 1
 
     # A terminal marker now exists -> the append guard suppresses a new pending.
@@ -1246,7 +1247,7 @@ async def test_append_pending_writes_event_but_not_after_terminal_marker(
     await sweeper._append_terminal_auth_overlay_unmount_pending(candidate, attempt=3)  # noqa: SLF001
     async with factory() as session:
         assert (await _event_types(session, ws_id)).count(
-            worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE
+            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE
         ) == 1
 
 
@@ -1320,7 +1321,7 @@ async def test_record_resolved_skips_when_release_revoked(
     """A ``resolved`` marker is NOT written when the release was revoked after listing —
     the retry stays owed and the skip is surfaced under its own reason code."""
     log = _RecordingLog()
-    monkeypatch.setattr(worker_cleanup, "_log", log)
+    monkeypatch.setattr(worker_overlay, "_log", log)
     sweeper = _sweeper(factory)
     ws_id: str = ""
     async with factory() as session:
@@ -1336,17 +1337,17 @@ async def test_record_resolved_skips_when_release_revoked(
 
     async with factory() as session:
         types = await _event_types(session, ws_id)
-    assert worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE not in types
+    assert worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE not in types
     revoked = [
         fields
         for event, fields in log.warnings
-        if event == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+        if event == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
     ]
     assert len(revoked) == 1
     assert revoked[0]["marker"] == "resolved"
     assert (
         revoked[0]["reason_code"]
-        == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_REASON_CODE
+        == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_REASON_CODE
     )
 
 
@@ -1358,7 +1359,7 @@ async def test_record_exhausted_skips_when_release_revoked(
     """An ``exhausted`` marker is NOT written when the release was revoked after listing,
     so a temporary revoke cannot permanently suppress the retry."""
     log = _RecordingLog()
-    monkeypatch.setattr(worker_cleanup, "_log", log)
+    monkeypatch.setattr(worker_overlay, "_log", log)
     sweeper = _sweeper(factory)
     ws_id: str = ""
     async with factory() as session:
@@ -1374,11 +1375,11 @@ async def test_record_exhausted_skips_when_release_revoked(
 
     async with factory() as session:
         types = await _event_types(session, ws_id)
-    assert worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE not in types
+    assert worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE not in types
     revoked = [
         fields
         for event, fields in log.warnings
-        if event == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+        if event == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
     ]
     assert len(revoked) == 1
     assert revoked[0]["marker"] == "exhausted"
@@ -1392,7 +1393,7 @@ async def test_append_pending_skips_when_release_revoked(
     """A fresh ``pending`` marker is NOT appended when the release was revoked after
     listing, so the revoke window cannot burn one of the bounded deferred attempts."""
     log = _RecordingLog()
-    monkeypatch.setattr(worker_cleanup, "_log", log)
+    monkeypatch.setattr(worker_overlay, "_log", log)
     sweeper = _sweeper(factory)
     ws_id: str = ""
     async with factory() as session:
@@ -1404,8 +1405,8 @@ async def test_append_pending_skips_when_release_revoked(
         # revoke superseded the release before this deferred sweep ran.
         await repo.add_event(
             ws,
-            event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
-            reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
             payload={"attempt": 1},
         )
         await session.commit()
@@ -1417,11 +1418,11 @@ async def test_append_pending_skips_when_release_revoked(
     async with factory() as session:
         types = await _event_types(session, ws_id)
     # The original pending marker survives, but no second one is appended.
-    assert types.count(worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE) == 1
+    assert types.count(worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE) == 1
     revoked = [
         fields
         for event, fields in log.warnings
-        if event == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+        if event == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
     ]
     assert len(revoked) == 1
     assert revoked[0]["marker"] == "pending"

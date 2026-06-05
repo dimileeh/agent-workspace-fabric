@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.exc import InterfaceError
 
 from awf.control.worker import cleanup as worker_cleanup
+from awf.control.worker import cleanup_auth_overlay as worker_overlay
 from awf.control.worker.types import _TerminalRuntimeCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.node.cleanup import (
@@ -882,6 +883,9 @@ async def test_release_candidate_overlay_unmount_failure_does_not_block_release(
     ``auth_overlay_unmounted=False``, and never blocks the runtime release."""
     log = _RecordingLog()
     monkeypatch.setattr(worker_cleanup, "_log", log)
+    # ``_teardown_terminal_auth_overlay`` (extracted to ``cleanup_auth_overlay``) logs
+    # the umount-failed warning via that module's ``_log``; capture it too.
+    monkeypatch.setattr(worker_overlay, "_log", log)
     candidate = _candidate("ws_overlay_fail")
 
     kernel_reason = "umount: /…/merged: target is busy."
@@ -939,6 +943,9 @@ async def test_release_candidate_overlay_unverifiable_does_not_abort_sweep(
 
     log = _RecordingLog()
     monkeypatch.setattr(worker_cleanup, "_log", log)
+    # ``_teardown_terminal_auth_overlay`` (extracted to ``cleanup_auth_overlay``) logs
+    # the umount-failed warning via that module's ``_log``; capture it too.
+    monkeypatch.setattr(worker_overlay, "_log", log)
     candidate = _candidate("ws_overlay_unverifiable")
 
     def _teardown(**_kwargs: Any) -> None:
