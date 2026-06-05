@@ -36,6 +36,7 @@ async def _check_auto_resolved_profile_host_ports(
     excluding_workspace_id: str | None = None,
     task_policy: Mapping[str, Any] | None = None,
     resolved_profile_dict: dict[str, Any] | None = None,
+    execution_claim_epoch: int | None = None,
 ) -> None:
     """Check auto-resolved profile service ports for admission after provision-time resolution.
 
@@ -65,7 +66,13 @@ async def _check_auto_resolved_profile_host_ports(
     pre-launch commit, this method publishes the workspace's
     ``resolved_profile`` inside the same transaction (and therefore
     under the same advisory lock) so that concurrent provisioners can
-    see the port claim before the lock is released.  When
+    see the port claim before the lock is released.  The publish is
+    fenced on ``execution_claim_epoch`` (under the ``get_for_update``
+    row lock): a provisioner superseded by a later claimant must not
+    write its stale profile into the new claimant's row, which the new
+    provisioner would otherwise inherit (it reconstructs from
+    ``resolved_profile`` rather than re-resolving).  This keeps the
+    epoch fence symmetric with the pre-launch commit.  When
     ``profile_resolution`` is ``None`` (profile was already resolved in
     a previous provisioner run and stored in ``ws.resolved_profile``),
     the previously-published profile is already visible to
@@ -133,6 +140,19 @@ async def _check_auto_resolved_profile_host_ports(
             ws is not None
             and profile_resolution is not None
             and ws.status == WorkspaceStatus.provisioning.value
+            # Fence (row-locked): a later claimant that superseded us after
+            # profile resolution advanced ``execution_claim_epoch`` while the
+            # row stayed ``provisioning``. The status guard alone cannot see
+            # that, so without this epoch predicate a fenced provisioner would
+            # publish its (stale) auto-resolved profile into the new claimant's
+            # row here — and because publishing happens *before* the
+            # epoch-gated pre-launch commit, the new provisioner would inherit
+            # it via ``ws.resolved_profile`` (reconstruct, don't re-resolve),
+            # reopening the #421 split-brain for auto profiles with host ports.
+            # The SELECT FOR UPDATE makes this read-and-write atomic against the
+            # reclaim. Keep this predicate in lockstep with the pre-launch
+            # commit guard in ``provisioner.provision_claimed``.
+            and (execution_claim_epoch is None or ws.execution_claim_epoch == execution_claim_epoch)
         ):
             ws.resolved_profile = resolved_profile_dict
         await session.commit()

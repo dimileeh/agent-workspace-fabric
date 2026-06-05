@@ -388,6 +388,7 @@ class Provisioner(ProvisionerHostPortCheckMixin):
                         excluding_workspace_id=workspace_id,
                         task_policy=ws.task_policy,
                         resolved_profile_dict=resolved_profile_dict,
+                        execution_claim_epoch=execution_claim_epoch,
                     )
                 except (
                     WorkspaceCreateHostPortConflictError,
