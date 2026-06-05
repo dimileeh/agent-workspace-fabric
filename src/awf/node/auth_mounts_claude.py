@@ -693,8 +693,17 @@ def _reconcile_fallback_edits_into_upper(
     can read) and is accepted as best-effort.
     """
 
-    for root, _dirs, files in os.walk(legacy):
+    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
+    for root, dirs, files in os.walk(legacy):
         root_path = Path(root)
+        # Mirror the base copy's ``ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS)``: the
+        # shared base never holds these usage-history subtrees, so every file in one
+        # reads as ``base_mtime_ns is None`` (an unconditional "fallback edit") and would
+        # be forwarded whole. A long fallback session that filled ``projects/`` with
+        # multi-GB transcripts would otherwise materialise all of it in the overlay upper,
+        # negating the shared-base disk-savings goal. Prune them in place so the walk does
+        # not descend, bounding reconcile to the same scope as the base itself.
+        dirs[:] = [d for d in dirs if d not in excluded]
         for name in files:
             legacy_file = root_path / name
             if legacy_file.is_symlink():

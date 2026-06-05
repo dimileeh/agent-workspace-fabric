@@ -555,6 +555,35 @@ def test_reconcile_forwards_into_a_preexisting_merged_parent_dir(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_reconcile_skips_usage_history_dirs_absent_from_base(tmp_path: Path) -> None:
+    # The shared base is built with ``ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS)``, so
+    # ``projects/``, ``todos/``, ``shell-snapshots/`` and ``statsig/`` never exist in it.
+    # A fallback session's Claude process re-creates them and can fill ``projects/`` with
+    # large transcripts; because the base lacks them they all read as ``base_mtime_ns is
+    # None`` fallback edits. Reconcile must mirror the base exclusion and not forward those
+    # subtrees into the overlay upper, or the shared-base disk savings are negated.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    # A genuine edit outside the usage-history dirs is still forwarded.
+    (legacy / "settings.json").write_text("real fallback edit\n")
+    # Agent-accumulated usage-history subtrees that the base does not track.
+    for history_dir in ("projects", "todos", "shell-snapshots", "statsig"):
+        (legacy / history_dir).mkdir()
+        (legacy / history_dir / "big").write_text("multi-GB transcript\n")
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    assert (merged / "settings.json").read_text() == "real fallback edit\n"
+    for history_dir in ("projects", "todos", "shell-snapshots", "statsig"):
+        assert not (merged / history_dir).exists()
+        assert not (upper / history_dir).exists()
+
+
+@pytest.mark.unit
 def test_safe_overlay_copy_refuses_source_symlink_swapped_after_caller_checks(
     tmp_path: Path,
 ) -> None:
