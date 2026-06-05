@@ -110,17 +110,17 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
         package_section.index(PACKAGE_DATABASE_URL_ENCODED_EXPORT)
     )
     assert package_section.index(package_env_tmp) < package_section.index(package_persist_target)
-    assert package_section.index(package_persist_target) < package_section.index(
-        package_setup_command,
+    assert _required_index(package_section, package_persist_target, "package first-run") < (
+        _required_index(package_section, package_setup_command, "package first-run")
     )
 
     for label, section, setup_command in source_cases:
         assert "cp .env.example .env" in section, f"{label} must create root .env"
         assert "awf_env_tmp" not in section, f"{label} should not use legacy env rewrite"
         assert "docker/compose/.env" not in section, f"{label} should not write compose env"
-        assert section.index("cp .env.example .env") < section.index(setup_command), (
-            f"{label} must create root .env before setup"
-        )
+        assert _required_index(section, "cp .env.example .env", label) < (
+            _required_index(section, setup_command, label)
+        ), f"{label} must create root .env before setup"
 
 
 def test_getting_started_package_first_run_url_encodes_custom_postgres_password(
