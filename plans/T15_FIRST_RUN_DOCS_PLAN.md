@@ -677,3 +677,25 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
 git diff --check
 ```
+
+CI repair iteration for PR #390:
+
+- Inspect the current PR Actions run with `gh pr checks 390` and focused job
+  log retrieval once a failing job is available.
+- Do not run repository-wide validation, coverage gates, OpenAPI drift checks,
+  console builds, pushes, rebases, or branch changes in the agent phase; AWF and
+  GitHub own broad validation after this repair cycle.
+- If a concrete failure points at this PR's docs or focused docs tests, add the
+  smallest behavior assertion needed to reproduce the failure first when
+  practical, then update only the matching documentation or test surface.
+- If the visible failure is outside the declared repair surface and requires an
+  unowned protected workflow, quality-gate, or configuration file, leave the
+  branch unchanged for that path and report the protected-file blocker.
+- Focused verification commands for this iteration:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init_parts/test_init_part_004.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/cli/test_init_parts/test_init_part_004.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py tests/unit/cli/test_init_parts/test_init_part_004.py
+```

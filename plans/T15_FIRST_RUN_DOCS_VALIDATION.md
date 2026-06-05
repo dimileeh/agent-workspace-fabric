@@ -2575,3 +2575,57 @@ gates after agent completion.
 ## Gaps
 
 None.
+
+## CI Repair Iteration for PR #390
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`, CI repair iteration.
+
+Root cause:
+
+- The most recent completed GitHub Actions failure before the current repair
+  came from two focused Python coverage shard failures on older PR head
+  `50b49514d8db7bf3cddb64cab696810c9a988d35`.
+- `tests/unit/docs/test_pr_monitor_adoption_docs.py::test_reference_docs_link_to_canonical_adoption_runbook`
+  failed because `docs/QUICKSTART.md` did not link to
+  `PR_MONITOR_ADOPTION.md`.
+- `tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit`
+  failed because `tests/unit/docs/test_public_docs_status.py` had grown to
+  3,443 lines, above the 1,500-line first-party file limit.
+
+Changes:
+
+- Added the missing Quickstart link to
+  `[PR Monitor Adoption](PR_MONITOR_ADOPTION.md)`.
+- Split the oversized docs status test into:
+  `tests/unit/docs/test_public_docs_status.py`,
+  `tests/unit/docs/test_public_docs_lifecycle_status.py`,
+  `tests/unit/docs/test_public_docs_guides_status.py`, and shared
+  `tests/unit/docs/public_docs_status_helpers.py`.
+- Preserved the existing 75 docs status assertions in the split successor
+  files and kept each touched test/helper file under the 1,500-line guard.
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_pr_monitor_adoption_docs.py::test_reference_docs_link_to_canonical_adoption_runbook tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+# 2 passed in 0.49s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py -q
+# 75 passed in 2.74s
+
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init_parts/test_init_part_004.py -q
+# 17 passed in 0.78s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+# 4 files already formatted
+
+git diff --check
+# no output
+```
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, console
+builds, pushes, and PR lifecycle actions were intentionally not run in the
+agent phase; AWF owns those broad gates after agent completion.

@@ -585,5 +585,6 @@ Next:
 - [Project Onboarding](PROJECT_ONBOARDING.md)
 - [Upgrade Guide](UPGRADE.md)
 - [Uninstall Guide](UNINSTALL.md)
+- [PR Monitor Adoption](PR_MONITOR_ADOPTION.md)
 - [DX Smoke Command](SMOKE_COMMAND.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
