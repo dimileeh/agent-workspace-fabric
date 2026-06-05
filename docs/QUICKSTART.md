@@ -415,10 +415,18 @@ awf_decode_double_quoted_dotenv() {
 replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
 print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
 }
+awf_strip_unquoted_dotenv_inline_comment() {
+  case "$1" in
+    \"*|\'*) printf "%s" "$1" ;;
+    \#*) printf "%s" "" ;;
+    *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
+  esac
+}
 AWF_PERSISTED_API_TOKEN=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
       AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
@@ -434,16 +442,17 @@ for env_file in .env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
-elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env 2>/dev/null; then
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
   export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")
       AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
@@ -460,10 +469,16 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
-docker compose --env-file .env -f docker/compose/local-service.yml stop
+if [ -f .env ]; then
+  docker compose --env-file .env -f docker/compose/local-service.yml stop
+elif [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 
@@ -656,10 +671,18 @@ awf_decode_double_quoted_dotenv() {
 replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
 print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
 }
+awf_strip_unquoted_dotenv_inline_comment() {
+  case "$1" in
+    \"*|\'*) printf "%s" "$1" ;;
+    \#*) printf "%s" "" ;;
+    *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
+  esac
+}
 AWF_PERSISTED_API_TOKEN=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
       AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
@@ -675,16 +698,17 @@ for env_file in .env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
-elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env 2>/dev/null; then
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
   export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")
       AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
@@ -701,10 +725,16 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
-docker compose --env-file .env -f docker/compose/local-service.yml stop
+if [ -f .env ]; then
+  docker compose --env-file .env -f docker/compose/local-service.yml stop
+elif [ -f docker/compose/.env ]; then
+  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
+else
+  docker compose -f docker/compose/local-service.yml stop
+fi
 uv run --python 3.12 --extra dev awf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric
 ```
 

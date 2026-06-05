@@ -3002,3 +3002,51 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lif
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py
 # 1 file already formatted
 ```
+
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HaNOB`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/QUICKSTART.md` Lane 2 and Lane 3 source-checkout uninstall
+  refresh snippets now read `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` from
+  checkout-root `.env` first, then legacy `docker/compose/.env`.
+- Complete: The same snippets now strip unquoted dotenv inline comments before
+  quote handling and export, matching the existing source-checkout parser
+  pattern used by adjacent upgrade/standalone uninstall guidance.
+- Complete: The uninstall refresh stop command now uses `.env` when present,
+  falls back to `docker/compose/.env`, and otherwise stops Compose without an
+  env file.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+# Red phase before docs update: failed because Quickstart uninstall did not strip
+# inline dotenv comments or keep the legacy docker/compose/.env fallback.
+# Final result: 1 passed in 0.53s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 1 passed in 0.59s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py
+# 2 files already formatted
+
+git diff --check
+# no output
+```

@@ -832,3 +832,22 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lif
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py
 git diff --check
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HaNOB`:
+Quickstart source-checkout uninstall refresh snippets must mirror the standalone
+Uninstall/source-upgrade lookup path by reading checkout-root `.env` first and
+legacy `docker/compose/.env` as a fallback for `AWF_API_TOKEN` and
+`AWF_POSTGRES_PASSWORD`, stripping unquoted dotenv inline comments before
+export, and stopping local Core with `.env`, then `docker/compose/.env`, then a
+no-env-file fallback. Preserve root `.env` precedence and keep the repair scoped
+to `docs/QUICKSTART.md` plus the focused docs regression.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HaNOB`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py
+git diff --check
+```

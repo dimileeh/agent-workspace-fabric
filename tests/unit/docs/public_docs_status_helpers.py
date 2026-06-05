@@ -1057,6 +1057,8 @@ def _assert_source_checkout_service_env_restore_before_stop(
     label: str,
     section: str,
     lifecycle: str,
+    *,
+    require_legacy_fallback: bool = False,
 ) -> tuple[int, int]:
     """Assert source-checkout snippets restore service secrets before stopping Core."""
     api_restore_start_index, password_restore_end_index, _stop_index, _stop_end_index = (
@@ -1064,6 +1066,7 @@ def _assert_source_checkout_service_env_restore_before_stop(
             label,
             section,
             lifecycle,
+            require_legacy_fallback=require_legacy_fallback,
         )
     )
     return api_restore_start_index, password_restore_end_index

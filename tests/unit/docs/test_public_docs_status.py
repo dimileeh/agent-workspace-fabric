@@ -491,10 +491,10 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
                 f"{heading} uninstall",
                 uninstall_section,
                 "refreshing source-checkout metadata",
+                require_legacy_fallback=True,
             )
         )
         assert stop_line in uninstall_section
-        assert "docker compose --env-file docker/compose/.env" not in uninstall_section
         assert "rm -rf aira-agent-workspace-fabric" in uninstall_section
         stop_index = uninstall_section.index(stop_line)
         assert section_words.index(core_stop_guidance) < section_words.index(port_block_guidance)
