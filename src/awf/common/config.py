@@ -406,6 +406,14 @@ class Settings(BaseSettings):
             "agent/GitHub credentials for workspace container auth mounts."
         ),
     )
+    claude_base_gc_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether service GC also reaps superseded shared ~/.claude overlay "
+            "bases (GC-B). Safe by default: it only acts under --execute and never "
+            "removes the current-signature, live-mounted, or pinned base."
+        ),
+    )
 
     # Orphan filesystem reconcile (WS-B2). Default OFF: the sweep runs in
     # report-only mode (visibility into the leak) until an operator opts into

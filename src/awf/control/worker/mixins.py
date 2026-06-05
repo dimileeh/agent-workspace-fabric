@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from awf.control.worker import claims as _claims
 from awf.control.worker import cleanup as _cleanup
+from awf.control.worker import cleanup_auth_overlay as _cleanup_auth_overlay
 from awf.control.worker import dispatch_methods as _dispatch_methods
 from awf.control.worker import recovery as _recovery
 from awf.control.worker import scheduler_methods as _scheduler_methods
@@ -53,6 +54,37 @@ class WorkerDelegatesMixin:
     _has_terminal_runtime_release_event = _cleanup._has_terminal_runtime_release_event
     _has_terminal_runtime_release_failure_event = (
         _cleanup._has_terminal_runtime_release_failure_event
+    )
+    # Deferred Claude auth-overlay umount re-sweep (issue #399), extracted to
+    # ``awf.control.worker.cleanup_auth_overlay``. The module-level
+    # ``_teardown_terminal_auth_overlay`` and ``_handle_terminal_auth_overlay_unmount_retry_failure``
+    # free functions are intentionally not delegated (called as module globals).
+    _retry_pending_terminal_auth_overlay_unmounts = (
+        _cleanup_auth_overlay._retry_pending_terminal_auth_overlay_unmounts
+    )
+    _retry_pending_terminal_auth_overlay_unmount_for_candidate = (
+        _cleanup_auth_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate
+    )
+    _terminal_auth_overlay_unmount_effective_release_guard = (
+        _cleanup_auth_overlay._terminal_auth_overlay_unmount_effective_release_guard
+    )
+    _list_pending_terminal_auth_overlay_unmount_candidates = (
+        _cleanup_auth_overlay._list_pending_terminal_auth_overlay_unmount_candidates
+    )
+    _count_terminal_auth_overlay_unmount_pending_events = (
+        _cleanup_auth_overlay._count_terminal_auth_overlay_unmount_pending_events
+    )
+    _has_terminal_auth_overlay_unmount_terminal_event = (
+        _cleanup_auth_overlay._has_terminal_auth_overlay_unmount_terminal_event
+    )
+    _record_terminal_auth_overlay_unmount_resolved = (
+        _cleanup_auth_overlay._record_terminal_auth_overlay_unmount_resolved
+    )
+    _record_terminal_auth_overlay_unmount_exhausted = (
+        _cleanup_auth_overlay._record_terminal_auth_overlay_unmount_exhausted
+    )
+    _append_terminal_auth_overlay_unmount_pending = (
+        _cleanup_auth_overlay._append_terminal_auth_overlay_unmount_pending
     )
 
     _draining_execution_task_count = _dispatch_methods._draining_execution_task_count

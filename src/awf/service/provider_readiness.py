@@ -15,6 +15,7 @@ from awf.db.enums import AgentRuntime
 from awf.node.auth_mounts import (
     claude_auth_isolation_label,
     force_copy_isolation_requested,
+    overlay_path_has_reserved_chars,
 )
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
@@ -430,6 +431,7 @@ def _check_provider_readiness(
         return _check_claude(
             environ=environ,
             host_home=host_home,
+            work_dir=Path(settings.work_dir).expanduser(),
             strict=strict,
             secrets=secrets,
         )
@@ -908,9 +910,28 @@ def _check_claude(
     *,
     environ: Mapping[str, str],
     host_home: Path,
+    work_dir: Path,
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    """Check whether Claude Code authentication signals are present.
+
+    Probes file-based (``~/.claude`` directory + ``~/.claude.json``) and
+    environment-based (``ANTHROPIC_API_KEY`` etc.) auth sources.  Reports
+    the isolation posture (overlay vs per-workspace copy) determined by
+    ``force_copy_isolation_requested`` and overlay path constraints.
+
+    When the effective ``environ`` carries ``AWF_WORK_DIR_BIND_PROPAGATION``
+    (set by bootstrap on non-propagating hosts or read from the compose
+    env-file by status), the value is attached as ``mount_propagation`` so
+    callers can correlate the readiness check with the bind-propagation
+    posture.
+
+    The force-copy and overlay-path-reserved-chars probes read the passed
+    ``environ`` (not ``os.environ``) because bootstrap folds the operator
+    override into the readiness environ dict; a default ``os.environ``
+    probe would miss it and overstate overlay isolation.
+    """
     # ``~/.claude`` is isolated per workspace via a shared read-only overlay base
     # + per-workspace writable upper when overlayfs is available, else a full
     # per-workspace copy. ``~/.claude.json`` is *always* a per-workspace copy
@@ -924,9 +945,18 @@ def _check_claude(
     # worker provisions with the copy fallback) rather than the CLI process
     # environment, so a default probe over ``os.environ`` would miss it and report
     # ``per_workspace_overlay`` while the worker actually uses per-workspace copies.
+    #
+    # The reserved-chars probe folds in the same deterministic, host-level copy
+    # fallback the worker takes when ``work_dir`` (the overlay auth root, inherited
+    # from ``AWF_WORK_DIR`` / ``AWF_HOST_WORK_DIR``) carries a ``,`` or ``:`` that
+    # overlayfs's unescapable ``-o`` payload cannot encode. Every overlay mount
+    # degrades to per-workspace copy there, so the label must report copy rather
+    # than overstate overlay isolation.
     directory_isolation = claude_auth_isolation_label(
         force_copy_requested=lambda: force_copy_isolation_requested(environ),
+        overlay_path_unsupported=lambda: overlay_path_has_reserved_chars(work_dir),
     )
+    propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
     file_sources: list[dict[str, str]] = []
     if (host_home / ".claude").exists():
         file_sources.append(
@@ -947,7 +977,7 @@ def _check_claude(
             )
         )
     if file_sources:
-        return _provider_result(
+        result = _provider_result(
             ok=True,
             strict=strict,
             reason="CLAUDE_FILE_AUTH_PRESENT",
@@ -959,10 +989,8 @@ def _check_claude(
             isolation=file_sources[0]["isolation"],
             warnings=[],
         )
-
-    signal = _first_present_env(environ, _CLAUDE_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
+    elif (signal := _first_present_env(environ, _CLAUDE_ENV_KEYS)) is not None:
+        result = _provider_result(
             ok=True,
             strict=strict,
             reason="CLAUDE_ENV_AUTH_PRESENT",
@@ -986,19 +1014,22 @@ def _check_claude(
                 )
             ],
         )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="CLAUDE_AUTH_MISSING",
-        message=(
-            "No Claude Code auth signal was visible. Set ANTHROPIC_API_KEY, "
-            "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or mount ~/.claude."
-        ),
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
+    else:
+        result = _provider_result(
+            ok=False,
+            strict=strict,
+            reason="CLAUDE_AUTH_MISSING",
+            message=(
+                "No Claude Code auth signal was visible. Set ANTHROPIC_API_KEY, "
+                "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or mount ~/.claude."
+            ),
+            secrets=secrets,
+            credential_scope="not_observed",
+            isolation="none",
+        )
+    if propagation_posture is not None:
+        result["mount_propagation"] = propagation_posture
+    return result
 
 
 def _check_cursor(
