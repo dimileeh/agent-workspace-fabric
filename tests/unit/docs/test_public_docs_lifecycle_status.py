@@ -46,6 +46,25 @@ def _package_database_url_restore_lines(lifecycle: str = "upgrading") -> tuple[s
     )
 
 
+def _required_rollback_subsection(
+    rollback_section: str,
+    start_marker: str,
+    *,
+    end_marker: str | None = None,
+) -> str:
+    """Return rollback text bounded by required markers with clear failures."""
+    _, found_start_marker, after_start_marker = rollback_section.partition(start_marker)
+    assert found_start_marker, f"Rollback section marker {start_marker!r} not found"
+    if end_marker is None:
+        return after_start_marker
+
+    subsection, found_end_marker, _ = after_start_marker.partition(end_marker)
+    assert found_end_marker, (
+        f"Rollback section marker {end_marker!r} not found after {start_marker!r}"
+    )
+    return subsection
+
+
 def test_source_checkout_stop_helper_allows_root_guard_without_legacy_when_optional() -> None:
     """Assert optional legacy fallback permits a guarded root-only stop."""
     section = "\n".join(
@@ -401,13 +420,11 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
-    release_rollback_section = rollback_section.split(
+    release_rollback_section = _required_rollback_subsection(
+        rollback_section,
         "For release-installed lanes",
-        maxsplit=1,
-    )[1].split(
-        "For the source checkout with global tool install lane",
-        maxsplit=1,
-    )[0]
+        end_marker="For the source checkout with global tool install lane",
+    )
     cases = (
         (
             "Quickstart Lane 1",
@@ -468,13 +485,11 @@ def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
     global_rollback_heading = "For the source checkout with global tool install lane"
     no_global_rollback_heading = "For the source checkout with no global install lane"
-    release_rollback_section = rollback_section.split(
+    release_rollback_section = _required_rollback_subsection(
+        rollback_section,
         "For release-installed lanes",
-        maxsplit=1,
-    )[1].split(
-        global_rollback_heading,
-        maxsplit=1,
-    )[0]
+        end_marker=global_rollback_heading,
+    )
     package_cases = (
         (
             "Quickstart Lane 1",
@@ -496,14 +511,18 @@ def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
         ),
         (
             "Global source-checkout rollback",
-            rollback_section.split(global_rollback_heading, maxsplit=1)[1].split(
-                no_global_rollback_heading,
-                maxsplit=1,
-            )[0],
+            _required_rollback_subsection(
+                rollback_section,
+                global_rollback_heading,
+                end_marker=no_global_rollback_heading,
+            ),
         ),
         (
             "No-global source-checkout rollback",
-            rollback_section.split(no_global_rollback_heading, maxsplit=1)[1],
+            _required_rollback_subsection(
+                rollback_section,
+                no_global_rollback_heading,
+            ),
         ),
     )
 
@@ -563,13 +582,11 @@ def test_upgrade_env_restore_strips_quoted_inline_dotenv_comments(
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
     global_rollback_heading = "For the source checkout with global tool install lane"
     no_global_rollback_heading = "For the source checkout with no global install lane"
-    release_rollback_section = rollback_section.split(
+    release_rollback_section = _required_rollback_subsection(
+        rollback_section,
         "For release-installed lanes",
-        maxsplit=1,
-    )[1].split(
-        global_rollback_heading,
-        maxsplit=1,
-    )[0]
+        end_marker=global_rollback_heading,
+    )
     package_cases = (
         ("Upgrade uv tool", _markdown_section(upgrade_text, "## uv tool")),
         ("Upgrade pipx", _markdown_section(upgrade_text, "## pipx")),
@@ -587,14 +604,18 @@ def test_upgrade_env_restore_strips_quoted_inline_dotenv_comments(
         ),
         (
             "Global source-checkout rollback",
-            rollback_section.split(global_rollback_heading, maxsplit=1)[1].split(
-                no_global_rollback_heading,
-                maxsplit=1,
-            )[0],
+            _required_rollback_subsection(
+                rollback_section,
+                global_rollback_heading,
+                end_marker=no_global_rollback_heading,
+            ),
         ),
         (
             "No-global source-checkout rollback",
-            rollback_section.split(no_global_rollback_heading, maxsplit=1)[1],
+            _required_rollback_subsection(
+                rollback_section,
+                no_global_rollback_heading,
+            ),
         ),
     )
 
@@ -1004,14 +1025,18 @@ def test_upgrade_source_checkout_restore_accepts_default_api_token(tmp_path: Pat
         ),
         (
             "Global source-checkout rollback",
-            rollback_section.split(global_rollback_heading, maxsplit=1)[1].split(
-                no_global_rollback_heading,
-                maxsplit=1,
-            )[0],
+            _required_rollback_subsection(
+                rollback_section,
+                global_rollback_heading,
+                end_marker=no_global_rollback_heading,
+            ),
         ),
         (
             "No-global source-checkout rollback",
-            rollback_section.split(no_global_rollback_heading, maxsplit=1)[1],
+            _required_rollback_subsection(
+                rollback_section,
+                no_global_rollback_heading,
+            ),
         ),
     )
 
@@ -1249,12 +1274,11 @@ def test_upgrade_release_installed_rollback_restores_service_env_before_start() 
     release_heading = "For release-installed lanes"
     source_heading = "For the source checkout with global tool install lane"
 
-    assert release_heading in rollback_section
-    assert source_heading in rollback_section
-    release_section = rollback_section.split(release_heading, maxsplit=1)[1].split(
-        source_heading,
-        maxsplit=1,
-    )[0]
+    release_section = _required_rollback_subsection(
+        rollback_section,
+        release_heading,
+        end_marker=source_heading,
+    )
     _assert_package_upgrade_restores_service_env(
         "release-installed rollback",
         release_section,
