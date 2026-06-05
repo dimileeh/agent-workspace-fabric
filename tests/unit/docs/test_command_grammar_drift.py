@@ -300,6 +300,26 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
     )
 
 
+def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
+    """Return why a smoke example violates R4, or ``None`` if it conforms.
+
+    R4 requires a project-targeting `awf smoke run` example to pair
+    `--project <path>` *with* `--mocked-local`. Enforcement is symmetric so a
+    regression in either direction is caught: a bare positional path, a
+    `--mocked-local` example that dropped `--project`, and a `--project` example
+    that dropped `--mocked-local` are each offenders. Without the last branch a
+    first-run doc could keep its project target but silently lose the no-token
+    `--mocked-local` grammar.
+    """
+    if invocation.positional_path:
+        return "bare positional path"
+    if invocation.has_mocked_local and not invocation.has_project:
+        return "mocked smoke missing --project"
+    if invocation.has_project and not invocation.has_mocked_local:
+        return "project smoke missing --mocked-local"
+    return None
+
+
 def _bootstrap_offenders(text: str) -> list[str]:
     return [
         pattern
@@ -382,6 +402,29 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     assert chained.positional_path is False
 
     assert _parse_smoke_invocation("awf service status --format pretty") is None
+
+
+def test_helper_flags_smoke_invocation_offenses() -> None:
+    def offense(line: str) -> str | None:
+        invocation = _parse_smoke_invocation(line)
+        assert invocation is not None
+        return _smoke_invocation_offense(invocation)
+
+    # The canonical project smoke example pairs `--project` with `--mocked-local`.
+    assert offense('awf smoke run --project "$HOME/p" --mocked-local --format pretty') is None
+    # A bare positional path is rejected regardless of the other flags.
+    assert offense('awf smoke run "$HOME/p" --mocked-local') == "bare positional path"
+    # A `--mocked-local` proof that dropped `--project` is rejected.
+    assert (
+        offense("awf smoke run --mocked-local --format pretty") == "mocked smoke missing --project"
+    )
+    # The reverse direction the reviewer flagged: a `--project` example that
+    # quietly drops `--mocked-local` must also be rejected so R4 enforces the
+    # `--project <path>` + `--mocked-local` grammar symmetrically.
+    assert (
+        offense('awf smoke run --project "$HOME/p" --format pretty')
+        == "project smoke missing --mocked-local"
+    )
 
 
 def test_helper_extracts_fenced_command_lines() -> None:
@@ -508,8 +551,11 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
 
     Covers both fenced examples and inline backticked mentions in prose/list
     steps (e.g. the `awf smoke run --project ... --mocked-local` rerun step in
-    docs/UPGRADE.md) so a bare-positional-path or missing-`--project` regression
-    is flagged in either shape, mirroring R2's fenced+inline scan.
+    docs/UPGRADE.md) so a bare-positional-path, missing-`--project`, or
+    missing-`--mocked-local` regression is flagged in either shape, mirroring
+    R2's fenced+inline scan. The `--project`/`--mocked-local` pairing is enforced
+    symmetrically (see `_smoke_invocation_offense`) so a doc cannot keep a project
+    target while quietly dropping the no-token `--mocked-local` grammar.
     """
     offenders: list[str] = []
     mocked_examples_seen = 0
@@ -519,14 +565,11 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
             invocation = _parse_smoke_invocation(line)
             if invocation is None:
                 continue
-            if invocation.positional_path:
-                offenders.append(f"{rel_path}: bare positional path in `{invocation.raw}`")
             if invocation.has_mocked_local:
                 mocked_examples_seen += 1
-                if not invocation.has_project:
-                    offenders.append(
-                        f"{rel_path}: mocked smoke missing --project in `{invocation.raw}`"
-                    )
+            offense = _smoke_invocation_offense(invocation)
+            if offense is not None:
+                offenders.append(f"{rel_path}: {offense} in `{invocation.raw}`")
 
     assert not offenders, offenders
     assert mocked_examples_seen, "Expected at least one mocked `awf smoke run --project` example."
