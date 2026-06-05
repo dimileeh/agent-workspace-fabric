@@ -1068,6 +1068,48 @@ def test_reconcile_deletion_not_whiteouted_without_cap_mknod(
 
 
 @pytest.mark.unit
+def test_reconcile_logs_when_whiteout_fails_despite_cap_mknod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A confident agent deletion (host == base) with CAP_MKNOD probed available, but
+    # the actual ``mknod`` is refused at the filesystem level (e.g. an ``upper`` tmpfs
+    # without char-device support). The credential stays visible (fail safe), but
+    # unlike the missing-capability path this would otherwise be completely silent:
+    # assert the failure is surfaced once so an operator can diagnose why a confident
+    # deletion was not forwarded even though the capability probe passed.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (base / "secret.json").write_text("token\n")
+    base_stat = (base / "secret.json").stat()
+    (host / "secret.json").write_text("token\n")
+    os.utime(host / "secret.json", ns=(base_stat.st_atime_ns, base_stat.st_mtime_ns))
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+
+    def _mknod_enodev(*args: object, **kwargs: object) -> None:
+        raise OSError("operation not supported")
+
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _mknod_enodev)
+
+    with capture_logs() as logs:
+        _reconcile_fallback_edits_into_upper(
+            legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        )
+
+    # No whiteout landed; the credential stays visible through the lower.
+    assert not (upper / "secret.json").exists()
+    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED" for entry in logs)
+    # The capability-missing signal is distinct and must NOT fire here (cap was present).
+    assert not any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE" for entry in logs
+    )
+
+
+@pytest.mark.unit
 def test_reconcile_deletion_skipped_when_upper_already_has_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

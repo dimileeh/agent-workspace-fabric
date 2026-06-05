@@ -16,6 +16,9 @@ from awf.node.auth_mounts_claude import (
     _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE as _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
 )
 from awf.node.auth_mounts_claude import (
+    _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED as _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
+)
+from awf.node.auth_mounts_claude import (
     _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE as _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE,
 )
 from awf.node.auth_mounts_claude import _CLAUDE_BASE_BUILD_LOCK_NAME as _CLAUDE_BASE_BUILD_LOCK_NAME

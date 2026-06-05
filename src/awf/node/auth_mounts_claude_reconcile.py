@@ -42,6 +42,13 @@ _CLAUDE_USAGE_HISTORY_DIRS = ("projects", "todos", "shell-snapshots", "statsig")
 # visible (fail-safe) — but the gap is surfaced so a capability misconfiguration on a
 # host that should hold ``CAP_MKNOD`` is diagnosable rather than silent.
 _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE = "CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE"
+# Logged once per reconcile when a fallback-era deletion *could* be forwarded and
+# ``CAP_MKNOD`` is present, yet the ``mknod`` is still refused at the filesystem level
+# (e.g. an ``upper`` tmpfs/filesystem without char-device support). Distinct from the
+# capability-missing case above: here the probe passed, so the failure would otherwise
+# be silent. The deletion is not forwarded — the credential stays visible (fail-safe) —
+# but the gap is surfaced so the un-forwarded deletion is diagnosable.
+_CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED = "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED"
 
 
 def _legacy_is_unedited_host_copy(legacy_stat: os.stat_result, host_file: Path) -> bool:
@@ -109,12 +116,28 @@ def _forward_fallback_deletions_as_whiteouts(
     link is ever traversed; the whiteout itself is created with a symlink-safe,
     ``CAP_MKNOD``-guarded descent in :func:`_safe_overlay_whiteout`. Best-effort: a
     capability-less worker that *would* have whiteouted at least one confident
-    deletion logs once so the gap is diagnosable, but never blocks provisioning.
+    deletion logs once (``CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE``), and a worker that
+    *has* ``CAP_MKNOD`` yet still has ``mknod`` refused by the filesystem logs once too
+    (``CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED``) so neither gap is silent, but neither ever
+    blocks provisioning.
+
+    Scope — *whole-directory* deletions are not fully hidden. This walks ``base`` for
+    *files* only (``for name in files``) and writes a per-file char-device whiteout for
+    each. When the agent deleted an entire directory during the fallback session (so the
+    directory is absent from ``legacy`` altogether), each contained file is whiteouted
+    individually, which first ``mkdir``s the directory in ``upper``; after the remount
+    overlayfs shows ``merged/dir`` as an *empty* directory rather than hiding it (fully
+    hiding a lower directory needs a char-device ``0,0`` placed *at* ``upper/dir`` itself,
+    replacing the entry). This is fail-safe (it never exposes a credential the agent
+    deleted — at most an empty husk remains) and, for Claude's auth layout — individual
+    credential files, not whole directories, are the deletion target — does not matter in
+    practice. Partial-directory deletions are handled correctly.
     """
 
     excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
     has_cap_mknod = _has_cap_mknod()
     skipped_for_capability = False
+    whiteout_failed_despite_cap = False
     for root, dirs, files in os.walk(base):
         root_path = Path(root)
         # Mirror the base copy's usage-history exclusion (kept for symmetry: those
@@ -149,11 +172,24 @@ def _forward_fallback_deletions_as_whiteouts(
                 # Leave the credential visible and surface the capability gap once.
                 skipped_for_capability = True
                 continue
-            _safe_overlay_whiteout(upper, rel)
+            if not _safe_overlay_whiteout(upper, rel):
+                # ``CAP_MKNOD`` is present but the ``mknod`` was still refused by the
+                # filesystem (e.g. an ``upper`` tmpfs without char-device support). The
+                # deletion is not forwarded — the credential stays visible (fail-safe) —
+                # but, unlike the missing-capability path, this would otherwise be
+                # entirely silent. Flag it for one diagnostic log below so an operator
+                # investigating an un-forwarded deletion has a signal beyond the probe.
+                whiteout_failed_despite_cap = True
     if skipped_for_capability:
         _log.info(
             "claude_auth_overlay_whiteout_incapable",
             reason_code=_CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE,
+            workspace_auth_root=str(upper.parent),
+        )
+    if whiteout_failed_despite_cap:
+        _log.warning(
+            "claude_auth_overlay_whiteout_failed",
+            reason_code=_CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
             workspace_auth_root=str(upper.parent),
         )
 

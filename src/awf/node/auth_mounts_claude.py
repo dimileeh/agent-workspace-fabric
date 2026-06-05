@@ -28,6 +28,9 @@ from awf.common.logging import get_logger
 from awf.node.auth_mounts_caps import _has_cap_mknod as _has_cap_mknod
 from awf.node.auth_mounts_caps import _has_cap_sys_admin as _has_cap_sys_admin
 from awf.node.auth_mounts_claude_reconcile import (
+    _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED as _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
+)
+from awf.node.auth_mounts_claude_reconcile import (
     _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE as _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE,
 )
 from awf.node.auth_mounts_claude_reconcile import (
