@@ -1258,7 +1258,12 @@ def test_reconcile_forwards_agent_deletion_as_whiteout(
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     assert len(recorded) == 1

@@ -344,7 +344,7 @@ def _reconcile_fallback_edits_into_upper(
     upper: Path,
     base: Path,
     host_claude: Path,
-    forward_deletions: bool = True,
+    forward_deletions: bool = False,
 ) -> None:
     """Forward fallback-era legacy edits into the overlay before reaping it.
 
@@ -428,9 +428,14 @@ def _reconcile_fallback_edits_into_upper(
     still-needed credential.
 
     ``forward_deletions`` is the caller's proof that ``legacy`` is a *complete* copy.
-    A base-present / legacy-absent file is read as a confident agent deletion, which is
-    sound only when every host file was copied into ``legacy`` to begin with. The caller
-    passes ``False`` for a reused legacy copy whose completeness it cannot prove (a
+    It **defaults to ``False``** so the destructive whiteout pass is strictly opt-in:
+    a caller (or future test/utility) that omits the flag gets only the always-safe
+    edit/addition forwarding and never hides a lower credential — the dangerous path
+    must be requested explicitly, matching the fail-safe defaults pervasive elsewhere
+    in this module. A base-present / legacy-absent file is read as a confident agent
+    deletion, which is sound only when every host file was copied into ``legacy`` to
+    begin with. The caller passes ``False`` for a reused legacy copy whose completeness
+    it cannot prove (a
     partial tree left by a pre-atomic-staging provision and adopted by the ``exists()``
     reuse guard): the deletion pass is then skipped — its never-copied files would
     otherwise read as deletions and whiteout still-valid credentials — and only the

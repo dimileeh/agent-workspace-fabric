@@ -181,7 +181,12 @@ def test_reconcile_deletion_not_whiteouted_without_cap_mknod(
 
     with capture_logs() as logs:
         _reconcile_fallback_edits_into_upper(
-            legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+            legacy=legacy,
+            merged=merged,
+            upper=upper,
+            base=base,
+            host_claude=host,
+            forward_deletions=True,
         )
 
     # No whiteout was created; the credential stays visible through the lower.
@@ -221,7 +226,12 @@ def test_reconcile_logs_when_whiteout_fails_despite_cap_mknod(
 
     with capture_logs() as logs:
         _reconcile_fallback_edits_into_upper(
-            legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+            legacy=legacy,
+            merged=merged,
+            upper=upper,
+            base=base,
+            host_claude=host,
+            forward_deletions=True,
         )
 
     # No whiteout landed; the credential stays visible through the lower.
@@ -292,7 +302,12 @@ def test_reconcile_skips_deletion_for_usage_history_dirs(
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     assert [entry["name"] for entry in recorded] == ["secret.json"]
@@ -437,7 +452,12 @@ def test_reconcile_intermediate_legacy_dir_symlink_does_not_whiteout(
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     # Only the unambiguous root-level deletion is forwarded; the symlink-occluded path is
@@ -495,7 +515,12 @@ def test_reconcile_intermediate_upper_dir_symlink_defers_without_whiteout_failed
 
     with capture_logs() as logs:
         _reconcile_fallback_edits_into_upper(
-            legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+            legacy=legacy,
+            merged=merged,
+            upper=upper,
+            base=base,
+            host_claude=host,
+            forward_deletions=True,
         )
 
     # Only the unambiguous root-level deletion is forwarded; the symlink-occluded path is
@@ -655,7 +680,7 @@ def test_reconcile_forward_deletions_true_still_whiteouts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The complementary case: an identical confident deletion with the caller proving
-    # the copy complete (``forward_deletions=True``, the default) still whiteouts the
+    # the copy complete (explicit ``forward_deletions=True``) still whiteouts the
     # removal — the gate suppresses the pass only for unproven copies, never for a
     # proven one (no regression to the #402 deletion-forwarding behaviour).
     legacy = tmp_path / "legacy"
@@ -688,3 +713,40 @@ def test_reconcile_forward_deletions_true_still_whiteouts(
         entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
         for entry in logs
     )
+
+
+@pytest.mark.unit
+def test_reconcile_forward_deletions_defaults_to_safe_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The destructive whiteout pass is opt-in: a caller that omits ``forward_deletions``
+    # must NOT attempt to hide a confident deletion (the dangerous direction defaults to
+    # off, matching the module's fail-safe defaults). Same confident-deletion shape as
+    # the explicit cases above, but the flag is left unset.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (base / "secret.json").write_text("token\n")
+    secret_stat = (base / "secret.json").stat()
+    (host / "secret.json").write_text("token\n")
+    os.utime(host / "secret.json", ns=(secret_stat.st_atime_ns, secret_stat.st_mtime_ns))
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    # Note: ``forward_deletions`` intentionally omitted — exercising the default.
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+    )
+
+    # No whiteout attempted — the default never runs the destructive pass.
+    assert recorded == []
+    assert not (upper / "secret.json").exists()
