@@ -89,5 +89,6 @@ query.json
 .claude/.session*
 .claude/projects/
 .claude/todos/
+.claude/worktrees/
 .claude/hooks/*.local.*
 .gstack/
