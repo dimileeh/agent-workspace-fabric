@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 
 # Patch the module that defines the overlay/Claude helpers (see part_001 header).
 from awf.node import auth_mounts_claude as auth_mounts_mod
+from awf.node import auth_mounts_claude_reconcile as reconcile_mod
 from awf.node import auth_mounts_overlay_copy as overlay_copy_mod
 from awf.node.auth_mounts import (
     _reconcile_fallback_edits_into_upper,
@@ -959,7 +960,7 @@ def test_reconcile_forwards_agent_deletion_as_whiteout(
     os.utime(host / "secret.json", ns=(base_stat.st_atime_ns, base_stat.st_mtime_ns))
     # ``legacy`` LACKS ``secret.json`` -> the agent removed it. ``upper`` is empty.
 
-    monkeypatch.setattr(auth_mounts_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
@@ -991,7 +992,7 @@ def test_reconcile_ambiguous_host_removed_file_is_not_whiteouted(
     _mkdirs(legacy, merged, upper, base, host)
     (base / "secret.json").write_text("token\n")  # host lacks it entirely
 
-    monkeypatch.setattr(auth_mounts_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
@@ -1021,7 +1022,7 @@ def test_reconcile_ambiguous_host_changed_file_is_not_whiteouted(
     # Host holds a *changed* version (different size), so it diverges from base.
     (host / "secret.json").write_text("token-rotated-and-longer\n")
 
-    monkeypatch.setattr(auth_mounts_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
@@ -1052,7 +1053,7 @@ def test_reconcile_deletion_not_whiteouted_without_cap_mknod(
     (host / "secret.json").write_text("token\n")
     os.utime(host / "secret.json", ns=(base_stat.st_atime_ns, base_stat.st_mtime_ns))
 
-    monkeypatch.setattr(auth_mounts_mod, "_has_cap_mknod", lambda: False)
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: False)
 
     with capture_logs() as logs:
         _reconcile_fallback_edits_into_upper(
@@ -1085,7 +1086,7 @@ def test_reconcile_deletion_skipped_when_upper_already_has_entry(
     os.utime(host / "secret.json", ns=(base_stat.st_atime_ns, base_stat.st_mtime_ns))
     (upper / "secret.json").write_text('{"agent": "overlay-rewrote-it"}\n')
 
-    monkeypatch.setattr(auth_mounts_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
@@ -1120,7 +1121,7 @@ def test_reconcile_skips_deletion_for_usage_history_dirs(
     (host / "projects").mkdir()
     (host / "projects" / "old.jsonl").write_text("history\n")
 
-    monkeypatch.setattr(auth_mounts_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
@@ -1217,7 +1218,7 @@ def test_reconcile_skips_legacy_file_that_becomes_unstattable(
             return None
         return real_safe_stat(Path(os.fspath(path)), follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(auth_mounts_mod, "_safe_stat", _stat_none_for_legacy)
+    monkeypatch.setattr(reconcile_mod, "_safe_stat", _stat_none_for_legacy)
 
     _reconcile_fallback_edits_into_upper(
         legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
