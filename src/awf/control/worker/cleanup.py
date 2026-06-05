@@ -282,19 +282,25 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
                     error=str(exc)[:240],
                 )
             release_errors.append(exc)
+    resume_failure: Exception | None = None
     try:
         await self._resume_pending_planning_scope_auto_retries_after_terminal_release(limit=limit)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        if not release_errors:
-            raise
-        _log.warning(
-            "worker.terminal_runtime_release_resume_scan_failed_after_release_error",
-            reason_code=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
-            error_type=type(exc).__name__,
-            error=str(exc)[:240],
-        )
+        if release_errors:
+            _log.warning(
+                "worker.terminal_runtime_release_resume_scan_failed_after_release_error",
+                reason_code=_PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+        else:
+            # Defer the re-raise until the independent best-effort overlay sweep below
+            # has run. The sweep mirrors the resume scan but is decoupled from it, so a
+            # resume-scan failure must not skip the deferred overlay umount retries owed
+            # for this interval (they would otherwise be silently dropped until the next).
+            resume_failure = exc
     # Piggyback the deferred Claude auth-overlay umount re-sweep on the same scan
     # (mirrors the resume-pending scan above). It is fully guarded: a failure here
     # is swallowed-and-logged so it never perturbs the release-error aggregation or
@@ -316,6 +322,9 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
             error=str(exc)[:240],
             exc_info=True,
         )
+    if resume_failure is not None:
+        # Only set when there were no release errors, so it is the sole pending failure.
+        raise resume_failure
     if len(release_errors) == 1:
         raise release_errors[0]
     if release_errors:

@@ -174,6 +174,50 @@ async def test_release_resources_reraises_resume_failure_when_no_release_errors(
 
 
 @pytest.mark.unit
+async def test_release_resources_runs_overlay_sweep_before_reraising_resume_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resume-scan failure with no release errors must not skip the independent
+    best-effort overlay sweep: the sweep still runs, then the resume failure
+    propagates."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+
+    async def _list_candidates(*, limit: int | None) -> list[_TerminalRuntimeCandidate]:
+        del limit
+        return []
+
+    resume_error = RuntimeError("resume scan failed")
+
+    async def _resume(*, limit: int | None) -> None:
+        del limit
+        raise resume_error
+
+    sweep_calls: list[int | None] = []
+
+    async def _retry_overlay(*, limit: int | None) -> None:
+        sweep_calls.append(limit)
+
+    worker = SimpleNamespace(
+        _config=SimpleNamespace(terminal_runtime_release_max_per_scan=7),
+        _runtime_cleaner=object(),
+        _list_terminal_runtime_candidates=_list_candidates,
+        _release_terminal_runtime_for_candidate=None,
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_retry_overlay,
+    )
+
+    with pytest.raises(RuntimeError, match="resume scan failed"):
+        await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+
+    # The deferred overlay sweep ran despite the resume-scan failure (independent
+    # best-effort work is not gated behind the resume scan succeeding).
+    assert sweep_calls == [7]
+    # No "resume scan failed after release error" warning when no release errors.
+    assert log.warnings == []
+
+
+@pytest.mark.unit
 async def test_release_resources_propagates_cancelled_from_resume_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
