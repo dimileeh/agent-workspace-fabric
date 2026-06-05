@@ -52,33 +52,48 @@ _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE = "CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABL
 _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED = "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED"
 
 
-def _legacy_is_unedited_host_copy(legacy_stat: os.stat_result, host_file: Path) -> bool:
-    """True when ``legacy_stat`` is byte/mtime-identical to the live host ``host_file``.
+def _legacy_is_unedited_host_copy(
+    legacy_file: Path, legacy_stat: os.stat_result, host_file: Path
+) -> bool:
+    """True when ``legacy_file`` is byte/mtime-identical to the live host ``host_file``.
 
     The legacy ``~/.claude`` copy is materialized via ``copytree(symlinks=False)``
     using ``copy2``, which preserves the host's ``st_mtime_ns`` and ``st_size``. So a
-    legacy file whose mtime *and* size still match the live host is an **unedited**
-    host-origin copy the agent never touched; one that diverges (different mtime or
-    size) is an agent fallback-era edit. #404 uses this to refuse overwriting an
-    agent's overlay-era ``upper`` edit with an unedited copy of a host that merely
-    changed *after* the edit — the reviewer's case, where the fallback copy carries a
-    newer host mtime yet the agent never edited it.
+    legacy file whose mtime *and* size still match the live host **and** whose bytes are
+    identical to it is an **unedited** host-origin copy the agent never touched; one that
+    diverges (different mtime, size, *or* content) is an agent fallback-era edit. #404
+    uses this to refuse overwriting an agent's overlay-era ``upper`` edit with an unedited
+    copy of a host that merely changed *after* the edit — the reviewer's case, where the
+    fallback copy carries a newer host mtime yet the agent never edited it.
 
-    Returns ``False`` when the host file is absent or unstattable: divergence then
-    cannot be *disproven*, so the caller treats the legacy file as an agent edit
-    (eligible to forward, preserving the tested fallback re-edit forwarding). The
-    fail-safe that protects the agent's ``upper`` edit fires only on a *positive*
-    host match — it never hides or drops a credential, it only declines to clobber a
-    provably-unedited file over an existing overlay-era edit.
+    The byte compare is not redundant with mtime + size: a same-length agent fallback
+    edit whose timestamp aligns with the live host (a ``touch -r`` or a coincidental ns
+    match on a fixed-width token rewrite) would otherwise read as "unedited" and be
+    *skipped* for forwarding — the legacy copy is then reaped and the agent's newer
+    credential never reaches ``upper``. Comparing content against the live host closes
+    that window, symmetric with the #402 deletion pass's
+    :func:`_safe_files_equal_content` guard.
+
+    Returns ``False`` when the host file is absent, unstattable, or unreadable, or when
+    either side cannot be read byte-for-byte: divergence then cannot be *disproven*, so
+    the caller treats the legacy file as an agent edit (eligible to forward, preserving
+    the tested fallback re-edit forwarding). The fail-safe that protects the agent's
+    ``upper`` edit fires only on a *positive* host match — it never hides or drops a
+    credential, it only declines to clobber a provably-unedited file over an existing
+    overlay-era edit.
     """
 
     host_stat = _safe_stat(host_file)
     if host_stat is None:
         return False
-    return (
-        host_stat.st_mtime_ns == legacy_stat.st_mtime_ns
-        and host_stat.st_size == legacy_stat.st_size
-    )
+    if host_stat.st_mtime_ns != legacy_stat.st_mtime_ns or host_stat.st_size != legacy_stat.st_size:
+        return False
+    # mtime + size match, but that is not proof of byte-identity (see docstring): a
+    # same-length agent edit with an aligned timestamp would slip through. Only a
+    # byte-for-byte match with the live host proves the legacy file is unedited and may
+    # protect the existing ``upper`` edit; any divergence (or an unreadable side, which
+    # fails safe to ``False``) leaves it eligible to forward.
+    return _safe_files_equal_content(legacy_file, host_file)
 
 
 def _forward_fallback_deletions_as_whiteouts(
@@ -244,11 +259,13 @@ def _reconcile_fallback_edits_into_upper(
       and only a *strictly newer* legacy edit overwrites it.
     - **#404 host-divergence guard:** even a strictly-newer legacy file does not
       overwrite an existing ``upper`` *regular file* unless it provably diverges from
-      the live host ``~/.claude`` (different mtime or size — see
+      the live host ``~/.claude`` (different mtime, size, *or* byte content — see
       :func:`_legacy_is_unedited_host_copy`). The legacy copy preserves host mtimes via
       ``copy2``, so a fallback copy that is byte/mtime-identical to a host that merely
       changed *after* the agent's overlay edit is an *unedited* host copy, not an agent
-      edit; forwarding it would silently drop the agent's overlay-era change. When
+      edit; forwarding it would silently drop the agent's overlay-era change. The content
+      compare is not redundant with mtime + size — a same-length agent edit with an
+      aligned timestamp would otherwise read as unedited and be wrongly skipped. When
       ``upper[rel]`` is absent, a whiteout, or any non-regular entry there is nothing to
       protect, so the existing fallback-edit behaviour stands (this preserves the tested
       fallback-session re-edit forwarding, where the agent-edited legacy diverges).
@@ -365,7 +382,7 @@ def _reconcile_fallback_edits_into_upper(
                     # ``upper`` wins ties: an equal-or-newer overlay-era edit stands.
                     continue
                 if stat.S_ISREG(upper_stat.st_mode) and _legacy_is_unedited_host_copy(
-                    legacy_stat, host_claude / rel
+                    legacy_file, legacy_stat, host_claude / rel
                 ):
                     # #404: the strictly-newer legacy file is byte/mtime-identical to
                     # the live host, so it is an *unedited* copy of a host that changed

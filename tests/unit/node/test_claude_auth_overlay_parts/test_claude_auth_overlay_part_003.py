@@ -936,6 +936,48 @@ def test_reconcile_forwards_agent_edit_when_host_lacks_file(tmp_path: Path) -> N
     assert (merged / "settings.json").read_text() == '{"theme": "agent-edit"}\n'
 
 
+@pytest.mark.unit
+def test_reconcile_forwards_agent_edit_matching_host_mtime_size_but_not_bytes(
+    tmp_path: Path,
+) -> None:
+    # #404 host-divergence guard must compare *content*, not just mtime + size. The agent
+    # edited the legacy copy during the fallback session to a *same-length* credential and
+    # the edit's timestamp happens to align with the live host's mtime (e.g. ``touch -r``
+    # or a coincidental ns match on a fixed-width token rewrite). mtime + size alone read
+    # the legacy file as an "unedited host copy" and skip forwarding, reaping the agent's
+    # newer credential so it never reaches ``upper``. Byte-for-byte comparison against the
+    # live host proves the legacy file diverges, so it is correctly forwarded — symmetric
+    # with the #402 deletion pass's content check.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (upper / "settings.json").write_text('{"theme": "old-overlay-edit-X"}\n')
+    upper_mtime_ns = (upper / "settings.json").stat().st_mtime_ns
+    # The live host holds one same-length version ...
+    (host / "settings.json").write_text('{"theme": "host-credential-A"}\n')
+    os.utime(
+        host / "settings.json",
+        ns=(upper_mtime_ns + 5_000_000, upper_mtime_ns + 5_000_000),
+    )
+    host_stat = (host / "settings.json").stat()
+    # ... but the agent edited the legacy copy to a *different, same-length* credential,
+    # strictly newer than ``upper`` yet with an mtime + size identical to the live host.
+    (legacy / "settings.json").write_text('{"theme": "host-credential-B"}\n')
+    assert (legacy / "settings.json").stat().st_size == host_stat.st_size
+    os.utime(legacy / "settings.json", ns=(host_stat.st_mtime_ns, host_stat.st_mtime_ns))
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The legacy bytes diverge from the host, so the agent's newer credential is forwarded
+    # rather than discarded as a phantom "unedited host copy".
+    assert (merged / "settings.json").read_text() == '{"theme": "host-credential-B"}\n'
+
+
 # --- #402: forward fallback-era deletions as overlayfs whiteouts ----------------------
 
 
