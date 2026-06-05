@@ -45,16 +45,69 @@ class InstallerHarness:
 
     # -- stub builders -------------------------------------------------
 
+    def _stub_contents(self, name: str, behavior: str) -> str:
+        """Return the full text of a logging stub for ``name`` running ``behavior``.
+
+        Factored out so the same stub body can be written directly to ``PATH``
+        (``_write_stub``) or embedded inside a fake uv-installer script
+        (``write_uv_installer``) that drops it into ``$UV_INSTALL_DIR`` at run
+        time. The argv log line targets the absolute ``log_file`` path so a stub
+        created mid-run by the installer still records into ``calls()``.
+        """
+        return (
+            f'#!/usr/bin/env bash\nprintf \'%s\\n\' "{name} $*" >> "{self.log_file}"\n{behavior}\n'
+        )
+
     def _write_stub(self, name: str, behavior: str, *, directory: Path | None = None) -> Path:
         """Write an executable stub that logs its argv then runs ``behavior``."""
         target_dir = directory if directory is not None else self.bin_dir
         path = target_dir / name
-        body = (
-            f'#!/usr/bin/env bash\nprintf \'%s\\n\' "{name} $*" >> "{self.log_file}"\n{behavior}\n'
-        )
-        path.write_text(body, encoding="utf-8")
+        path.write_text(self._stub_contents(name, behavior), encoding="utf-8")
         path.chmod(0o755)
         return path
+
+    def _uv_behavior(
+        self,
+        *,
+        install_rc: int = 0,
+        uninstall_rc: int = 0,
+        list_output: str = "",
+        tool_bin_dir: str | None = None,
+    ) -> str:
+        """Return the ``case``-based body of the ``uv`` CLI stub.
+
+        Shared by ``add_uv`` (writes the stub onto ``PATH``) and
+        ``write_uv_installer`` (embeds the stub so a bootstrap drops a runnable
+        ``uv`` into ``$UV_INSTALL_DIR``), so a bootstrapped uv behaves exactly
+        like one the harness placed directly.
+        """
+        bin_dir_expr = (
+            json.dumps(tool_bin_dir) if tool_bin_dir is not None else '"$HOME/.local/bin"'
+        )
+        return (
+            'case "$1 $2" in\n'
+            '  "tool install")\n'
+            f"    if [ {install_rc} -ne 0 ]; then\n"
+            "      printf '%s\\n' 'uv: simulated install failure' >&2\n"
+            f"      exit {install_rc}\n"
+            "    fi\n"
+            "    exit 0 ;;\n"
+            '  "tool uninstall")\n'
+            "    printf '%s\\n' \"uv-tool-uninstall-env UV_TOOL_BIN_DIR=${UV_TOOL_BIN_DIR:-<unset>}\""
+            ' >> "$AWF_STUB_LOG"\n'
+            f"    exit {uninstall_rc} ;;\n"
+            '  "tool list")\n'
+            f"    printf '%b' {json.dumps(list_output)}\n"
+            "    exit 0 ;;\n"
+            '  "tool dir")\n'
+            '    case "$*" in\n'
+            f"      *--bin*) printf '%s\\n' {bin_dir_expr} ;;\n"
+            "      *) printf '%s\\n' \"$HOME/.local/share/uv/tools\" ;;\n"
+            "    esac\n"
+            "    exit 0 ;;\n"
+            "  *) exit 0 ;;\n"
+            "esac"
+        )
 
     def add_uname(self, system: str, machine: str) -> None:
         """Stub ``uname -s``/``uname -m`` with fixed platform values."""
@@ -84,34 +137,55 @@ class InstallerHarness:
         a ``uv-tool-uninstall-env UV_TOOL_BIN_DIR=<value|<unset>>`` line so tests
         can assert the installer re-exports the install-time bin dir on uninstall.
         """
-        bin_dir_expr = (
-            json.dumps(tool_bin_dir) if tool_bin_dir is not None else '"$HOME/.local/bin"'
+        self._write_stub(
+            "uv",
+            self._uv_behavior(
+                install_rc=install_rc,
+                uninstall_rc=uninstall_rc,
+                list_output=list_output,
+                tool_bin_dir=tool_bin_dir,
+            ),
         )
-        behavior = (
-            'case "$1 $2" in\n'
-            '  "tool install")\n'
-            f"    if [ {install_rc} -ne 0 ]; then\n"
-            "      printf '%s\\n' 'uv: simulated install failure' >&2\n"
-            f"      exit {install_rc}\n"
-            "    fi\n"
-            "    exit 0 ;;\n"
-            '  "tool uninstall")\n'
-            "    printf '%s\\n' \"uv-tool-uninstall-env UV_TOOL_BIN_DIR=${UV_TOOL_BIN_DIR:-<unset>}\""
-            ' >> "$AWF_STUB_LOG"\n'
-            f"    exit {uninstall_rc} ;;\n"
-            '  "tool list")\n'
-            f"    printf '%b' {json.dumps(list_output)}\n"
-            "    exit 0 ;;\n"
-            '  "tool dir")\n'
-            '    case "$*" in\n'
-            f"      *--bin*) printf '%s\\n' {bin_dir_expr} ;;\n"
-            "      *) printf '%s\\n' \"$HOME/.local/share/uv/tools\" ;;\n"
-            "    esac\n"
-            "    exit 0 ;;\n"
-            "  *) exit 0 ;;\n"
-            "esac"
-        )
-        self._write_stub("uv", behavior)
+
+    def write_uv_installer(self, *, succeeds: bool = True, path: Path | None = None) -> Path:
+        """Write a fake uv-installer script — the ``AWF_UV_INSTALLER`` seam target.
+
+        The official uv installer honors ``UV_INSTALL_DIR``; the bootstrap step
+        sets it and prepends it to ``PATH``. This fake mirrors that contract
+        hermetically (no network, no real release):
+
+        * ``succeeds=True`` drops a working ``uv`` stub (the same body
+          ``add_uv`` uses) into ``$UV_INSTALL_DIR`` so the bootstrap's
+          post-install ``command -v uv`` / ``uv tool install`` resolve it.
+        * ``succeeds=False`` runs to a clean exit but installs nothing, modeling
+          a bootstrap that ran yet yielded no runnable ``uv`` (the
+          ``UV_BOOTSTRAP_FAILED`` "still not on PATH" guard).
+
+        A *missing* installer (download failure) is modeled by pointing
+        ``AWF_UV_INSTALLER`` at a non-existent file, without this helper.
+        """
+        installer = path if path is not None else (self.root / "uv-installer.sh")
+        if succeeds:
+            uv_stub = self._stub_contents("uv", self._uv_behavior())
+            body = (
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                'target="${UV_INSTALL_DIR:?UV_INSTALL_DIR must be set by the bootstrap}"\n'
+                'mkdir -p "$target"\n'
+                "cat > \"$target/uv\" <<'AWF_UV_STUB_EOF'\n"
+                f"{uv_stub}"
+                "AWF_UV_STUB_EOF\n"
+                'chmod 755 "$target/uv"\n'
+            )
+        else:
+            body = (
+                "#!/usr/bin/env bash\n"
+                "# Fake uv installer that runs cleanly but installs no uv binary.\n"
+                "exit 0\n"
+            )
+        installer.write_text(body, encoding="utf-8")
+        installer.chmod(0o755)
+        return installer
 
     def add_pipx(
         self,
@@ -307,15 +381,28 @@ class InstallerHarness:
         *,
         manifest: Path | None = None,
         extra_env: dict[str, str] | None = None,
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run the installer with a hermetic env and captured output."""
+        """Run the installer with a hermetic env and captured output.
+
+        ``stdin`` feeds the process standard input (used to confirm/decline the
+        interactive uv-bootstrap prompt under the
+        ``AWF_INSTALL_FORCE_INTERACTIVE`` seam). When it is ``None`` the child's
+        stdin is ``/dev/null`` so ``[ -t 0 ]`` is deterministically non-TTY and
+        the non-interactive decision path is exercised regardless of how pytest
+        was launched.
+        """
         # Keep system coreutils on PATH but drop any directory that already ships
-        # a real ``awf`` (e.g. the dev virtualenv bin) so reachability/uninstall
-        # tests see only the stub binaries this harness places.
+        # a real ``awf``/``uv``/``pipx`` (e.g. the dev virtualenv or /usr/local/bin)
+        # so a test that omits ``add_uv``/``add_pipx`` sees that tool as genuinely
+        # missing and reachability/uninstall tests see only the stub binaries this
+        # harness places. Tests that need the tool present add their own stub,
+        # which sits first on ``PATH`` and shadows the real one regardless.
+        managed_tools = ("awf", "uv", "pipx")
         system_path = os.pathsep.join(
             entry
             for entry in os.environ.get("PATH", "").split(os.pathsep)
-            if entry and not (Path(entry) / "awf").exists()
+            if entry and not any((Path(entry) / tool).exists() for tool in managed_tools)
         )
         env: dict[str, str] = {
             "PATH": f"{self.bin_dir}{os.pathsep}{system_path}",
@@ -326,14 +413,18 @@ class InstallerHarness:
             env["AWF_INSTALL_MANIFEST"] = str(manifest)
         if extra_env is not None:
             env.update(extra_env)
-        return subprocess.run(
-            ["bash", str(INSTALLER), *args],
-            env=env,
-            cwd=str(self.root),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        run_kwargs: dict[str, object] = {
+            "env": env,
+            "cwd": str(self.root),
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        }
+        if stdin is None:
+            run_kwargs["stdin"] = subprocess.DEVNULL
+        else:
+            run_kwargs["input"] = stdin
+        return subprocess.run(["bash", str(INSTALLER), *args], **run_kwargs)  # type: ignore[call-overload]
 
     def calls(self) -> list[str]:
         """Return the recorded stub invocations (one ``name args`` per line)."""

@@ -15,12 +15,17 @@
 #   UNSUPPORTED_PLATFORM MISSING_DEPENDENCY MANIFEST_UNAVAILABLE MANIFEST_INVALID
 #   CHANNEL_MISMATCH VERSION_MISMATCH PACKAGE_MISMATCH INSECURE_URL DOWNLOAD_FAILED
 #   CHECKSUM_MISMATCH INSTALL_METHOD_FAILED AWF_NOT_REACHABLE UNINSTALL_REFUSED_UNMANAGED
-#   BAD_USAGE
+#   UV_BOOTSTRAP_REQUIRED UV_BOOTSTRAP_FAILED BAD_USAGE
 #
 # Testability seams (keep fixture tests hermetic, no real release/network):
-#   AWF_INSTALL_MANIFEST   path or file:// URL to a local manifest JSON.
-#   AWF_INSTALL_BASE_URL   base URL used to resolve a manifest by version/channel.
-#   --shell <name>         override shell detection for PATH advice.
+#   AWF_INSTALL_MANIFEST          path or file:// URL to a local manifest JSON.
+#   AWF_INSTALL_BASE_URL          base URL used to resolve a manifest by version/channel.
+#   AWF_UV_INSTALLER              path/file:// URL of the uv-installer script the
+#                                 --bootstrap-uv path fetches (defaults to the
+#                                 official https://astral.sh/uv/install.sh).
+#   AWF_INSTALL_FORCE_INTERACTIVE treat stdin as a TTY so the bootstrap confirm
+#                                 prompt can be exercised under a piped stdin.
+#   --shell <name>                override shell detection for PATH advice.
 
 set -euo pipefail
 
@@ -35,6 +40,15 @@ INSTALL_DIR=""
 SHELL_OVERRIDE=""
 DRY_RUN=0
 DO_UNINSTALL=0
+# uv-bootstrap contract (see prepare_install_method): --bootstrap-uv opts in to
+# installing uv via the official uv installer when it is missing; --non-interactive
+# forces the non-interactive decision path even on a TTY. Both default off.
+BOOTSTRAP_UV=0
+NON_INTERACTIVE=0
+
+# Default source for the uv installer the --bootstrap-uv path fetches; overridable
+# via the AWF_UV_INSTALLER seam so fixture tests stay hermetic (no real network).
+UV_INSTALLER_DEFAULT_URL="https://astral.sh/uv/install.sh"
 
 WORK_DIR=""
 
@@ -102,13 +116,20 @@ Options:
                         actions without installing or writing shell rc files.
   --uninstall           Remove an AWF-managed install only; refuse unknown
                         executables.
+  --bootstrap-uv        When --method uv and uv is missing, install uv via the
+                        official uv installer instead of failing. Off by default;
+                        not valid with --method pipx or --uninstall.
+  --non-interactive     Never prompt; force the non-interactive decision path even
+                        on a TTY (a missing uv then requires --bootstrap-uv).
   --shell <name>        Override shell detection (zsh|bash|fish) for PATH advice.
   --help                Print this help and exit.
 
 Trust:
   The installer verifies a manifest-pinned sha256 of the downloaded wheel before
   installing. A checksum mismatch, unsupported platform, or unmanaged uninstall
-  target aborts before any mutation.
+  target aborts before any mutation. By default uv is never installed for you:
+  bootstrapping uv requires --bootstrap-uv or an interactive confirmation, and
+  --method pipx never bootstraps uv.
 EOF
 }
 
@@ -240,6 +261,14 @@ parse_args() {
                 DO_UNINSTALL=1
                 shift
                 ;;
+            --bootstrap-uv)
+                BOOTSTRAP_UV=1
+                shift
+                ;;
+            --non-interactive)
+                NON_INTERACTIVE=1
+                shift
+                ;;
             --help | -h)
                 usage
                 exit 0
@@ -259,6 +288,20 @@ parse_args() {
         uv | pipx) ;;
         *) bad_usage "unsupported method: $METHOD (expected uv|pipx)" ;;
     esac
+
+    # --bootstrap-uv is scoped to the uv install lane. Rejecting the meaningless
+    # combinations at the boundary makes two guarantees explicit rather than
+    # silently ignored: pipx never bootstraps uv, and bootstrap is install-only.
+    # --non-interactive needs no such guard — it is a harmless no-op for pipx and
+    # uninstall, so it is accepted broadly.
+    if [ "$BOOTSTRAP_UV" -eq 1 ]; then
+        if [ "$METHOD" = "pipx" ]; then
+            bad_usage "--bootstrap-uv only applies to --method uv; pipx never bootstraps uv"
+        fi
+        if [ "$DO_UNINSTALL" -eq 1 ]; then
+            bad_usage "--bootstrap-uv is an install-only flag and is not valid with --uninstall"
+        fi
+    fi
 
     # Install-only pins are meaningless during --uninstall: uninstall_awf removes
     # whatever uv/pipx currently manage regardless of version, and ignores the
@@ -738,6 +781,92 @@ verify_checksum() {
 }
 
 # --------------------------------------------------------------------------
+# uv bootstrap (explicit, opt-in)
+# --------------------------------------------------------------------------
+
+# Whether the bootstrap confirm prompt may be shown. --non-interactive is the
+# explicit override and wins over everything, so the "non-interactive overrides
+# the prompt" edge is testable even with the force seam set. The
+# AWF_INSTALL_FORCE_INTERACTIVE seam then stands in for a real TTY (the black-box
+# tests run the script under a piped, non-TTY stdin). Only if neither applies do
+# we consult the real terminal via `[ -t 0 ]`.
+stdin_is_interactive() {
+    [ "$NON_INTERACTIVE" -eq 1 ] && return 1
+    [ "${AWF_INSTALL_FORCE_INTERACTIVE:-0}" = "1" ] && return 0
+    [ -t 0 ]
+}
+
+# Prompt before bootstrapping uv on an interactive run. Returns 0 only on an
+# explicit affirmative answer; anything else (including EOF) declines, which
+# falls through to UV_BOOTSTRAP_REQUIRED. The `|| reply=""` keeps a closed stdin
+# from tripping `set -e` via read's non-zero status.
+confirm_bootstrap_uv() {
+    warn "uv is required for --method uv but is not installed."
+    printf '%s' "Install uv now via the official uv installer (https://astral.sh/uv)? [y/N] " >&2
+    local reply=""
+    IFS= read -r reply || reply=""
+    case "$reply" in
+        y | Y | yes | YES | Yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Install uv via the official uv installer (or the AWF_UV_INSTALLER seam). Under
+# --dry-run this only plans the action and mutates nothing. The installer honors
+# UV_INSTALL_DIR; we set it to a known dir and prepend that dir to PATH so the
+# subsequent `command -v uv` / `uv tool install` resolve the freshly installed uv
+# within this same process. Every failure fails closed with UV_BOOTSTRAP_FAILED
+# rather than proceeding toward an install with no usable uv.
+bootstrap_uv() {
+    local src="${AWF_UV_INSTALLER:-$UV_INSTALLER_DEFAULT_URL}"
+    plan "bootstrap uv via the official uv installer: ${src}"
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    local installer_file="${WORK_DIR}/uv-install.sh"
+    fetch "$src" "$installer_file" \
+        || fail UV_BOOTSTRAP_FAILED "could not download the uv installer from ${src}"
+    [ -s "$installer_file" ] \
+        || fail UV_BOOTSTRAP_FAILED "downloaded uv installer is empty: ${src}"
+    local uv_bin_dir="${HOME}/.local/bin"
+    UV_INSTALL_DIR="$uv_bin_dir" sh "$installer_file" \
+        || fail UV_BOOTSTRAP_FAILED "the uv installer exited non-zero"
+    case ":${PATH}:" in
+        *":${uv_bin_dir}:"*) ;;
+        *)
+            PATH="${uv_bin_dir}:${PATH}"
+            export PATH
+            ;;
+    esac
+    command -v uv >/dev/null 2>&1 \
+        || fail UV_BOOTSTRAP_FAILED "uv is still not on PATH after bootstrap (expected it in ${uv_bin_dir})"
+    say "Bootstrapped uv into ${uv_bin_dir}."
+}
+
+# Ensure the chosen install method's tool is available before installing. Only
+# the uv lane is affected; pipx is untouched (and never bootstraps uv). When uv
+# is already present this is a no-op, preserving today's behavior exactly. When
+# uv is missing it is installed only with explicit authorization: --bootstrap-uv,
+# or an affirmative answer to an interactive prompt (never under --dry-run, which
+# stays non-mutating). Otherwise it fails clearly with UV_BOOTSTRAP_REQUIRED,
+# naming all three recoveries.
+prepare_install_method() {
+    [ "$METHOD" = "uv" ] || return 0
+    command -v uv >/dev/null 2>&1 && return 0
+    if [ "$BOOTSTRAP_UV" -eq 1 ]; then
+        bootstrap_uv
+        return 0
+    fi
+    if [ "$DRY_RUN" -ne 1 ] && stdin_is_interactive; then
+        if confirm_bootstrap_uv; then
+            bootstrap_uv
+            return 0
+        fi
+    fi
+    fail UV_BOOTSTRAP_REQUIRED "uv is required for --method uv but is not installed; \
+re-run with --bootstrap-uv to install it via the official uv installer, install uv \
+manually (https://astral.sh/uv), or use --method pipx"
+}
+
+# --------------------------------------------------------------------------
 # Install
 # --------------------------------------------------------------------------
 
@@ -1161,6 +1290,12 @@ run_install() {
     plan "verify sha256: ${ARTIFACT_SHA256}"
     verify_checksum "$ARTIFACT_FILE" "$ARTIFACT_SHA256"
     say "Checksum verified for ${ARTIFACT_NAME}."
+
+    # Ensure uv is available (bootstrapping it only with explicit authorization)
+    # before the install step. Routed before the --dry-run branch so a dry run is
+    # gated by the same contract: it either plans the bootstrap or fails clearly,
+    # without mutating anything.
+    prepare_install_method
 
     if [ "$DRY_RUN" -eq 1 ]; then
         plan "install via ${METHOD}: $(install_command)"
