@@ -138,12 +138,26 @@ def _init_arg_status(line: str) -> str | None:
     tokens = _split_tail(match.group("tail"))
     if not tokens:
         return "bare"
-    first = tokens[0]
-    if first in HELP_FLAGS:
+    if any(tok in HELP_FLAGS for tok in tokens):
         return "ok"
-    if first.startswith("-"):
-        return "flag-only"
-    return "ok"
+
+    # Scan every token (not just the first) so a path that follows leading flags
+    # — e.g. ``awf init --yes .`` — is still recognised. Skip flags and the value
+    # of any value-taking flag, mirroring ``_parse_smoke_invocation``.
+    has_path = False
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-"):
+            if token in VALUE_FLAGS:
+                skip_next = True
+            continue
+        has_path = True
+        break
+
+    return "ok" if has_path else "flag-only"
 
 
 def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
@@ -196,6 +210,9 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("awf init  # bootstrap the service") == "bare"
     assert _init_arg_status("awf init --write-profile --yes") == "flag-only"
     assert _init_arg_status("awf init .") == "ok"
+    # A path that follows leading flags is still a path, not a flag-only line.
+    assert _init_arg_status("awf init --yes .") == "ok"
+    assert _init_arg_status("awf init --write-profile --yes <path>") == "ok"
     assert _init_arg_status("awf init <path>") == "ok"
     assert _init_arg_status('awf init "$HOME/awf-eval-project"') == "ok"
     assert _init_arg_status("awf init --help") == "ok"
