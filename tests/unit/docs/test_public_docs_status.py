@@ -1416,11 +1416,15 @@ def test_getting_started_configure_environment_uses_root_env() -> None:
         "### Configure Environment",
         maxsplit=1,
     )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
-    root_env_snippet_start = configure_section.index(
+    root_env_snippet_start = _required_index(
+        configure_section,
         "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example",
+        "Configure Environment",
     )
-    root_env_snippet_end = configure_section.index(
+    root_env_snippet_end = _required_index(
+        configure_section,
         "uv run --python 3.12 --extra dev awf service bootstrap",
+        "Configure Environment",
     )
     root_env_snippet = configure_section[root_env_snippet_start:root_env_snippet_end]
 
