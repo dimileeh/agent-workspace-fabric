@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -362,6 +363,60 @@ def test_prepare_source_lane_dirs_writes_parent_project_sentinel(tmp_path: Path)
         'name = "awf-first-run-smoke-root"\n'
         'version = "0.0.0"\n'
         'requires-python = ">=3.12"\n'
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lane", [smoke.Lane.SOURCE_UV_RUN, smoke.Lane.SOURCE_TOOL_INSTALL])
+@pytest.mark.parametrize(
+    "copy_error",
+    [
+        PermissionError("permission denied while copying checkout"),
+        shutil.Error("dangling symlink while copying checkout"),
+    ],
+)
+def test_source_lanes_report_checkout_copy_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lane: smoke.Lane,
+    copy_error: Exception,
+) -> None:
+    """Source checkout copy failures are structured lane failures, not tracebacks."""
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def failing_copy(_source: Path, _destination: Path) -> Path:
+        raise copy_error
+
+    def unexpected_run(
+        _command: smoke.CommandSpec,
+        _timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        pytest.fail("source lane should stop before running commands")
+
+    monkeypatch.setattr(smoke, "copy_source_checkout", failing_copy)
+
+    if lane is smoke.Lane.SOURCE_UV_RUN:
+        results = smoke.run_source_uv_run_lane(
+            checkout_root=tmp_path / "checkout",
+            smoke_root=tmp_path / "smoke",
+            timeout_seconds=5,
+            runner=unexpected_run,
+        )
+    else:
+        results = smoke.run_source_tool_install_lane(
+            checkout_root=tmp_path / "checkout",
+            smoke_root=tmp_path / "smoke",
+            timeout_seconds=5,
+            runner=unexpected_run,
+        )
+
+    assert results == (
+        smoke.SmokeResult(
+            lane=lane,
+            status="failed",
+            reason=f"source checkout preparation failed: {copy_error}",
+            stderr_tail=str(copy_error),
+        ),
     )
 
 

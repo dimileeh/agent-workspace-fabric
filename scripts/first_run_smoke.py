@@ -399,7 +399,10 @@ def run_source_uv_run_lane(
         return (_skip(Lane.SOURCE_UV_RUN, "uv is not available"),)
 
     run = runner or run_command
-    checkout, outside = _prepare_source_lane_dirs(checkout_root, smoke_root)
+    try:
+        checkout, outside = _prepare_source_lane_dirs(checkout_root, smoke_root)
+    except (OSError, shutil.Error) as exc:
+        return (_source_checkout_prepare_failure(Lane.SOURCE_UV_RUN, exc),)
     commands = source_uv_run_commands(
         checkout=checkout,
         outside_cwd=outside,
@@ -428,7 +431,10 @@ def run_source_tool_install_lane(
         return (_skip(Lane.SOURCE_TOOL_INSTALL, "uv is not available"),)
 
     run = runner or run_command
-    checkout, outside = _prepare_source_lane_dirs(checkout_root, smoke_root)
+    try:
+        checkout, outside = _prepare_source_lane_dirs(checkout_root, smoke_root)
+    except (OSError, shutil.Error) as exc:
+        return (_source_checkout_prepare_failure(Lane.SOURCE_TOOL_INSTALL, exc),)
     env = isolated_tool_environment(smoke_root, method="uv")
     install = CommandSpec(
         argv=("uv", "tool", "install", ".", "--force", "--python", python),
@@ -915,6 +921,16 @@ def _failed_completed(
         reason=reason,
         stdout_tail=_tail(completed.stdout),
         stderr_tail=_tail(completed.stderr),
+    )
+
+
+def _source_checkout_prepare_failure(lane: Lane, exc: Exception) -> SmokeResult:
+    detail = str(exc)
+    return SmokeResult(
+        lane=lane,
+        status="failed",
+        reason=f"source checkout preparation failed: {detail}",
+        stderr_tail=_tail(detail),
     )
 
 
