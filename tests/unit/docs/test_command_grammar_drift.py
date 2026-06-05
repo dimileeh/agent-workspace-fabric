@@ -394,17 +394,42 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
 
 
 def test_first_run_install_lanes_present_and_curl_gated() -> None:
-    """R5: README + Quickstart present the four lanes and gate the curl lane."""
-    combined = "\n".join(_read(rel_path) for rel_path in ("README.md", "docs/QUICKSTART.md"))
+    """R5: README and Quickstart each present the four lanes and gate the curl lane.
 
-    for expected in (
-        "release-installed",
-        "package-manager",
-        "Source Checkout With Global Tool Install",
-        "Source Checkout With No Global Install",
-        "release-gated",
-    ):
-        assert expected in combined, f"Missing first-run lane marker: {expected!r}"
+    Each document is asserted independently rather than against a concatenation:
+    these are two public first-run entry points, so dropping every lane marker
+    from one must fail even if the sibling doc still carries them. README's
+    summary table and Quickstart's lane headers spell the two source-checkout
+    lanes with different casing, so the expected markers are tracked per file.
+    """
+    expected_lane_markers = {
+        "README.md": (
+            "release-installed",
+            "package-manager",
+            "Source checkout with global tool install",
+            "Source checkout with no global install",
+            "release-gated",
+        ),
+        "docs/QUICKSTART.md": (
+            "release-installed",
+            "package-manager",
+            "Source Checkout With Global Tool Install",
+            "Source Checkout With No Global Install",
+            "release-gated",
+        ),
+    }
 
-    assert "curl -fsSL" not in combined
-    assert "curl | bash" not in combined
+    missing: list[str] = []
+    curl_offenders: list[str] = []
+    for rel_path, markers in expected_lane_markers.items():
+        text = _read(rel_path)
+        missing.extend(
+            f"{rel_path}: missing first-run lane marker {expected!r}"
+            for expected in markers
+            if expected not in text
+        )
+        if "curl -fsSL" in text or "curl | bash" in text:
+            curl_offenders.append(f"{rel_path}: documents an ungated curl installer lane")
+
+    assert not missing, missing
+    assert not curl_offenders, curl_offenders
