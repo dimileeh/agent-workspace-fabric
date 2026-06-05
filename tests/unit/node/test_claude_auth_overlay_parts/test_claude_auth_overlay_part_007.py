@@ -16,6 +16,7 @@ imported from part 1 so every test in this package exercises the same fakes.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 from collections.abc import Iterator
@@ -290,5 +291,62 @@ def test_overlay_provision_lock_unavailable_proceeds_best_effort(
     assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
     assert len(mounter.mounts) == 1
     # The unavailability is logged exactly once, and no contention was reported.
+    assert sum(1 for entry in logs if entry.get("reason_code") == _UNAVAILABLE) == 1
+    assert not any(entry.get("reason_code") == _CONTENDED for entry in logs)
+
+
+@pytest.mark.unit
+def test_flock_unsupported_proceeds_best_effort_not_contended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The lock file is created, but the FS does not support advisory locking, so
+    # ``fcntl.flock`` raises a non-blocking ``OSError`` (ENOTSUP/ENOSYS/EINVAL).
+    # This must be treated as ``"unavailable"`` (best-effort, unserialized overlay),
+    # NOT ``"contended"`` — otherwise overlays would be permanently disabled and
+    # degrade to the legacy copy on every provision on such a filesystem.
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    # ``fcntl`` is the same module object everywhere, so patching its ``flock`` would
+    # also break the shared-base ``.build.lock``. Scope the failure to *only* the
+    # overlay provision lock's fd by tracking which fd was opened for ``.overlay.lock``.
+    real_os_open = os.open
+    real_flock = fcntl.flock
+    overlay_lock_fds: set[int] = set()
+
+    def _track_overlay_lock_fd(path: object, *args: object, **kwargs: object) -> int:
+        fd = real_os_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        if os.fspath(path).endswith(_LOCK_NAME):
+            overlay_lock_fds.add(fd)
+        return fd
+
+    def _flock_unsupported(fd: int, operation: int) -> None:
+        # Only the overlay provision lock's non-blocking acquire raises; the release
+        # in ``finally`` and the base-build ``flock`` pass through unchanged.
+        if fd in overlay_lock_fds and operation == (fcntl.LOCK_EX | fcntl.LOCK_NB):
+            raise OSError(errno.ENOTSUP, "operation not supported")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(auth_mounts_mod.os, "open", _track_overlay_lock_fd)
+    monkeypatch.setattr(auth_mounts_mod.fcntl, "flock", _flock_unsupported)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_flock_unsupported",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    claude_root = work_dir / "auth" / "ws_flock_unsupported" / "claude"
+    by_target = {m.target: m for m in mounts}
+    # Provisioning still produced a live overlay (best-effort, unserialized) — it did
+    # not degrade to the legacy copy.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    assert len(mounter.mounts) == 1
+    # The unavailability is logged exactly once, and contention was NOT reported.
     assert sum(1 for entry in logs if entry.get("reason_code") == _UNAVAILABLE) == 1
     assert not any(entry.get("reason_code") == _CONTENDED for entry in logs)

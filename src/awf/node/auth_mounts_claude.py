@@ -863,13 +863,17 @@ def _overlay_provision_lock(claude_root: Path) -> Iterator[_OverlayLockState]:
       (``EWOULDBLOCK``/``EAGAIN`` from a non-blocking ``flock``). This is the narrow
       stale-lease-recovery window the DB-CAS claim does not cover; the caller must
       neither ``rmtree`` the (in-use) upper nor issue a fresh off-lock mount.
-    - ``"unavailable"`` — the lock file could not be created/locked (an FS fault:
-      ENOSPC, EROFS, EPERM). The caller proceeds best-effort without serialization.
+    - ``"unavailable"`` — the lock file could not be created (an FS fault: ENOSPC,
+      EROFS, EPERM) **or** the FS does not support advisory locking, so ``flock``
+      itself failed (ENOTSUP, ENOSYS, EINVAL). The caller proceeds best-effort
+      without serialization rather than degrading to the legacy copy.
 
     Acquisition is strictly non-blocking (``LOCK_NB``) so it never wedges the worker;
     the kernel releases the lock on ``close``/process death, matching the shared-base
-    build lock's crash semantics (:func:`_ensure_shared_claude_base`). Only ``OSError``
-    /``BlockingIOError`` are caught — never a bare ``Exception`` (AGENTS.md rule).
+    build lock's crash semantics (:func:`_ensure_shared_claude_base`). ``flock``
+    contention surfaces as ``BlockingIOError`` (``"contended"``); any other ``OSError``
+    means locking is unsupported (``"unavailable"``). Only ``OSError``/``BlockingIOError``
+    are caught — never a bare ``Exception`` (AGENTS.md rule).
     """
 
     lock_path = claude_root / _OVERLAY_PROVISION_LOCK_NAME
@@ -890,10 +894,24 @@ def _overlay_provision_lock(claude_root: Path) -> Iterator[_OverlayLockState]:
     try:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            # ``EWOULDBLOCK``/``EAGAIN`` (``BlockingIOError``): a concurrent
-            # same-workspace provision holds the lock — the stale-lease window.
+        except BlockingIOError:
+            # ``EWOULDBLOCK``/``EAGAIN``: a concurrent same-workspace provision holds
+            # the lock — the stale-lease window. Only genuine contention is
+            # ``"contended"``; that path may degrade to the legacy copy this round.
             yield "contended"
+            return
+        except OSError as exc:
+            # The FS does not support advisory locking (``ENOTSUP``/``ENOSYS``/
+            # ``EINVAL``). Treat the lock as unavailable and proceed best-effort
+            # (unserialized) rather than degrading every provision to the legacy copy
+            # — overlays would otherwise be permanently disabled on such filesystems.
+            _log.warning(
+                "claude_auth_overlay_provision_lock_unavailable",
+                reason_code=_CLAUDE_AUTH_OVERLAY_PROVISION_LOCK_UNAVAILABLE,
+                workspace_auth_root=str(claude_root),
+                error=str(exc),
+            )
+            yield "unavailable"
             return
         yield "acquired"
     finally:
