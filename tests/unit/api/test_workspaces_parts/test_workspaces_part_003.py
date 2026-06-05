@@ -25,6 +25,7 @@ import awf.api.request_admission as request_admission
 import awf.api.routes.workspaces as workspaces_route
 from awf.api.app import configure_database, create_app
 from awf.api.schemas import (
+    WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
 )
 from awf.common.config import Settings, get_settings
@@ -607,18 +608,19 @@ class TestCreateWorkspacePart002:
         engine: AsyncEngine,
     ) -> None:
         payload = WorkspaceCreateRequest.model_validate(_MINIMAL_BODY)
+        settings = Settings(_env_file=None, min_free_disk_bytes=0)
         factory = make_session_factory(engine)
         async with factory() as session:
             first = await workspaces_route.create_workspace(
                 payload,
                 idempotency_key="direct-v1-replay",
-                settings=Settings(_env_file=None),
+                settings=settings,
                 session=session,
             )
             replay = await workspaces_route.create_workspace(
                 payload,
                 idempotency_key="direct-v1-replay",
-                settings=Settings(_env_file=None),
+                settings=settings,
                 session=session,
             )
             conflict = await workspaces_route.create_workspace(
@@ -626,10 +628,12 @@ class TestCreateWorkspacePart002:
                     {**_MINIMAL_BODY, "task_title": "Changed direct replay"}
                 ),
                 idempotency_key="direct-v1-replay",
-                settings=Settings(_env_file=None),
+                settings=settings,
                 session=session,
             )
 
+        assert isinstance(first, WorkspaceAcceptedResponse)
+        assert isinstance(replay, WorkspaceAcceptedResponse)
         assert first.workspace_id == replay.workspace_id
         assert isinstance(conflict, JSONResponse)
         assert conflict.status_code == 409
