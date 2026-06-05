@@ -437,18 +437,16 @@ async def test_pre_push_validation_fix_pass_genuine_no_commit_still_rolls_back(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_fix_pass_non_descendant_head_rolls_back(
+async def test_pre_push_validation_fix_pass_non_descendant_head_is_reparented(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A clean worktree whose HEAD was rewritten off ``fix_start_head`` in a way that
-    DROPS the validation-fix work (the ``git reset --hard HEAD~1`` + recommit hole)
-    must roll back instead of being treated as a preserving self-commit.
-
-    Extends the e05b47b6c regression: we now discriminate by tree content (a re-merge
-    that re-introduces ``fix_start_head``'s work yields a tree != ``current_head``'s
-    tree) rather than by topology alone, so the work-dropping hole stays closed."""
+    DROPS the validation-fix work (the ``git reset --hard HEAD~1`` + recommit hole) is
+    no longer rolled back. Per issue #411 we STOP DISCRIMINATING and ALWAYS re-parent
+    the agent's resulting tree onto ``fix_start_head`` (no ``merge-tree``), so the fix
+    pass converges; any dropped work stays auditable and is caught by re-validation."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
     workspace_id = await seed_monitoring_workspace(factory)
@@ -459,15 +457,18 @@ async def test_pre_push_validation_fix_pass_non_descendant_head_rolls_back(
     cmd = FakeCommandRunner()
     fix_start_head = "1" * 40
     divergent_head = "3" * 40
-    remerged_tree = "a" * 40
     current_tree = "b" * 40
-    # merge-base --is-ancestor reports non-descendant (exit 1); the tree-preservation
-    # merge then re-introduces fix work (re-merged tree != current tree), so the
-    # rewrite is classified as work-dropping and rolled back.
+    start_tree = "c" * 40
+    reparented_head = "4" * 40
+    # merge-base --is-ancestor reports non-descendant (exit 1); we always re-parent:
+    # rev-parse the two trees (they differ), derive a message, commit-tree onto
+    # fix_start_head, then reset --hard to the reconstructed commit.
     cmd.queue_result(returncode=1)
-    cmd.queue_result(returncode=0, stdout=f"{remerged_tree}\n")
     cmd.queue_result(returncode=0, stdout=f"{current_tree}\n")
-    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    cmd.queue_result(returncode=0, stdout=f"{start_tree}\n")
+    cmd.queue_result(returncode=0, stdout="agent fix message\n")
+    cmd.queue_result(returncode=0, stdout=f"{reparented_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {reparented_head[:8]}\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -497,161 +498,8 @@ async def test_pre_push_validation_fix_pass_non_descendant_head_rolls_back(
             restore_ref=cast(str, kwargs["restore_ref"]),
         )
 
-    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
-    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _pre_push_validation_cleanup,
-    )
-    validation_result = pre_push_validation._PrePushValidationResult(
-        passed=False,
-        validation_run_id="vr_failed",
-        workspace_head_sha=fix_start_head,
-        reason_code="PRE_PUSH_VALIDATION_FAILED",
-        message="PR monitor pre-push validation failed: COMMAND_FAILED",
-        validation_reason_code="COMMAND_FAILED",
-        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
-    )
-
-    (
-        committed,
-        rollback_failure_reason,
-    ) = await pre_push_validation._run_pre_push_validation_fix_pass(
-        runner,
-        workspace_id=workspace_id,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        remote_branch="codex/pr",
-        remote_url=None,
-        state=None,
-        validation_result=validation_result,
-        pass_number=1,
-        total_passes=1,
-        validation_commands=("pytest -q",),
-    )
-
-    assert committed is False
-    assert rollback_failure_reason is None
-    joined_calls = [" ".join(call.args) for call in cmd.calls]
-    assert any(
-        f"merge-base --is-ancestor {fix_start_head} {divergent_head}" in call
-        for call in joined_calls
-    )
-    # Discriminated by tree content, not topology: the merge-tree re-merge was
-    # attempted before deciding to roll back.
-    assert any(
-        f"merge-tree --write-tree {divergent_head} {fix_start_head}" in call
-        for call in joined_calls
-    )
-    assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": fix_start_head}]
-    assert rev_parse_results == []
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("merge_returncode", "merge_stdout", "rev_parse_returncode", "rev_parse_stdout"),
-    [
-        pytest.param(1, "", 0, "", id="merge_conflict"),
-        pytest.param(0, "", 0, "", id="merge_empty_output"),
-        pytest.param(0, "   \n", 0, "", id="merge_blank_oid"),
-        pytest.param(0, "tree\n", 1, "", id="rev_parse_failed"),
-        pytest.param(0, "tree\n", 0, "  \n", id="rev_parse_blank_oid"),
-        pytest.param(0, "tree\n", 0, "other\n", id="tree_mismatch"),
-    ],
-)
-async def test_head_preserves_fix_tree_rejects_unpreserved_rewrites(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    merge_returncode: int,
-    merge_stdout: str,
-    rev_parse_returncode: int,
-    rev_parse_stdout: str,
-) -> None:
-    """Any merge failure, ambiguous output, or tree mismatch is NOT preserved."""
-    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-
-    worktree = tmp_path / "worktrees" / "workspace"
-    _mark_git_worktree(worktree)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=merge_returncode, stdout=merge_stdout)
-    if merge_returncode == 0 and merge_stdout.strip():
-        cmd.queue_result(returncode=rev_parse_returncode, stdout=rev_parse_stdout)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    preserved = await pre_push_validation._head_preserves_fix_tree(
-        runner,
-        worktree_path=worktree,
-        fix_start_head="1" * 40,
-        current_head="2" * 40,
-    )
-
-    assert preserved is False
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_fix_pass_amend_self_commit_preserving_tree_is_accepted(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A non-descendant rewrite (``git commit --amend``) that preserves the fix tree is
-    accepted as a committed repair instead of being rolled back (issue #408)."""
-    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-
-    workspace_id = await seed_monitoring_workspace(factory)
-    worktree = tmp_path / "worktrees" / workspace_id
-    _mark_git_worktree(worktree)
-    adapter = FakeAdapter()
-    adapter.queue(stdout="amended self-commit\n")
-    cmd = FakeCommandRunner()
-    fix_start_head = "1" * 40
-    amended_head = "2" * 40
-    preserved_tree = "a" * 40
-    # merge-base --is-ancestor reports non-descendant (exit 1); the tree-preservation
-    # merge yields the same OID as the amended head's own tree, so the work is
-    # preserved and the rewrite is accepted (no rollback).
-    cmd.queue_result(returncode=1)
-    cmd.queue_result(returncode=0, stdout=f"{preserved_tree}\n")
-    cmd.queue_result(returncode=0, stdout=f"{preserved_tree}\n")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    rev_parse_results: list[str | None] = [fix_start_head, amended_head]
-
-    async def _rev_parse_head(_worktree_path: Path) -> str | None:
-        return rev_parse_results.pop(0)
-
-    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
-        """Clean worktree after the agent amended its self-commit."""
-        return False
-
-    cleanup_calls: list[dict[str, object]] = []
-
-    async def _pre_push_validation_cleanup(
-        _runner: object,
-        **kwargs: object,
-    ) -> ValidationWorktreeCleanup:
-        cleanup_calls.append(cast(dict[str, object], kwargs))
-        return ValidationWorktreeCleanup(
-            cleaned=True,
-            check=ValidationWorktreeCheck(clean=True),
-            restore_ref=cast(str, kwargs["restore_ref"]),
-        )
-
     async def _rollback_should_not_run(*_args: object, **_kwargs: object) -> str | None:
-        raise AssertionError("preserving rewrite must not be rolled back")
+        raise AssertionError("a non-descendant rewrite must be re-parented, not rolled back")
 
     monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
@@ -691,39 +539,54 @@ async def test_pre_push_validation_fix_pass_amend_self_commit_preserving_tree_is
 
     assert committed is True
     assert cleanup_failure_reason is None
-    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": amended_head}]
-    assert rev_parse_results == []
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(
-        f"merge-tree --write-tree {amended_head} {fix_start_head}" in call for call in joined_calls
+        f"merge-base --is-ancestor {fix_start_head} {divergent_head}" in call
+        for call in joined_calls
     )
-    assert any(f"rev-parse {amended_head}^{{tree}}" in call for call in joined_calls)
+    # No tree-content discrimination: the reconstructed commit is parented on
+    # fix_start_head using the agent's resulting (current) tree.
+    assert not any("merge-tree" in call for call in joined_calls)
+    assert any(
+        f"commit-tree {current_tree} -p {fix_start_head} -m" in call for call in joined_calls
+    )
+    assert any(f"reset --hard {reparented_head}" in call for call in joined_calls)
+    # The pre-fix-pass head is never restored: it is preserved as the parent.
     assert not any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": reparented_head}]
+    assert rev_parse_results == []
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_fix_pass_rewrite_merge_conflict_rolls_back(
+async def test_pre_push_validation_fix_pass_amend_self_commit_is_reparented(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-descendant rewrite whose tree-preservation merge conflicts (non-zero exit)
-    is treated as NOT preserved and rolled back to ``fix_start_head`` (issue #408)."""
+    """A non-descendant rewrite (``git commit --amend``) is accepted as a committed
+    repair by re-parenting onto ``fix_start_head`` (issue #408 behavior is now
+    subsumed by the always-reparent rule of issue #411 — no ``merge-tree``)."""
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     adapter = FakeAdapter()
-    adapter.queue(stdout="conflicting rewrite\n")
+    adapter.queue(stdout="amended self-commit\n")
     cmd = FakeCommandRunner()
     fix_start_head = "1" * 40
-    divergent_head = "3" * 40
-    # merge-base --is-ancestor reports non-descendant (exit 1); the merge-tree
-    # three-way merge conflicts (exit 1), so we never compare trees and roll back.
+    amended_head = "2" * 40
+    amended_tree = "a" * 40
+    start_tree = "b" * 40
+    reparented_head = "5" * 40
+    # merge-base --is-ancestor reports non-descendant (exit 1); we re-parent the
+    # amended tree onto fix_start_head (trees differ), then reset to the new commit.
     cmd.queue_result(returncode=1)
-    cmd.queue_result(returncode=1, stdout="")
-    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    cmd.queue_result(returncode=0, stdout=f"{amended_tree}\n")
+    cmd.queue_result(returncode=0, stdout=f"{start_tree}\n")
+    cmd.queue_result(returncode=0, stdout="amended commit message\n")
+    cmd.queue_result(returncode=0, stdout=f"{reparented_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {reparented_head[:8]}\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -731,13 +594,13 @@ async def test_pre_push_validation_fix_pass_rewrite_merge_conflict_rolls_back(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, divergent_head]
+    rev_parse_results: list[str | None] = [fix_start_head, amended_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
-        """Clean worktree after the agent rewrote HEAD: nothing left to commit."""
+        """Clean worktree after the agent amended its self-commit."""
         return False
 
     cleanup_calls: list[dict[str, object]] = []
@@ -753,12 +616,20 @@ async def test_pre_push_validation_fix_pass_rewrite_merge_conflict_rolls_back(
             restore_ref=cast(str, kwargs["restore_ref"]),
         )
 
+    async def _rollback_should_not_run(*_args: object, **_kwargs: object) -> str | None:
+        raise AssertionError("amended rewrite must be re-parented, not rolled back")
+
     monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
     monkeypatch.setattr(
         pre_push_validation,
         "_pre_push_validation_cleanup",
         _pre_push_validation_cleanup,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_should_not_run,
     )
     validation_result = pre_push_validation._PrePushValidationResult(
         passed=False,
@@ -770,10 +641,7 @@ async def test_pre_push_validation_fix_pass_rewrite_merge_conflict_rolls_back(
         result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
     )
 
-    (
-        committed,
-        rollback_failure_reason,
-    ) = await pre_push_validation._run_pre_push_validation_fix_pass(
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
         runner,
         workspace_id=workspace_id,
         compose_project="proj",
@@ -787,18 +655,17 @@ async def test_pre_push_validation_fix_pass_rewrite_merge_conflict_rolls_back(
         validation_commands=("pytest -q",),
     )
 
-    assert committed is False
-    assert rollback_failure_reason is None
-    joined_calls = [" ".join(call.args) for call in cmd.calls]
-    assert any(
-        f"merge-tree --write-tree {divergent_head} {fix_start_head}" in call
-        for call in joined_calls
-    )
-    # Conflict short-circuits before any tree comparison.
-    assert not any(f"rev-parse {divergent_head}^{{tree}}" in call for call in joined_calls)
-    assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
-    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": fix_start_head}]
+    assert committed is True
+    assert cleanup_failure_reason is None
+    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": reparented_head}]
     assert rev_parse_results == []
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert not any("merge-tree" in call for call in joined_calls)
+    assert any(
+        f"commit-tree {amended_tree} -p {fix_start_head} -m" in call for call in joined_calls
+    )
+    assert any(f"reset --hard {reparented_head}" in call for call in joined_calls)
+    assert not any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
 
 
 @pytest.mark.unit

@@ -749,6 +749,8 @@ async def test_pre_push_validation_mixed_127_prefers_real_failure_for_fix_pass(
     cmd.queue_result(returncode=0, stdout=f"{'2' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'3' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'4' * 40}\n")
+    # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout=f"{'5' * 40}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()
