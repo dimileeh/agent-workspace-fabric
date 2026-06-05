@@ -20,17 +20,25 @@ KNOWN_TOKEN_PATTERN: Final = (
     r"xox[baprs]-[A-Za-z0-9-]*"
     r")(?![A-Za-z0-9_])"
 )
-TOKEN_ASSIGNMENT_PATTERN: Final = (
-    r"\b(?P<key>"
+TOKEN_ASSIGNMENT_KEY_PATTERN: Final = (
     r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
-    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY)"
+    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)"
     r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
     r"|PASSWORD|PASSWD|SECRET"
+)
+TOKEN_ASSIGNMENT_PATTERN: Final = (
+    r"\b(?P<key>"
+    f"{TOKEN_ASSIGNMENT_KEY_PATTERN}"
     r")\b"
     r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)"
-    r"(?P<value>[^\s\"'`,;)}\]]+)"
-    r"(?P=quote)"
+    r"(?P<quote>[\"'])?"
+    r"(?P<value>"
+    r"(?=-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----)"
+    r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]*?"
+    r"-----END [A-Z0-9 -]*PRIVATE KEY-----"
+    r"|[^\s\"'`,;)}\]]+"
+    r")"
+    r"(?(quote)\s*(?P=quote)|)"
 )
 PROVIDER_REF_PATTERN: Final = (
     # Match from the start of a URI-like scheme token so hyphen-prefixed

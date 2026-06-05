@@ -6,13 +6,19 @@ import asyncio
 import dataclasses
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
 from awf import __version__
 from awf.db.session import make_engine, make_session_factory
+from awf.host_setup.config import (
+    HostSetupConfig,
+    HostSetupConfigError,
+    ProviderConfig,
+    read_host_setup_config,
+)
 from awf.service.config import (
     COMPOSE_ENV_FILE_OMITTED,
     ComposeEnvFileInput,
@@ -27,6 +33,8 @@ from awf.service.status import collect_service_status
 
 BUNDLE_FILENAME_PREFIX = "awf-support-bundle"
 ISSUE_TEMPLATE_PATH = ".github/ISSUE_TEMPLATE/bug_report.yml"
+_HOST_SETUP_CONFIG_READ_FAILED_REASON_CODE = "HOST_SETUP_CONFIG_READ_FAILED"
+_HOST_SETUP_CONFIG_SUMMARY_FAILED_REASON_CODE = "HOST_SETUP_CONFIG_SUMMARY_FAILED"
 
 _SAFE_EXAMPLE_KEYS = frozenset(
     {"workspace_id", "failure_reason", "reason_code", "status", "updated_at", "count"}
@@ -76,6 +84,7 @@ async def collect_support_bundle(
     status_collector: Any = None,
     doctor_collector: Any = None,
     failure_analysis_collector: Any = None,
+    setup_config_reader: Callable[[], HostSetupConfig] | None = None,
 ) -> dict[str, object]:
     """Collect a telemetry-free, redacted support bundle."""
     env = os.environ if environ is None else environ
@@ -172,12 +181,16 @@ async def collect_support_bundle(
             "since_hours": failure_window_hours,
         }
 
-    config_fingerprint = service_config_payload(settings)
+    config_fingerprint = _support_bundle_config_fingerprint(settings)
+    if setup_config_reader is None:
+        setup_config_reader = _default_setup_config_reader
+    setup_state = _setup_state(setup_config_reader, secrets=secrets)
+    state_directory_status = "configured" if settings.work_dir else "not configured"
 
     log_pointers = [
         "Service logs: run `awf service logs --tail 100`",
         "Worker logs: run `awf service logs --service worker --tail 100`",
-        f"State directory: {settings.work_dir}",
+        f"State directory: {state_directory_status}",
     ]
 
     bundle: dict[str, object] = {
@@ -189,11 +202,184 @@ async def collect_support_bundle(
         "orphan_cleanup_posture": _redact_value(orphan_cleanup_posture, secrets),
         "recent_failure_summary": recent_failure_summary,
         "config_fingerprint": _redact_value(config_fingerprint, secrets),
+        "setup_state": setup_state,
         "log_pointers": [_redact_text(ptr, secrets) for ptr in log_pointers],
         "issue_template_pointer": ISSUE_TEMPLATE_PATH,
     }
 
     return bundle
+
+
+def _support_bundle_config_fingerprint(settings: ServiceSettings) -> dict[str, object]:
+    """Return service config metadata without exposing local state paths."""
+    payload = service_config_payload(settings)
+    payload["work_dir_configured"] = bool(payload.pop("work_dir", None))
+    return payload
+
+
+def _default_setup_config_reader() -> HostSetupConfig:
+    """Read the operator's host setup configuration from its default location."""
+    return read_host_setup_config()
+
+
+def _setup_state(
+    setup_config_reader: Callable[[], HostSetupConfig],
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    """Build a secret-free summary of the host setup configuration state."""
+    try:
+        config = setup_config_reader()
+    except HostSetupConfigError as exc:
+        payload: dict[str, object] = {
+            "status": "failed",
+            "reason_code": exc.reason_code,
+            "message": _redact_text(exc.message, secrets),
+        }
+        if exc.details:
+            payload["details"] = _redact_value(exc.details, secrets)
+        return payload
+    except Exception as exc:
+        unexpected_payload: dict[str, object] = {
+            "status": "failed",
+            "reason_code": str(
+                getattr(exc, "reason_code", _HOST_SETUP_CONFIG_READ_FAILED_REASON_CODE)
+            ),
+            "message": _redact_text(str(exc), secrets),
+        }
+        details = getattr(exc, "details", None)
+        if details is not None:
+            unexpected_payload["details"] = _redact_value(details, secrets)
+        return unexpected_payload
+
+    try:
+        return {
+            "status": "loaded",
+            "config": {
+                "version": config.version,
+                "install_channel": _redact_text(config.install.channel, secrets),
+                "api_host_port": config.api.host_port,
+                "work_dir_configured": bool(config.work_dir),
+            },
+            "providers": _setup_state_provider_summaries(config, secrets=secrets),
+            "clients": _setup_state_client_summaries(config, secrets=secrets),
+            "consent": {
+                "plain_file_secrets": config.consent.plain_file_secrets,
+                "source_checkout_assets": config.consent.source_checkout_assets,
+            },
+            "source_checkout": _source_checkout_summary(config),
+        }
+    except Exception as exc:
+        summary_payload: dict[str, object] = {
+            "status": "failed",
+            "reason_code": str(
+                getattr(exc, "reason_code", _HOST_SETUP_CONFIG_SUMMARY_FAILED_REASON_CODE)
+            ),
+            "message": _redact_text(str(exc), secrets),
+        }
+        details = getattr(exc, "details", None)
+        if details is not None:
+            summary_payload["details"] = _redact_value(details, secrets)
+        return summary_payload
+
+
+def _setup_state_provider_summaries(
+    config: HostSetupConfig,
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    """Summarize providers without dropping entries on redacted-name collisions."""
+    providers: dict[str, object] = {}
+    for name, provider in sorted(config.providers.items()):
+        providers[_unique_redacted_setup_state_key(name, secrets, providers)] = (
+            _provider_setup_summary(provider, secrets=secrets)
+        )
+    return providers
+
+
+def _setup_state_client_summaries(
+    config: HostSetupConfig,
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    """Summarize clients without dropping entries on redacted-name collisions."""
+    clients: dict[str, object] = {}
+    for name, client in sorted(config.clients.items()):
+        clients[_unique_redacted_setup_state_key(name, secrets, clients)] = {
+            "status": _redact_text(client.status, secrets),
+            "updated_at": _isoformat(client.updated_at),
+        }
+    return clients
+
+
+def _unique_redacted_setup_state_key(
+    name: str,
+    secrets: frozenset[str],
+    existing: Mapping[str, object],
+) -> str:
+    """Return a stable redacted key, suffixing only when redaction collides."""
+    base_key = str(_redact_value(name, secrets))
+    key = base_key
+    suffix = 2
+    while key in existing:
+        key = f"{base_key}#{suffix}"
+        suffix += 1
+    return key
+
+
+def _provider_setup_summary(
+    provider: ProviderConfig,
+    *,
+    secrets: frozenset[str],
+) -> dict[str, object]:
+    """Summarize one provider without exposing its credential reference."""
+    credential_ref = provider.credential_ref
+    return {
+        "status": _redact_text(provider.status, secrets),
+        "backend": _optional_redacted_text(provider.backend, secrets),
+        "source": _optional_redacted_text(provider.source, secrets),
+        "credential_ref_present": credential_ref is not None,
+        "credential_ref_kind": _credential_ref_kind(credential_ref),
+    }
+
+
+def _source_checkout_summary(config: HostSetupConfig) -> dict[str, object]:
+    """Summarize source-checkout state without exposing host paths."""
+    source_checkout = config.source_checkout
+    if source_checkout is None:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "verified_at": _isoformat(source_checkout.verified_at),
+        "marker_count": len(source_checkout.markers),
+    }
+
+
+def _credential_ref_kind(credential_ref: str | None) -> str | None:
+    """Classify a credential reference by backend scheme."""
+    if credential_ref is None:
+        return None
+    if credential_ref.startswith("keyring://"):
+        return "keyring"
+    if credential_ref.startswith("env://"):
+        return "env_ref"
+    if credential_ref.startswith("plain-file://"):
+        return "plain_file"
+    return "unknown"
+
+
+def _optional_redacted_text(value: str | None, secrets: frozenset[str]) -> str | None:
+    """Redact an optional text value while preserving absent values."""
+    return None if value is None else _redact_text(value, secrets)
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    """Format datetimes as UTC ISO-8601 strings for stable bundle output."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def write_support_bundle(
