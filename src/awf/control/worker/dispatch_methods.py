@@ -443,8 +443,17 @@ async def _refresh_execution_claim_loop(
             # renewed. On the provisioning path, fence conservatively: cancel the
             # in-flight provision task so a worker that may have silently lost the
             # lease stops before any destructive git/compose op, rather than
-            # racing a new claimant that reclaims and bumps the epoch. The next
-            # poll re-claims and retries. The executor path passes no callback.
+            # racing a new claimant that reclaims and bumps the epoch. The row is
+            # left ``provisioning`` with its claim released by
+            # ``_safely_provision_claimed``'s outer ``finally``. The normal poll
+            # only claims ``requested`` rows, so it never re-claims this row;
+            # instead the released row is owned by the stale-active execution
+            # recovery scan, which covers ``provisioning`` rows whose execution
+            # claim is released/expired (see
+            # ``_list_stale_active_execution_candidates``) and cleans up and
+            # fails the interrupted attempt for retry-policy/operator retry —
+            # the same recovery contract as any other interrupted active work.
+            # The executor path passes no callback.
             if on_claim_lost is not None:
                 on_claim_lost()
             return

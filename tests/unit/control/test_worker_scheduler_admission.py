@@ -215,6 +215,57 @@ async def test_live_named_provisioning_claim_is_hidden_from_sibling_stale_scan(
 
 
 @pytest.mark.unit
+async def test_fenced_provisioning_row_with_released_claim_is_a_stale_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A heartbeat-fenced provisioning row is recovered by the stale-active scan.
+
+    When ``_refresh_execution_claim_loop`` fences during provisioning (e.g. a
+    transient DB disconnect raising), ``_safely_provision_claimed`` releases the
+    execution claim and leaves the row in ``provisioning``. The normal poll only
+    claims ``requested`` rows, so the released row is owned by the stale-active
+    execution recovery scan instead — it must surface as a candidate so the
+    interrupted attempt is cleaned up and failed for retry rather than stranded.
+    """
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    # Mirror the post-fence released state: the row stays ``provisioning`` but
+    # its execution claim is released by the cancellation ``finally``.
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.provisioning.value
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+        await session.commit()
+
+    candidates = await worker._list_stale_active_execution_candidates(  # noqa: SLF001
+        exclude_ids=set()
+    )
+
+    assert [candidate.workspace_id for candidate in candidates] == [workspace_id]
+    [candidate] = candidates
+    assert candidate.status == WorkspaceStatus.provisioning
+
+
+@pytest.mark.unit
 async def test_safely_provision_claimed_swallows_provision_exception(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
