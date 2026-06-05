@@ -921,16 +921,18 @@ class TestCollectSmokeReportExceptionPaths:
             result = _default_auth_collector(_settings())
         assert result["status"] == "ok"
 
-    def test_default_profile_preview_direct_call(self) -> None:
-        (Path("/tmp") / "pyproject.toml").write_text("[project]\nname='test'\n")
+    def test_default_profile_preview_direct_call(self, tmp_path: Path) -> None:
+        """Call the profile preview helper directly and return a preview."""
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='test'\n")
         with patch(
             "awf.profiles.onboarding.preview_project_onboarding",
             return_value=SimpleNamespace(template="python"),
-        ):
+        ) as preview:
             from awf.service.smoke import _default_profile_preview
 
-            result = _default_profile_preview(Path("/tmp"))
+            result = _default_profile_preview(tmp_path)
         assert result is not None
+        preview.assert_called_once_with(tmp_path)
 
     def test_default_disk_profile_preview_direct_call(self, tmp_path: Path) -> None:
         """Call the on-disk profile preview helper and return the parsed preview."""
