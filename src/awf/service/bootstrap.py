@@ -302,6 +302,9 @@ def _persist_work_dir_propagation_result(
     has a co-persisted timestamp, any ``AWF_CLAUDE_AUTH_FORCE_COPY`` in
     *environ* is assumed to have been loaded from the stale env-file
     (not set by the operator), and is not treated as an override (#413).
+    The stale guard does **not** apply to ``os.environ``, which
+    represents the operator's current shell and must win over stale
+    persisted state (#413).
 
     Best-effort: ``OSError`` on write is caught and logged (redacted), never
     fatal. The env-file is written atomically via a temp file in the same
@@ -318,10 +321,12 @@ def _persist_work_dir_propagation_result(
         environ_force_copy_is_operator_override = (
             not stale_generated and environ is not None and _force_copy_already_requested(environ)
         )
+        host_force_copy_is_operator_override = _force_copy_already_requested(os.environ)
         effective_force_copy = (
             result.force_copy
             or env_file_force_copy_is_operator_override
             or environ_force_copy_is_operator_override
+            or host_force_copy_is_operator_override
         )
     except (OSError, UnicodeDecodeError):
         pass
@@ -717,6 +722,12 @@ def _apply_work_dir_propagation_env(
     ``AWF_CLAUDE_AUTH_FORCE_COPY`` in *environ* is assumed to have been loaded
     from that stale env-file (not set by the operator), and is not treated as
     an override (#413).
+
+    Host override escape: the stale guard does **not** apply to ``os.environ``,
+    which represents the operator's current shell. When the operator explicitly
+    runs a later bootstrap with ``AWF_CLAUDE_AUTH_FORCE_COPY=true`` set in the
+    shell, that value must win over stale persisted state even when the merged
+    *environ* has been tainted by the stale env-file (#413).
     """
 
     stale_generated = False
@@ -729,9 +740,14 @@ def _apply_work_dir_propagation_env(
     environ_force_copy_is_operator_override = not stale_generated and _force_copy_already_requested(
         environ
     )
+    host_force_copy_is_operator_override = _force_copy_already_requested(os.environ)
     updated = dict(environ)
     updated[AWF_WORK_DIR_BIND_PROPAGATION_ENV] = result.propagation
-    force_copy = result.force_copy or environ_force_copy_is_operator_override
+    force_copy = (
+        result.force_copy
+        or environ_force_copy_is_operator_override
+        or host_force_copy_is_operator_override
+    )
     updated[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = "true" if force_copy else "false"
     return updated
 

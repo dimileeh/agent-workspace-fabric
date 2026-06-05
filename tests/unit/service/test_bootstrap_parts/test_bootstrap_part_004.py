@@ -728,7 +728,10 @@ def test_unescape_mountinfo_field_decodes_escapes_order_independently() -> None:
 
 
 @pytest.mark.unit
-def test_apply_propagation_env_raises_force_copy_but_never_lowers_it() -> None:
+def test_apply_propagation_env_raises_force_copy_but_never_lowers_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AWF_CLAUDE_AUTH_FORCE_COPY", raising=False)
     apply = bootstrap._apply_work_dir_propagation_env  # noqa: SLF001
     forced = WorkDirPropagationResult(
         propagation="rprivate",
@@ -765,6 +768,7 @@ def test_apply_propagation_env_raises_force_copy_but_never_lowers_it() -> None:
 @pytest.mark.unit
 def test_apply_propagation_env_ignores_stale_force_copy_when_env_file_stale(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the compose env-file has a stale bootstrap-generated
     AWF_CLAUDE_AUTH_FORCE_COPY=true plus AWF_WORK_DIR_PROPAGATION_TIMESTAMP,
@@ -772,6 +776,7 @@ def test_apply_propagation_env_ignores_stale_force_copy_when_env_file_stale(
     as an operator override — otherwise a fresh preflight returning
     force_copy=False gets the wrong in-memory posture for the rest of
     bootstrap (#413)."""
+    monkeypatch.delenv("AWF_CLAUDE_AUTH_FORCE_COPY", raising=False)
     apply = bootstrap._apply_work_dir_propagation_env  # noqa: SLF001
     shared = WorkDirPropagationResult(
         propagation="rshared",
@@ -813,6 +818,42 @@ def test_apply_propagation_env_ignores_stale_force_copy_when_env_file_stale(
         compose_env_file=env_file_no_timestamp,
     )
     assert result_operator["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+
+@pytest.mark.unit
+def test_apply_propagation_env_host_force_copy_overrides_stale_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the compose env-file has a stale TIMESTAMP but the operator
+    explicitly sets AWF_CLAUDE_AUTH_FORCE_COPY=true in the shell (os.environ),
+    _apply_work_dir_propagation_env must honor the host override over the
+    stale persisted state (#413)."""
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", "true")
+    apply = bootstrap._apply_work_dir_propagation_env  # noqa: SLF001
+    shared = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\n"
+        "AWF_CLAUDE_AUTH_FORCE_COPY=false\n"
+        "AWF_WORK_DIR_PROPAGATION_TIMESTAMP=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    environ_with_stale_false = {"AWF_CLAUDE_AUTH_FORCE_COPY": "false"}
+
+    result = apply(
+        environ_with_stale_false,
+        shared,
+        compose_env_file=env_file,
+    )
+    assert result["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -1110,6 +1151,7 @@ def test_persist_preserves_operator_force_copy_from_environ(tmp_path: Path) -> N
 @pytest.mark.unit
 def test_persist_ignores_stale_force_copy_in_environ_when_env_file_stale(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the env-file has a stale bootstrap-generated
     AWF_CLAUDE_AUTH_FORCE_COPY=true plus AWF_WORK_DIR_PROPAGATION_TIMESTAMP,
@@ -1119,6 +1161,7 @@ def test_persist_ignores_stale_force_copy_in_environ_when_env_file_stale(
     as an operator override — otherwise a fresh preflight returning
     force_copy=False writes true back and bootstrap cannot return to
     overlay mode (#413)."""
+    monkeypatch.delenv("AWF_CLAUDE_AUTH_FORCE_COPY", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\n"
@@ -1140,6 +1183,39 @@ def test_persist_ignores_stale_force_copy_in_environ_when_env_file_stale(
 
     values = _read_env_file_values(env_file)
     assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
+
+
+@pytest.mark.unit
+def test_persist_host_force_copy_overrides_stale_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the compose env-file has a stale TIMESTAMP but the operator
+    explicitly sets AWF_CLAUDE_AUTH_FORCE_COPY=true in the shell (os.environ),
+    _persist_work_dir_propagation_result must honor the host override and
+    persist true (#413)."""
+    monkeypatch.setenv("AWF_CLAUDE_AUTH_FORCE_COPY", "true")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\n"
+        "AWF_CLAUDE_AUTH_FORCE_COPY=false\n"
+        "AWF_WORK_DIR_PROPAGATION_TIMESTAMP=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    environ_with_stale_false = {"AWF_CLAUDE_AUTH_FORCE_COPY": "false"}
+    bootstrap._persist_work_dir_propagation_result(
+        env_file, result, environ=environ_with_stale_false
+    )  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
 
 
 @pytest.mark.unit
