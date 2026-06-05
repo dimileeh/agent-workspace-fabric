@@ -142,10 +142,28 @@ _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_EVENT_TYPE = (
 )
 """Structured-log event for a deferred-sweep that failed without perturbing release."""
 
+_TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_REASON_CODE = (
+    "TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED"
+)
+"""Reason code for a scan-level deferred overlay-umount failure.
+
+Kept distinct from ``TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING`` (a normal lifecycle marker) so
+operators filtering structured logs on this reason code see only error events, not markers.
+"""
+
 _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED_EVENT_TYPE = (
     "worker.terminal_auth_overlay_unmount_retry_failed"
 )
 """Structured-log event for a per-candidate deferred-sweep failure (does not abort the scan)."""
+
+_TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED_REASON_CODE = (
+    "TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED"
+)
+"""Reason code for a per-candidate deferred overlay-umount failure.
+
+Kept distinct from ``TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING`` (a normal lifecycle marker) so
+operators filtering structured logs on this reason code see only error events, not markers.
+"""
 
 
 async def _maybe_expire_due_secret_leases(self: Any) -> None:
@@ -375,7 +393,7 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
         # rather than masked behind the truncated ``error`` string.
         _log.warning(
             _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_EVENT_TYPE,
-            reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_REASON_CODE,
             error_type=type(exc).__name__,
             error=str(exc)[:240],
             exc_info=True,
@@ -1213,7 +1231,7 @@ async def _handle_terminal_auth_overlay_unmount_retry_failure(
         workspace_id=candidate.workspace_id,
         status=candidate.status.value,
         compose_project_name=candidate.compose_project_name,
-        reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+        reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED_REASON_CODE,
         error_type=type(exc).__name__,
         error=str(exc)[:240],
         exc_info=True,

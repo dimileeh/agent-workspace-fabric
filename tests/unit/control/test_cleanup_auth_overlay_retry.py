@@ -309,6 +309,12 @@ async def test_release_resources_swallows_deferred_sweep_failure(
     assert [event for event, _ in log.warnings] == [
         "worker.terminal_auth_overlay_unmount_retry_scan_failed",
     ]
+    # The scan-level error carries its own dedicated reason code, kept distinct from the
+    # ``TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING`` lifecycle marker so log filters don't conflate them.
+    assert (
+        log.warnings[0][1]["reason_code"]
+        == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_REASON_CODE
+    )
     # The unexpected best-effort scan failure preserves its full traceback so it is
     # diagnosable rather than masked behind the truncated ``error`` string.
     assert log.warnings[0][1]["exc_info"] is True
@@ -552,7 +558,8 @@ async def test_retry_failure_handler_logs_warning(
     assert event == "worker.terminal_auth_overlay_unmount_retry_failed"
     assert fields["workspace_id"] == "ws_handler"
     assert (
-        fields["reason_code"] == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE
+        fields["reason_code"]
+        == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED_REASON_CODE
     )
     # The unexpected best-effort failure preserves its full traceback so it is
     # diagnosable rather than masked behind the truncated ``error`` string.
