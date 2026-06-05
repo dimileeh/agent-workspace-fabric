@@ -914,6 +914,24 @@ def _check_claude(
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    """Check whether Claude Code authentication signals are present.
+
+    Probes file-based (``~/.claude`` directory + ``~/.claude.json``) and
+    environment-based (``ANTHROPIC_API_KEY`` etc.) auth sources.  Reports
+    the isolation posture (overlay vs per-workspace copy) determined by
+    ``force_copy_isolation_requested`` and overlay path constraints.
+
+    When the effective ``environ`` carries ``AWF_WORK_DIR_BIND_PROPAGATION``
+    (set by bootstrap on non-propagating hosts or read from the compose
+    env-file by status), the value is attached as ``mount_propagation`` so
+    callers can correlate the readiness check with the bind-propagation
+    posture.
+
+    The force-copy and overlay-path-reserved-chars probes read the passed
+    ``environ`` (not ``os.environ``) because bootstrap folds the operator
+    override into the readiness environ dict; a default ``os.environ``
+    probe would miss it and overstate overlay isolation.
+    """
     # ``~/.claude`` is isolated per workspace via a shared read-only overlay base
     # + per-workspace writable upper when overlayfs is available, else a full
     # per-workspace copy. ``~/.claude.json`` is *always* a per-workspace copy

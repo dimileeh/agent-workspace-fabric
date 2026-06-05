@@ -264,7 +264,14 @@ class WorkDirPropagationResult:
 
 @dataclass(frozen=True)
 class PersistedPropagationPosture:
-    """Snapshot of the mount-propagation posture persisted to the compose env-file."""
+    """Snapshot of the mount-propagation posture persisted to the compose env-file.
+
+    Attributes:
+        propagation: The ``AWF_WORK_DIR_BIND_PROPAGATION`` value (``rshared`` / ``rprivate``).
+        force_copy: The ``AWF_CLAUDE_AUTH_FORCE_COPY`` value (``true`` / ``false``).
+        timestamp: ISO-8601 UTC timestamp of the persistence write
+            (``AWF_WORK_DIR_PROPAGATION_TIMESTAMP``); used for stale detection.
+    """
 
     propagation: str
     force_copy: str
