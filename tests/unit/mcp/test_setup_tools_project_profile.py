@@ -403,6 +403,68 @@ async def test_initialize_project_profile_value_error_preview_failure_does_not_s
 
 
 @pytest.mark.unit
+async def test_initialize_project_profile_payload_assembly_failure_is_structured(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    leaked_detail = "/srv/awf/internal/onboarding-preview contains secret refs"
+    preview = SimpleNamespace(
+        path=project,
+        draft=SimpleNamespace(template="generic"),
+        to_dict=lambda: {
+            "path": str(project),
+            "inspection": {"detected_template": "generic"},
+            "draft": {"template": "generic", "yaml": "name: generic\n"},
+            "diagnostics": {},
+        },
+    )
+
+    def fail_payload_assembly(**_kwargs: Any) -> dict[str, Any]:
+        raise AttributeError(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "preview_project_onboarding", lambda *_a, **_k: preview)
+    monkeypatch.setattr(
+        setup_tools,
+        "_init_project_onboarding_payload",
+        fail_payload_assembly,
+    )
+    caplog.set_level(logging.ERROR, logger="awf.mcp.setup_tools")
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "template": "generic"},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_FAILED"
+    assert payload["message"] == "could not build onboarding payload"
+    assert payload["detail"] == {
+        "project_path": str(project.resolve()),
+        "mode": "preview",
+    }
+    assert leaked_detail not in rendered
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "awf.mcp.setup_tools"
+        and record.message == "could not build project onboarding MCP payload"
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].project_path == str(project.resolve())
+    assert records[0].mode == "preview"
+
+
+@pytest.mark.unit
 async def test_initialize_project_profile_existing_profile_probe_failure_logs_probe_context(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

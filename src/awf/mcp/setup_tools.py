@@ -641,16 +641,32 @@ def _initialize_project_profile_result(
             )
 
     mode = "write" if write_profile else "preview"
-    payload = _init_project_onboarding_payload(
-        preview=preview,
-        existing_profile_path=existing_profile_path,
-        written_path=written_path,
-        service_status={"service": "awf", "status": "not_checked", "source": "mcp"},
-        doctor_status="not_checked",
-        local_checks_ready=False,
-        guided=False,
-        mode=mode,
-    )
+    try:
+        payload = _init_project_onboarding_payload(
+            preview=preview,
+            existing_profile_path=existing_profile_path,
+            written_path=written_path,
+            service_status={
+                "service": "awf",
+                "status": "not_checked",
+                "source": "mcp",
+            },
+            doctor_status="not_checked",
+            local_checks_ready=False,
+            guided=False,
+            mode=mode,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "could not build project onboarding MCP payload",
+            extra={"project_path": str(repository), "mode": mode},
+        )
+        return _error_result(
+            safe_result,
+            PROJECT_INIT_FAILED,
+            "could not build onboarding payload",
+            detail={"project_path": str(repository), "mode": mode},
+        )
     return safe_result(cast(dict[str, Any], payload))
 
 

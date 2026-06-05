@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Onboarding Payload Guard
+
+### Problem Statement And Scope
+
+The review reports that `_initialize_project_profile_result` guards existing
+profile probing, onboarding preview, and profile writing, but calls
+`_init_project_onboarding_payload(...)` outside any defensive handler. An
+unexpected preview shape or payload-builder failure could therefore escape the
+MCP tool instead of returning a structured project-init error response.
+
+Scope is limited to wrapping project-profile onboarding payload assembly and
+adding focused regression coverage. Existing success payloads, write behavior,
+and earlier error handling stay unchanged.
+
+### Requirements Checklist
+
+- Preserve successful preview/write project-profile responses.
+- Convert unexpected onboarding payload assembly failures into
+  `PROJECT_INIT_FAILED` MCP errors.
+- Keep returned details safe and generic with only project path and mode.
+- Log the assembly failure with project path and mode context.
+- Add focused regression coverage for the repaired failure path.
+
+### Implementation Steps
+
+1. Add a focused failing regression that makes onboarding payload assembly
+   raise after preview succeeds.
+2. Wrap `_init_project_onboarding_payload(...)` in a defensive handler.
+3. Return a structured `_error_result(...)` with safe project path and mode
+   details on assembly failure.
+4. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_payload_assembly_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Project Profile Message And Bridge Smoke Test
 
 ### Problem Statement And Scope

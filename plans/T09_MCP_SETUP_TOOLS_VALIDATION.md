@@ -53,6 +53,52 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Onboarding Payload Guard
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve successful preview/write project-profile responses: Complete.
+- Convert unexpected onboarding payload assembly failures into
+  `PROJECT_INIT_FAILED` MCP errors: Complete.
+- Keep returned details safe and generic with only project path and mode:
+  Complete.
+- Log the assembly failure with project path and mode context: Complete.
+- Add focused regression coverage for the repaired failure path: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_project_profile.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_payload_assembly_failure_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `awf_initialize_project_profile` raised a raw `ToolError` containing the
+  payload assembly exception text.
+- Regression test after the implementation change: 1 passed.
+- Focused project-profile MCP test file: 12 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Project Profile Message And Bridge Smoke Test
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
