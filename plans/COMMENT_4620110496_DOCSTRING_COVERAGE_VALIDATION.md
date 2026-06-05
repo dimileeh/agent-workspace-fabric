@@ -331,7 +331,7 @@ Evidence after Iteration 14:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_resolves_omitted_compose_env_file_before_subprocess -q`
   passed: `1 passed in 0.43s`.
 
-## Current Recheck
+## Prior Recheck
 
 Later exact-MCP and shadowed compose-env redaction commits expanded the
 PR-added definition count, so the focused added-line AST audit was rerun
@@ -343,6 +343,30 @@ Evidence after the current recheck:
 - Focused added-line AST audit over `origin/development...HEAD`:
   `changed_python_files=23`, `added_defs=252`,
   `missing_docstrings_on_added_defs=0`.
+
+## Iteration 15
+
+Later multiline compose-env artifact redaction commits expanded the PR's Python
+diff again. The focused added-line AST audit reported three PR-added MCP
+artifact tests without docstrings in
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py` and
+`tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`. This
+iteration added concise behavior-neutral docstrings only.
+
+Evidence after Iteration 15:
+
+- Focused added-line AST audit over `origin/development...HEAD` before this
+  iteration:
+  `changed_python_files=26`, `added_defs=268`,
+  `missing_docstrings_on_added_defs=3`.
+- Focused added-line AST audit over `origin/development...HEAD` after this
+  iteration:
+  `changed_python_files=26`, `added_defs=266`,
+  `missing_docstrings_on_added_defs=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact::test_binary_artifact_containing_secret_is_blocked tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact::test_binary_artifact_containing_provider_env_secret_is_blocked tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestReadWorkspaceArtifact::test_redaction_expansion_triggers_oversized -q`
+  passed: `3 passed in 3.83s`.
 
 ## Gaps
 

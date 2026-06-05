@@ -217,12 +217,19 @@ docstring:
 Add a concise behavior-neutral docstring to that helper only, re-run the
 focused audit, and run narrow Ruff plus the affected targeted service-log test.
 
-### Current Recheck
+### Iteration 15 Update
 
-Later exact-MCP and shadowed compose-env redaction commits expanded the PR's
-added definition count, but the same focused added-line audit now reports zero
-PR-added definitions without docstrings. No additional code changes are needed
-for this review-level docstring warning.
+Later multiline compose-env artifact redaction commits expanded the PR's
+Python diff and the focused added-line audit now reports three PR-added test
+methods without docstrings:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact.test_binary_artifact_containing_secret_is_blocked`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact.test_binary_artifact_containing_provider_env_secret_is_blocked`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestReadWorkspaceArtifact.test_redaction_expansion_triggers_oversized`
+
+Add concise behavior-neutral docstrings to those tests only, re-run the
+focused audit, and run narrow Ruff plus the affected targeted MCP artifact
+tests.
 
 ## Verification Commands and Pass Criteria
 
@@ -231,6 +238,7 @@ for this review-level docstring warning.
 - `uv run --python 3.12 --extra dev ruff check <touched Python files>` passes.
 - Targeted tests pass:
   `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_log_redaction.py tests/unit/service/test_support_bundle.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py -q`
+  or the narrower targeted tests for the latest edited docstring-only methods.
 
 Full AWF/GitHub validation, full coverage, whole-repository tests, frontend
 builds, OpenAPI drift checks, and any broad external docstring coverage gate

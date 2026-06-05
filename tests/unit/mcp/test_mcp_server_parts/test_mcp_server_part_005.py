@@ -61,6 +61,7 @@ class TestReadWorkspaceArtifact:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Verify redaction expansion still respects artifact size limits."""
         secret = "ABCD"
         settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
         service = WorkspaceService(factory, settings=settings)

@@ -960,6 +960,7 @@ class TestReadWorkspaceArtifact:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Verify binary artifacts containing configured secrets are blocked."""
         secret = "test-secret-token-abc"
         settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
         service = WorkspaceService(factory, settings=settings)
@@ -994,6 +995,7 @@ class TestReadWorkspaceArtifact:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
+        """Verify binary artifacts containing provider env secrets are blocked."""
         secret = "env-secret-token-abc"
         monkeypatch.setenv("OPENAI_API_KEY", secret)
         settings = Settings(_env_file=None, work_dir=str(tmp_path))
