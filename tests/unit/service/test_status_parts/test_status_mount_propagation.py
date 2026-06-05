@@ -106,6 +106,20 @@ def test_mount_propagation_check_force_copy_on() -> None:
 
 
 @pytest.mark.unit
+def test_mount_propagation_check_force_copy_whitespace_trimmed() -> None:
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={
+            "AWF_WORK_DIR_BIND_PROPAGATION": "rprivate",
+            "AWF_CLAUDE_AUTH_FORCE_COPY": " yes ",
+        },
+        compose_env_file=None,
+    )
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["force_copy"] is True
+
+
+@pytest.mark.unit
 def test_mount_propagation_check_force_copy_none_when_missing() -> None:
     payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
         environ={"AWF_WORK_DIR_BIND_PROPAGATION": "rshared"},

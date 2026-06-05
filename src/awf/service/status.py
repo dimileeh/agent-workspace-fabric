@@ -133,7 +133,7 @@ def _mount_propagation_check_payload(
 
     if propagation is not None:
         if force_copy_raw is not None:
-            fc: bool | None = force_copy_raw.lower() in {"1", "on", "true", "yes"}
+            fc: bool | None = force_copy_raw.strip().lower() in {"1", "on", "true", "yes"}
         else:
             fc = None
         return {
