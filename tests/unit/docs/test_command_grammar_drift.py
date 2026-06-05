@@ -239,14 +239,24 @@ def _split_tail(tail: str) -> list[str]:
 def _is_standalone(line: str, command: str) -> bool:
     """True if ``line`` invokes ``command`` as a standalone entrypoint.
 
-    Tokenised comment-aware (via :func:`_split_tail`) so an annotated example —
-    ``awf setup  # first-time setup`` — still counts as the bare entrypoint
-    instead of triggering a spurious R1 failure. Trailing flags/args
+    Tokenised comment-aware (``shlex.split(..., comments=True)``) so an annotated
+    example — ``awf setup  # first-time setup`` — still counts as the bare
+    entrypoint instead of triggering a spurious R1 failure. Trailing flags/args
     (``awf setup --x``) are intentionally *not* standalone, preserving R1's
     "documented as a standalone entrypoint" intent rather than relaxing it to any
     invocation.
+
+    Unlike :func:`_split_tail` (which stops at the first shell operator so R2/R3
+    don't read a chained continuation's tokens as init arguments), R1 must *not*
+    truncate at operators: a chained line like ``awf setup && awf start`` is two
+    commands, not a standalone ``awf setup``. Comparing the full tokenisation
+    keeps such chained examples from satisfying R1 in place of a bare entrypoint.
     """
-    return _split_tail(line) == command.split()
+    try:
+        tokens = shlex.split(line, comments=True)
+    except ValueError:
+        tokens = line.split()
+    return tokens == command.split()
 
 
 def _looks_pathlike(token: str) -> bool:
@@ -534,6 +544,13 @@ def test_helper_standalone_command_ignores_inline_comment() -> None:
     assert _is_standalone("awf start", "awf start")
     assert not _is_standalone("awf setup --source-checkout .", "awf setup")
     assert not _is_standalone("awf service status", "awf start")
+    # A chained line is two commands, not a standalone entrypoint: it must not
+    # satisfy R1 in place of a bare `awf setup` / `awf start` line (operator
+    # spaced, glued, or as the continuation head).
+    assert not _is_standalone("awf setup && awf start", "awf setup")
+    assert not _is_standalone("awf setup && awf start", "awf start")
+    assert not _is_standalone("awf setup; awf start", "awf setup")
+    assert not _is_standalone("awf setup&&awf start", "awf setup")
 
 
 def test_helper_extracts_inline_command_mentions() -> None:
