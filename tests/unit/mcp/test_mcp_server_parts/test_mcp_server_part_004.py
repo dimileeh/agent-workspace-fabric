@@ -955,51 +955,6 @@ class TestReadWorkspaceArtifact:
         assert result["error_code"] == "ARTIFACT_BLOCKED"
 
     @pytest.mark.unit
-    async def test_redaction_expansion_triggers_oversized(
-        self,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        secret = "ABCD"
-        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
-        service = WorkspaceService(factory, settings=settings)
-        mcp = build_mcp_server(service=service, settings=settings)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/app.git",
-                branch_base="main",
-                task_title="Artifact redaction oversize",
-                task_prompt="Read artifact.",
-                agent="codex",
-                test_commands=[],
-            )
-            await session.commit()
-        artifact_dir = tmp_path / "artifacts" / workspace.id
-        artifact_dir.mkdir(parents=True)
-        limit_bytes = 100
-        payload = (secret * (limit_bytes // len(secret))).encode()
-        (artifact_dir / "secret.txt").write_bytes(payload)
-
-        result = await mcp.call_tool(
-            "awf_read_workspace_artifact",
-            {
-                "workspace_id": workspace.id,
-                "relative_path": "secret.txt",
-                "limit_bytes": limit_bytes,
-            },
-        )
-        assert isinstance(result, CallToolResult)
-        assert result.isError is True
-        assert result.structuredContent is not None
-        assert result.structuredContent["error_code"] == "ARTIFACT_OVERSIZED"
-        assert result.structuredContent.get("detail") is not None
-        assert isinstance(result.structuredContent["detail"], dict)
-        assert result.structuredContent["detail"]["limit_bytes"] == limit_bytes
-        assert result.structuredContent["detail"]["actual_bytes"] == (
-            (limit_bytes // len(secret)) * len("<redacted>")
-        )
-
-    @pytest.mark.unit
     async def test_binary_artifact_containing_secret_is_blocked(
         self,
         factory: async_sessionmaker[AsyncSession],

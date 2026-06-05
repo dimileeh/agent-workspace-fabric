@@ -2293,3 +2293,59 @@ uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py
 uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py tests/unit/common/test_token_patterns.py
 # All checks passed!
 ```
+
+## PR 391 CI Failure Repair Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: the oversized artifact regression now uses separated exact-secret
+  occurrences so redaction replaces each span with `REDACTION_MARKER` and the
+  redacted content expands beyond `limit_bytes`.
+- Complete: MCP/docs surface-introspection tests now pass
+  `Settings(_env_file=None)` to `build_mcp_server()` instead of mock settings.
+- Complete: `test_mcp_server_part_004.py` is under the configured first-party
+  file line limit after moving the oversized artifact regression; the moved
+  coverage remains in `test_mcp_server_part_005.py`.
+- Complete: the four failures from CI run `26983719773` pass in the focused
+  repro on this workspace.
+- Complete: focused adjacent tests, ruff check, and ruff format check passed.
+  Broad AWF/GitHub validation, full coverage, OpenAPI drift, and frontend
+  builds were not run locally; AWF owns those gates after agent completion.
+
+Additional files changed:
+
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py`
+- `tests/unit/mcp/test_mcp_client_parity_docs.py`
+- `tests/unit/docs/test_pr_monitor_adoption_docs.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact::test_redaction_expansion_triggers_oversized tests/unit/mcp/test_mcp_client_parity_docs.py::test_parity_matrix_matches_real_surfaces tests/unit/docs/test_pr_monitor_adoption_docs.py::test_adoption_docs_publish_real_rest_cli_and_mcp_names tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+# 4 failed: adjacent secret spans coalesced to one redaction marker; mock settings caused service settings TypeError; part 004 had 1510 lines.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestReadWorkspaceArtifact::test_redaction_expansion_triggers_oversized tests/unit/mcp/test_mcp_client_parity_docs.py::test_parity_matrix_matches_real_surfaces tests/unit/docs/test_pr_monitor_adoption_docs.py::test_adoption_docs_publish_real_rest_cli_and_mcp_names tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+# 4 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py tests/unit/mcp/test_mcp_client_parity_docs.py::test_parity_matrix_matches_real_surfaces tests/unit/docs/test_pr_monitor_adoption_docs.py::test_adoption_docs_publish_real_rest_cli_and_mcp_names -q
+# 59 passed
+
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py tests/unit/mcp/test_mcp_client_parity_docs.py tests/unit/docs/test_pr_monitor_adoption_docs.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py tests/unit/mcp/test_mcp_client_parity_docs.py tests/unit/docs/test_pr_monitor_adoption_docs.py
+# 4 files already formatted
+
+wc -l tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# 1465 tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
+# 1476 tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+```

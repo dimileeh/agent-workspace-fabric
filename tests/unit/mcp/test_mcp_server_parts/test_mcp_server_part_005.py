@@ -1,4 +1,4 @@
-"""MCP workspace log tool behaviour tests."""
+"""MCP workspace artifact and log tool behaviour tests."""
 
 from __future__ import annotations
 
@@ -50,6 +50,57 @@ def _log_redaction_context_for_settings(settings: Settings) -> int:
         service_settings=service_settings,
     )
     return metrics_tools_mod._workspace_log_redaction_context_bytes(extra_secrets)  # noqa: SLF001
+
+
+class TestReadWorkspaceArtifact:
+    """Coverage for MCP workspace artifact content reads."""
+
+    @pytest.mark.unit
+    async def test_redaction_expansion_triggers_oversized(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "ABCD"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact redaction oversize",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        limit_bytes = 100
+        occurrences = 20
+        payload = ("x" + secret).encode() * occurrences
+        assert len(payload) == limit_bytes
+        (artifact_dir / "secret.txt").write_bytes(payload)
+
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "secret.txt",
+                "limit_bytes": limit_bytes,
+            },
+        )
+
+        expected_redacted_size = occurrences * (len("x") + len(REDACTION_MARKER))
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "ARTIFACT_OVERSIZED"
+        assert result.structuredContent.get("detail") is not None
+        assert isinstance(result.structuredContent["detail"], dict)
+        assert result.structuredContent["detail"]["limit_bytes"] == limit_bytes
+        assert result.structuredContent["detail"]["actual_bytes"] == expected_redacted_size
 
 
 class TestWorkspaceLogs:

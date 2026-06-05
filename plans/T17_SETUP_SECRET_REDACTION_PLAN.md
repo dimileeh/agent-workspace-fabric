@@ -1887,3 +1887,56 @@ uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py
 uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_token_assignment_pattern_guards_multiline_private_key_branch tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values -q --tb=short -ra
 uv run --python 3.12 --extra dev ruff check src/awf/common/token_patterns.py tests/unit/common/test_token_patterns.py
 ```
+
+## PR 391 CI Failure Repair Plan
+
+### Problem Statement And Scope
+
+GitHub Actions CI run `26983719773` failed in `python-full-coverage` because
+four tests failed while total coverage still exceeded the required threshold:
+
+- `TestReadWorkspaceArtifact::test_redaction_expansion_triggers_oversized`
+  expected an oversized post-redaction artifact, but its adjacent repeated
+  secret bytes are correctly coalesced into one redaction marker and shrink.
+- MCP/docs surface-introspection tests pass `MagicMock()` as settings, but
+  `build_mcp_server()` now resolves service settings and needs a real
+  `Settings` object for that path.
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py` is 1510
+  lines, over the first-party file limit.
+
+This repair is limited to test correctness, test placement, and focused
+verification. It does not change broad validation ownership, branch
+management, pushing, workflow files, quality gates, or unrelated source logic.
+
+### Requirements Checklist
+
+- The oversized artifact regression must use input whose redacted content
+  expands past `limit_bytes` because separate secret spans are replaced by
+  separate redaction markers.
+- MCP/docs surface-introspection tests must construct the MCP server with real
+  `Settings(_env_file=None)` instead of mock settings.
+- `test_mcp_server_part_004.py` must fall back under the configured line limit
+  without deleting behavioral coverage.
+- The previously failing four-test focused repro must pass.
+- Run only focused tests and narrow lint checks for touched files; leave broad
+  AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Move the oversized artifact regression out of
+   `test_mcp_server_part_004.py` into the existing adjacent MCP part file so
+   part 004 is below the line limit.
+2. Update the moved regression payload to include separators between exact
+   secret occurrences and assert the resulting expanded redacted byte length.
+3. Replace bare mock MCP settings in the surface-introspection tests with
+   `Settings(_env_file=None)`.
+4. Re-run the four-test focused repro plus targeted adjacent tests and narrow
+   lint for touched tests.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestReadWorkspaceArtifact::test_redaction_expansion_triggers_oversized tests/unit/mcp/test_mcp_client_parity_docs.py::test_parity_matrix_matches_real_surfaces tests/unit/docs/test_pr_monitor_adoption_docs.py::test_adoption_docs_publish_real_rest_cli_and_mcp_names tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py tests/unit/mcp/test_mcp_client_parity_docs.py::test_parity_matrix_matches_real_surfaces tests/unit/docs/test_pr_monitor_adoption_docs.py::test_adoption_docs_publish_real_rest_cli_and_mcp_names -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py tests/unit/mcp/test_mcp_client_parity_docs.py tests/unit/docs/test_pr_monitor_adoption_docs.py
+```
