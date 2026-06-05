@@ -217,10 +217,15 @@ def _looks_pathlike(token: str) -> bool:
 def _init_arg_status(line: str) -> str | None:
     """Classify an ``awf init`` command line.
 
-    Returns ``"ok"`` when a path/repo argument follows, ``"bare"`` when nothing
-    follows, ``"flag-only"`` when only flags follow (no path), or ``None`` when
-    the line does not invoke ``awf init`` (e.g. ``awf service bootstrap`` or
-    ``awf profile init``).
+    Returns ``"ok"`` when a path/repo argument follows, ``"help"`` when only a
+    help flag follows (a legitimate non-offender that nonetheless demonstrates no
+    path), ``"bare"`` when nothing follows, ``"flag-only"`` when only non-help
+    flags follow (no path), or ``None`` when the line does not invoke ``awf init``
+    (e.g. ``awf service bootstrap`` or ``awf profile init``).
+
+    ``"help"`` is kept distinct from ``"ok"`` so a help-only invocation is not
+    flagged as a missing-path offender, yet also cannot stand in for the
+    path-bearing example each first-run init context must demonstrate.
     """
     match = re.search(r"(?<![\w-])awf init\b(?P<tail>.*)", line)
     if match is None:
@@ -229,7 +234,7 @@ def _init_arg_status(line: str) -> str | None:
     if not tokens:
         return "bare"
     if any(tok in HELP_FLAGS for tok in tokens):
-        return "ok"
+        return "help"
 
     # Scan every token (not just the first) so a path that follows leading flags
     # — e.g. ``awf init --yes .`` — is still recognised. Skip flags and the value
@@ -354,7 +359,10 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("awf init --write-profile --yes <path>") == "ok"
     assert _init_arg_status("awf init <path>") == "ok"
     assert _init_arg_status('awf init "$HOME/awf-eval-project"') == "ok"
-    assert _init_arg_status("awf init --help") == "ok"
+    # Help-only invocations are a distinct status: not a missing-path offender,
+    # but not a path example a first-run init context can lean on either.
+    assert _init_arg_status("awf init --help") == "help"
+    assert _init_arg_status("awf init -h") == "help"
     # The legitimate lower-level command and project-init alias are not flagged.
     assert _init_arg_status("awf service bootstrap") is None
     assert _init_arg_status("awf profile init . --write") is None
@@ -481,6 +489,11 @@ def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     assert _bootstrap_offenders("Run `awf service bootstrap` to start Postgres.") == []
     assert _bootstrap_offenders("awf init .") == []
     assert _bootstrap_offenders('awf init "$HOME/awf-eval-project"') == []
+    # R2 reads `awf init --help` as a non-offender (so help snippets don't trip a
+    # false drift failure), but it must not count as the path example each
+    # first-run init context owes: only a path-bearing status ("ok") does.
+    assert _init_arg_status("awf init --help") not in (None, "bare", "flag-only")
+    assert _init_arg_status("awf init --help") != "ok"
     # A *bare* no-path `awf init` (no bootstrap comment) is R2's offender, not
     # R3's: the fenced-line pattern requires an explicit `# ...bootstrap...`
     # comment, so R3 stays complementary instead of double-flagging the same
@@ -523,7 +536,9 @@ def test_documented_awf_init_always_takes_a_path() -> None:
         text = _read(rel_path)
         for line in _fenced_command_lines(text) + _inline_command_mentions(text):
             status = _init_arg_status(line)
-            if status is None:
+            if status is None or status == "help":
+                # `awf init --help`/`-h` carries no path but is a legitimate
+                # invocation, so it is neither an offender nor a path example.
                 continue
             if status != "ok":
                 offenders.append(f"{rel_path}: `{line}` ({status})")
