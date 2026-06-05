@@ -149,6 +149,7 @@ class _GitPushResult:
             or self.reason_code
             in {
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
                 _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
                 _PRE_EXISTING_DIRTY_WORKTREE_REASON,
                 _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,

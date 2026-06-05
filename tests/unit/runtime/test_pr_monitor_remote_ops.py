@@ -69,6 +69,14 @@ def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() ->
 
 
 @pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_reparent_failed_as_terminal() -> None:
+    """Re-parent failure leaves HEAD on a non-descendant commit with no rollback, so it
+    must end monitor recovery rather than let a later iteration push the orphaning HEAD
+    and mask the error as a non-fast-forward (PR #422 thread)."""
+    assert _make_push_result("PRE_PUSH_VALIDATION_REPARENT_FAILED").terminal_monitor_failure is True
+
+
+@pytest.mark.unit
 def test_git_push_failure_outcome_defaults_to_git_push_failed() -> None:
     """Unknown push failures should retain the default push-failed outcome."""
     assert _git_push_failure_outcome(_make_push_result("UNKNOWN_FAILURE")) == "git_push_failed"
