@@ -1085,10 +1085,10 @@ def _client_instruction_reason_coded_next_steps(
 
 def _client_instruction_reason_coded_next_step(step: str, *, command: str) -> str:
     if "awf setup --dry-run" in step:
-        return step.replace("awf setup --dry-run", command)
+        return step.replace("awf setup --dry-run", command, 1)
     if "awf setup --client" in step:
-        return step.replace("awf setup --client", command)
-    return step.replace("awf setup", command)
+        return step.replace("awf setup --client", command, 1)
+    return step.replace("awf setup", command, 1)
 
 
 def _client_instruction_command(clients: list[str], *, source_checkout: Path | None) -> str:

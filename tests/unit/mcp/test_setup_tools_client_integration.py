@@ -17,6 +17,39 @@ from tests.unit.mcp.setup_tools_test_helpers import _json_text, _payload, _setti
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("step", "command", "expected"),
+    [
+        (
+            "Run awf setup --dry-run, then compare awf setup --dry-run output.",
+            "awf setup --dry-run --source-checkout '/tmp/source'",
+            "Run awf setup --dry-run --source-checkout '/tmp/source', "
+            "then compare awf setup --dry-run output.",
+        ),
+        (
+            "Run awf setup --client once; awf setup --client remains as an example.",
+            "awf setup --client claude --source-checkout '/tmp/source'",
+            "Run awf setup --client claude --source-checkout '/tmp/source' once; "
+            "awf setup --client remains as an example.",
+        ),
+        (
+            "Run awf setup now; keep awf setup in the explanatory tail.",
+            "awf setup --client codex",
+            "Run awf setup --client codex now; keep awf setup in the explanatory tail.",
+        ),
+    ],
+)
+def test_client_instruction_reason_coded_next_step_rewrites_first_command_only(
+    step: str,
+    command: str,
+    expected: str,
+) -> None:
+    from awf.mcp import setup_tools
+
+    assert setup_tools._client_instruction_reason_coded_next_step(step, command=command) == expected
+
+
+@pytest.mark.unit
 async def test_client_integration_instructions_preserves_explicit_empty_clients(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
