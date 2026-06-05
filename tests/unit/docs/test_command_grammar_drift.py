@@ -452,11 +452,18 @@ def test_no_path_init_is_not_described_as_service_bootstrap() -> None:
 
 
 def test_mocked_smoke_examples_use_project_flag() -> None:
-    """R4: smoke examples targeting a project use `--project` + `--mocked-local`."""
+    """R4: smoke examples targeting a project use `--project` + `--mocked-local`.
+
+    Covers both fenced examples and inline backticked mentions in prose/list
+    steps (e.g. the `awf smoke run --project ... --mocked-local` rerun step in
+    docs/UPGRADE.md) so a bare-positional-path or missing-`--project` regression
+    is flagged in either shape, mirroring R2's fenced+inline scan.
+    """
     offenders: list[str] = []
     mocked_examples_seen = 0
     for rel_path in FIRST_RUN_DOCS:
-        for line in _fenced_command_lines(_read(rel_path)):
+        text = _read(rel_path)
+        for line in _fenced_command_lines(text) + _inline_command_mentions(text):
             invocation = _parse_smoke_invocation(line)
             if invocation is None:
                 continue
