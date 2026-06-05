@@ -196,6 +196,7 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
         encoding="utf-8",
     )
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
     release_rollback_section = rollback_section.split(
         "For release-installed lanes",
@@ -205,6 +206,10 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
         maxsplit=1,
     )[0]
     cases = (
+        (
+            "Quickstart Lane 1",
+            _quickstart_upgrade_section(quickstart_text, "## Lane 1: uv tool or pipx"),
+        ),
         ("Upgrade uv tool", _markdown_section(upgrade_text, "## uv tool")),
         ("Upgrade pipx", _markdown_section(upgrade_text, "## pipx")),
         ("Upgrade virtualenv / pip", _markdown_section(upgrade_text, "## Virtualenv / pip")),

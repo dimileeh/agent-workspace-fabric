@@ -71,6 +71,12 @@ PACKAGE_ENV_READ_LINES = {
         "AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | "
         'head -n 1)"'
     ),
+    "AWF_DATABASE_URL": (
+        "AWF_PERSISTED_DATABASE_URL=\"$(sed -n 's/^[[:space:]]*"
+        "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        "AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | "
+        'head -n 1)"'
+    ),
 }
 PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES = {
     "AWF_API_TOKEN": (
@@ -80,6 +86,10 @@ PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES = {
     "AWF_POSTGRES_PASSWORD": (
         'AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment '
         '"$AWF_PERSISTED_POSTGRES_PASSWORD")"'
+    ),
+    "AWF_DATABASE_URL": (
+        'AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_DATABASE_URL")"'
     ),
 }
 PACKAGE_ENV_QUOTE_STRIP_LINES = {
@@ -109,6 +119,22 @@ PACKAGE_ENV_QUOTE_STRIP_LINES = {
         "  \\'*\\')",
         '    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"',
         '    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}"',
+        "    ;;",
+        "esac",
+    ),
+    "AWF_DATABASE_URL": (
+        'case "$AWF_PERSISTED_DATABASE_URL" in',
+        '  \\"*\\")',
+        '    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\\"}"',
+        '    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\\"}"',
+        (
+            '    AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv '
+            '"$AWF_PERSISTED_DATABASE_URL")"'
+        ),
+        "    ;;",
+        "  \\'*\\')",
+        '    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\\\'}"',
+        '    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\\\'}"',
         "    ;;",
         "esac",
     ),
@@ -838,6 +864,19 @@ def _assert_package_upgrade_restores_service_env(
     unsafe_password_default_line = (
         'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     )
+    database_url_read_line = PACKAGE_ENV_READ_LINES["AWF_DATABASE_URL"]
+    database_url_inline_comment_strip_line = PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES[
+        "AWF_DATABASE_URL"
+    ]
+    database_url_quote_strip_lines = PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_DATABASE_URL"]
+    database_url_guard_line = 'if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then'
+    database_url_persisted_export_line = '  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"'
+    database_url_else_line = "else"
+    database_url_require_line = (
+        '  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for '
+        f'the running local Core or persist it in .env before {lifecycle}}}"'
+    )
+    database_url_shell_export_line = "  export AWF_DATABASE_URL"
     start_line = "\nawf start\n"
 
     if upgrade_line is not None:
@@ -885,6 +924,24 @@ def _assert_package_upgrade_restores_service_env(
     )
     assert password_shell_export_line in section, (
         f"{label} must export restored AWF_POSTGRES_PASSWORD"
+    )
+    assert database_url_read_line in section, f"{label} must read persisted AWF_DATABASE_URL"
+    assert database_url_inline_comment_strip_line in section, (
+        f"{label} must strip unquoted AWF_DATABASE_URL inline comments"
+    )
+    for database_url_quote_strip_line in database_url_quote_strip_lines:
+        assert database_url_quote_strip_line in section, (
+            f"{label} must strip quoted AWF_DATABASE_URL"
+        )
+    assert database_url_guard_line in section, f"{label} must branch on persisted AWF_DATABASE_URL"
+    assert database_url_persisted_export_line in section, (
+        f"{label} must export persisted AWF_DATABASE_URL"
+    )
+    assert database_url_require_line in section, (
+        f"{label} must require the existing AWF_DATABASE_URL"
+    )
+    assert database_url_shell_export_line in section, (
+        f"{label} must export restored AWF_DATABASE_URL"
     )
     assert start_line in section, f"{label} is missing restart command"
 
@@ -982,7 +1039,60 @@ def _assert_package_upgrade_restores_service_env(
         password_shell_export_index,
         label,
     )
-    start_index = _required_index(section, start_line, label, start=password_guard_end_index)
+    database_url_read_index = _shell_line_index(
+        section,
+        database_url_read_line,
+        label,
+        password_guard_end_index,
+    )
+    database_url_inline_comment_strip_index = _shell_line_index(
+        section,
+        database_url_inline_comment_strip_line,
+        label,
+        database_url_read_index,
+    )
+    database_url_quote_strip_indexes = _assert_package_env_quote_strip_lines(
+        label=label,
+        section=section,
+        lines=database_url_quote_strip_lines,
+        start=database_url_inline_comment_strip_index,
+    )
+    database_url_guard_index = _shell_line_index(
+        section,
+        database_url_guard_line,
+        label,
+        database_url_quote_strip_indexes[-1],
+    )
+    database_url_persisted_export_index = _shell_line_index(
+        section,
+        database_url_persisted_export_line,
+        label,
+        database_url_guard_index,
+    )
+    database_url_else_index = _shell_line_index(
+        section,
+        database_url_else_line,
+        label,
+        database_url_persisted_export_index,
+    )
+    database_url_require_index = _shell_line_index(
+        section,
+        database_url_require_line,
+        label,
+        database_url_else_index,
+    )
+    database_url_shell_export_index = _shell_line_index(
+        section,
+        database_url_shell_export_line,
+        label,
+        database_url_require_index,
+    )
+    database_url_guard_end_index = _shell_closing_fi_index(
+        section,
+        database_url_shell_export_index,
+        label,
+    )
+    start_index = _required_index(section, start_line, label, start=database_url_guard_end_index)
     assert (
         upgrade_index
         < decode_start_index
@@ -1009,6 +1119,16 @@ def _assert_package_upgrade_restores_service_env(
         < password_require_index
         < password_shell_export_index
         < password_guard_end_index
+        < database_url_read_index
+        < database_url_inline_comment_strip_index
+        < min(database_url_quote_strip_indexes)
+        <= max(database_url_quote_strip_indexes)
+        < database_url_guard_index
+        < database_url_persisted_export_index
+        < database_url_else_index
+        < database_url_require_index
+        < database_url_shell_export_index
+        < database_url_guard_end_index
         < start_index
     ), f"{label} must restore missing service env before restart"
 

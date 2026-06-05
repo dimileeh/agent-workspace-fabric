@@ -686,6 +686,21 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 git diff --check
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HYS4i`: the Quickstart
+package-lane upgrade restore block must restore the persisted
+`AWF_DATABASE_URL` before `awf start`, matching `docs/UPGRADE.md`, so a stale
+shell `AWF_DATABASE_URL` cannot override the `.env` value persisted during
+first run.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HYS4i`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_package_upgrade_docs_restore_service_env_before_start tests/unit/docs/test_public_docs_lifecycle_status.py::test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+git diff --check
+```
+
 CI repair iteration for PR #390:
 
 - Inspect the current PR Actions run with `gh pr checks 390` and focused job

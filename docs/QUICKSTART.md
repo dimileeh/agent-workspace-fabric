@@ -146,11 +146,11 @@ uv tool upgrade agent-workspace-fabric
 pipx upgrade agent-workspace-fabric
 ```
 
-Then restart AWF and rerun smoke. If `AWF_API_TOKEN` and
-`AWF_POSTGRES_PASSWORD` are not already persisted in `.env`, restore them in
-this shell before restarting. Restore the same `AWF_API_TOKEN` and
-`AWF_POSTGRES_PASSWORD` used by the running local Core; do not generate
-replacement service secrets during upgrade:
+Then restart AWF and rerun smoke. If `AWF_API_TOKEN`,
+`AWF_POSTGRES_PASSWORD`, and `AWF_DATABASE_URL` are not already persisted in
+`.env`, restore them in this shell before restarting. Restore the same
+`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and `AWF_DATABASE_URL` used by the
+running local Core; do not generate replacement service secrets during upgrade:
 
 ```bash
 awf_decode_double_quoted_dotenv() {
@@ -202,6 +202,25 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
+fi
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
+case "$AWF_PERSISTED_DATABASE_URL" in
+  \"*\")
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+    AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+    AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+    ;;
+esac
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  export AWF_DATABASE_URL
 fi
 awf start
 awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
