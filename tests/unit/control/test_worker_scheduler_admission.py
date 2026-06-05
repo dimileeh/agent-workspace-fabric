@@ -469,6 +469,37 @@ class _EpochCapturingProvisioner:
         self.calls.append((workspace_id, execution_claim_epoch))
 
 
+class _RaisingProvisioner:
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        raise RuntimeError("provision failed")
+
+
+@pytest.mark.unit
+async def test_safely_provision_claimed_swallows_provision_exception(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A claimed workspace whose provision raises: the failure is swallowed (one
+    # bad workspace must not abort the batch) and the epoch is cleared.
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RaisingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_provisions=1, max_concurrent_executions=1),
+    )
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    await worker._safely_provision_claimed(workspace_id)  # noqa: SLF001
+
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
+
+
 @pytest.mark.unit
 async def test_safely_provision_claimed_aborts_when_epoch_is_none(
     session_factory: async_sessionmaker[AsyncSession],
