@@ -1318,7 +1318,7 @@ def _client_instruction_reason_coded_next_steps(
 
 
 def _client_instruction_reason_coded_next_step(step: str, *, command: str) -> str:
-    return _START_REASON_CODED_SETUP_COMMAND_PATTERN.sub(command, step, count=1)
+    return _START_REASON_CODED_SETUP_COMMAND_PATTERN.sub(lambda _: command, step, count=1)
 
 
 def _client_instruction_command(clients: list[str], *, source_checkout: Path | None) -> str:

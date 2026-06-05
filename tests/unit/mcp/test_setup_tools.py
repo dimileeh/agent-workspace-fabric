@@ -87,6 +87,19 @@ def test_start_reason_coded_next_step_strips_setup_only_selectors(
 
 
 @pytest.mark.unit
+def test_client_instruction_reason_coded_next_step_preserves_backslash_digit_command() -> None:
+    from awf.mcp import setup_tools
+
+    step = "Fix GitHub auth, then re-run awf setup --dry-run --provider github."
+    command = r"awf setup --source-checkout '/projects/model\1'"
+
+    assert (
+        setup_tools._client_instruction_reason_coded_next_step(step, command=command)
+        == r"Fix GitHub auth, then re-run awf setup --source-checkout '/projects/model\1'."
+    )
+
+
+@pytest.mark.unit
 async def test_setup_tools_are_registered(tmp_path: Path) -> None:
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
