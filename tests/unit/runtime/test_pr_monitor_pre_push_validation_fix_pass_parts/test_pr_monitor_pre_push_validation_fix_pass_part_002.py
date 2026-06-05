@@ -435,6 +435,8 @@ async def test_pre_push_validation_fix_pass_revalidates_before_push(
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
+    # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()
@@ -491,6 +493,8 @@ async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
+    # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()
@@ -550,6 +554,8 @@ async def test_pre_push_validation_fix_pass_commits_agent_failure_evidence(
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
+    # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
     adapter = FakeAdapter()
