@@ -186,7 +186,7 @@ async def test_client_integration_instructions_persisted_source_checkout_failure
         {"clients": ["claude", "codex"]},
     )
     payload = _payload(result)
-    expected_command = "awf setup --client claude --client codex"
+    expected_command = f"awf setup --client claude --client codex --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"

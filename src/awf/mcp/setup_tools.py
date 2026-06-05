@@ -896,10 +896,11 @@ def _client_integration_instructions_result(
             is_error=True,
         )
     except SourceCheckoutError as exc:
+        remediation_source_checkout = source_path if source_path is not None else exc.root
         blocked_payload = _client_source_checkout_blocked_payload_with_explicit_command(
             _client_source_checkout_blocked_payload(exc),
             selected_clients=selected,
-            source_checkout=source_path,
+            source_checkout=remediation_source_checkout,
         )
         return _first_run_result(
             safe_result,
