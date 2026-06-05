@@ -318,6 +318,12 @@ that source-tree file is absent. Mirror the Quickstart package-lane persistence
 pattern: generate the AWF service values, preserve unrelated existing `.env`
 entries through a temporary file, then run bare `awf setup`.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HabPD`: Quickstart and
+uninstall restore snippets must strip trailing dotenv comments after closed
+single-quoted or double-quoted values before exporting persisted local service
+values. Preserve `#` inside quotes and escaped double-quoted bytes, matching the
+quoted-comment handling already used by `docs/UPGRADE.md`.
+
 1. Update focused docs tests first so current stale docs fail the new lane and
    grammar requirements.
 2. Rewrite `docs/QUICKSTART.md` as the canonical lane selector.
@@ -376,6 +382,12 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HJ8Ps`:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_first_run_persists_compose_env_for_upgrade -q
+```
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HabPD`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments -q
 ```
 
 Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HKFwb`: source-checkout

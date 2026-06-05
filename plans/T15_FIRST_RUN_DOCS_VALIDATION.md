@@ -2626,6 +2626,59 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HabPD`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/QUICKSTART.md` package upgrade, source-checkout upgrade, and
+  source-checkout uninstall restore snippets now strip trailing dotenv comments
+  after a closed single-quoted or double-quoted value before quote removal and
+  export.
+- Complete: `docs/UNINSTALL.md` source-checkout metadata-refresh restore
+  snippets now use the same quoted-comment parser, so uninstall paths do not
+  export raw `"value" # comment` or `'value' # comment` bytes.
+- Complete: The parser preserves `#` inside quoted values and decodes escaped
+  double-quoted bytes after trimming only a valid trailing comment, matching the
+  existing `docs/UPGRADE.md` behavior.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `docs/UNINSTALL.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments -q
+# Red phase before docs update: failed because Quickstart exported raw
+# quoted/commented dotenv RHS values.
+# Final result: 1 passed in 1.59s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py -q
+# 40 passed in 5.41s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+# 15 passed in 0.81s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# 2 files already formatted
+
+git diff --check
+# no output
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HabO-`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.

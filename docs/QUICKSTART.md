@@ -160,6 +160,35 @@ print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.a
 }
 awf_strip_unquoted_dotenv_inline_comment() {
   case "$1" in
+    \"*\"[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+escaped = False
+for index in range(1, len(value)):
+    char = value[index]
+    if escaped:
+        escaped = False
+    elif char == "\\":
+        escaped = True
+    elif char == chr(34):
+        rest = value[index + 1:]
+        if rest == "" or rest.lstrip(" \t").startswith("#"):
+            print(value[: index + 1], end="")
+            raise SystemExit
+        break
+print(value, end="")' "$1"
+      ;;
+    \'*\'[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+index = value.find(chr(39), 1)
+if index != -1:
+    rest = value[index + 1:]
+    if rest == "" or rest.lstrip(" \t").startswith("#"):
+        print(value[: index + 1], end="")
+        raise SystemExit
+print(value, end="")' "$1"
+      ;;
     \"*|\'*) printf "%s" "$1" ;;
     \#*) printf "%s" "" ;;
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
@@ -286,6 +315,35 @@ print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.a
 }
 awf_strip_unquoted_dotenv_inline_comment() {
   case "$1" in
+    \"*\"[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+escaped = False
+for index in range(1, len(value)):
+    char = value[index]
+    if escaped:
+        escaped = False
+    elif char == "\\":
+        escaped = True
+    elif char == chr(34):
+        rest = value[index + 1:]
+        if rest == "" or rest.lstrip(" \t").startswith("#"):
+            print(value[: index + 1], end="")
+            raise SystemExit
+        break
+print(value, end="")' "$1"
+      ;;
+    \'*\'[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+index = value.find(chr(39), 1)
+if index != -1:
+    rest = value[index + 1:]
+    if rest == "" or rest.lstrip(" \t").startswith("#"):
+        print(value[: index + 1], end="")
+        raise SystemExit
+print(value, end="")' "$1"
+      ;;
     \"*|\'*) printf "%s" "$1" ;;
     \#*) printf "%s" "" ;;
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
@@ -417,6 +475,35 @@ print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.a
 }
 awf_strip_unquoted_dotenv_inline_comment() {
   case "$1" in
+    \"*\"[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+escaped = False
+for index in range(1, len(value)):
+    char = value[index]
+    if escaped:
+        escaped = False
+    elif char == "\\":
+        escaped = True
+    elif char == chr(34):
+        rest = value[index + 1:]
+        if rest == "" or rest.lstrip(" \t").startswith("#"):
+            print(value[: index + 1], end="")
+            raise SystemExit
+        break
+print(value, end="")' "$1"
+      ;;
+    \'*\'[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+index = value.find(chr(39), 1)
+if index != -1:
+    rest = value[index + 1:]
+    if rest == "" or rest.lstrip(" \t").startswith("#"):
+        print(value[: index + 1], end="")
+        raise SystemExit
+print(value, end="")' "$1"
+      ;;
     \"*|\'*) printf "%s" "$1" ;;
     \#*) printf "%s" "" ;;
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
@@ -543,6 +630,35 @@ print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.a
 }
 awf_strip_unquoted_dotenv_inline_comment() {
   case "$1" in
+    \"*\"[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+escaped = False
+for index in range(1, len(value)):
+    char = value[index]
+    if escaped:
+        escaped = False
+    elif char == "\\":
+        escaped = True
+    elif char == chr(34):
+        rest = value[index + 1:]
+        if rest == "" or rest.lstrip(" \t").startswith("#"):
+            print(value[: index + 1], end="")
+            raise SystemExit
+        break
+print(value, end="")' "$1"
+      ;;
+    \'*\'[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+index = value.find(chr(39), 1)
+if index != -1:
+    rest = value[index + 1:]
+    if rest == "" or rest.lstrip(" \t").startswith("#"):
+        print(value[: index + 1], end="")
+        raise SystemExit
+print(value, end="")' "$1"
+      ;;
     \"*|\'*) printf "%s" "$1" ;;
     \#*) printf "%s" "" ;;
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
@@ -673,6 +789,35 @@ print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.a
 }
 awf_strip_unquoted_dotenv_inline_comment() {
   case "$1" in
+    \"*\"[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+escaped = False
+for index in range(1, len(value)):
+    char = value[index]
+    if escaped:
+        escaped = False
+    elif char == "\\":
+        escaped = True
+    elif char == chr(34):
+        rest = value[index + 1:]
+        if rest == "" or rest.lstrip(" \t").startswith("#"):
+            print(value[: index + 1], end="")
+            raise SystemExit
+        break
+print(value, end="")' "$1"
+      ;;
+    \'*\'[[:space:]]*\#*)
+      python3 -c 'import sys
+value = sys.argv[1]
+index = value.find(chr(39), 1)
+if index != -1:
+    rest = value[index + 1:]
+    if rest == "" or rest.lstrip(" \t").startswith("#"):
+        print(value[: index + 1], end="")
+        raise SystemExit
+print(value, end="")' "$1"
+      ;;
     \"*|\'*) printf "%s" "$1" ;;
     \#*) printf "%s" "" ;;
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;

@@ -645,6 +645,135 @@ def test_upgrade_env_restore_strips_quoted_inline_dotenv_comments(
         assert result.stdout == expected_stdout, label
 
 
+def test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments(
+    tmp_path: Path,
+) -> None:
+    """Assert Quickstart and uninstall snippets match Compose quoted comments."""
+    env_file = tmp_path / ".env"
+    persisted_database_url = "postgresql+asyncpg://awf:p%23w@localhost:15433/awf"
+    env_file.write_text(
+        "\n".join(
+            [
+                'AWF_API_TOKEN="tok\\"\\$en # inside" # local token',
+                "AWF_POSTGRES_PASSWORD='pw # inside' # local password",
+                f'AWF_DATABASE_URL="{persisted_database_url}" # local database',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+
+    scripts: list[tuple[str, str, bool]] = [
+        (
+            "Quickstart Lane 1 package upgrade",
+            _package_env_restore_script(
+                _quickstart_upgrade_section(quickstart_text, "## Lane 1: uv tool or pipx"),
+                "Quickstart Lane 1 package upgrade",
+            ),
+            True,
+        )
+    ]
+    for heading in (
+        "## Lane 2: Source Checkout With Global Tool Install",
+        "## Lane 3: Source Checkout With No Global Install",
+    ):
+        upgrade_section = _quickstart_upgrade_section(quickstart_text, heading)
+        upgrade_fences = [
+            fence
+            for fence in _markdown_fences("docs/QUICKSTART.md", upgrade_section)
+            if fence.language == "bash"
+        ]
+        assert len(upgrade_fences) == 1, heading
+        scripts.append(
+            (
+                f"{heading} upgrade",
+                upgrade_fences[0].body.split("if [ -f .env ]; then", maxsplit=1)[0],
+                True,
+            )
+        )
+
+        lane_section = _markdown_section(quickstart_text, heading)
+        uninstall_fences = [
+            fence
+            for fence in _markdown_fences("docs/QUICKSTART.md", lane_section)
+            if fence.language == "bash"
+            and 'AWF_PERSISTED_API_TOKEN=""' in fence.body
+            and "/path/to/replacement/aira-agent-workspace-fabric" in fence.body
+        ]
+        assert len(uninstall_fences) == 1, heading
+        restore_start = uninstall_fences[0].body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        scripts.append(
+            (
+                f"{heading} uninstall",
+                uninstall_fences[0]
+                .body[restore_start:]
+                .split("if [ -f .env ]; then", maxsplit=1)[0],
+                False,
+            )
+        )
+
+    uninstall_cases = (
+        (
+            "Uninstall intro source-checkout refresh",
+            uninstall_text.split("## uv tool", maxsplit=1)[0],
+        ),
+        (
+            "Uninstall global source-checkout refresh",
+            _markdown_section(uninstall_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "Uninstall no-global source-checkout refresh",
+            _markdown_section(uninstall_text, "## Source Checkout With No Global Install"),
+        ),
+    )
+    for label, section in uninstall_cases:
+        bash_fences = [
+            fence
+            for fence in _markdown_fences("docs/UNINSTALL.md", section)
+            if fence.language == "bash" and 'AWF_PERSISTED_API_TOKEN=""' in fence.body
+        ]
+        assert len(bash_fences) == 1, label
+        restore_start = bash_fences[0].body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        scripts.append(
+            (
+                label,
+                bash_fences[0].body[restore_start:].split("if [ -f .env ]; then", maxsplit=1)[0],
+                False,
+            )
+        )
+
+    for label, restore_script, restores_database_url in scripts:
+        if restores_database_url:
+            print_command = (
+                'printf "%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                '"$AWF_POSTGRES_PASSWORD" "$AWF_DATABASE_URL"'
+            )
+            expected_stdout = f'tok"$en # inside\npw # inside\n{persisted_database_url}\n'
+        else:
+            print_command = 'printf "%s\\n%s\\n" "$AWF_API_TOKEN" "$AWF_POSTGRES_PASSWORD"'
+            expected_stdout = 'tok"$en # inside\npw # inside\n'
+        script = "\n".join(
+            (
+                "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD AWF_DATABASE_URL",
+                restore_script,
+                print_command,
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == expected_stdout, label
+
+
 @pytest.mark.parametrize(
     "heading",
     (
