@@ -808,6 +808,26 @@ async def has_terminal_runtime_released_event(
     return bool(row[0])
 
 
+async def latest_terminal_runtime_release_event_order(
+    session: AsyncSession,
+    workspace_id: str,
+) -> int | None:
+    """Return the ``event_order`` of the latest ``terminal_runtime_released`` event, or None.
+
+    Async counterpart of :func:`latest_terminal_runtime_release_event_order_expr` for
+    use under a held row lock. Callers compare this against a release-cycle floor captured
+    at candidate listing time to detect a revoke-plus-re-release that opened a *new* cycle
+    after listing — a case the bare :func:`has_terminal_runtime_released_event` check (which
+    only asks whether *some* release is currently effective) cannot distinguish. Returns
+    ``None`` when no release event has been recorded yet.
+    """
+    expr = latest_terminal_runtime_release_event_order_expr(workspace_id=workspace_id)
+    stmt = select(expr)
+    row = (await session.execute(stmt)).one()
+    value = row[0]
+    return int(value) if value is not None else None
+
+
 SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
 SECRET_LEASE_AUDIT_SCHEMA: Final = "secret_lease_audit.v1"
 SECRET_LEASE_STATUS_ISSUED: Final = "issued"

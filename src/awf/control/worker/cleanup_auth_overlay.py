@@ -29,6 +29,7 @@ from awf.db.models import (
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
     has_terminal_runtime_released_event,
+    latest_terminal_runtime_release_event_order,
     latest_terminal_runtime_release_event_order_expr,
     terminal_runtime_effectively_released_expr,
 )
@@ -141,6 +142,13 @@ candidate is listed and before the deferred retry's marker write runs. Writing a
 window would suppress the umount retry still owed once the runtime is genuinely released,
 leaking the overlay mount. The write is skipped under the row lock and surfaced with this
 reason code so the deferred retry stays owed and the skip stays diagnosable.
+
+The same reason code also covers the cross-cycle variant: a revoke *plus* a genuine
+re-release that opens a new effective-release cycle (a higher release ``event_order``)
+after listing. The bare effective-release check passes there (the workspace is released
+again), so the marker writes additionally verify the latest release cycle still matches the
+listed floor and skip when it does not — preventing the stale cycle's umount outcome from
+suppressing the fresh cycle's just-owed retry.
 """
 
 
@@ -496,6 +504,11 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
             Workspace.repo_url,
             Workspace.compose_project_name,
             Workspace.compose_file_path,
+            # Carry the listed cycle's release floor so the marker-write guards can detect a
+            # revoke-plus-re-release that opened a *new* cycle after listing. ``effectively_released``
+            # below guarantees a release event exists, so the ``coalesce(-1)`` fallback never
+            # fires for a listed row — the value is always the real release ``event_order``.
+            release_cycle_floor.label("release_cycle_floor"),
         )
         .where(Workspace.status.in_(terminal_status_values))
         .where(
@@ -526,7 +539,14 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
     )
 
     candidates: list[_TerminalRuntimeCandidate] = []
-    for workspace_id, status_val, repo_url, compose_project_name, compose_file_path in rows:
+    for (
+        workspace_id,
+        status_val,
+        repo_url,
+        compose_project_name,
+        compose_file_path,
+        cycle_floor,
+    ) in rows:
         if not repo_url:
             continue
         candidates.append(
@@ -536,6 +556,10 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
                 repo_url=repo_url,
                 compose_project_name=compose_project_name,
                 compose_file_path=compose_file_path,
+                # ``coalesce`` never yields NULL and ``effectively_released`` guarantees a
+                # real release order (never the ``-1`` fallback), so this is always the
+                # listed cycle's release ``event_order``.
+                release_cycle_floor=int(cycle_floor),
             )
         )
     return candidates
@@ -634,6 +658,32 @@ def _log_terminal_auth_overlay_unmount_release_revoked(
     )
 
 
+async def _terminal_auth_overlay_unmount_release_cycle_unchanged(
+    session: AsyncSession,
+    candidate: _TerminalRuntimeCandidate,
+) -> bool:
+    """Return True if the latest release cycle still matches the one the candidate was listed under.
+
+    ``has_terminal_runtime_released_event`` only asks whether *some* release is currently
+    effective, so it cannot tell a still-listed cycle apart from a fresh one: if the listed
+    cycle was revoked and the workspace genuinely re-released (a new
+    ``terminal_runtime_released`` at a higher ``event_order``) between candidate listing and a
+    marker write, that bare check passes even though the umount outcome being recorded belongs
+    to the *previous* cycle. The cycle-scoped terminal-marker guard then sees no terminal marker
+    for the new cycle and would let the stale outcome write a ``resolved``/``exhausted`` (or burn
+    a ``pending``) at or after the new floor — suppressing the retry the new cycle just owed.
+
+    Comparing the current latest-release ``event_order`` against the floor captured at listing
+    closes that cross-cycle window. A candidate with no captured floor (``None`` — e.g. a
+    hand-built non-overlay candidate) skips the check and relies on the effective-release guard
+    alone, preserving prior behavior.
+    """
+    if candidate.release_cycle_floor is None:
+        return True
+    latest = await latest_terminal_runtime_release_event_order(session, candidate.workspace_id)
+    return latest == candidate.release_cycle_floor
+
+
 async def _record_terminal_auth_overlay_unmount_resolved(
     self: Any,
     candidate: _TerminalRuntimeCandidate,
@@ -665,6 +715,12 @@ async def _record_terminal_auth_overlay_unmount_resolved(
         # ``resolved`` marker recorded then would permanently suppress the umount retry
         # still owed once the runtime is genuinely released, leaking the overlay mount.
         if not await has_terminal_runtime_released_event(session, candidate.workspace_id):
+            return "revoked"
+        # A revoke *plus* a genuine re-release between listing and this write leaves the
+        # workspace effectively released again but under a *new* cycle. Recording this
+        # stale cycle's ``resolved`` outcome would land at/after the new floor and suppress
+        # the fresh cycle's just-owed retry; skip it and leave that retry to the new cycle.
+        if not await _terminal_auth_overlay_unmount_release_cycle_unchanged(session, candidate):
             return "revoked"
         await repo.add_event(
             ws,
@@ -728,6 +784,10 @@ async def _record_terminal_auth_overlay_unmount_exhausted(
         # retry still owed once the runtime is genuinely released.
         if not await has_terminal_runtime_released_event(session, candidate.workspace_id):
             return "revoked"
+        # Likewise skip when a revoke-plus-re-release opened a new cycle after listing, so a
+        # stale-cycle ``exhausted`` cannot starve the fresh cycle's deferred-sweep budget.
+        if not await _terminal_auth_overlay_unmount_release_cycle_unchanged(session, candidate):
+            return "revoked"
         await repo.add_event(
             ws,
             event_type=_TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
@@ -787,6 +847,11 @@ async def _append_terminal_auth_overlay_unmount_pending(
         # deferred attempts on a futile umount (the overlay bind is held again), pushing
         # the workspace toward a premature ``exhausted`` once it is genuinely released.
         if not await has_terminal_runtime_released_event(session, candidate.workspace_id):
+            return "revoked"
+        # And skip when a revoke-plus-re-release opened a new cycle after listing: a stale-cycle
+        # ``pending`` would land at/after the new floor and inflate the fresh cycle's bounded
+        # sweep count toward a premature ``exhausted``.
+        if not await _terminal_auth_overlay_unmount_release_cycle_unchanged(session, candidate):
             return "revoked"
         await repo.add_event(
             ws,

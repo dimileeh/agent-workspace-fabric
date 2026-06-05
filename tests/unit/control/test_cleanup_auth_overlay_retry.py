@@ -45,6 +45,7 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+    latest_terminal_runtime_release_event_order,
     latest_terminal_runtime_release_event_order_expr,
 )
 from awf.db.session import make_session_factory
@@ -54,13 +55,18 @@ _REPO = "git@github.com:example/auth-overlay-retry.git"
 _BASE = "main"
 
 
-def _candidate(workspace_id: str = "ws_overlay") -> _TerminalRuntimeCandidate:
+def _candidate(
+    workspace_id: str = "ws_overlay",
+    *,
+    release_cycle_floor: int | None = None,
+) -> _TerminalRuntimeCandidate:
     return _TerminalRuntimeCandidate(
         workspace_id=workspace_id,
         status=WorkspaceStatus.failed,
         repo_url=_REPO,
         compose_project_name=f"awf_{workspace_id}",
         compose_file_path=f"/tmp/{workspace_id}/compose.yml",
+        release_cycle_floor=release_cycle_floor,
     )
 
 
@@ -695,13 +701,14 @@ async def test_list_pending_candidates_skips_rows_without_repo_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = [
-        ("ws_no_repo", WorkspaceStatus.failed.value, "", "awf_ws_no_repo", None),
+        ("ws_no_repo", WorkspaceStatus.failed.value, "", "awf_ws_no_repo", None, 3),
         (
             "ws_ok",
             WorkspaceStatus.failed.value,
             _REPO,
             "awf_ws_ok",
             "/tmp/ws_ok/compose.yml",
+            7,
         ),
     ]
 
@@ -721,6 +728,7 @@ async def test_list_pending_candidates_skips_rows_without_repo_url(
         limit=10,
     )
     assert [c.workspace_id for c in candidates] == ["ws_ok"]
+    assert candidates[0].release_cycle_floor == 7
 
 
 # --------------------------------------------------------------------------- #
@@ -1524,6 +1532,219 @@ async def test_append_pending_skips_when_release_revoked(
     ]
     assert len(revoked) == 1
     assert revoked[0]["marker"] == "pending"
+
+
+# --------------------------------------------------------------------------- #
+# 8b. Marker writes verify the *cycle* under the row lock (revoke + re-release)
+# --------------------------------------------------------------------------- #
+#
+# The bare effective-release recheck only asks whether *some* release is currently
+# effective. A revoke *plus* a genuine re-release after listing leaves the workspace
+# effectively released again but under a NEW cycle (a higher release ``event_order``).
+# The cycle-scoped terminal-marker guard then sees no terminal marker for the new cycle,
+# so a stale-cycle outcome would write a ``resolved``/``exhausted`` (or burn a ``pending``)
+# at/after the new floor and suppress the retry the fresh cycle just owed. Each marker write
+# therefore also verifies the latest release cycle still matches the listed floor.
+
+
+async def _min_release_event_order(session: AsyncSession, workspace_id: str) -> int:
+    """Return the *earliest* ``terminal_runtime_released`` order — the prior cycle's floor."""
+    return int(
+        (
+            await session.execute(
+                sa.select(sa.func.min(WorkspaceEvent.event_order))
+                .where(WorkspaceEvent.workspace_id == workspace_id)
+                .where(WorkspaceEvent.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+            )
+        ).scalar_one()
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_resolved_skips_when_release_cycle_changed(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate listed under a now-superseded cycle must NOT write a ``resolved`` marker:
+    the workspace is effectively released again, but under a fresh cycle that owes its own
+    retry, so the stale-cycle outcome is skipped under its own reason code."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_overlay, "_log", log)
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    stale_floor: int = 0
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await _build_revoked_then_rereleased_cycle(repo, ws)
+        await session.commit()
+    async with factory() as session:
+        stale_floor = await _min_release_event_order(session, ws_id)
+
+    await sweeper._record_terminal_auth_overlay_unmount_resolved(  # noqa: SLF001
+        _candidate(ws_id, release_cycle_floor=stale_floor), auth_overlay_unmounted=True
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    assert worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE not in types
+    revoked = [
+        fields
+        for event, fields in log.warnings
+        if event == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+    ]
+    assert len(revoked) == 1
+    assert revoked[0]["marker"] == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_record_exhausted_skips_when_release_cycle_changed(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``exhausted`` marker computed from a superseded cycle must not starve the fresh
+    cycle's deferred-sweep budget."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_overlay, "_log", log)
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    stale_floor: int = 0
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await _build_revoked_then_rereleased_cycle(repo, ws)
+        await session.commit()
+    async with factory() as session:
+        stale_floor = await _min_release_event_order(session, ws_id)
+
+    await sweeper._record_terminal_auth_overlay_unmount_exhausted(  # noqa: SLF001
+        _candidate(ws_id, release_cycle_floor=stale_floor), attempts=5
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    assert worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE not in types
+    revoked = [
+        fields
+        for event, fields in log.warnings
+        if event == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+    ]
+    assert len(revoked) == 1
+    assert revoked[0]["marker"] == "exhausted"
+
+
+@pytest.mark.asyncio
+async def test_append_pending_skips_when_release_cycle_changed(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh ``pending`` appended for a superseded cycle would inflate the new cycle's
+    bounded-sweep count toward a premature ``exhausted``; it is skipped instead."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_overlay, "_log", log)
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    stale_floor: int = 0
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        # Cycle 1 carries one ``pending``; cycle 2 carries one fresh ``pending`` (two total).
+        await _build_revoked_then_rereleased_cycle(repo, ws)
+        await session.commit()
+    async with factory() as session:
+        stale_floor = await _min_release_event_order(session, ws_id)
+
+    await sweeper._append_terminal_auth_overlay_unmount_pending(  # noqa: SLF001
+        _candidate(ws_id, release_cycle_floor=stale_floor), attempt=2
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    # No third ``pending`` appended — the two pre-existing markers are untouched.
+    assert types.count(worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE) == 2
+    revoked = [
+        fields
+        for event, fields in log.warnings
+        if event == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+    ]
+    assert len(revoked) == 1
+    assert revoked[0]["marker"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_record_resolved_writes_when_release_cycle_matches(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When the listed floor still matches the latest release cycle, the cycle guard is a
+    no-op and the ``resolved`` marker is written normally."""
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    current_floor: int = 0
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        await _mark_runtime_released(repo, ws)
+        ws_id = ws.id
+        await session.commit()
+    async with factory() as session:
+        current_floor = await _min_release_event_order(session, ws_id)
+
+    await sweeper._record_terminal_auth_overlay_unmount_resolved(  # noqa: SLF001
+        _candidate(ws_id, release_cycle_floor=current_floor), auth_overlay_unmounted=True
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    assert types.count(worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_query_carries_release_cycle_floor(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A listed candidate carries the current cycle's release ``event_order`` so the
+    marker-write guards can detect a later cross-cycle re-release."""
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    current_floor: int = 0
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        ws_id = ws.id
+        await _mark_runtime_released(repo, ws)
+        await repo.add_event(
+            ws,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            payload={"attempt": 1},
+        )
+        await session.commit()
+    async with factory() as session:
+        current_floor = await _min_release_event_order(session, ws_id)
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(limit=None)  # noqa: SLF001
+    listed = next(c for c in candidates if c.workspace_id == ws_id)
+    assert listed.release_cycle_floor == current_floor
+
+
+@pytest.mark.asyncio
+async def test_latest_release_event_order_reader_returns_none_then_floor(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The async cycle-floor reader returns ``None`` before any release event and the latest
+    release ``event_order`` once one exists (the comparison the marker-write guards rely on)."""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        await session.commit()
+        assert await latest_terminal_runtime_release_event_order(session, ws.id) is None
+        await _mark_runtime_released(repo, ws)
+        await session.commit()
+        expected = await _min_release_event_order(session, ws.id)
+        assert await latest_terminal_runtime_release_event_order(session, ws.id) == expected
 
 
 @pytest.mark.asyncio
