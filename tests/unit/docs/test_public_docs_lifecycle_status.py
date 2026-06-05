@@ -889,7 +889,7 @@ def test_quickstart_source_checkout_upgrade_accepts_default_api_token(
     env_file.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
     script = "\n".join(
         (
-            "unset AWF_API_TOKEN",
+            "export AWF_API_TOKEN=stale-token-from-shell",
             token_restore_script,
             'printf "%s\\n" "$AWF_API_TOKEN"',
         )
@@ -963,7 +963,7 @@ def test_upgrade_source_checkout_restore_accepts_default_api_token(tmp_path: Pat
         env_file.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
         script = "\n".join(
             (
-                "unset AWF_API_TOKEN",
+                "export AWF_API_TOKEN=stale-token-from-shell",
                 token_restore_script,
                 'printf "%s\\n" "$AWF_API_TOKEN"',
             )
@@ -1025,7 +1025,7 @@ def test_uninstall_source_checkout_restore_accepts_default_api_token(
         env_file.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
         script = "\n".join(
             (
-                "unset AWF_API_TOKEN",
+                "export AWF_API_TOKEN=stale-token-from-shell",
                 token_restore_script,
                 'printf "%s\\n" "$AWF_API_TOKEN"',
             )

@@ -424,7 +424,7 @@ def _assert_source_checkout_api_token_restore(
         "elif grep -q '^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
         f"AWF_API_TOKEN[[:space:]]*=' {token_default_env_files} 2>/dev/null; then"
     )
-    token_default_export_line = '  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"'
+    token_default_export_line = '  export AWF_API_TOKEN="local-dev-token"'
     token_else_line = "else"
     legacy_first_token_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
