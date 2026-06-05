@@ -385,6 +385,60 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HXZ6g` Multiline Interpolation Plan
+
+### Problem Statement And Scope
+
+The inline review reports that quoted multiline Compose env-file secret
+collection decodes double-quoted values but does not apply the same Compose
+interpolation used by ordinary env-file values. For a physical multiline value
+such as `ANTHROPIC_AUTH_TOKEN="prefix-${TOKEN_SUFFIX}` followed by a second
+line, exact-secret collectors can record the unresolved `${...}` full value
+while Compose emits the resolved secret.
+
+This repair is limited to the shared quoted multiline env-file helper, the
+service-log caller interpolation context, focused regressions, and this
+plan/validation evidence. It does not change branch management, pushing, broad
+validation, full coverage, OpenAPI drift, frontend validation, or unrelated
+Compose parsing behavior.
+
+### Requirements Checklist
+
+- Double-quoted quoted-multiline Compose env-file entries must apply the same
+  interpolation semantics as `compose_env_file_values()` before they are
+  returned for exact-secret redaction.
+- Single-quoted quoted-multiline entries must remain literal.
+- First-line fragment exclusion context must match the resolved first-line
+  value that `compose_env_file_values()` records for physical multiline
+  double-quoted entries.
+- Service-log exact-secret collection must use the same service interpolation
+  environment for quoted multiline secrets that it already uses for ordinary
+  env-file values.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused regressions for the shared multiline helper and service-log
+   captured redaction using a physical multiline double-quoted secret with an
+   interpolated suffix.
+2. Extend `compose_env_file_quoted_multiline_values()` with an optional
+   interpolation environment and apply `_compose_expand_env_value()` to
+   double-quoted full values and first-line fragments.
+3. Preserve literal single-quoted values and escaped-dollar double-quote
+   behavior by keeping escaped-dollar sentinels until interpolation completes.
+4. Pass the service-log interpolation environment into the quoted multiline
+   secret context.
+5. Run the focused regressions and narrow lint/type checks for touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_expands_double_quoted_references tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_double_quoted_multiline_secret_interpolated_from_service_environ -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/logs.py tests/unit/service/test_environment.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/logs.py
+```
+
 ## Review-Level Comment `issue:4620175517` Duplication Follow-Up Plan
 
 ### Problem Statement And Scope

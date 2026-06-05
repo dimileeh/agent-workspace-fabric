@@ -591,11 +591,14 @@ def _service_log_secret_values(
     compose_env_file: Path | None,
 ) -> tuple[str, ...]:
     """Return exact service env values that service logs must redact."""
+    compose_environ = None if environ is None else {**os.environ, **environ}
     (
         quoted_multiline_values,
         quoted_multiline_first_line_values,
-    ) = _service_log_quoted_multiline_secret_context(compose_env_file)
-    compose_environ = None if environ is None else {**os.environ, **environ}
+    ) = _service_log_quoted_multiline_secret_context(
+        compose_env_file,
+        environ=compose_environ,
+    )
     secret_values = [
         value
         for key, value in compose_env_file_values(compose_env_file, environ=compose_environ).items()
@@ -618,11 +621,13 @@ def _service_log_secret_values(
 
 def _service_log_quoted_multiline_secret_context(
     compose_env_file: Path | None,
+    *,
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
     """Return full quoted multiline secrets and parsed first-line fragments."""
     values: list[str] = []
     first_line_values: set[tuple[str, str]] = set()
-    for entry in compose_env_file_quoted_multiline_values(compose_env_file):
+    for entry in compose_env_file_quoted_multiline_values(compose_env_file, environ=environ):
         if len(entry.value) < 4 or not is_secret_env_key(entry.key):
             continue
         values.append(entry.value)

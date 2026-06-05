@@ -472,6 +472,60 @@ def test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values
 
 
 @pytest.mark.unit
+def test_compose_env_file_quoted_multiline_values_expands_double_quoted_references(
+    tmp_path,
+) -> None:
+    """Resolve double-quoted multiline values before returning exact secrets."""
+    from awf.service.environment import compose_env_file_quoted_multiline_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TOKEN_SUFFIX=file-suffix",
+                'ANTHROPIC_AUTH_TOKEN="prefix-${TOKEN_SUFFIX}',
+                'body-${TOKEN_SUFFIX}"',
+                r'ESCAPED_TOKEN="literal-\$TOKEN',
+                'escaped-body"',
+                "LITERAL_TOKEN='literal-${TOKEN_SUFFIX}",
+                "literal-body'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    values = compose_env_file_quoted_multiline_values(
+        env_file,
+        environ={"TOKEN_SUFFIX": "caller-suffix"},
+    )
+
+    assert [
+        (value.key, value.value, value.first_line_value, value.closed_on_first_line)
+        for value in values
+    ] == [
+        (
+            "ANTHROPIC_AUTH_TOKEN",
+            "prefix-caller-suffix\nbody-caller-suffix",
+            "prefix-caller-suffix",
+            False,
+        ),
+        (
+            "ESCAPED_TOKEN",
+            "literal-$TOKEN\nescaped-body",
+            "literal-$TOKEN",
+            False,
+        ),
+        (
+            "LITERAL_TOKEN",
+            "literal-${TOKEN_SUFFIX}\nliteral-body",
+            "literal-${TOKEN_SUFFIX}",
+            False,
+        ),
+    ]
+
+
+@pytest.mark.unit
 def test_compose_interpolation_keys_ignores_unreadable_and_non_utf8_files(
     tmp_path,
 ) -> None:

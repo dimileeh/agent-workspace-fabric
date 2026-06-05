@@ -879,6 +879,62 @@ services:
     assert "<redacted>" in result.stdout
 
 
+@pytest.mark.unit
+def test_service_logs_redacts_double_quoted_multiline_secret_interpolated_from_service_environ(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Redact resolved physical multiline Compose env-file provider credentials."""
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      VALUE_SUFFIX: "${VALUE_SUFFIX:?set VALUE_SUFFIX}"
+""",
+    )
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        "\n".join(
+            [
+                'ANTHROPIC_AUTH_TOKEN="provider-${VALUE_SUFFIX}',
+                'body-${VALUE_SUFFIX}"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    service_environ = {"VALUE_SUFFIX": "service-current-suffix"}
+    current_secret = "provider-service-current-suffix\nbody-service-current-suffix"
+    stale_secret = "provider-caller-stale-suffix\nbody-caller-stale-suffix"
+
+    def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return captured output containing the service-interpolated multiline secret."""
+        return subprocess.CompletedProcess(
+            args,
+            returncode=0,
+            stdout=f"stdout bare {current_secret}\n",
+            stderr=f"stderr bare {current_secret}\n",
+        )
+
+    monkeypatch.setenv("VALUE_SUFFIX", "caller-stale-suffix")
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+        service_environ=service_environ,
+        run_subprocess=success_run,
+    )
+
+    rendered = result.stdout + result.stderr
+    for fragment in current_secret.splitlines():
+        assert fragment not in rendered
+    assert stale_secret not in rendered
+    assert "<redacted>" in rendered
+
+
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output(

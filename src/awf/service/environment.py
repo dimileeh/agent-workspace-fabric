@@ -54,7 +54,7 @@ class ComposeEnvInterpolationError(ValueError):
 
 @dataclass(frozen=True)
 class ComposeEnvQuotedMultilineValue:
-    """A closed quoted Compose env-file value whose decoded value contains a newline."""
+    """A closed quoted Compose env-file value whose resolved value contains a newline."""
 
     key: str
     value: str
@@ -207,16 +207,30 @@ def compose_env_file_values(
 
 def compose_env_file_quoted_multiline_values(
     compose_env_file: Path | None,
+    *,
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[ComposeEnvQuotedMultilineValue, ...]:
-    """Return closed quoted Compose env-file entries whose decoded value spans lines."""
+    """Return closed quoted Compose env-file entries whose resolved value spans lines."""
     if compose_env_file is None or not compose_env_file.exists():
         return ()
-    values: list[ComposeEnvQuotedMultilineValue] = []
+    caller_environ = os.environ if environ is None else environ
+    multiline_values: list[ComposeEnvQuotedMultilineValue] = []
+    parsed_values: dict[str, str] = {}
     lines = compose_env_file.read_text(encoding="utf-8").splitlines()
     index = 0
     while index < len(lines):
         parsed = _parse_compose_quoted_env_start(lines[index])
         if parsed is None:
+            parsed_line = _parse_compose_env_line(lines[index])
+            if parsed_line is not None:
+                key, value, quote = parsed_line
+                if quote != "single":
+                    value = _compose_expand_env_value(
+                        value,
+                        caller_environ=caller_environ,
+                        values=parsed_values,
+                    )
+                parsed_values[key] = value
             index += 1
             continue
         key, quote, raw_value = parsed
@@ -227,8 +241,24 @@ def compose_env_file_quoted_multiline_values(
             index += 1
             raw_value = raw_value + "\n" + lines[index]
             value, closed = _consume_compose_quoted_multiline_value(raw_value, quote)
+        first_line_value = _resolve_compose_quoted_multiline_value(
+            first_line_value,
+            quote,
+            decoded=closed_on_first_line,
+            caller_environ=caller_environ,
+            values=parsed_values,
+        )
+        value = _resolve_compose_quoted_multiline_value(
+            value,
+            quote,
+            decoded=closed,
+            caller_environ=caller_environ,
+            values=parsed_values,
+        )
+        if closed:
+            parsed_values[key] = value
         if closed and "\n" in value and value:
-            values.append(
+            multiline_values.append(
                 ComposeEnvQuotedMultilineValue(
                     key=key,
                     value=value,
@@ -237,7 +267,23 @@ def compose_env_file_quoted_multiline_values(
                 )
             )
         index += 1
-    return tuple(values)
+    return tuple(multiline_values)
+
+
+def _resolve_compose_quoted_multiline_value(
+    value: str,
+    quote: str,
+    *,
+    decoded: bool,
+    caller_environ: Mapping[str, str],
+    values: Mapping[str, str],
+) -> str:
+    """Resolve one consumed quoted multiline env-file value."""
+    if quote == "'":
+        return value
+    if not decoded:
+        value = _decode_compose_double_quoted_value(value)
+    return _compose_expand_env_value(value, caller_environ=caller_environ, values=values)
 
 
 def _parse_compose_quoted_env_start(line: str) -> tuple[str, str, str] | None:
@@ -271,10 +317,7 @@ def _consume_compose_quoted_multiline_value(raw_value: str, quote: str) -> tuple
         if char == "'" and quote == "'":
             return "".join(chars), True
         if char == '"' and quote == '"':
-            value = _decode_compose_double_quoted_value("".join(chars)).replace(
-                _COMPOSE_ESCAPED_DOLLAR,
-                "$",
-            )
+            value = _decode_compose_double_quoted_value("".join(chars))
             return value, True
         chars.append(char)
     if escaped:

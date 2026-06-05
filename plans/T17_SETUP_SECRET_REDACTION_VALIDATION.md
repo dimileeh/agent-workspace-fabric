@@ -481,6 +481,62 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
 ```
 
+## Review Thread `PRRT_kwDOSJAM6s6HXZ6g` Multiline Interpolation Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `compose_env_file_quoted_multiline_values()` now applies the same
+  Compose interpolation helper used by `compose_env_file_values()` to
+  double-quoted full multiline values before returning exact-secret entries.
+- Complete: single-quoted multiline entries remain literal, and double-quoted
+  escaped dollars remain literal after interpolation.
+- Complete: physical multiline double-quoted first-line fragments are resolved
+  before first-line exclusion, matching the fragment parsed by
+  `compose_env_file_values()`.
+- Complete: service-log exact-secret collection passes the merged
+  service/caller interpolation environment into quoted multiline secret
+  collection.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/environment.py`
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_environment.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_expands_double_quoted_references tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_double_quoted_multiline_secret_interpolated_from_service_environ -q --tb=short -ra
+# 2 failed: the helper had no interpolation environment and service logs leaked the resolved multiline body.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_expands_double_quoted_references tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_double_quoted_multiline_secret_interpolated_from_service_environ -q --tb=short -ra
+# 2 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_expands_double_quoted_references tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_secret_interpolated_from_service_environ tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_double_quoted_multiline_secret_interpolated_from_service_environ tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_excludes_multiline_first_line_fragment tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+# 10 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py -q --tb=short -ra
+# 30 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/logs.py tests/unit/service/test_environment.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/logs.py
+# Success: no issues found in 2 source files
+```
+
 ## Review-Level Comment `issue:4620175517` Duplication Follow-Up Validation
 
 Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
