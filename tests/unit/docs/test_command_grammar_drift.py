@@ -186,6 +186,13 @@ class SmokeInvocation:
     # as `awf smoke run --mocked-local --format pretty` references no project path
     # (the CLI defaults `--project` to the cwd), so it must not be flagged.
     references_project_path: bool = False
+    # Whether the example wrote `--project` (spaced or `=`-glued) but dropped its
+    # value — the next token is another flag, the line ended, or the glued form is
+    # empty. This is malformed grammar regardless of whether a project path is
+    # otherwise referenced, so R4 flags it unconditionally (unlike the *conditional*
+    # missing-`--project` check above): a project-free proof simply omits `--project`
+    # entirely, it never writes a valueless `--project`.
+    project_value_dropped: bool = False
 
 
 def _read(rel_path: str) -> str:
@@ -471,10 +478,15 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
     # `--project` whose next token is another flag (e.g.
     # `awf smoke run --project --mocked-local ...`) dropped its path: it must not
     # set `has_project`, and must not swallow that following flag as if it were
-    # the value — otherwise R4 would wave through invalid mocked smoke guidance.
+    # the value. Instead it records `project_value_dropped` so R4 can reject the
+    # malformed line outright — otherwise R4 would wave through invalid mocked
+    # smoke guidance (the parser correctly keeps `has_project` false, but with no
+    # project path otherwise referenced `_smoke_invocation_offense` would emit no
+    # offense and silently pass it).
     has_project = False
     has_demo_path = False
     positional_path = False
+    project_value_dropped = False
     skip_next = False
     for index, token in enumerate(tokens):
         if skip_next:
@@ -483,12 +495,16 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
         if token.startswith("--project="):
             if token[len("--project=") :]:
                 has_project = True
+            else:
+                project_value_dropped = True
             continue
         if token == "--project":
             nxt = tokens[index + 1] if index + 1 < len(tokens) else None
             if nxt is not None and not nxt.startswith("-"):
                 has_project = True
                 skip_next = True
+            else:
+                project_value_dropped = True
             continue
         # `--demo-path` is the CLI's "fallback project path", so its presence means
         # the example references a project path even without `--project`.
@@ -515,6 +531,7 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
         has_mocked_local=has_mocked_local,
         positional_path=positional_path,
         references_project_path=positional_path or has_demo_path,
+        project_value_dropped=project_value_dropped,
     )
 
 
@@ -534,9 +551,18 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
     to the cwd) is valid usage and is not flagged. Without the last branch a
     first-run doc could keep its project target but silently lose the no-token
     `--mocked-local` grammar.
+
+    A `--project` that dropped its value (`awf smoke run --project --mocked-local
+    ...`) is malformed grammar and is rejected *unconditionally* — independent of
+    `references_project_path` — because the example explicitly wrote `--project`
+    yet gave it no path. This is distinct from the conditional missing-`--project`
+    check: a valid project-free proof omits `--project` outright, it never writes a
+    valueless one.
     """
     if invocation.positional_path:
         return "bare positional path"
+    if invocation.project_value_dropped:
+        return "smoke --project missing value"
     if (
         invocation.has_mocked_local
         and not invocation.has_project
@@ -725,7 +751,8 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     # A `--project` flag that drops its path value (the next token is another
     # flag) must not count as a satisfied `--project`, and must not swallow that
     # flag as the value — otherwise R4 would pass invalid mocked smoke guidance
-    # like `awf smoke run --project --mocked-local --format pretty`.
+    # like `awf smoke run --project --mocked-local --format pretty`. It is recorded
+    # as `project_value_dropped` so R4 rejects the malformed line.
     dropped_value = _parse_smoke_invocation(
         "awf smoke run --project --mocked-local --format pretty"
     )
@@ -733,6 +760,19 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     assert dropped_value.has_project is False
     assert dropped_value.has_mocked_local is True
     assert dropped_value.positional_path is False
+    assert dropped_value.project_value_dropped is True
+
+    # A trailing `--project` (line ends with no value) is likewise a dropped value.
+    trailing_project = _parse_smoke_invocation("awf smoke run --mocked-local --project")
+    assert trailing_project is not None
+    assert trailing_project.has_project is False
+    assert trailing_project.project_value_dropped is True
+
+    # The `=`-glued empty form (`--project=`) drops its value too.
+    glued_empty = _parse_smoke_invocation("awf smoke run --project= --mocked-local")
+    assert glued_empty is not None
+    assert glued_empty.has_project is False
+    assert glued_empty.project_value_dropped is True
 
     # `--demo-path` is a value-taking smoke option (the fallback project path),
     # so the path token following it must be consumed as the flag's value rather
@@ -785,6 +825,13 @@ def test_helper_flags_smoke_invocation_offenses() -> None:
     assert (
         offense('awf smoke run --project "$HOME/p" --format pretty')
         == "project smoke missing --mocked-local"
+    )
+    # A `--project` that dropped its value is malformed grammar and is rejected
+    # unconditionally — even when no project path is otherwise referenced, so the
+    # conditional missing-`--project` exemption cannot let it slip through.
+    assert (
+        offense("awf smoke run --project --mocked-local --format pretty")
+        == "smoke --project missing value"
     )
 
 
