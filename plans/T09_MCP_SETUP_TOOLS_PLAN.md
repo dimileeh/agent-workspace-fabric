@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HOlA0
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` includes
+an explicit `--source-checkout` in each per-client `apply_command` and in the
+returned next steps, but the top-level `command` field remains the generic
+`awf setup --client`. Operators or agents that copy only `command` can therefore
+apply client setup against the default or persisted checkout instead of the
+checkout used to build the MCP instruction plan.
+
+Scope is limited to making the top-level client-instruction command preserve
+the explicit source checkout selection. Per-client payloads, next-step text,
+secret redaction, and behavior without `source_checkout` stay unchanged.
+
+### Requirements Checklist
+
+- Preserve existing client instruction payloads when `source_checkout` is not
+  provided.
+- When explicit `source_checkout` is provided, include the resolved checkout in
+  the top-level `command` field.
+- Keep the top-level command executable for the selected clients rather than
+  dropping the client selectors.
+- Add a focused regression for the explicit source-checkout command field.
+
+### Implementation Steps
+
+1. Extend the explicit source-checkout client-instruction regression so it
+   expects `payload["command"]` to include the resolved `--source-checkout`.
+2. Add a small helper that renders the top-level client-instruction command
+   from selected clients and the resolved checkout.
+3. Use that helper only on the non-empty selected-client path.
+4. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserve_explicit_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HObk-
 
 ### Problem Statement And Scope

@@ -561,7 +561,7 @@ def _client_integration_instructions_result(
     status = "blocked" if blocked else "success"
     payload: dict[str, Any] = {
         "status": status,
-        "command": "awf setup --client",
+        "command": _client_instruction_command(selected, source_checkout=source_path),
         "summary": _client_instructions_summary(plans, blocked=bool(blocked)),
         "env_file": str(env_file),
         "clients": [
@@ -864,6 +864,17 @@ def _client_instruction_next_steps(
         for plan in plans
         if plan.action != "no_change"
     ] or ["No client config changes are needed."]
+
+
+def _client_instruction_command(clients: list[str], *, source_checkout: Path | None) -> str:
+    if source_checkout is None:
+        return "awf setup --client"
+
+    command = ["awf", "setup"]
+    for client in clients:
+        command.extend(["--client", client])
+    command.extend(["--source-checkout", str(source_checkout)])
+    return shlex.join(command)
 
 
 def _client_apply_command(client: str, *, source_checkout: Path | None) -> str:

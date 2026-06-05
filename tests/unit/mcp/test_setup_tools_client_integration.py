@@ -86,6 +86,7 @@ async def test_client_integration_instructions_preserve_explicit_source_checkout
     expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
     assert result.isError is False
     assert resolve_calls == [(checkout, False)]
+    assert payload["command"] == expected_command
     assert payload["clients"][0]["apply_command"] == expected_command
     assert payload["next_steps"] == [
         f"Run `{expected_command}` to apply the claude client integration."

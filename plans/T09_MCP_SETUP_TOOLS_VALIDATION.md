@@ -53,6 +53,52 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HOlA0
+
+### Requirement Status
+
+- Preserve existing client instruction payloads when `source_checkout` is not
+  provided: Complete. The helper returns the existing generic command for the
+  no-explicit-checkout path.
+- When explicit `source_checkout` is provided, include the resolved checkout in
+  the top-level `command` field: Complete.
+- Keep the top-level command executable for the selected clients rather than
+  dropping the client selectors: Complete.
+- Add a focused regression for the explicit source-checkout command field:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserve_explicit_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["command"]` remained `awf setup --client` without the explicit
+  `--source-checkout` argument.
+- Regression test after the implementation change: 1 passed.
+- Focused client-integration MCP test file: 8 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HObk-
 
 ### Requirement Status
