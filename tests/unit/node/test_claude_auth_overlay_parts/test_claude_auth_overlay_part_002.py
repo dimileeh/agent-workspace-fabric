@@ -681,6 +681,62 @@ def test_interrupted_legacy_copy_leaves_no_reusable_partial_tree(
 
 
 @pytest.mark.unit
+def test_legacy_copy_race_loss_to_partial_winner_omits_completeness_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost legacy-copy ``replace`` race must not mark the winner's copy complete.
+
+    When this provision's atomic ``staged_copy.replace(target_dir)`` loses the race —
+    ``target_dir`` already exists, so the ``OSError`` is swallowed and the winner's
+    ``.claude`` is reused — the completeness marker must be written only by the side
+    whose own atomic ``replace`` landed the copy, never by the loser. The winner is not
+    guaranteed to be this atomic path: a concurrent older *pre-atomic-staging* provision
+    may have left a *partial* tree straight in ``.claude``. Marking such a copy complete
+    would make a later overlay-reconcile read its never-copied files as confident agent
+    deletions and whiteout still-valid lower credentials (PRRT_kwDOSJAM6s6HRnsP). A
+    missing marker is the safe direction — the reconcile then skips the whiteout pass.
+    """
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    real_replace = auth_mounts_mod.Path.replace
+
+    def _lost_legacy_race(self: Path, target: Path) -> object:
+        # Model a concurrent (possibly older, non-atomic) provision that already
+        # materialized a *partial* ``.claude`` straight into ``target_dir``: only
+        # ``settings.json`` landed, ``skills`` was never copied. Renaming our complete
+        # staged tree onto that now non-empty dir fails — the lost-race path.
+        if ".claude-legacy-" in str(self):
+            target_dir = Path(target)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / "settings.json").write_text('{"theme": "dark"}\n')
+            raise OSError("legacy .claude populated by a concurrent provision")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(auth_mounts_mod.Path, "replace", _lost_legacy_race)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_legacy_race",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=False),
+    )
+
+    claude_root = work_dir / "auth" / "ws_legacy_race" / "claude"
+    by_target = {m.target: m for m in mounts}
+    # The race winner's ``.claude`` is reused rather than the run failing.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    # ...but because *this* provision did not land the copy, it does not vouch for the
+    # winner's completeness: no marker, so a later reconcile fails safe (keeps lower
+    # credentials visible) for what may be a partial tree.
+    assert not (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).exists()
+    # The throwaway staging dir was reclaimed, never orphaned under the auth root.
+    assert list(claude_root.glob(".claude-legacy-*")) == []
+
+
+@pytest.mark.unit
 def test_shared_base_build_lock_open_failure_cleans_staging_and_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

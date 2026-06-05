@@ -709,18 +709,24 @@ def _prepare_isolated_claude_auth(
                         # than mounting a missing source.
                         if not target_dir.exists():
                             raise
+                        staged_replace_won = False
+                    else:
+                        staged_replace_won = True
                 finally:
                     shutil.rmtree(staging, ignore_errors=True)
-                # ``.claude`` now exists as a *complete* atomic copy — either this
-                # provision's ``replace`` landed it, or a concurrent provision of the
-                # same workspace won the race and materialized its own whole copy (the
-                # re-raise above only lets us fall through when ``target_dir`` exists).
-                # Drop the completeness marker so a later overlay-reconcile may treat
-                # this copy's absences as confident agent deletions. A pre-atomic-staging
-                # *partial* copy is adopted by the ``not target_dir.exists()`` guard
-                # above and never reaches this block, so it never gets the marker and the
-                # reconcile path fails safe (keeps lower credentials visible).
-                _write_legacy_complete_marker(target_root)
+                # Drop the completeness marker only when *this* provision's atomic
+                # ``replace`` landed the copy — then ``target_dir`` is provably the whole
+                # staged tree we just built, and a later overlay-reconcile may treat its
+                # absences as confident agent deletions. When the ``replace`` instead lost
+                # the race, the winner owns its copy and marks it itself once *its* atomic
+                # rename lands; we must not vouch for a tree we did not complete, because
+                # the winner need not be this atomic path — a concurrent *older*
+                # pre-atomic-staging provision may have left a *partial* ``.claude`` that
+                # our rename then failed onto. A marker over a partial copy would make the
+                # reconcile whiteout still-valid lower credentials; a missing marker is the
+                # safe direction (the reconcile skips that destructive pass).
+                if staged_replace_won:
+                    _write_legacy_complete_marker(target_root)
             mounts.append(
                 AuthMount(
                     source=str(target_dir),
