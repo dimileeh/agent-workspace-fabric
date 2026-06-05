@@ -209,26 +209,34 @@ async def test_client_integration_instructions_planning_oserror_is_generic(
     from awf.mcp import setup_tools
 
     raw_token = "sk-proj-" + "e" * 40
+    checkout = tmp_path / "source checkout"
+    env_file = checkout / "docker" / "compose" / ".env"
     leaked_detail = f"{tmp_path}/config.json contains {raw_token}"
 
     def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
         raise OSError(leaked_detail)
 
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
     monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
     result = await mcp.call_tool(
         "awf_get_client_integration_instructions",
-        {"clients": ["claude"]},
+        {"clients": ["claude"], "source_checkout": str(checkout)},
     )
     payload = _payload(result)
     rendered = _json_text(result)
+    expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["command"] == expected_command
     assert payload["summary"] == "could not inspect existing client MCP configuration"
     assert payload["issues"][0]["details"] == {"error_type": "OSError"}
+    assert payload["next_steps"] == [
+        f"Fix the reported issue above, then re-run {expected_command}.",
+    ]
     assert leaked_detail not in rendered
     assert raw_token not in rendered
 
@@ -338,7 +346,8 @@ async def test_client_integration_instructions_success_transformation_failure_is
     from awf.mcp import setup_tools
 
     raw_token = "sk-proj-" + "h" * 40
-    env_file = tmp_path / ".env"
+    checkout = tmp_path / "source checkout"
+    env_file = checkout / "docker" / "compose" / ".env"
     home = tmp_path / "home"
     home.mkdir()
 
@@ -355,14 +364,19 @@ async def test_client_integration_instructions_success_transformation_failure_is
 
     result = await mcp.call_tool(
         "awf_get_client_integration_instructions",
-        {"clients": ["claude"]},
+        {"clients": ["claude"], "source_checkout": str(checkout)},
     )
     payload = _payload(result)
     rendered = _json_text(result)
+    expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["command"] == expected_command
     assert payload["summary"] == "could not build client integration instructions"
     assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
+    assert payload["next_steps"] == [
+        f"Fix the reported issue above, then re-run {expected_command}.",
+    ]
     assert raw_token not in rendered

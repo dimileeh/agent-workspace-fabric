@@ -84,6 +84,53 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HQJ6B
+
+### Problem Statement And Scope
+
+The PR review reports that generic client-instruction failures during client
+plan construction or response assembly return `_reason_coded_payload(...)`
+unchanged. Those generic payloads advertise `awf setup` retry commands instead
+of preserving the caller's selected `--client` values and explicit
+`--source-checkout`, unlike the `SetupCheckError` path.
+
+Scope is limited to the existing generic `awf_get_client_integration_instructions`
+error branches and focused regressions for command and next-step rendering.
+
+### Requirements Checklist
+
+- Preserve the existing sanitized reason code, summary, issue details,
+  redaction, and MCP error behavior for generic client plan construction
+  failures.
+- Preserve the same behavior for response assembly failures.
+- Render generic client plan construction failures with a command that includes
+  the selected client values and explicit `source_checkout` when provided.
+- Render response assembly failures with the same selected-client and explicit
+  checkout retry command.
+- Add focused regression coverage for both repaired paths.
+
+### Implementation Steps
+
+1. Extend the focused client-integration generic planning failure regression to
+   assert command and next-step preservation.
+2. Extend the focused client-integration response assembly failure regression to
+   assert command and next-step preservation.
+3. Replace the two generic client-integration `_reason_coded_payload(...)`
+   returns with `_client_instruction_reason_coded_payload(...)`.
+4. Run the targeted regressions and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_oserror_is_generic tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_success_transformation_failure_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Client Planning Fallback And Start Step Rewrites
 
 ### Problem Statement And Scope
