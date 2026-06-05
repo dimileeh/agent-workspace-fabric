@@ -13,6 +13,7 @@ tests.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import os
@@ -25,6 +26,20 @@ from pathlib import Path
 from typing import Protocol
 
 from awf.common.logging import get_logger
+from awf.node.auth_mounts_caps import _has_cap_mknod as _has_cap_mknod
+from awf.node.auth_mounts_caps import _has_cap_sys_admin as _has_cap_sys_admin
+from awf.node.auth_mounts_claude_reconcile import (
+    _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED as _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
+)
+from awf.node.auth_mounts_claude_reconcile import (
+    _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE as _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE,
+)
+from awf.node.auth_mounts_claude_reconcile import (
+    _CLAUDE_USAGE_HISTORY_DIRS as _CLAUDE_USAGE_HISTORY_DIRS,
+)
+from awf.node.auth_mounts_claude_reconcile import (
+    _reconcile_fallback_edits_into_upper as _reconcile_fallback_edits_into_upper,
+)
 from awf.node.auth_mounts_overlay import _PROC_MOUNTS as _PROC_MOUNTS
 from awf.node.auth_mounts_overlay import (
     _overlay_lowerdir_from_proc_mounts as _overlay_lowerdir_from_proc_mounts,
@@ -33,8 +48,13 @@ from awf.node.auth_mounts_overlay import (
     _unescape_proc_mount_field as _unescape_proc_mount_field,
 )
 from awf.node.auth_mounts_overlay import iter_overlay_lowerdirs as iter_overlay_lowerdirs
+from awf.node.auth_mounts_overlay_copy import (
+    _legacy_path_confidently_absent as _legacy_path_confidently_absent,
+)
 from awf.node.auth_mounts_overlay_copy import _safe_mtime_ns as _safe_mtime_ns
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_copy as _safe_overlay_copy
+from awf.node.auth_mounts_overlay_copy import _safe_overlay_whiteout as _safe_overlay_whiteout
+from awf.node.auth_mounts_overlay_copy import _safe_stat as _safe_stat
 from awf.node.compose_manager import AuthMount
 
 _log = get_logger(__name__)
@@ -42,12 +62,6 @@ _log = get_logger(__name__)
 _CONTAINER_HOME = "/home/agent"
 _CLAUDE_DIR_TARGET = f"{_CONTAINER_HOME}/.claude"
 _CLAUDE_FILE_TARGET = f"{_CONTAINER_HOME}/.claude.json"
-# Per-workspace Claude/Gemini auth copies must exclude historical usage/transcript
-# dirs. Otherwise ``ccusage`` (which reads these local files) would attribute the
-# host's prior usage to the workspace run; baseline/delta still guards totals, but
-# excluding the copy keeps the workspace from seeing unrelated host transcripts and
-# avoids copying potentially large history trees.
-_CLAUDE_USAGE_HISTORY_DIRS = ("projects", "todos", "shell-snapshots", "statsig")
 
 # Shared, read-only overlay base for ``~/.claude``. The bulk of ``~/.claude``
 # (skills, plugins, static config) is identical across workspaces and read-only
@@ -75,6 +89,14 @@ _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 # legacy-copy reap are both deferred to a later provision that can pin the true base,
 # rather than reconciling against a wrong tree (which would mis-copy or drop edits).
 _CLAUDE_AUTH_OVERLAY_RECONCILE_DEFERRED = "CLAUDE_AUTH_OVERLAY_RECONCILE_DEFERRED"
+# Logged when clearing the legacy-copy completeness marker before its reap fails with a
+# non-``FileNotFoundError`` ``OSError`` (readonly mount, EPERM, transient I/O). The reap
+# is best-effort and the overlay is already prepared+reconciled, so a cleanup-only fault
+# must not fail auth provisioning. We deliberately skip the reap too: a marker we could
+# not clear over a tree the ``rmtree`` then partially removes is the credential-hiding
+# state the clear-before-reap ordering exists to prevent, so the still-complete tree and
+# its valid marker are both left intact for a later provision to retry.
+_CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED = "CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED"
 # Raised by ``teardown_workspace_auth_overlay`` when a process that lacks
 # ``CAP_SYS_ADMIN`` (the CLI / API container) is asked to release a workspace's
 # overlay it cannot see in its own mount namespace and no capable process has
@@ -92,6 +114,20 @@ _CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAI
 # later capability-less GC distinguish "the worker already released this overlay"
 # (safe to remove) from "still mounted elsewhere" (must not remove).
 _OVERLAY_UNMOUNTED_MARKER = ".overlay-unmounted"
+# Sibling marker written under ``auth/<id>/claude`` once a per-workspace legacy
+# ``.claude`` copy has been materialized as a *complete* atomic copy (staging dir +
+# atomic ``replace``). The #402 deletion-whiteout pass reads a base-present /
+# legacy-absent file as a *confident* agent deletion and whiteouts the lower
+# credential; that inference is only sound when the legacy copy is whole. Atomic
+# staging guarantees completeness for copies this code newly materializes, but a
+# ``.claude`` left *partial* by a pre-atomic-staging provision (an interrupted plain
+# ``copytree`` that landed straight in ``.claude``) is still reused by the bare
+# ``exists()`` guards with no completeness check and no host-signature invalidation —
+# its never-copied files would read as deletions and whiteout still-valid credentials
+# (PRRT_kwDOSJAM6s6HRNkk). Only a copy materialized through the atomic path drops this
+# marker; the reconcile path forwards deletions as whiteouts only when it is present,
+# and otherwise fails safe (edits are still forwarded, lower credentials stay visible).
+_CLAUDE_LEGACY_COMPLETE_MARKER = ".claude-complete"
 # When truthy in the worker environment, force the per-workspace copy fallback
 # even where overlayfs + CAP_SYS_ADMIN are present. The bootstrap mount-propagation
 # preflight sets this on hosts whose work dir cannot be made an ``rshared`` mount
@@ -107,8 +143,6 @@ _CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
 # so the overlay branch degrades to the per-workspace copy fallback on such a host.
 _OVERLAY_OPTION_RESERVED_CHARS = (",", ":")
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
-_PROC_SELF_STATUS = Path("/proc/self/status")
-_CAP_SYS_ADMIN_BIT = 21
 _ISOLATION_OVERLAY = "per_workspace_overlay"
 _ISOLATION_COPY = "per_workspace_copy"
 
@@ -157,24 +191,6 @@ def _overlay_filesystem_available(proc_filesystems: Path = _PROC_FILESYSTEMS) ->
     except OSError:
         return False
     return any("overlay" in line.split() for line in contents.splitlines())
-
-
-def _has_cap_sys_admin(proc_status: Path = _PROC_SELF_STATUS) -> bool:
-    """Return whether the current process holds ``CAP_SYS_ADMIN`` (needed to mount)."""
-
-    try:
-        contents = proc_status.read_text()
-    except OSError:
-        return False
-    for line in contents.splitlines():
-        if not line.startswith("CapEff:"):
-            continue
-        try:
-            caps = int(line.split(":", 1)[1].strip(), 16)
-        except ValueError:
-            return False
-        return bool(caps & (1 << _CAP_SYS_ADMIN_BIT))
-    return False
 
 
 def _overlay_path_has_reserved_chars(path: Path) -> bool:
@@ -522,150 +538,21 @@ def _overlay_upper_has_data(upper: Path) -> bool:
         return False
 
 
-def _reconcile_fallback_edits_into_upper(
-    *, legacy: Path, merged: Path, upper: Path, base: Path
-) -> None:
-    """Forward fallback-era legacy edits into the overlay before reaping it.
+def _write_legacy_complete_marker(target_root: Path) -> None:
+    """Drop the per-workspace ``.claude`` completeness marker (best-effort).
 
-    Closes #381: when a surviving non-empty ``upper`` exists but a transient remount
-    failure degraded a provision to the legacy full copy, the agent may have mutated
-    Claude auth/config in that legacy copy. When the overlay later remounts,
-    ``merged`` (``upper`` over ``base``) shadows the legacy copy and the caller
-    ``rmtree``s it — dropping those fallback edits. This reconciles them first.
-
-    The forwarded copies are written **through the live ``merged`` mount**, never
-    directly into the underlying ``upper`` dir. By the time this runs the overlay is
-    already mounted, and overlayfs treats external writes to the upper/lower trees of
-    a live mount as undefined behavior — files poked straight into ``upper`` can read
-    back stale or invisible through ``merged`` (what the agent actually sees). Writing
-    via ``merged`` lets the kernel perform the copy-up coherently, so the reconciled
-    edit lands in ``upper`` *and* is immediately visible to the agent. The generation
-    comparisons below only *stat* the underlying ``upper``/``base`` (reads are safe);
-    only the copy itself routes through ``merged``.
-
-    Generation/mtime rule, walking every regular file ``rel`` under ``legacy``:
-
-    - It is a **fallback edit** iff ``base[rel]`` is absent OR
-      ``legacy[rel].st_mtime_ns > base[rel].st_mtime_ns``. A *fresh* legacy copy
-      preserves host mtimes via ``copy2``, so an unedited file matches the base and
-      is skipped — this filters the whole baseline tree out, preserving the
-      overlay's disk savings (only the small edited set is ever copied).
-    - A fallback edit is forwarded (via ``merged``) only when ``upper[rel]`` is absent
-      OR ``legacy[rel].st_mtime_ns > upper[rel].st_mtime_ns``. **``upper`` wins ties:**
-      an equal-or-newer upper edit is the agent's authoritative overlay-era change,
-      and only a *strictly newer* legacy edit overwrites it.
-
-    Per-file ``OSError`` is caught and skipped — best-effort, never blocks
-    provisioning. Never logs file contents (no secret leakage). Each copy goes through
-    :func:`_safe_overlay_copy`, which descends with ``O_NOFOLLOW`` file descriptors and
-    opens the leaf relative to the parent ``dir_fd``: ``merged``'s upper layer is
-    agent-controlled, and a name-based copy would follow a planted symlink at any
-    component, so an fd-based descent (no check/use gap) is required to keep this root
-    write inside the ``.claude`` tree.
-
-    *Source* symlinks are likewise refused: a fresh legacy copy is materialized via
-    ``copytree(symlinks=False)`` so it never contains symlinks, but the agent can plant
-    one in its ``rw`` legacy copy during the fallback session. ``copy2`` follows source
-    symlinks by default, which would let this root worker read the link target (possibly
-    outside the ``.claude`` tree) and surface its contents through the agent-visible
-    overlay. Any symlink in the legacy tree is therefore skipped before it is stat'd.
-
-    Known limitation: if the host ``~/.claude`` changed between when the overlay's
-    base was built and when the fallback copy was taken, unedited legacy files may
-    read as "newer than base" and be copied. There is still no data loss (an
-    equal/newer ``upper`` always wins, and the copy is bounded to the differing
-    set); the mtime comparison is intentionally conservative toward preserving edits.
-
-    Known limitation (deletions are not forwarded): ``os.walk`` only yields files
-    that *exist* in the legacy copy, so a file (or directory) the agent deleted
-    during the fallback session is invisible here. No overlayfs whiteout / opaque
-    marker is created in ``upper`` for it, so after the overlay remounts that path
-    reappears from ``base``. Only writes are forwarded; fallback-era removals are
-    silently lost. Tracking them would require diffing legacy against base and
-    synthesizing whiteouts, which the mtime-only (no content-hash) design omits.
-
-    Known limitation (edits inside an agent-planted directory symlink are not
-    forwarded): ``os.walk`` runs with the default ``followlinks=False``, so if the
-    agent replaced a subdirectory with a symlink (e.g. ``legacy/.config ->
-    /other/dir``) during the fallback session, the walk lists it in ``_dirs`` but
-    never descends, and files reachable only *through* that link are not yielded or
-    forwarded. This is deliberate, not a regression: descending (``followlinks=True``)
-    would let this root worker read content at the link target — possibly outside the
-    ``.claude`` tree — and surface it through the agent-visible overlay, the same
-    arbitrary root-read primitive the per-file source-symlink skip above guards
-    against. The only "lost" data is content that never lived in the ``.claude`` copy
-    to begin with (it lives at the link target); genuine edits to files in *real*
-    subdirectories are walked and forwarded normally.
-
-    Known limitation (a newer host write can un-delete an overlay deletion): an
-    overlay-era deletion is recorded in ``upper`` as a whiteout character device,
-    and ``_safe_mtime_ns`` returns that whiteout's *creation* mtime (when the agent
-    deleted the file). The "upper wins ties" rule only guards equal mtimes, so if
-    the host updates the same path *after* teardown and bumps the legacy copy's
-    mtime strictly past the whiteout's creation mtime, ``legacy_mtime_ns >
-    upper_mtime_ns`` holds and ``copy2`` replaces the whiteout with a regular file —
-    silently restoring what the agent had intentionally removed. This is an inherent
-    edge of the mtime-only approach (whiteouts carry no "deleted at" semantics stat
-    can read) and is accepted as best-effort.
+    Called only *after* an atomic legacy-copy materialization, so the marker's
+    presence proves the copy is whole (see :data:`_CLAUDE_LEGACY_COMPLETE_MARKER`).
+    Written strictly after the ``replace`` so a crash between the rename and this
+    write yields a complete copy with *no* marker — the reconcile path then skips the
+    destructive whiteout pass (over-conservative but safe); the inverse, a marker over
+    a partial copy, is impossible. A failed write (ENOSPC, transient FS error) is
+    swallowed for the same reason: a missing marker only forgoes whiteouting confident
+    deletions, never blocks provisioning and never hides a credential.
     """
 
-    excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
-    for root, dirs, files in os.walk(legacy):
-        root_path = Path(root)
-        # Mirror the base copy's ``ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS)``: the
-        # shared base never holds these usage-history subtrees, so every file in one
-        # reads as ``base_mtime_ns is None`` (an unconditional "fallback edit") and would
-        # be forwarded whole. A long fallback session that filled ``projects/`` with
-        # multi-GB transcripts would otherwise materialise all of it in the overlay upper,
-        # negating the shared-base disk-savings goal. Prune them in place so the walk does
-        # not descend, bounding reconcile to the same scope as the base itself.
-        dirs[:] = [d for d in dirs if d not in excluded]
-        for name in files:
-            legacy_file = root_path / name
-            if legacy_file.is_symlink():
-                # A fresh legacy copy is materialized via ``copytree(symlinks=False)`` and
-                # so never holds symlinks; any symlink here was planted by the (untrusted)
-                # agent in the fallback session (the legacy copy is mounted ``rw`` for it).
-                # ``shutil.copy2`` follows *source* symlinks by default, so the root worker
-                # would read the link target — possibly outside the ``.claude`` tree — and
-                # write its contents into the agent-visible overlay, an arbitrary root-read
-                # primitive. The destination guard below only blocks writes *through* a
-                # dest link, so a source link must be skipped here. Best-effort: drop just
-                # this entry, never block provisioning.
-                continue
-            if not legacy_file.is_file():
-                # Not a regular file: the agent can ``mkfifo`` (or plant a socket/device)
-                # in the ``rw`` legacy copy during the fallback session. ``_safe_mtime_ns``
-                # ``stat``s a FIFO fine, so it would otherwise slip through — but
-                # ``shutil.copy2`` then ``open``s the source for reading, and a FIFO with no
-                # peer writer blocks the root worker *indefinitely*, hanging provisioning
-                # rather than completing the copy. (Not a symlink here — that is skipped
-                # above.) Best-effort: drop just this entry.
-                continue
-            legacy_mtime_ns = _safe_mtime_ns(legacy_file)
-            if legacy_mtime_ns is None:
-                continue
-            rel = legacy_file.relative_to(legacy)
-            base_mtime_ns = _safe_mtime_ns(base / rel)
-            is_fallback_edit = base_mtime_ns is None or legacy_mtime_ns > base_mtime_ns
-            if not is_fallback_edit:
-                continue
-            upper_file = upper / rel
-            # ``lstat`` the overlay entry: ``upper`` is agent-controlled and may hold a
-            # planted symlink. Comparing the symlink's *own* mtime (not its target's)
-            # is the semantically correct generation for the "upper wins ties" rule.
-            upper_mtime_ns = _safe_mtime_ns(upper_file, follow_symlinks=False)
-            if upper_mtime_ns is not None and legacy_mtime_ns <= upper_mtime_ns:
-                continue
-            # Copy via :func:`_safe_overlay_copy`, which descends *both* the destination
-            # (under ``merged``) and the source (under the trusted ``legacy`` root) with
-            # ``O_NOFOLLOW`` file descriptors and opens each leaf relative to its parent
-            # ``dir_fd`` — so an agent-planted symlink at *any* component of either path
-            # cannot redirect this root copy outside the ``.claude`` tree (no name-based
-            # check/use gap). Passing ``legacy`` (not ``legacy_file``) lets the source be
-            # descended component-by-component from a trusted anchor. Best-effort: it
-            # swallows any structural conflict or ``OSError`` and drops just this file.
-            _safe_overlay_copy(merged, rel, legacy)
+    with contextlib.suppress(OSError):
+        (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).touch()
 
 
 def _prepare_isolated_claude_auth(
@@ -772,23 +659,143 @@ def _prepare_isolated_claude_auth(
                         workspace_auth_root=str(target_root),
                     )
                 else:
+                    # Forward fallback-era *deletions* as whiteouts only when this
+                    # legacy copy is proven complete (the completeness marker is
+                    # present): only then is a base-present / legacy-absent file a
+                    # confident agent deletion rather than a never-copied file of a
+                    # partial pre-atomic-staging copy. A partial copy reused by the
+                    # ``exists()`` guard above carries no marker, so its absences are
+                    # left visible. Edits are always forwarded regardless — they only
+                    # add/overwrite under ``upper`` and so can never hide a lower
+                    # credential.
+                    legacy_complete = (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).exists()
                     _reconcile_fallback_edits_into_upper(
                         legacy=legacy_claude_copy,
                         merged=Path(mount.source),
                         upper=upper,
                         base=base,
+                        host_claude=source_dir,
+                        forward_deletions=legacy_complete,
                     )
-                    shutil.rmtree(legacy_claude_copy, ignore_errors=True)
+                    # Reap the completeness marker with the copy it vouches for, and
+                    # do it *before* the (potentially multi-GB) ``rmtree`` — not after.
+                    # The marker lives *beside* the legacy tree (``target_root``), so
+                    # ``rmtree`` of ``.claude`` leaves it dangling. Its invariant is
+                    # "present ⟹ *this* ``.claude`` copy is provably complete"; a
+                    # stale marker over a since-reaped copy would falsely vouch for a
+                    # later partial ``.claude`` that lands here without the atomic
+                    # write path (e.g. a concurrent older-code provision), keeping
+                    # ``forward_deletions`` true so the whiteout pass could hide
+                    # still-valid lower credentials. Removing it restores the
+                    # safe default (a missing marker forgoes the destructive pass).
+                    #
+                    # Order matters: a worker killed *during* the large ``rmtree`` would
+                    # leave a *partially removed* legacy tree behind. If the marker were
+                    # only cleared afterwards it would survive, and the next provision's
+                    # ``legacy_complete`` gate would treat that damaged tree as proven
+                    # complete — forwarding files the interrupted cleanup deleted (not the
+                    # agent) as credential-hiding whiteouts. Clearing the marker first
+                    # makes an interrupted cleanup degrade to the safe direction instead.
+                    # We already captured ``legacy_complete`` above, so the reconcile's
+                    # deletion-forwarding decision is unaffected by removing it now.
+                    try:
+                        (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).unlink(missing_ok=True)
+                    except OSError as exc:
+                        # Clearing the marker is the one non-best-effort step in this
+                        # cleanup path, and the overlay is already prepared+reconciled
+                        # above. A transient/readonly/permission failure removing it must
+                        # not fail auth provisioning over a cleanup-only problem. Crucially
+                        # we must NOT fall through to the ``rmtree``: a marker we could not
+                        # clear, left over a tree the reap then partially removes, is the
+                        # exact credential-hiding state the clear-before-reap ordering
+                        # exists to prevent. Leaving both the still-complete legacy tree and
+                        # its valid marker intact keeps the "marker present ⟹ complete tree"
+                        # invariant true, so a later provision can retry the reap safely.
+                        _log.info(
+                            "claude_auth_overlay_legacy_reap_deferred",
+                            reason_code=_CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED,
+                            workspace_auth_root=str(target_root),
+                            error=str(exc),
+                        )
+                    else:
+                        shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)
             if not target_dir.exists():
-                shutil.copytree(
-                    source_dir,
-                    target_dir,
-                    ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
-                    ignore_dangling_symlinks=True,
-                )
+                # No live legacy copy exists, so any ``.claude-complete`` marker still
+                # sitting beside it is stale — it can only have been left dangling by an
+                # interrupted older-code reap (one that removed ``.claude`` without
+                # clearing its marker first, the inverse of the clear-before-rmtree
+                # ordering this module now enforces). ``staged_replace_won`` only stops
+                # *this* provision from *adding* a marker; it never neutralizes a
+                # pre-existing one. Clear it before racing to materialize a new copy so
+                # the build starts neutral: if our atomic ``replace`` below loses to a
+                # concurrent *partial* pre-atomic ``.claude`` winner we would otherwise
+                # leave that stale marker vouching for the winner's incomplete tree,
+                # re-enabling the destructive deletion whiteouts the completeness gate
+                # exists to suppress. A winning writer re-asserts the marker after its own
+                # atomic replace lands; clearing here only ever forgoes a destructive
+                # pass (the safe direction), never hides a credential. Best-effort: a
+                # transient unlink fault must not fail provisioning — the worst case is a
+                # surviving stale marker, which the reconcile already treats conservatively
+                # only when paired with a reused (never freshly built) copy.
+                with contextlib.suppress(OSError):
+                    (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).unlink(missing_ok=True)
+
+                # Materialize the legacy copy atomically: ``copytree`` into a sibling
+                # staging dir, then ``replace`` it into ``.claude`` only once the copy
+                # is complete. A plain ``copytree`` straight into ``.claude`` that is
+                # interrupted (crash, SIGKILL, OSError mid-copy) leaves a *partial*
+                # tree, and the ``not target_dir.exists()`` reuse guard above would then
+                # adopt it as the authoritative legacy copy on the next provision. Its
+                # never-copied files would read as confident agent deletions to the #402
+                # whiteout pass (:func:`_forward_fallback_deletions_as_whiteouts`), which
+                # would synthesize overlayfs whiteouts that *hide still-valid lower
+                # credentials* from ``merged`` — the exact credential-hiding the
+                # reconcile design forbids. Staging + an atomic rename guarantees
+                # ``.claude`` only ever exists as a *complete* copy; an interrupted
+                # attempt leaves only the discardable staging dir (reclaimed by the
+                # ``finally``, or — on a hard kill — by the per-workspace teardown that
+                # reaps ``target_root`` wholesale). Mirrors the shared-base build's
+                # staging pattern in :func:`_ensure_shared_claude_base`.
+                staging = Path(tempfile.mkdtemp(prefix=".claude-legacy-", dir=target_root))
+                staged_copy = staging / ".claude"
+                try:
+                    shutil.copytree(
+                        source_dir,
+                        staged_copy,
+                        ignore=shutil.ignore_patterns(*_CLAUDE_USAGE_HISTORY_DIRS),
+                        ignore_dangling_symlinks=True,
+                    )
+                    try:
+                        staged_copy.replace(target_dir)
+                    except OSError:
+                        # A concurrent provision of the same workspace won the race and
+                        # already materialized ``.claude`` (renaming onto the now
+                        # non-empty dir fails): reuse theirs. Any other failure leaves
+                        # ``.claude`` absent — re-raise so the caller surfaces it rather
+                        # than mounting a missing source.
+                        if not target_dir.exists():
+                            raise
+                        staged_replace_won = False
+                    else:
+                        staged_replace_won = True
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
+                # Drop the completeness marker only when *this* provision's atomic
+                # ``replace`` landed the copy — then ``target_dir`` is provably the whole
+                # staged tree we just built, and a later overlay-reconcile may treat its
+                # absences as confident agent deletions. When the ``replace`` instead lost
+                # the race, the winner owns its copy and marks it itself once *its* atomic
+                # rename lands; we must not vouch for a tree we did not complete, because
+                # the winner need not be this atomic path — a concurrent *older*
+                # pre-atomic-staging provision may have left a *partial* ``.claude`` that
+                # our rename then failed onto. A marker over a partial copy would make the
+                # reconcile whiteout still-valid lower credentials; a missing marker is the
+                # safe direction (the reconcile skips that destructive pass).
+                if staged_replace_won:
+                    _write_legacy_complete_marker(target_root)
             mounts.append(
                 AuthMount(
                     source=str(target_dir),
