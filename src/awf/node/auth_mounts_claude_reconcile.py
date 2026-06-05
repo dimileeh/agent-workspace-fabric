@@ -559,11 +559,28 @@ def _reconcile_fallback_edits_into_upper(
     # (possibly partial) copy, never-copied files would read as confident deletions and
     # whiteout still-valid lower credentials, so skip the pass and keep them visible.
     if not forward_deletions:
-        _log.info(
-            "claude_auth_overlay_deletion_reconcile_skipped_incomplete_legacy",
-            reason_code=_CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY,
-            workspace_auth_root=str(upper.parent),
-        )
+        # Surface the "incomplete legacy" diagnostic only when ``base`` actually holds a
+        # file the deletion pass *would* have evaluated. ``forward_deletions=False`` is the
+        # default and the expected state for every legacy copy that pre-dates the
+        # atomic-staging rollout, so an unconditional log fires once per provision for every
+        # such workspace until it is refreshed — including clean, freshly-minted ones that
+        # simply never got the marker. That drowns the signal for the genuinely-unexpected
+        # case. Mirror the deletion pass's own base walk (same usage-history pruning): an
+        # empty or fully-excluded ``base`` yields no deletion candidate regardless of the
+        # marker, so logging there is pure noise.
+        excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
+        has_deletion_candidate = False
+        for _root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in excluded]
+            if files:
+                has_deletion_candidate = True
+                break
+        if has_deletion_candidate:
+            _log.info(
+                "claude_auth_overlay_deletion_reconcile_skipped_incomplete_legacy",
+                reason_code=_CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY,
+                workspace_auth_root=str(upper.parent),
+            )
         return
     _forward_fallback_deletions_as_whiteouts(
         legacy=legacy, upper=upper, base=base, host_claude=host_claude

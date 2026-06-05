@@ -779,3 +779,50 @@ def test_reconcile_forward_deletions_defaults_to_safe_skip(
     # No whiteout attempted — the default never runs the destructive pass.
     assert recorded == []
     assert not (upper / "secret.json").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_skip_log_suppressed_when_base_has_no_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``forward_deletions=False`` is the default/expected state for every legacy copy
+    # predating the atomic-staging rollout, so the skip diagnostic must not fire on a
+    # clean workspace whose ``base`` holds no file the deletion pass could ever evaluate
+    # — otherwise it emits one INFO per provision for every such workspace and drowns the
+    # signal for the genuinely-unexpected unmarked-but-populated case. Here ``base`` is
+    # empty (and a fully-excluded usage-history file still counts as no candidate), so the
+    # log is suppressed while the always-safe edit pass still runs.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    # ``base`` holds only a usage-history file the deletion pass prunes — no candidate.
+    (base / "projects").mkdir()
+    (base / "projects" / "transcript.json").write_text("[]\n")
+    # A genuine fallback edit the always-safe edit pass must still forward.
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    with capture_logs() as logs:
+        _reconcile_fallback_edits_into_upper(
+            legacy=legacy,
+            merged=merged,
+            upper=upper,
+            base=base,
+            host_claude=host,
+            forward_deletions=False,
+        )
+
+    # No whiteout attempted, and the noisy skip diagnostic is suppressed.
+    assert recorded == []
+    assert not any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
+        for entry in logs
+    )
+    # The always-safe edit forwarding still runs (writes through merged).
+    assert (merged / "edited.json").read_text() == '{"fallback": "edit"}\n'
