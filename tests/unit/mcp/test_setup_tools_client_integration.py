@@ -283,3 +283,41 @@ async def test_client_integration_instructions_planning_value_error_is_generic(
     assert payload["issues"][0]["details"] == {"error_type": "ValueError"}
     assert leaked_detail not in rendered
     assert raw_token not in rendered
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_success_transformation_failure_is_structured_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "h" * 40
+    env_file = tmp_path / ".env"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    def fail_summary(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError(f"summary rendering leaked {raw_token}")
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
+    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
+    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
+    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(setup_tools, "_client_env", lambda: {})
+    monkeypatch.setattr(setup_tools, "_client_instructions_summary", fail_summary)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["summary"] == "could not build client integration instructions"
+    assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
+    assert raw_token not in rendered

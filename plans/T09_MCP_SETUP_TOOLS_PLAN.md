@@ -84,6 +84,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Success Path Safe Result
+
+### Problem Statement And Scope
+
+The review reports that `_get_setup_status_result` and
+`_client_integration_instructions_result` handle dependency failures through
+structured `safe_result` responses, but then build their success payloads
+outside those guards. If a post-dependency transformation helper raises, the
+exception can escape through FastMCP instead of returning a redacted MCP error
+payload.
+
+Scope is limited to guarding the success-path payload transformations for those
+two MCP tools. Existing dependency-specific exception handling, payload schemas,
+and normal success behavior remain unchanged.
+
+### Requirements Checklist
+
+- Preserve normal setup-status and client-instruction success payloads.
+- Convert unexpected setup-status success-path transformation exceptions into a
+  sanitized `SETUP_READINESS_FAILED` MCP error response.
+- Convert unexpected client-instruction success-path transformation exceptions
+  into a sanitized `CLIENT_CONFIG_CONFLICT` MCP error response.
+- Ensure raw exception text and token-like values are not returned in the MCP
+  response.
+- Add focused regressions for both guarded success paths.
+
+### Implementation Steps
+
+1. Add focused failing regressions that force setup-status and
+   client-instruction post-dependency transformation helpers to raise.
+2. Wrap only the success payload-building sections in narrow generic exception
+   guards that return existing sanitized first-run error payloads.
+3. Run the targeted regressions and focused lint/type checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_success_transformation_failure_is_structured_and_redacted tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_success_transformation_failure_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HPThr
 
 ### Problem Statement And Scope

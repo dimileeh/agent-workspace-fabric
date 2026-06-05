@@ -267,44 +267,56 @@ def _get_setup_status_result(
             is_error=True,
         )
 
-    rendered = render_first_run_json(readiness)
-    details = _mapping(rendered.get("details"))
-    selected_providers = _list_of_strings(details.get("selected_providers"))
-    setup_payload: dict[str, Any] = {
-        "dry_run": True,
-        "selected_providers": selected_providers,
-        "checks": _safe_setup_checks(details.get("checks")),
-        "plain_file_consent": config.consent.plain_file_secrets,
-        "source_checkout_assets_consent": config.consent.source_checkout_assets,
-    }
-    if config_path is not None:
-        setup_payload["config_path"] = str(config_path)
-    payload = {
-        "status": rendered.get("status", "unknown"),
-        "command": _setup_status_command(
-            rendered.get("command"),
-            selected_providers=selected_providers,
-            source_checkout=source_path,
-        ),
-        "summary": rendered.get("summary", ""),
-        "reason_code": rendered.get("reason_code"),
-        "setup": setup_payload,
-        "providers": _provider_statuses(config.providers),
-        "clients": _client_statuses(config.clients),
-        "source_checkout": _setup_status_source_checkout(
-            config,
-            details,
-            rendered.get("issues"),
-            prefer_probed=source_path is not None,
-        ),
-        "issues": _setup_status_issues(rendered.get("issues")),
-        "next_steps": _setup_status_next_steps(
-            rendered.get("next_steps"),
-            selected_providers=selected_providers,
-            source_checkout=source_path,
-        ),
-    }
-    return safe_result(payload, is_error=payload["status"] in ("blocked", "failed"))
+    try:
+        rendered = render_first_run_json(readiness)
+        details = _mapping(rendered.get("details"))
+        selected_providers = _list_of_strings(details.get("selected_providers"))
+        setup_payload: dict[str, Any] = {
+            "dry_run": True,
+            "selected_providers": selected_providers,
+            "checks": _safe_setup_checks(details.get("checks")),
+            "plain_file_consent": config.consent.plain_file_secrets,
+            "source_checkout_assets_consent": config.consent.source_checkout_assets,
+        }
+        if config_path is not None:
+            setup_payload["config_path"] = str(config_path)
+        payload = {
+            "status": rendered.get("status", "unknown"),
+            "command": _setup_status_command(
+                rendered.get("command"),
+                selected_providers=selected_providers,
+                source_checkout=source_path,
+            ),
+            "summary": rendered.get("summary", ""),
+            "reason_code": rendered.get("reason_code"),
+            "setup": setup_payload,
+            "providers": _provider_statuses(config.providers),
+            "clients": _client_statuses(config.clients),
+            "source_checkout": _setup_status_source_checkout(
+                config,
+                details,
+                rendered.get("issues"),
+                prefer_probed=source_path is not None,
+            ),
+            "issues": _setup_status_issues(rendered.get("issues")),
+            "next_steps": _setup_status_next_steps(
+                rendered.get("next_steps"),
+                selected_providers=selected_providers,
+                source_checkout=source_path,
+            ),
+        }
+        is_error = payload["status"] in ("blocked", "failed")
+    except Exception as exc:
+        return _first_run_result(
+            safe_result,
+            _reason_coded_payload(
+                SETUP_READINESS_FAILED,
+                "could not build setup status response",
+                {"error_type": type(exc).__name__},
+            ),
+            is_error=True,
+        )
+    return safe_result(payload, is_error=is_error)
 
 
 async def _start_local_service_result(
@@ -586,25 +598,37 @@ def _client_integration_instructions_result(
             is_error=True,
         )
 
-    blocked = [plan for plan in plans if plan.action == "conflict"]
-    status = "blocked" if blocked else "success"
-    payload: dict[str, Any] = {
-        "status": status,
-        "command": _client_instruction_command(selected, source_checkout=source_path),
-        "summary": _client_instructions_summary(plans, blocked=bool(blocked)),
-        "env_file": str(env_file),
-        "clients": [
-            _client_instruction_payload(plan, source_checkout=source_path) for plan in plans
-        ],
-        "next_steps": _client_instruction_next_steps(
-            plans,
-            blocked=bool(blocked),
-            source_checkout=source_path,
-        ),
-    }
-    if blocked:
-        payload["reason_code"] = CLIENT_CONFIG_CONFLICT
-    return safe_result(payload, is_error=bool(blocked))
+    try:
+        blocked = [plan for plan in plans if plan.action == "conflict"]
+        status = "blocked" if blocked else "success"
+        payload: dict[str, Any] = {
+            "status": status,
+            "command": _client_instruction_command(selected, source_checkout=source_path),
+            "summary": _client_instructions_summary(plans, blocked=bool(blocked)),
+            "env_file": str(env_file),
+            "clients": [
+                _client_instruction_payload(plan, source_checkout=source_path) for plan in plans
+            ],
+            "next_steps": _client_instruction_next_steps(
+                plans,
+                blocked=bool(blocked),
+                source_checkout=source_path,
+            ),
+        }
+        is_error = bool(blocked)
+        if blocked:
+            payload["reason_code"] = CLIENT_CONFIG_CONFLICT
+    except Exception as exc:
+        return _first_run_result(
+            safe_result,
+            _reason_coded_payload(
+                CLIENT_CONFIG_CONFLICT,
+                "could not build client integration instructions",
+                {"error_type": type(exc).__name__},
+            ),
+            is_error=True,
+        )
+    return safe_result(payload, is_error=is_error)
 
 
 def _first_run_result(

@@ -548,6 +548,41 @@ async def test_get_setup_status_run_setup_oserror_is_structured_and_redacted(
 
 
 @pytest.mark.unit
+async def test_get_setup_status_success_transformation_failure_is_structured_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "g" * 40
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="ready",
+        details={"selected_providers": [], "checks": [{"name": "docker", "level": "ok"}]},
+        next_steps=(),
+    )
+
+    def fail_setup_check_rendering(_value: Any) -> list[dict[str, str]]:
+        raise RuntimeError(f"check rendering leaked {raw_token}")
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", HostSetupConfig)
+    monkeypatch.setattr(setup_tools, "_safe_setup_checks", fail_setup_check_rendering)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_get_setup_status", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["summary"] == "could not build setup status response"
+    assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
+    assert raw_token not in rendered
+
+
+@pytest.mark.unit
 async def test_get_setup_status_source_checkout_reads_host_config_status(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
