@@ -50,6 +50,15 @@ DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES = (
     ),
     "}",
 )
+DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES = (
+    "awf_strip_unquoted_dotenv_inline_comment() {",
+    '  case "$1" in',
+    '    \\"*|\\\'*) printf "%s" "$1" ;;',
+    '    \\#*) printf "%s" "" ;;',
+    '    *) printf "%s" "$1" | sed \'s/[[:space:]]#.*$//; s/[[:space:]]*$//\' ;;',
+    "  esac",
+    "}",
+)
 PACKAGE_ENV_READ_LINES = {
     "AWF_API_TOKEN": (
         "AWF_PERSISTED_API_TOKEN=\"$(sed -n 's/^[[:space:]]*"
@@ -61,6 +70,16 @@ PACKAGE_ENV_READ_LINES = {
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
         "AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | "
         'head -n 1)"'
+    ),
+}
+PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES = {
+    "AWF_API_TOKEN": (
+        'AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_API_TOKEN")"'
+    ),
+    "AWF_POSTGRES_PASSWORD": (
+        'AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_POSTGRES_PASSWORD")"'
     ),
 }
 PACKAGE_ENV_QUOTE_STRIP_LINES = {
@@ -250,6 +269,20 @@ def _assert_dotenv_decode_function(section: str, label: str, start: int = 0) -> 
     indexes: list[int] = []
     current_index = start
     for line in DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES:
+        current_index = _shell_line_index(section, line, label, current_index)
+        indexes.append(current_index)
+    return indexes[0], indexes[-1]
+
+
+def _assert_dotenv_inline_comment_strip_function(
+    section: str,
+    label: str,
+    start: int = 0,
+) -> tuple[int, int]:
+    """Assert the unquoted dotenv inline-comment stripper is present in order."""
+    indexes: list[int] = []
+    current_index = start
+    for line in DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES:
         current_index = _shell_line_index(section, line, label, current_index)
         indexes.append(current_index)
     return indexes[0], indexes[-1]
@@ -732,6 +765,7 @@ def _assert_package_upgrade_restores_service_env(
 ) -> None:
     """Assert package upgrade snippets restore service environment before restart."""
     api_read_line = PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"]
+    api_inline_comment_strip_line = PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_API_TOKEN"]
     api_quote_strip_lines = PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"]
     api_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
     api_persisted_export_line = '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"'
@@ -749,6 +783,9 @@ def _assert_package_upgrade_restores_service_env(
         '  export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     )
     password_read_line = PACKAGE_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"]
+    password_inline_comment_strip_line = PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES[
+        "AWF_POSTGRES_PASSWORD"
+    ]
     password_quote_strip_lines = PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_PASSWORD"]
     password_guard_line = 'if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then'
     password_persisted_export_line = (
@@ -774,10 +811,17 @@ def _assert_package_upgrade_restores_service_env(
         assert upgrade_line in section, f"{label} is missing upgrade command"
     for decode_line in DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES:
         assert decode_line in section, f"{label} must decode double-quoted dotenv escapes"
+    for strip_function_line in DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES:
+        assert strip_function_line in section, (
+            f"{label} must define unquoted dotenv inline-comment stripping"
+        )
     assert unsafe_api_grep_guard_line not in section, (
         f"{label} must not let stale shell AWF_API_TOKEN override persisted .env"
     )
     assert api_read_line in section, f"{label} must read persisted AWF_API_TOKEN"
+    assert api_inline_comment_strip_line in section, (
+        f"{label} must strip unquoted AWF_API_TOKEN inline comments"
+    )
     for api_quote_strip_line in api_quote_strip_lines:
         assert api_quote_strip_line in section, f"{label} must strip quoted AWF_API_TOKEN"
     assert api_guard_line in section, f"{label} must branch on persisted AWF_API_TOKEN"
@@ -789,6 +833,9 @@ def _assert_package_upgrade_restores_service_env(
         f"{label} must not let stale shell AWF_POSTGRES_PASSWORD override persisted .env"
     )
     assert password_read_line in section, f"{label} must read persisted AWF_POSTGRES_PASSWORD"
+    assert password_inline_comment_strip_line in section, (
+        f"{label} must strip unquoted AWF_POSTGRES_PASSWORD inline comments"
+    )
     for password_quote_strip_line in password_quote_strip_lines:
         assert password_quote_strip_line in section, (
             f"{label} must strip quoted AWF_POSTGRES_PASSWORD"
@@ -815,12 +862,23 @@ def _assert_package_upgrade_restores_service_env(
         label,
         search_start_index,
     )
-    api_read_index = _shell_line_index(section, api_read_line, label, decode_end_index)
+    strip_start_index, strip_end_index = _assert_dotenv_inline_comment_strip_function(
+        section,
+        label,
+        decode_end_index,
+    )
+    api_read_index = _shell_line_index(section, api_read_line, label, strip_end_index)
+    api_inline_comment_strip_index = _shell_line_index(
+        section,
+        api_inline_comment_strip_line,
+        label,
+        api_read_index,
+    )
     api_quote_strip_indexes = _assert_package_env_quote_strip_lines(
         label=label,
         section=section,
         lines=api_quote_strip_lines,
-        start=api_read_index,
+        start=api_inline_comment_strip_index,
     )
     api_guard_index = _shell_line_index(
         section,
@@ -844,11 +902,17 @@ def _assert_package_upgrade_restores_service_env(
     )
     api_guard_end_index = _shell_closing_fi_index(section, api_shell_export_index, label)
     password_read_index = _shell_line_index(section, password_read_line, label, api_guard_end_index)
+    password_inline_comment_strip_index = _shell_line_index(
+        section,
+        password_inline_comment_strip_line,
+        label,
+        password_read_index,
+    )
     password_quote_strip_indexes = _assert_package_env_quote_strip_lines(
         label=label,
         section=section,
         lines=password_quote_strip_lines,
-        start=password_read_index,
+        start=password_inline_comment_strip_index,
     )
     password_guard_index = _shell_line_index(
         section,
@@ -890,7 +954,10 @@ def _assert_package_upgrade_restores_service_env(
         upgrade_index
         < decode_start_index
         < decode_end_index
+        < strip_start_index
+        < strip_end_index
         < api_read_index
+        < api_inline_comment_strip_index
         < min(api_quote_strip_indexes)
         <= max(api_quote_strip_indexes)
         < api_guard_index
@@ -900,6 +967,7 @@ def _assert_package_upgrade_restores_service_env(
         < api_shell_export_index
         < api_guard_end_index
         < password_read_index
+        < password_inline_comment_strip_index
         < min(password_quote_strip_indexes)
         <= max(password_quote_strip_indexes)
         < password_guard_index

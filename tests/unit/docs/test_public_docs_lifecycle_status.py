@@ -12,6 +12,8 @@ from awf.service.config import DEFAULT_LOCAL_SERVICE_API_BASE_URL
 from awf.service.smoke import DEFAULT_LOCAL_CONSOLE_URL
 from tests.unit.docs.public_docs_status_helpers import (
     DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
+    DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES,
+    PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES,
     PACKAGE_ENV_QUOTE_STRIP_LINES,
     PACKAGE_ENV_READ_LINES,
     REPO_ROOT,
@@ -214,6 +216,7 @@ def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
         encoding="utf-8",
     )
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
     global_rollback_heading = "For the source checkout with global tool install lane"
     no_global_rollback_heading = "For the source checkout with no global install lane"
@@ -225,6 +228,10 @@ def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
         maxsplit=1,
     )[0]
     package_cases = (
+        (
+            "Quickstart Lane 1",
+            _quickstart_upgrade_section(quickstart_text, "## Lane 1: uv tool or pipx"),
+        ),
         ("Upgrade uv tool", _markdown_section(upgrade_text, "## uv tool")),
         ("Upgrade pipx", _markdown_section(upgrade_text, "## pipx")),
         ("Upgrade virtualenv / pip", _markdown_section(upgrade_text, "## Virtualenv / pip")),
@@ -515,7 +522,9 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
             [
                 upgrade_line,
                 *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
+                *DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES,
                 PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"],
+                PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_API_TOKEN"],
                 *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"],
                 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then',
                 '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"',
@@ -527,6 +536,7 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
                 "  export AWF_API_TOKEN",
                 "  # awf_config_file can be configured elsewhere",
                 PACKAGE_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"],
+                PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_POSTGRES_PASSWORD"],
                 *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_PASSWORD"],
                 'if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then',
                 '  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"',
@@ -556,7 +566,9 @@ def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
         [
             upgrade_line,
             *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
+            *DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES,
             PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"],
+            PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_API_TOKEN"],
             *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"],
             'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then',
             '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"',
@@ -568,6 +580,7 @@ def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
             "  export AWF_API_TOKEN",
             "fi",
             PACKAGE_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"],
+            PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_POSTGRES_PASSWORD"],
             *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_PASSWORD"],
             'if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then',
             '  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"',
@@ -594,7 +607,9 @@ def test_package_upgrade_env_restore_rejects_prefixed_api_export_line() -> None:
             [
                 upgrade_line,
                 *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
+                *DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES,
                 PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"],
+                PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_API_TOKEN"],
                 *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"],
                 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then',
                 "  export AWF_API_TOKEN_BACKUP",
@@ -606,6 +621,7 @@ def test_package_upgrade_env_restore_rejects_prefixed_api_export_line() -> None:
                 "  export AWF_API_TOKEN",
                 "fi",
                 PACKAGE_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"],
+                PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES["AWF_POSTGRES_PASSWORD"],
                 *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_PASSWORD"],
                 'if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then',
                 '  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"',
