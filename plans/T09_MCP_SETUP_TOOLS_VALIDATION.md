@@ -53,6 +53,57 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: python-coverage-shards (8) Setup Tools Line Limit
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Keep all four first-run MCP tools registered from the same setup-tools entry
+  point: Complete.
+- Move cohesive setup-status payload projection helpers out of the oversized
+  module: Complete. The helpers now live in
+  `src/awf/mcp/setup_status_payload.py`.
+- Preserve existing monkeypatch seams used by focused MCP setup tests:
+  Complete. `setup_tools.py` imports the helpers under the same private names
+  used by existing call sites and tests.
+- Keep all first-party code files at or below 1,500 lines: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `src/awf/mcp/setup_status_payload.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py tests/unit/mcp/test_setup_tools_start.py tests/unit/mcp/test_setup_tools_project_profile.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/mcp/setup_status_payload.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py tests/unit/mcp/test_setup_tools_start.py tests/unit/mcp/test_setup_tools_project_profile.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_setup_tools_import_contract.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/setup_status_payload.py
+```
+
+Latest results:
+
+- The targeted line-limit guard failed before the implementation change with
+  `src/awf/mcp/setup_tools.py: 1558`.
+- After decomposition, `src/awf/mcp/setup_tools.py` is 1,424 lines and
+  `src/awf/mcp/setup_status_payload.py` is 149 lines.
+- Targeted line-limit guard: 1 passed.
+- Focused setup-status/import tests: 24 passed.
+- Focused setup-tool test group: 86 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6Hel1F
 
 ### Requirement Status

@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: python-coverage-shards (8) Setup Tools Line Limit
+
+### Problem Statement And Scope
+
+GitHub Actions `python-coverage-shards (8)` fails the maintainability guard
+`tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit`.
+The guard reports `src/awf/mcp/setup_tools.py` at 1,558 lines, above the
+1,500-line first-party file limit.
+
+Scope is limited to decomposing `setup_tools.py` without changing the MCP setup
+tool behavior, response schemas, server registration, or tests outside the
+affected MCP setup surface.
+
+### Requirements Checklist
+
+- Keep `awf_get_setup_status`, `awf_start_local_service`,
+  `awf_initialize_project_profile`, and
+  `awf_get_client_integration_instructions` registered from the same MCP entry
+  point.
+- Move cohesive setup-status payload helpers out of the oversized module.
+- Preserve existing monkeypatch seams used by focused MCP setup tests.
+- Keep all first-party code files at or below 1,500 lines.
+- Run only focused local checks; broad AWF/GitHub validation remains managed by
+  AWF after agent completion.
+
+### Implementation Steps
+
+1. Reproduce the failing line-limit guard locally.
+2. Add an MCP-local helper module for setup-status payload projection helpers.
+3. Import those helpers into `setup_tools.py` so existing call sites and focused
+   test monkeypatching continue to work.
+4. Run the line-limit guard, affected setup-status/MCP tests, focused ruff, and
+   focused mypy.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/mcp/setup_status_payload.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/setup_status_payload.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6Hel1F Planned Profile Probe OSError
 
 ### Problem Statement And Scope
