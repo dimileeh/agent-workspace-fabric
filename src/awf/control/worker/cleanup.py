@@ -368,11 +368,17 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        # The per-candidate loop already handles individual umount failures, so an
+        # exception reaching this scan-level guard is unexpected (e.g. the candidate
+        # listing query). Preserve its full traceback via ``exc_info`` — mirroring the
+        # per-candidate handler — so the swallowed best-effort failure stays diagnosable
+        # rather than masked behind the truncated ``error`` string.
         _log.warning(
             _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_SCAN_FAILED_EVENT_TYPE,
             reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
             error_type=type(exc).__name__,
             error=str(exc)[:240],
+            exc_info=True,
         )
     if len(release_errors) == 1:
         raise release_errors[0]

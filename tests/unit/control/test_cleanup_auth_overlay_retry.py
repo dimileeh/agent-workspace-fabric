@@ -309,6 +309,9 @@ async def test_release_resources_swallows_deferred_sweep_failure(
     assert [event for event, _ in log.warnings] == [
         "worker.terminal_auth_overlay_unmount_retry_scan_failed",
     ]
+    # The unexpected best-effort scan failure preserves its full traceback so it is
+    # diagnosable rather than masked behind the truncated ``error`` string.
+    assert log.warnings[0][1]["exc_info"] is True
 
 
 @pytest.mark.unit
