@@ -53,6 +53,51 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: python-coverage-shards (8) Test File Line Limit
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Keep all existing MCP setup-tool behavioral assertions intact: Complete.
+- Bring `tests/unit/mcp/test_setup_tools.py` under the 1500-line guardrail:
+  Complete.
+- Keep destination test files under the same guardrail: Complete.
+- Avoid workflow, quality-gate, and protected configuration changes: Complete.
+- Use focused local checks only: Complete.
+
+### Evidence
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+```
+
+Latest results:
+
+- The maintainability repro failed before the test move with
+  `tests/unit/mcp/test_setup_tools.py: 1504`.
+- After moving the client-integration tests, line counts are
+  `tests/unit/mcp/test_setup_tools.py: 1385` and
+  `tests/unit/mcp/test_setup_tools_client_integration.py: 612`.
+- Focused maintainability guard: 1 passed.
+- Affected MCP test modules: 50 passed.
+- Focused ruff: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HYot6
 
 ### Requirement Status
