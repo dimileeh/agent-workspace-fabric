@@ -565,7 +565,7 @@ async def test_initialize_project_profile_existing_profile_probe_failure_logs_pr
 
     assert result.isError is True
     assert payload["error_code"] == "PROJECT_INIT_FAILED"
-    assert payload["message"] == "could not build onboarding preview"
+    assert payload["message"] == "could not probe existing project profile"
     assert payload["detail"] == {
         "project_path": str(project.resolve()),
         "template": "generic",

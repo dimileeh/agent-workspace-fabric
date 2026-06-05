@@ -3021,3 +3021,45 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
+
+## Review Repair: issue:4620143523 Probe Failure Message
+
+### Problem Statement And Scope
+
+The review reports that `_initialize_project_profile_result` logs an existing
+profile probe failure correctly, but returns the same sanitized MCP message as
+the later onboarding-preview generation failure. That obscures which stage
+failed for MCP callers.
+
+Scope is limited to the existing-profile probe exception branch in
+`awf_initialize_project_profile` and its focused regression. The error code,
+redacted detail payload, logging context, and preview-generation error message
+remain unchanged.
+
+### Requirements Checklist
+
+- Preserve the structured `PROJECT_INIT_FAILED` response and safe redaction.
+- Return a stage-specific sanitized message when the existing profile probe
+  fails.
+- Keep the preview-generation failure message unchanged.
+- Update the existing focused regression for the probe-failure branch.
+
+### Implementation Steps
+
+1. Update the existing probe-failure regression to expect the stage-specific
+   sanitized message and confirm it fails before the implementation change.
+2. Change only the probe-failure `_error_result(...)` message in
+   `src/awf/mcp/setup_tools.py`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_existing_profile_probe_failure_logs_probe_context -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.

@@ -626,7 +626,7 @@ def _initialize_project_profile_result(
         return _error_result(
             safe_result,
             PROJECT_INIT_FAILED,
-            "could not build onboarding preview",
+            "could not probe existing project profile",
             detail={"project_path": str(repository), "template": template},
         )
 
