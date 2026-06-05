@@ -13,8 +13,9 @@ import asyncio
 import subprocess
 from typing import Any
 
-from sqlalchemy import func, literal, or_, select
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import _TERMINAL_RELEASE_STATUSES
@@ -150,6 +151,19 @@ again), so the marker writes additionally verify the latest release cycle still 
 listed floor and skip when it does not — preventing the stale cycle's umount outcome from
 suppressing the fresh cycle's just-owed retry.
 """
+
+
+def _current_release_cycle_event_order_matches(
+    release_cycle_floor: Any,
+) -> ColumnElement[bool]:
+    """Match current-cycle markers, including legacy NULL-order markers for floor ``-1``."""
+    return or_(
+        WorkspaceEvent.event_order >= release_cycle_floor,
+        and_(
+            release_cycle_floor == literal(-1),
+            WorkspaceEvent.event_order.is_(None),
+        ),
+    )
 
 
 async def _teardown_terminal_auth_overlay(
@@ -470,6 +484,9 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
     # per-workspace monotonic and reserved for every marker, so markers at or after the
     # latest ``terminal_runtime_released`` order belong to the current cycle. ``coalesce``
     # to ``-1`` keeps the lifetime predicate when no release event exists yet (no floor).
+    # Legacy NULL-order releases also use floor ``-1``; in that cycle, legacy NULL-order
+    # markers are current-cycle markers because the backfill migration treats them as
+    # dedupe signals instead of inserting a fresh real-order marker.
     release_cycle_floor = func.coalesce(
         latest_terminal_runtime_release_event_order_expr(correlated_to=Workspace),
         literal(-1),
@@ -478,7 +495,7 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
         select(WorkspaceEvent.id)
         .where(WorkspaceEvent.workspace_id == Workspace.id)
         .where(WorkspaceEvent.event_type == _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE)
-        .where(WorkspaceEvent.event_order >= release_cycle_floor)
+        .where(_current_release_cycle_event_order_matches(release_cycle_floor))
         .correlate(Workspace)
         .exists()
     )
@@ -493,7 +510,7 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
                 )
             )
         )
-        .where(WorkspaceEvent.event_order >= release_cycle_floor)
+        .where(_current_release_cycle_event_order_matches(release_cycle_floor))
         .correlate(Workspace)
         .exists()
     )
@@ -588,7 +605,7 @@ async def _count_terminal_auth_overlay_unmount_pending_events(
             .select_from(WorkspaceEvent)
             .where(WorkspaceEvent.workspace_id == workspace_id)
             .where(WorkspaceEvent.event_type == _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE)
-            .where(WorkspaceEvent.event_order >= release_cycle_floor)
+            .where(_current_release_cycle_event_order_matches(release_cycle_floor))
         )
         return int((await session.execute(stmt)).scalar_one())
 
@@ -628,7 +645,7 @@ async def _has_terminal_auth_overlay_unmount_terminal_event(
                 )
             )
         )
-        .where(WorkspaceEvent.event_order >= release_cycle_floor)
+        .where(_current_release_cycle_event_order_matches(release_cycle_floor))
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none() is not None

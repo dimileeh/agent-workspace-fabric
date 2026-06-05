@@ -343,6 +343,94 @@ async def test_auth_overlay_backfill_null_order_release_retry_sweep_resolves(
     }
 
 
+@pytest.mark.asyncio
+async def test_pending_candidate_query_detects_legacy_null_order_pending_marker(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A NULL-order marker belongs to a NULL-order release cycle.
+
+    The backfill migration treats such a marker as current-cycle dedupe, so the
+    runtime sweep must also see it when the coalesced release floor is ``-1``.
+    """
+    sweeper = _sweeper(factory)
+    ws_id = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            compose_project_name="awf_legacy_null_pending",
+        )
+        ws_id = ws.id
+        release = await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        pending = await repo.add_event(
+            ws,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            payload={"attempt": 1},
+        )
+        release.event_order = None
+        pending.event_order = None
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+        limit=None
+    )
+    listed = next(candidate for candidate in candidates if candidate.workspace_id == ws_id)
+    assert listed.release_cycle_floor == -1
+    assert await sweeper._count_terminal_auth_overlay_unmount_pending_events(ws_id) == 1  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_check_detects_legacy_null_order_marker(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A NULL-order terminal marker suppresses the NULL-order release cycle."""
+    sweeper = _sweeper(factory)
+    ws_id = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            compose_project_name="awf_legacy_null_resolved",
+        )
+        ws_id = ws.id
+        release = await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        pending = await repo.add_event(
+            ws,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            payload={"attempt": 1},
+        )
+        resolved = await repo.add_event(
+            ws,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
+        )
+        release.event_order = None
+        pending.event_order = None
+        resolved.event_order = None
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+        limit=None
+    )
+    assert ws_id not in {candidate.workspace_id for candidate in candidates}
+    async with factory() as session:
+        assert (
+            await sweeper._has_terminal_auth_overlay_unmount_terminal_event(session, ws_id)  # noqa: SLF001
+        ) is True
+
+
 async def _mark_runtime_released(repo: WorkspaceRepository, ws: Workspace) -> None:
     """Write the ``terminal_runtime_released`` event a deferred candidate always carries.
 
