@@ -851,6 +851,63 @@ async def test_start_local_service_bootstrap_called_process_error_is_structured(
 
 
 @pytest.mark.unit
+async def test_start_local_service_unexpected_bootstrap_exception_is_structured_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "j" * 40
+    settings_secret = "opaque-unexpected-settings-secret"
+    env_secret = "opaque-unexpected-env-secret"
+
+    class EnvMigration:
+        def to_dict(self) -> dict[str, str]:
+            return {
+                "status": "migrated",
+                "diagnostic": f"moved {settings_secret} and {env_secret}",
+            }
+
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(
+            api_base_url="http://localhost:8000",
+            console_url=None,
+            api_token=settings_secret,
+            github_token=None,
+        ),
+        compose_file=tmp_path / "compose.yml",
+        compose_env_file=None,
+        asset_root=None,
+        service_env={"CUSTOM_API_TOKEN": env_secret},
+        env_migration=EnvMigration(),
+    )
+
+    async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        raise KeyError(raw_token)
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: None)
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fail_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "failed"
+    assert payload["command"] == "awf start"
+    assert payload["reason_code"] == "START_BOOTSTRAP_EXECUTION_FAILED"
+    assert payload["issues"][0]["details"]["bootstrap"]["stderr"] == "error_type=KeyError"
+    assert payload["issues"][0]["details"]["env_migration"]["diagnostic"] == (
+        f"moved {TEXT_REDACTION_MARKER} and {TEXT_REDACTION_MARKER}"
+    )
+    assert raw_token not in rendered
+    assert settings_secret not in rendered
+    assert env_secret not in rendered
+
+
+@pytest.mark.unit
 async def test_start_local_service_input_resolution_failure_is_structured(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -937,6 +994,43 @@ async def test_start_local_service_runtime_input_resolution_failure_is_structure
     assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
     assert bootstrap_calls == []
     assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
+async def test_start_local_service_unexpected_input_resolution_failure_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "i" * 40
+
+    def fail_bootstrap_inputs(_verified: object) -> SimpleNamespace:
+        raise KeyError(raw_token)
+
+    bootstrap_calls: list[bool] = []
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", fail_bootstrap_inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["command"] == "awf start"
+    assert payload["summary"] == "could not resolve local service startup inputs"
+    assert payload["reason_code"] == "START_INPUT_RESOLUTION_FAILED"
+    assert payload["issues"][0]["details"] == {"error_type": "KeyError"}
+    assert bootstrap_calls == []
+    assert raw_token not in rendered
 
 
 @pytest.mark.unit

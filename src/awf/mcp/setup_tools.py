@@ -424,6 +424,15 @@ async def _start_local_service_result(
             timeout_seconds=timeout_seconds,
             source_checkout=source_path,
         )
+    except Exception as exc:
+        return _start_input_resolution_error_result(
+            safe_result,
+            exc,
+            rebuild=rebuild,
+            skip_agent_runtime_build=skip_agent_runtime_build,
+            timeout_seconds=timeout_seconds,
+            source_checkout=source_path,
+        )
 
     options = ServiceBootstrapOptions(
         timeout_seconds=timeout_seconds,
@@ -453,6 +462,17 @@ async def _start_local_service_result(
             extra_secrets=_selected_start_secret_values(inputs),
         )
     except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
+        return _start_bootstrap_path_error_result(
+            safe_result,
+            exc,
+            env_migration=inputs.env_migration,
+            rebuild=rebuild,
+            skip_agent_runtime_build=skip_agent_runtime_build,
+            timeout_seconds=timeout_seconds,
+            source_checkout=source_path,
+            extra_secrets=_selected_start_secret_values(inputs),
+        )
+    except Exception as exc:
         return _start_bootstrap_path_error_result(
             safe_result,
             exc,
@@ -525,7 +545,7 @@ def _unique_secret_values(values: Iterable[str | None]) -> tuple[str, ...]:
 
 def _start_input_resolution_error_result(
     safe_result: SafeResult,
-    exc: CalledProcessError | HostSetupConfigError | OSError | RuntimeError | ValueError,
+    exc: Exception,
     *,
     rebuild: bool,
     skip_agent_runtime_build: bool,
@@ -568,7 +588,7 @@ def _start_input_resolution_error_result(
 
 def _start_bootstrap_path_error_result(
     safe_result: SafeResult,
-    exc: CalledProcessError | OSError | RuntimeError | ValueError,
+    exc: Exception,
     *,
     env_migration: object | None = None,
     rebuild: bool,

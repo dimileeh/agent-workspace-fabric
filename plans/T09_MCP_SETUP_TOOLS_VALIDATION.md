@@ -53,6 +53,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Start Unexpected Exception Handling
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve existing structured responses for known start input-resolution
+  failures: Complete.
+- Convert unexpected start input-resolution exceptions into the existing
+  `START_INPUT_RESOLUTION_FAILED` structured MCP error without exposing
+  exception messages: Complete.
+- Preserve existing structured responses for known start bootstrap failures:
+  Complete.
+- Convert unexpected start bootstrap exceptions into the existing
+  `START_BOOTSTRAP_EXECUTION_FAILED` structured MCP error, including selected
+  start secret redaction: Complete.
+- Add focused regressions for both start-tool escape paths: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_start.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_unexpected_input_resolution_failure_is_structured tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_unexpected_bootstrap_exception_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Targeted regressions failed before the implementation change because
+  unexpected input-resolution and bootstrap `KeyError` values escaped as
+  FastMCP `ToolError` exceptions that included the raw token.
+- Targeted regressions after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Bootstrap Path Error Secrets
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

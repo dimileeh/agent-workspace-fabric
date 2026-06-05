@@ -84,6 +84,56 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Start Unexpected Exception Handling
+
+### Problem Statement And Scope
+
+The review asks for a final exception-handler read-through in
+`_start_local_service_result` and `_client_integration_instructions_result` so
+future CLI-helper refactors do not introduce exception types that bypass MCP
+redaction and structured error responses.
+
+The client-integration path already has catch-all handlers for both planning and
+payload construction. The start path catches known setup/start exception types,
+but unexpected `Exception` subclasses from startup input resolution or service
+bootstrap can still escape the MCP tool.
+
+Scope is limited to hardening those two start-tool phases. Existing known-error
+payloads, client-integration behavior, command rendering, and secret redaction
+contracts stay unchanged.
+
+### Requirements Checklist
+
+- Preserve existing structured responses for known start input-resolution
+  failures.
+- Convert unexpected start input-resolution exceptions into the existing
+  `START_INPUT_RESOLUTION_FAILED` structured MCP error without exposing
+  exception messages.
+- Preserve existing structured responses for known start bootstrap failures.
+- Convert unexpected start bootstrap exceptions into the existing
+  `START_BOOTSTRAP_EXECUTION_FAILED` structured MCP error, including selected
+  start secret redaction.
+- Add focused regressions for both start-tool escape paths.
+
+### Implementation Steps
+
+1. Add focused failing regressions for unexpected start input-resolution and
+   bootstrap exceptions.
+2. Add `except Exception` fallbacks after the known start exception handlers.
+3. Run the targeted regressions and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_unexpected_input_resolution_failure_is_structured tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_unexpected_bootstrap_exception_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: Comment 4440090018 Client Instructions Env File Dry-Run
 
 ### Problem Statement And Scope
