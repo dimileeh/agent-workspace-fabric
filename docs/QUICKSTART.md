@@ -80,19 +80,30 @@ pipx install agent-workspace-fabric
 Then run the shared first-run commands from the directory where AWF should keep
 the package-lane `.env`. Persist the generated local service values before
 setup/start so a later upgrade can restore the same running Core token and
-password, and so host-side database checks use a URL-encoded copy of that same
-password:
+password, so host-side database checks use a URL-encoded copy of that same
+password, and so the persisted password stays literal under Compose dotenv
+parsing:
 
 ```bash
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
 awf_postgres_password_urlencoded="$(python3 -c 'from os import environ; from urllib.parse import quote; print(quote(environ["AWF_POSTGRES_PASSWORD"], safe=""))')"
+awf_postgres_password_dotenv="$(
+  python3 - <<'PY'
+from os import environ
+
+value = environ["AWF_POSTGRES_PASSWORD"]
+if "\n" in value or "\r" in value:
+    raise SystemExit("AWF_POSTGRES_PASSWORD cannot contain newlines")
+print('"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"')
+PY
+)"
 export AWF_DATABASE_URL="postgresql+asyncpg://awf:${awf_postgres_password_urlencoded}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
 awf_env_tmp="$(mktemp)"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$AWF_POSTGRES_PASSWORD"
+  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$awf_postgres_password_dotenv"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
   if [ -f .env ]; then

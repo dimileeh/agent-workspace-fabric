@@ -9,7 +9,7 @@ import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import pytest
 import yaml
@@ -310,7 +310,8 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     password_export = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     host_port_export = 'export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"'
     api_persist = "  printf 'AWF_API_TOKEN=%s\\n' \"$AWF_API_TOKEN\""
-    password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$AWF_POSTGRES_PASSWORD\""
+    password_dotenv_export = 'awf_postgres_password_dotenv="$('
+    password_persist = "  printf 'AWF_POSTGRES_PASSWORD=%s\\n' \"$awf_postgres_password_dotenv\""
     host_port_persist = "  printf 'AWF_POSTGRES_HOST_PORT=%s\\n' \"$AWF_POSTGRES_HOST_PORT\""
     database_url_persist = "  printf 'AWF_DATABASE_URL=%s\\n' \"$AWF_DATABASE_URL\""
     env_tmp = 'awf_env_tmp="$(mktemp)"'
@@ -337,6 +338,8 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     assert password_export in first_run_section
     assert host_port_export in first_run_section
     assert PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE in first_run_section
+    assert password_dotenv_export in first_run_section
+    assert "AWF_POSTGRES_PASSWORD cannot contain newlines" in first_run_section
     assert PACKAGE_DATABASE_URL_ENCODED_EXPORT in first_run_section
     assert PACKAGE_DATABASE_URL_RAW_PASSWORD_EXPORT not in first_run_section
     assert env_tmp in first_run_section
@@ -354,6 +357,7 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
         ("Postgres password export", password_export),
         ("Postgres host port export", host_port_export),
         ("Postgres password URL encoding", PACKAGE_POSTGRES_PASSWORD_URLENCODE_LINE),
+        ("Postgres password dotenv escaping", password_dotenv_export),
         ("database URL export", PACKAGE_DATABASE_URL_ENCODED_EXPORT),
         ("temporary env file creation", env_tmp),
         ("API token persist", api_persist),
@@ -380,7 +384,9 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
 def test_quickstart_package_first_run_url_encodes_custom_postgres_password(
     tmp_path: Path,
 ) -> None:
-    """Assert custom Postgres passwords are encoded only inside AWF_DATABASE_URL."""
+    """Assert custom Postgres passwords are safe for URL and dotenv parsing."""
+    from awf.service.environment import compose_env_file_values
+
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     lane_section = _markdown_section(quickstart_text, "## Lane 1: uv tool or pipx")
     first_run_section = lane_section.split("\nUpgrade:\n", maxsplit=1)[0]
@@ -391,8 +397,11 @@ def test_quickstart_package_first_run_url_encodes_custom_postgres_password(
     ]
     assert len(bash_fences) == 1
     env_persist_script = bash_fences[0].body.split("\nawf setup\n", maxsplit=1)[0]
-    custom_password = "p@ss/word:with#reserved"
-    expected_url = "postgresql+asyncpg://awf:p%40ss%2Fword%3Awith%23reserved@localhost:5433/awf"
+    custom_password = 'p@ss/word:with $dollar #hash "quote" \\path'
+    expected_url = f"postgresql+asyncpg://awf:{quote(custom_password, safe='')}@localhost:5433/awf"
+    expected_dotenv_password = (
+        '"' + custom_password.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+    )
     script = "\n".join(
         (
             f"export AWF_POSTGRES_PASSWORD={shlex.quote(custom_password)}",
@@ -409,9 +418,11 @@ def test_quickstart_package_first_run_url_encodes_custom_postgres_password(
     )
 
     assert result.returncode == 0, result.stderr
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert f"AWF_POSTGRES_PASSWORD={custom_password}\n" in env_text
+    env_file = tmp_path / ".env"
+    env_text = env_file.read_text(encoding="utf-8")
+    assert f"AWF_POSTGRES_PASSWORD={expected_dotenv_password}\n" in env_text
     assert f"AWF_DATABASE_URL={expected_url}\n" in env_text
+    assert compose_env_file_values(env_file, environ={})["AWF_POSTGRES_PASSWORD"] == custom_password
     assert custom_password not in env_text.split("AWF_DATABASE_URL=", maxsplit=1)[1]
 
 

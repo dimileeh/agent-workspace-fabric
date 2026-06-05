@@ -614,3 +614,17 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HWglA`: the Quickstart
+package-lane first-run snippet must persist `AWF_POSTGRES_PASSWORD` in a
+Compose-safe quoted dotenv form so passwords containing `$`, inline `#`,
+quotes, or backslashes are not reinterpreted differently from the
+URL-encoded `AWF_DATABASE_URL`.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HWglA`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_url_encodes_custom_postgres_password -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```

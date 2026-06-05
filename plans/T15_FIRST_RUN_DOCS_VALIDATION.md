@@ -114,6 +114,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   upgrade, rollback, and uninstall Core stop snippets prefer checkout-root
   `.env` before legacy `docker/compose/.env`, matching source-checkout
   setup/start env precedence while preserving the legacy fallback.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HWglA` by making the Quickstart
+  package-lane first-run snippet persist `AWF_POSTGRES_PASSWORD` as an escaped
+  double-quoted dotenv value, preserving `$`, inline `#`, quotes, and
+  backslashes under Compose dotenv parsing.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -2403,6 +2407,40 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 Final focused repair result: `4 passed in 0.80s`; snippet syntax check
 `1 passed in 0.75s`; `ruff check` passed; `ruff format --check` reported
 `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HWglA`:
+
+- `docs/QUICKSTART.md` Lane 1 now derives an escaped double-quoted dotenv copy
+  of `AWF_POSTGRES_PASSWORD`, rejects newline-containing passwords that cannot
+  be represented in the one-line env snippet, and persists that escaped value
+  to `.env`.
+- `AWF_DATABASE_URL` still uses the URL-encoded password derived from the
+  original shell value.
+- `tests/unit/docs/test_public_docs_status.py` now executes the Quickstart
+  first-run env-persistence snippet with `$`, inline `#`, quotes, and a
+  backslash in the custom password and verifies the resulting `.env` parses
+  back to the original password under AWF's Compose env parser.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_url_encodes_custom_postgres_password -q
+```
+
+Red-phase result after updating the focused regression: failed as expected with
+`2 failed`; the current Quickstart still lacked
+`awf_postgres_password_dotenv` and persisted the raw password line.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_url_encodes_custom_postgres_password tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `3 passed in 1.02s`; `ruff check` passed;
+`ruff format --check` reported `1 file already formatted`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
