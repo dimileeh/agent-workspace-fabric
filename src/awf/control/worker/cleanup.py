@@ -1245,15 +1245,29 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
 ) -> list[_TerminalRuntimeCandidate]:
     """Return terminal workspaces with an unresolved pending overlay-umount marker.
 
-    The predicate is intentionally event-type existence/count only (no JSONB value
-    comparison), so it behaves identically on Postgres (prod) and SQLite (tests): a
-    terminal-status workspace on this node (or ``node_id IS NULL``, matching
+    The marker predicate is intentionally event-type existence/count only (no JSONB
+    value comparison), so it behaves identically on Postgres (prod) and SQLite
+    (tests): a terminal-status workspace on this node (or ``node_id IS NULL``, matching
     ``_list_terminal_runtime_candidates``) with a non-empty ``repo_url``, at least one
     ``pending`` marker, and no ``resolved`` and no ``exhausted`` marker.
+
+    Candidates are additionally gated on the *effective-release* predicate (the same
+    ``terminal_runtime_effectively_released_expr`` the terminal-runtime candidate/resume
+    paths use, here in its positive form). A ``pending`` marker is always co-written
+    with ``terminal_runtime_released``, but that release can later be superseded by
+    ``terminal_runtime_release_revoked`` when orphan containers could not be stopped —
+    in which case the agent container still holds the overlay bind. Re-attempting the
+    umount then is futile: it would burn the bounded deferred sweeps and record a
+    terminal ``exhausted``/``resolved`` marker that permanently suppresses the retry
+    owed once the runtime is *actually* released later. Gating on effective release
+    keeps the workspace out of the sweep until the bind is genuinely gone.
     """
     if limit is not None and limit <= 0:
         return []
     terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
+    effectively_released = terminal_runtime_effectively_released_expr(
+        correlated_to=Workspace,
+    )
     worker_node_id = effective_worker_config_node_id(self._config)
     pending_exists = (
         select(WorkspaceEvent.id)
@@ -1293,6 +1307,7 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
         )
         .where(pending_exists)
         .where(~terminal_marker_exists)
+        .where(effectively_released)
         .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
     )
     if limit is not None:
