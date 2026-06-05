@@ -951,6 +951,55 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
         )
         return True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+    # ``_commit_dirty_worktree`` commits onto whatever the agent left as HEAD. If the
+    # fix-pass agent rewrote the tip (``commit --amend`` / ``reset`` to a non-descendant
+    # of ``fix_start_head``) AND also left dirty or untracked work, that commit lands as a
+    # child of the rewritten tip — so ``committed_head`` no longer descends from
+    # ``fix_start_head``, which is orphaned, and the later non-force push (remote_ops.py)
+    # would be rejected as a non-fast-forward (issue #411 gap). Re-parent the committed
+    # tree onto ``fix_start_head`` so the original tip is preserved as the new commit's
+    # parent and the push stays fast-forward, mirroring the self-commit reparent above.
+    if not await _head_descends_from(
+        self,
+        worktree_path=worktree_path,
+        ancestor=fix_start_head,
+        descendant=committed_head,
+    ):
+        new_head, no_net_change, reparent_failure_reason = await _reparent_fix_pass_commit(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            fix_start_head=fix_start_head,
+            current_head=committed_head,
+            pass_number=pass_number,
+        )
+        if reparent_failure_reason is not None:
+            return True, reparent_failure_reason
+        if not no_net_change and new_head is not None:
+            _log.info(
+                "monitor.pre_push_validation_fix_reparented",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                from_sha=committed_head,
+                to_sha=new_head,
+                fix_start_head=fix_start_head,
+            )
+            committed_head = new_head
+        else:
+            # The committed tree equals ``fix_start_head``'s tree: the rewrite carried no
+            # net change worth preserving. Roll back to the pre-fix tip rather than accept
+            # an orphaning rewrite that the push would reject.
+            rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                restore_ref=fix_start_head,
+                pass_number=pass_number,
+                reason="commit_reparent_no_net_change",
+            )
+            if rollback_failure_reason is not None:
+                return False, rollback_failure_reason
+            return False, None
     cleanup_failure_reason = await _cleanup_committed_pre_push_validation_fix_pass(
         self,
         workspace_id=workspace_id,

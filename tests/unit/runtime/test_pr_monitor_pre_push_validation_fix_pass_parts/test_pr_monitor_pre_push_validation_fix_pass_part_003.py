@@ -786,3 +786,375 @@ async def test_pre_push_validation_fix_pass_reparent_failure_uses_reparent_label
     assert result.reason_code == pre_push_validation.PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
     assert "fix pass reparent failed" in result.message
     assert "cleanup failed" not in result.message
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_committed_nondescendant_is_reparented(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fix-pass agent that rewrites HEAD (amend/reset to a non-descendant) AND leaves
+    dirty work has that work committed by ``_commit_dirty_worktree`` as a child of the
+    rewritten tip. The committed head must be re-parented onto ``fix_start_head`` so the
+    original tip is preserved and the later non-force push stays fast-forward (issue #411
+    gap on the committed-dirty branch)."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="amended HEAD then left dirty work\n")
+    cmd = FakeCommandRunner()
+    fix_start_head = "1" * 40
+    committed_head = "3" * 40
+    current_tree = "a" * 40
+    start_tree = "b" * 40
+    reparented_head = "7" * 40
+    # merge-base --is-ancestor reports non-descendant (exit 1); then the re-parent steps.
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0, stdout=f"{current_tree}\n")
+    cmd.queue_result(returncode=0, stdout=f"{start_tree}\n")
+    cmd.queue_result(returncode=0, stdout="amend message\n")
+    cmd.queue_result(returncode=0, stdout=f"{reparented_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {reparented_head[:8]}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """The agent left dirty work that is committed onto the rewritten tip."""
+        return True
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        cleanup_calls.append(cast(dict[str, object], kwargs))
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+        )
+
+    async def _rollback_should_not_run(*_args: object, **_kwargs: object) -> str | None:
+        raise AssertionError("a committed reparent must not roll back to fix_start_head")
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_should_not_run,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    commit_args = _commit_tree_call(cmd)
+    assert commit_args is not None
+    # The committed tree is reconstructed as a child of fix_start_head, so the pre-fix tip
+    # is preserved and the push remains fast-forward.
+    assert commit_args[commit_args.index("commit-tree") + 1] == current_tree
+    assert commit_args[commit_args.index("-p") + 1] == fix_start_head
+    # Side-effect cleanup runs against the re-parented head, not the orphaning commit.
+    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": reparented_head}]
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        f"merge-base --is-ancestor {fix_start_head} {committed_head}" in call
+        for call in joined_calls
+    )
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_committed_descendant_skips_reparent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The common case — ``_commit_dirty_worktree`` commits onto a HEAD that still descends
+    from ``fix_start_head`` — is accepted as-is with no re-parent (no ``commit-tree``)."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed and left dirty work on top\n")
+    cmd = FakeCommandRunner()
+    fix_start_head = "1" * 40
+    committed_head = "2" * 40
+    # merge-base --is-ancestor reports a descendant (exit 0): accept without re-parenting.
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return True
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        cleanup_calls.append(cast(dict[str, object], kwargs))
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+        )
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    assert cleanup_calls == [{"worktree_path": worktree, "restore_ref": committed_head}]
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert not any("commit-tree" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_committed_reparent_failure_returns_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-parent infra failure on the committed-dirty branch surfaces the reparent reason
+    (committed stays True) and must not roll back to ``fix_start_head``."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="amended HEAD then left dirty work\n")
+    cmd = FakeCommandRunner()
+    fix_start_head = "1" * 40
+    committed_head = "3" * 40
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
+    cmd.queue_result(returncode=0, stdout="message\n")
+    cmd.queue_result(returncode=1, stderr="commit-tree failed")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return True
+
+    async def _rollback_should_not_run(*_args: object, **_kwargs: object) -> str | None:
+        raise AssertionError("a reparent infra failure must not trigger rollback")
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_should_not_run,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert failure_reason == pre_push_validation.PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert not any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("rollback_reason", [None, "VALIDATION_WORKTREE_CLEANUP_FAILED"])
+async def test_pre_push_validation_fix_pass_committed_no_net_change_rolls_back(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rollback_reason: str | None,
+) -> None:
+    """When the committed-dirty rewrite nets out to ``fix_start_head``'s tree there is
+    nothing to preserve, so the pass rolls back to the pre-fix tip and reports
+    ``committed=False`` (propagating any rollback failure reason)."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="no-op amend over dirty work\n")
+    cmd = FakeCommandRunner()
+    fix_start_head = "1" * 40
+    committed_head = "3" * 40
+    same_tree = "a" * 40
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0, stdout=f"{same_tree}\n")
+    cmd.queue_result(returncode=0, stdout=f"{same_tree}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return True
+
+    rollback_calls: list[dict[str, object]] = []
+
+    async def _rollback(_runner: object, **kwargs: object) -> str | None:
+        rollback_calls.append(cast(dict[str, object], kwargs))
+        return rollback_reason
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is False
+    assert failure_reason == rollback_reason
+    assert rollback_calls == [
+        {
+            "workspace_id": workspace_id,
+            "worktree_path": worktree,
+            "restore_ref": fix_start_head,
+            "pass_number": 1,
+            "reason": "commit_reparent_no_net_change",
+        }
+    ]
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert not any("commit-tree" in call for call in joined_calls)
