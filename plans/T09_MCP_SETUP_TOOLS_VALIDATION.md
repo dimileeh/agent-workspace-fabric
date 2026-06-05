@@ -53,6 +53,58 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HQd4E
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve existing start option validation, including rejecting simultaneous
+  `rebuild=true` and `skip_agent_runtime_build=true`: Complete.
+- Preserve existing bootstrap option wiring to `ServiceBootstrapOptions`:
+  Complete.
+- Render returned start payload commands with `--rebuild` when requested:
+  Complete.
+- Render returned start payload commands with `--skip-agent-runtime-build` when
+  requested: Complete.
+- Render returned start payload commands with `--timeout-seconds` when the MCP
+  caller supplied a non-default timeout: Complete.
+- Preserve explicit `source_checkout` command rendering together with any
+  requested start options: Complete.
+- Add focused regression coverage for the returned command: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_reuses_bootstrap_and_is_idempotent tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_skip_agent_runtime_build_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -k start_local_service -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- The two command regressions failed before the implementation change because
+  returned start payload commands dropped `--rebuild`, `--timeout-seconds`, and
+  `--skip-agent-runtime-build`.
+- Targeted regressions after the implementation change: 2 passed.
+- Focused `start_local_service` subset: 17 passed, 12 deselected.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: Python Coverage Shard 8 File-Line Guard
 
 ### Requirement Status

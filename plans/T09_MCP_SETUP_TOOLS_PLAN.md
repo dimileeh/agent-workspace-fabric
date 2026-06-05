@@ -84,6 +84,57 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HQd4E
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_start_local_service` honors MCP start options
+when constructing `ServiceBootstrapOptions`, but rewrites every returned
+first-run payload command to only `awf start` or
+`awf start --source-checkout <path>`. Operators copying that command can retry
+without requested non-default start options such as forced rebuild, runtime-build
+skip, or a custom readiness timeout.
+
+Scope is limited to preserving accepted MCP start options in returned
+`awf_start_local_service` first-run payload commands.
+
+### Requirements Checklist
+
+- Preserve existing start option validation, including rejecting simultaneous
+  `rebuild=true` and `skip_agent_runtime_build=true`.
+- Preserve existing bootstrap option wiring to `ServiceBootstrapOptions`.
+- Render returned start payload commands with `--rebuild` when requested.
+- Render returned start payload commands with `--skip-agent-runtime-build` when
+  requested.
+- Render returned start payload commands with `--timeout-seconds` when the MCP
+  caller supplied a non-default timeout.
+- Preserve explicit `source_checkout` command rendering together with any
+  requested start options.
+- Add focused regression coverage for the returned command.
+
+### Implementation Steps
+
+1. Extend the existing start-service option regression to assert that the
+   returned success command preserves rebuild, timeout, and source-checkout
+   values.
+2. Add a focused regression for the skip-runtime-build option because it is
+   mutually exclusive with rebuild.
+3. Replace the checkout-only command override helper with a start-command helper
+   that renders the accepted option values.
+4. Thread the accepted start options into each start first-run payload path.
+5. Run targeted regressions and focused lint/type checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_reuses_bootstrap_and_is_idempotent tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_skip_agent_runtime_build_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: Python Coverage Shard 8 File-Line Guard
 
 ### Problem Statement And Scope

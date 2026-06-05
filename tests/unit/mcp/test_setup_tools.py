@@ -746,6 +746,9 @@ async def test_start_local_service_reuses_bootstrap_and_is_idempotent(
 
     assert first["status"] == "success"
     assert second["status"] == "success"
+    expected_command = f"awf start --rebuild --timeout-seconds 7.5 --source-checkout {tmp_path}"
+    assert first["command"] == expected_command
+    assert second["command"] == first["command"]
     assert first["details"]["env_migration"] == migration_payload
     assert second["details"]["env_migration"] == migration_payload
     assert len(calls) == 2
@@ -758,6 +761,44 @@ async def test_start_local_service_reuses_bootstrap_and_is_idempotent(
         assert call["kwargs"]["env_file"] == inputs.compose_env_file
         assert call["kwargs"]["asset_root"] == inputs.asset_root
         assert call["kwargs"]["service_environ"] == inputs.service_env
+
+
+@pytest.mark.unit
+async def test_start_local_service_preserves_skip_agent_runtime_build_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+        compose_file=tmp_path / "compose.yml",
+        compose_env_file=None,
+        asset_root=None,
+        service_env={},
+        env_migration=None,
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def fake_bootstrap(*args: Any, **kwargs: Any) -> ServiceBootstrapResult:
+        calls.append({"args": args, "kwargs": kwargs})
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: None)
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    payload = _payload(
+        await mcp.call_tool("awf_start_local_service", {"skip_agent_runtime_build": True})
+    )
+
+    assert payload["status"] == "success"
+    assert payload["command"] == "awf start --skip-agent-runtime-build"
+    assert len(calls) == 1
+    options = calls[0]["kwargs"]["options"]
+    assert options.force_rebuild is False
+    assert options.skip_agent_runtime_build is True
 
 
 @pytest.mark.unit
