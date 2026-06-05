@@ -318,7 +318,8 @@ def _persist_work_dir_propagation_result(
     directory and ``os.replace()``.
     """
     now_iso = datetime.now(tz=UTC).isoformat()
-    effective_force_copy = result.force_copy
+    host_force_copy_is_operator_override = _force_copy_already_requested(os.environ)
+    effective_force_copy = result.force_copy or host_force_copy_is_operator_override
     try:
         pre_existing_env = compose_env_file_values(env_file) if env_file.exists() else {}
         stale_generated = AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV in pre_existing_env
@@ -328,12 +329,10 @@ def _persist_work_dir_propagation_result(
         environ_force_copy_is_operator_override = (
             not stale_generated and environ is not None and _force_copy_already_requested(environ)
         )
-        host_force_copy_is_operator_override = _force_copy_already_requested(os.environ)
         effective_force_copy = (
-            result.force_copy
+            effective_force_copy
             or env_file_force_copy_is_operator_override
             or environ_force_copy_is_operator_override
-            or host_force_copy_is_operator_override
         )
     except (OSError, UnicodeDecodeError):
         pass
