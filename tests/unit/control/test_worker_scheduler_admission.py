@@ -590,6 +590,48 @@ async def test_refresh_execution_claim_loop_cancels_provision_on_fence(
 
 
 @pytest.mark.unit
+async def test_refresh_execution_claim_loop_cancels_provision_on_refresh_error(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heartbeat refresh that raises must still fence the provisioner.
+
+    A transient failure (e.g. a DB disconnect) leaves us unable to confirm we
+    still hold the lease while the heartbeat loop dies, so the conservative
+    action is to cancel the in-flight provision before a new claimant can reclaim
+    the workspace and race destructive git/compose work.
+    """
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            execution_claim_lease_seconds=3.0,
+        ),
+    )
+
+    async def _raising_refresh(_workspace_id: str) -> bool:
+        raise RuntimeError("transient DB disconnect")
+
+    monkeypatch.setattr(worker, "_refresh_execution_claim", _raising_refresh)
+    cancelled = asyncio.Event()
+
+    await worker._refresh_execution_claim_loop(  # noqa: SLF001
+        workspace_id,
+        on_claim_lost=cancelled.set,
+    )
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.unit
 async def test_provisioning_claim_increments_execution_claim_epoch(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

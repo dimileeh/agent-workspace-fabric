@@ -437,6 +437,16 @@ async def _refresh_execution_claim_loop(
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+            # D4: a refresh failure (e.g. a transient DB disconnect) leaves us
+            # unable to confirm we still hold the lease, yet the heartbeat loop
+            # is about to die so ``execution_claim_expires_at`` stops being
+            # renewed. On the provisioning path, fence conservatively: cancel the
+            # in-flight provision task so a worker that may have silently lost the
+            # lease stops before any destructive git/compose op, rather than
+            # racing a new claimant that reclaims and bumps the epoch. The next
+            # poll re-claims and retries. The executor path passes no callback.
+            if on_claim_lost is not None:
+                on_claim_lost()
             return
         if not refreshed:
             _log.warning(
