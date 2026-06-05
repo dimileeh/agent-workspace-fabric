@@ -315,7 +315,7 @@ def _persist_work_dir_propagation_result(
             or (environ is not None and _force_copy_already_requested(environ))
         )
     except (OSError, UnicodeDecodeError):
-        pre_existing_env = {}
+        pass
     new_posture = PersistedPropagationPosture(
         propagation=result.propagation,
         force_copy="true" if effective_force_copy else "false",
