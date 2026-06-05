@@ -440,10 +440,18 @@ def test_quickstart_smoke_commands_reuse_initialized_project_paths() -> None:
     """Assert Quickstart smoke commands validate the lane's initialized project."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
 
-    smoke_lines = [line for line in quickstart_text.splitlines() if "smoke run" in line]
+    smoke_lines = [
+        line
+        for fence in _markdown_fences("docs/QUICKSTART.md", quickstart_text)
+        for line in fence.body.splitlines()
+        if "smoke run" in line
+    ]
 
-    assert smoke_lines
-    assert all("--project " in line for line in smoke_lines)
+    assert smoke_lines, "Quickstart must document smoke commands in Markdown fences"
+    missing_project_lines = [line for line in smoke_lines if "--project " not in line]
+    assert not missing_project_lines, (
+        f"Quickstart smoke commands in Markdown fences must pass --project: {missing_project_lines}"
+    )
 
 
 def test_quickstart_mocked_smoke_keeps_github_auth_optional() -> None:
@@ -523,6 +531,7 @@ def test_quickstart_clears_source_checkout_metadata_before_checkout_deletion() -
                 f"{heading} uninstall",
                 uninstall_section,
                 "refreshing source-checkout metadata",
+                require_database_url_restore=True,
                 require_legacy_fallback=True,
             )
         )

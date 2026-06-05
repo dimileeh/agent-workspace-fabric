@@ -3522,3 +3522,64 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 git diff --check
 # no output
 ```
+
+## Post-Review Repair for Review-Level Comment `issue:4620140358`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `test_quickstart_smoke_commands_reuse_initialized_project_paths`
+  now derives `smoke run` command lines from parsed Markdown fence bodies
+  instead of scanning arbitrary Quickstart prose.
+- Complete: `_assert_source_checkout_service_env_restore_before_stop` now
+  exposes `require_database_url_restore` and passes it through to the shared
+  env-restore-and-stop assertion.
+- Complete: the cited Quickstart source-checkout uninstall assertion now
+  requires `AWF_POSTGRES_HOST_PORT` and `AWF_DATABASE_URL` restore/unset
+  ordering before the guarded Core stop.
+- Complete: `docs/QUICKSTART.md` source-checkout uninstall metadata-refresh
+  snippets now restore persisted `AWF_POSTGRES_HOST_PORT` and
+  `AWF_DATABASE_URL`, or unset a stale shell `AWF_DATABASE_URL`, before
+  stopping Core and refreshing `source_checkout` metadata.
+- Complete: Full AWF/GitHub validation, full coverage, frontend builds, pushes,
+  rebases, and PR lifecycle actions were intentionally not run in the agent
+  phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `tests/unit/docs/test_public_docs_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_smoke_commands_reuse_initialized_project_paths tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+# Red phase after tightening the helper call: 1 failed, 1 passed.
+# Failure: Quickstart Lane 2 uninstall did not initialize persisted Postgres
+# host-port/database-url lookup before Core stop.
+```
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_smoke_commands_reuse_initialized_project_paths tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 3 passed in 0.63s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments -q
+# 1 passed in 1.82s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_public_docs_lifecycle_status.py -q
+# 51 passed in 5.62s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/test_public_docs_lifecycle_status.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/test_public_docs_lifecycle_status.py
+# 3 files already formatted
+
+git diff --check
+# no output
+```

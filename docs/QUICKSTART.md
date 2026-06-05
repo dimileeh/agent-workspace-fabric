@@ -578,6 +578,50 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
+AWF_PERSISTED_POSTGRES_HOST_PORT=""
+for env_file in .env docker/compose/.env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_POSTGRES_HOST_PORT="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
+  AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_HOST_PORT")"
+  case "$AWF_PERSISTED_POSTGRES_HOST_PORT" in
+    \"*\")
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT#\"}"
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT%\"}"
+      AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_HOST_PORT")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT#\'}"
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT%\'}"
+      ;;
+  esac
+  [ -n "$AWF_PERSISTED_POSTGRES_HOST_PORT" ] && break
+done
+if [ -n "$AWF_PERSISTED_POSTGRES_HOST_PORT" ]; then
+  export AWF_POSTGRES_HOST_PORT="$AWF_PERSISTED_POSTGRES_HOST_PORT"
+fi
+AWF_PERSISTED_DATABASE_URL=""
+for env_file in .env docker/compose/.env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
+  AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
+  case "$AWF_PERSISTED_DATABASE_URL" in
+    \"*\")
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+      AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+      ;;
+  esac
+  [ -n "$AWF_PERSISTED_DATABASE_URL" ] && break
+done
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  unset AWF_DATABASE_URL
+fi
 if [ -f .env ]; then
   docker compose --env-file .env -f docker/compose/local-service.yml stop
 elif [ -f docker/compose/.env ]; then
@@ -891,6 +935,50 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
+fi
+AWF_PERSISTED_POSTGRES_HOST_PORT=""
+for env_file in .env docker/compose/.env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_POSTGRES_HOST_PORT="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
+  AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_HOST_PORT")"
+  case "$AWF_PERSISTED_POSTGRES_HOST_PORT" in
+    \"*\")
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT#\"}"
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT%\"}"
+      AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_HOST_PORT")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT#\'}"
+      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT%\'}"
+      ;;
+  esac
+  [ -n "$AWF_PERSISTED_POSTGRES_HOST_PORT" ] && break
+done
+if [ -n "$AWF_PERSISTED_POSTGRES_HOST_PORT" ]; then
+  export AWF_POSTGRES_HOST_PORT="$AWF_PERSISTED_POSTGRES_HOST_PORT"
+fi
+AWF_PERSISTED_DATABASE_URL=""
+for env_file in .env docker/compose/.env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
+  AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
+  case "$AWF_PERSISTED_DATABASE_URL" in
+    \"*\")
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+      AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+      ;;
+  esac
+  [ -n "$AWF_PERSISTED_DATABASE_URL" ] && break
+done
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  unset AWF_DATABASE_URL
 fi
 if [ -f .env ]; then
   docker compose --env-file .env -f docker/compose/local-service.yml stop

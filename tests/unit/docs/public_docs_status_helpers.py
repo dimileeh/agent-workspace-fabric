@@ -1050,18 +1050,20 @@ def _assert_source_checkout_service_env_restore_before_stop(
     section: str,
     lifecycle: str,
     *,
+    require_database_url_restore: bool = False,
     require_legacy_fallback: bool = False,
 ) -> tuple[int, int]:
     """Assert source-checkout snippets restore service secrets before stopping Core."""
-    api_restore_start_index, password_restore_end_index, _stop_index, _stop_end_index = (
+    api_restore_start_index, env_restore_end_index, _stop_index, _stop_end_index = (
         _assert_source_checkout_service_env_restore_and_stop(
             label,
             section,
             lifecycle,
+            require_database_url_restore=require_database_url_restore,
             require_legacy_fallback=require_legacy_fallback,
         )
     )
-    return api_restore_start_index, password_restore_end_index
+    return api_restore_start_index, env_restore_end_index
 
 
 def _assert_package_upgrade_restores_service_env(

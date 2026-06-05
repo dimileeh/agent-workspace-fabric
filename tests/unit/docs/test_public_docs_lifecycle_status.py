@@ -622,7 +622,7 @@ def test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments(
                 uninstall_fences[0]
                 .body[restore_start:]
                 .split("if [ -f .env ]; then", maxsplit=1)[0],
-                False,
+                True,
             )
         )
 

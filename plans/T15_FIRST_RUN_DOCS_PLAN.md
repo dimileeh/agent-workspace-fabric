@@ -1268,3 +1268,56 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_
 git diff --check
 # No whitespace errors.
 ```
+
+## Post-Review Repair for Review-Level Comment `issue:4620140358`
+
+Problem statement and scope:
+the review identified two focused docs-test robustness gaps. The Quickstart
+smoke command assertion scans all prose instead of only Markdown code fences,
+so unrelated explanatory text containing `smoke run` can make the test fail
+with an unhelpful command-shape message. The source-checkout env-restore helper
+also has no wrapper-level way to require `AWF_DATABASE_URL` restore ordering
+before a guarded Core stop, leaving the Quickstart source uninstall assertion
+unable to prove database URL restore/unset ordering when the snippet includes
+that block. Keep the repair scoped to the docs test helpers, the cited
+Quickstart source uninstall snippets if the stricter test exposes a gap, and
+these T15 plan artifacts.
+
+Requirements checklist:
+
+- Restrict the Quickstart smoke command assertion to lines from Markdown code
+  fences instead of matching arbitrary document prose.
+- Expose a `require_database_url_restore` parameter on
+  `_assert_source_checkout_service_env_restore_before_stop` and thread it to
+  `_assert_source_checkout_service_env_restore_and_stop`.
+- Require database URL restore ordering for the cited Quickstart source
+  checkout uninstall metadata-refresh assertion.
+- If the stricter assertion fails because the Quickstart uninstall snippet is
+  missing the restore/unset block, add the smallest matching doc update before
+  the guarded Compose stop.
+- Do not run full AWF/GitHub-owned validation, full coverage, frontend builds,
+  pushes, rebases, or branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Update the focused tests/helper first and confirm the Quickstart uninstall
+   ordering assertion fails if the docs do not yet restore or clear
+   `AWF_DATABASE_URL`.
+2. Add the minimal Quickstart source uninstall database URL restore/unset block
+   if needed by the new assertion.
+3. Run the targeted docs tests and focused ruff check for the changed Python
+   files, plus `git diff --check`; leave broad validation to AWF/GitHub.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_smoke_commands_reuse_initialized_project_paths tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+# Red phase after the stricter helper call fails on missing database URL restore
+# if the docs still lack that block; final result passes.
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks pass.
+
+git diff --check
+# No whitespace errors.
+```
